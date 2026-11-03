@@ -460,6 +460,7 @@ type session struct {
 	log   *slog.Logger
 
 	deliverCh chan struct{} // cap 1: a delivery is wanted
+	reportCh  chan struct{} // cap 1: the session filed a Report
 	stopCh    chan struct{}
 
 	mu          sync.Mutex
@@ -470,6 +471,8 @@ type session struct {
 	// unseenFailure is set when a tool call failed and the model has not taken a step since: it may have filed a
 	// result claim in the same step, before it saw the failure.
 	unseenFailure bool
+	// reports counts the Reports the session filed through the socket.
+	reports int
 }
 
 func (n *Node) newSession(t core.Ticket, a core.Assignment, p placement) *session {
@@ -478,6 +481,7 @@ func (n *Node) newSession(t core.Ticket, a core.Assignment, p placement) *sessio
 		name:      filepath.Base(TicketDir(n.cfg.WorkRoot, t)),
 		log:       n.log.With("ticket", t.ID, "assignment", a.ID),
 		deliverCh: make(chan struct{}, 1),
+		reportCh:  make(chan struct{}, 1),
 		stopCh:    make(chan struct{}),
 	}
 }
@@ -531,6 +535,24 @@ func (s *session) hasUnseenFailure() bool {
 	return s.unseenFailure
 }
 
+// noteReport records that the session filed a Report and wakes its runner.
+func (s *session) noteReport() {
+	s.mu.Lock()
+	s.reports++
+	s.mu.Unlock()
+	select {
+	case s.reportCh <- struct{}{}:
+	default:
+	}
+}
+
+// reportCount returns how many Reports the session filed so far.
+func (s *session) reportCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.reports
+}
+
 func (s *session) currentSessionID() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -577,10 +599,10 @@ type runner struct {
 	// started is set once the Assignment is known to run, so InputsDelivered counts.
 	started bool
 	// sent holds every Input sent to this Assignment's sessions; unconfirmed those sent before it was known to run;
-	// unread those sent that no step of the session has taken yet (resent after a crash).
+	// unread those sent that no turn end or Report has followed yet (resent after a crash).
 	sent        map[string]bool
 	unconfirmed []string
-	unread      []string
+	unread      []unreadInput
 	sessionID   string
 	initSeen    bool
 	// model is the model the sessions run with: the Ticket's, or the node's default.
@@ -593,6 +615,13 @@ type runner struct {
 	spawned    time.Time
 	firstSent  time.Time
 	outputSeen bool
+}
+
+// unreadInput is an Input sent to the session that may not be in its history yet; reports is the session's Report
+// count once it was sent, so a later Report shows the session took it in.
+type unreadInput struct {
+	id      string
+	reports int
 }
 
 func (n *Node) run(s *session) {
@@ -690,6 +719,8 @@ loop:
 			r.onEvent(ev)
 		case <-s.deliverCh:
 			r.deliver(sess)
+		case <-s.reportCh:
+			r.markRead(s.reportCount())
 		case <-s.stopCh:
 			crashed = false
 			r.log.Info("session stopped", "reason", s.reason())
@@ -762,7 +793,7 @@ func (r *runner) sendFirst(sess *claude.Session, recovering bool) {
 	}
 	// Inputs a crashed process received but never took into a step go again, ahead of what waits.
 	if len(r.unread) > 0 {
-		b.WriteString("\n" + renderInputs(t, r.unread))
+		b.WriteString("\n" + renderInputs(t, r.unreadIDs()))
 	}
 	if len(ids) > 0 {
 		b.WriteString("\n" + renderInputs(t, ids))
@@ -773,6 +804,10 @@ func (r *runner) sendFirst(sess *claude.Session, recovering bool) {
 	if err := sess.Send(b.String()); err != nil {
 		r.log.Warn("send first message", "error", err)
 		return
+	}
+	// What went again counts from this send: only a Report after it shows the session took it in.
+	for i := range r.unread {
+		r.unread[i].reports = r.s.reportCount()
 	}
 	r.markSent(ids)
 }
@@ -816,7 +851,7 @@ func (r *runner) seedUnread() {
 	for _, in := range t.Inputs {
 		if in.Kind == core.InputTrigger && in.DeliveredTo == r.s.a.ID && in.ReadAt == nil && !slices.Contains(t.Undelivered, in.ID) && !r.sent[in.ID] {
 			r.sent[in.ID] = true
-			r.unread = append(r.unread, in.ID)
+			r.unread = append(r.unread, unreadInput{id: in.ID})
 		}
 	}
 }
@@ -836,10 +871,12 @@ func (r *runner) markSent(ids []string) {
 	if len(ids) == 0 {
 		return
 	}
+	// Read the Report count after the send: a Report filed before it cannot have seen these Inputs.
+	reports := r.s.reportCount()
 	for _, id := range ids {
 		r.sent[id] = true
+		r.unread = append(r.unread, unreadInput{id: id, reports: reports})
 	}
-	r.unread = append(r.unread, ids...)
 	if !r.started {
 		r.unconfirmed = append(r.unconfirmed, ids...)
 		return
@@ -937,17 +974,49 @@ func (r *runner) onEvent(ev claude.Event) {
 		if e.IsError {
 			r.s.setUnseenFailure(true)
 		}
-	case claude.AssistantText, claude.ToolUse, claude.Result:
+	case claude.AssistantText, claude.ToolUse:
 		r.s.setUnseenFailure(false)
-		// A step of the session ran after the Inputs were sent: it took them in.
-		if r.initSeen && len(r.unread) > 0 && r.started {
-			ids := r.unread
-			r.unread = nil
-			if err := r.eng.InputsRead(r.s.t.ID, ids); err != nil {
-				r.log.Error("record read", "error", err)
-			}
+	case claude.Result:
+		r.s.setUnseenFailure(false)
+		// The turn that took in everything sent before its end is over. A failed turn (an API error) may not have
+		// reached the model: its Inputs stay unread, so a retry or a crash sends them again.
+		if !e.IsError {
+			r.markRead(-1)
 		}
 	}
+}
+
+// markRead records as read the unread Inputs sent before the session's Report number reports was filed; -1 (a turn
+// end) records all. The CLI does not echo user messages: a step already in flight when an Input was sent says nothing
+// about it, only a Report or the end of the turn does.
+func (r *runner) markRead(reports int) {
+	if !r.initSeen || !r.started || len(r.unread) == 0 {
+		return
+	}
+	var ids []string
+	keep := r.unread[:0]
+	for _, u := range r.unread {
+		if reports < 0 || u.reports < reports {
+			ids = append(ids, u.id)
+		} else {
+			keep = append(keep, u)
+		}
+	}
+	r.unread = keep
+	if len(ids) == 0 {
+		return
+	}
+	if err := r.eng.InputsRead(r.s.t.ID, ids); err != nil {
+		r.log.Error("record read", "error", err)
+	}
+}
+
+func (r *runner) unreadIDs() []string {
+	ids := make([]string, len(r.unread))
+	for i, u := range r.unread {
+		ids[i] = u.id
+	}
+	return ids
 }
 
 // fail reports the Assignment failed, unless it was stopped meanwhile.

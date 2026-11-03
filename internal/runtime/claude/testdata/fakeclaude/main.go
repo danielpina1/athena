@@ -14,6 +14,9 @@
 //	ATHENA_FAKE_EXIT_MID_TURN      when set, replay half of the fixture, then exit 3
 //	ATHENA_FAKE_EXIT_MID_TURN_ONCE path of a marker file: the first invocation that finds it missing creates it
 //	                               and behaves as ATHENA_FAKE_EXIT_MID_TURN; later ones replay normally
+//	ATHENA_FAKE_LATER_FIXTURE      path of a .jsonl file replayed after every later user line (not the first)
+//	ATHENA_FAKE_LATER_EXIT_ONCE    path of a marker file: the first invocation that replays the later fixture and finds
+//	                               it missing creates it and exits 3 right after that replay
 //	ATHENA_FAKE_IGNORE_STDIN_CLOSE when set, keep running after stdin reaches EOF
 //	ATHENA_FAKE_NO_READ_STDIN      when set, never read stdin (a hung child)
 package main
@@ -86,9 +89,13 @@ func main() {
 			if stdinLog != nil {
 				_, _ = stdinLog.WriteString(strings.TrimRight(line, "\n") + "\n")
 			}
-			if !replayed && !strings.Contains(line, `"control_request"`) {
-				replayed = true
-				replay(out, exitMidTurn)
+			if !strings.Contains(line, `"control_request"`) {
+				if !replayed {
+					replayed = true
+					replay(out, exitMidTurn)
+				} else {
+					replayLater(out)
+				}
 			}
 		}
 		if err != nil {
@@ -134,4 +141,24 @@ func replay(out *bufio.Writer, exitMidTurn bool) {
 		}
 	}
 	_ = out.Flush()
+}
+
+// replayLater replays ATHENA_FAKE_LATER_FIXTURE, then exits 3 once if ATHENA_FAKE_LATER_EXIT_ONCE says so.
+func replayLater(out *bufio.Writer) {
+	path := os.Getenv("ATHENA_FAKE_LATER_FIXTURE")
+	if path == "" {
+		return
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		os.Exit(6)
+	}
+	_, _ = out.Write(data)
+	_ = out.Flush()
+	if p := os.Getenv("ATHENA_FAKE_LATER_EXIT_ONCE"); p != "" {
+		if f, err := os.OpenFile(p, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600); err == nil {
+			_ = f.Close()
+			os.Exit(3)
+		}
+	}
 }

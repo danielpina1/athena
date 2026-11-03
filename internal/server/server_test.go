@@ -520,12 +520,18 @@ func TestRestartResumesRunningAssignment(t *testing.T) {
 		}
 	})
 
-	// The resumed process runs a step, so it reads what it is sent.
+	// The resumed process runs a step and files a Report once it received both, so it has read them.
 	t.Setenv("ATHENA_FAKE_FIXTURE", steppingTurnFixture(t))
 	s = startServer(t, dir)
 	eventually(t, "a second claude start", func() bool { return len(fake.invocations(t)) == 2 })
 	if rid, ok := argValue(fake.invocations(t)[1], "--resume"); !ok || rid != fixtureSessionID {
 		t.Fatalf("second start args = %v, want --resume %s", fake.invocations(t)[1], fixtureSessionID)
+	}
+	eventually(t, "both inputs sent to the resumed process", func() bool { return strings.Contains(fake.stdin(t), "follow-up-c3d4") })
+	var resp node.Response
+	nodeCall(t, dir, node.ReportRequest{Op: node.OpReport, Ticket: id, Assignment: a.ID, Status: "progress", Summary: "resumed"}, &resp)
+	if !resp.OK {
+		t.Fatalf("progress report = %+v", resp)
 	}
 	eventually(t, "both inputs read", func() bool {
 		var read bool

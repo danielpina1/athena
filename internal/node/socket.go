@@ -316,6 +316,7 @@ func (n *Node) handleReport(req ReportRequest) Response {
 		s.log.Warn("report refused", "state", req.Status, "error", err)
 		return Response{Error: err.Error()}
 	}
+	s.noteReport()
 	s.log.Info("report filed", "state", req.Status)
 	return Response{OK: true}
 }

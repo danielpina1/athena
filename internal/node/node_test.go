@@ -680,9 +680,10 @@ func TestCrashResumesSameSession(t *testing.T) {
 	if n := h.n.liveCount(); n != 1 {
 		t.Fatalf("live sessions = %d, want 1 (never working without a process)", n)
 	}
-	// The task was taken into a step before the crash, so it is not sent again.
-	if n := strings.Count(h.stdin(), "body-7f3e"); n != 1 {
-		t.Fatalf("task sent %d times, want 1", n)
+	// The process died before its turn ended or it reported, so the task may not be in its history: it goes again,
+	// once, after the recovery note.
+	if n := strings.Count(h.stdin(), "body-7f3e"); n != 2 {
+		t.Fatalf("task sent %d times, want 2", n)
 	}
 	h.never("a third start", 200*time.Millisecond, func() bool { return len(h.invocations()) > 2 })
 	if r := h.report(tk.ID, a.ID, core.ReportReady, "done"); !r.OK {
@@ -719,6 +720,74 @@ func TestCrashLoopReportsFailed(t *testing.T) {
 	h.eventually("message delivered to a new process", func() bool {
 		tk, _ := h.ticket(tk.ID)
 		return len(tk.Undelivered) == 0 && strings.Contains(h.stdin(), "please try again") && h.n.liveCount() == 1
+	})
+}
+
+// fixtureLines writes the lines of a captured fixture that match keep, in order, to a new fixture and returns its path.
+func fixtureLines(t *testing.T, name string, keep func(i int, line string) bool) string {
+	t.Helper()
+	b, err := os.ReadFile(claudeFixture(t, name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	for i, l := range strings.Split(strings.TrimRight(string(b), "\n"), "\n") {
+		if keep(i, l) {
+			out.WriteString(l + "\n")
+		}
+	}
+	p := filepath.Join(t.TempDir(), "part-"+name)
+	if err := os.WriteFile(p, []byte(out.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// An Input counts as read only once a turn ends (a Result) or the session files a Report after it was sent: the CLI
+// does not echo user messages, so a step that was already in flight says nothing about it. A crash before either
+// sends it again.
+func TestInputReadOnlyAtTurnEndOrReport(t *testing.T) {
+	h := newHarness(t, nil)
+	isText := func(l string) bool {
+		return strings.Contains(l, `"type":"assistant"`) && strings.Contains(l, `"type":"text"`)
+	}
+	textSeen := false
+	// A turn that takes one step (text) and never ends; each later message gets another step, then the first process dies.
+	t.Setenv("ATHENA_FAKE_FIXTURE", fixtureLines(t, "simple-turn.jsonl", func(i int, l string) bool {
+		if i == 0 {
+			return true
+		}
+		if isText(l) && !textSeen {
+			textSeen = true
+			return true
+		}
+		return false
+	}))
+	t.Setenv("ATHENA_FAKE_LATER_FIXTURE", fixtureLines(t, "simple-turn.jsonl", func(_ int, l string) bool { return isText(l) }))
+	t.Setenv("ATHENA_FAKE_LATER_EXIT_ONCE", filepath.Join(t.TempDir(), "died"))
+	tk := h.submit("Stepping task\nbody-5e6f", "")
+	h.running(tk.ID)
+	if err := h.eng.AddPersonInput(tk.ID, "mid-turn-q9"); err != nil {
+		t.Fatal(err)
+	}
+	h.eventually("a second claude start", func() bool { return len(h.invocations()) == 2 })
+	h.eventually("inputs sent again", func() bool { return strings.Count(h.stdin(), "mid-turn-q9") == 2 })
+	if n := strings.Count(h.stdin(), "body-5e6f"); n != 2 {
+		t.Errorf("task sent %d times, want 2 (no turn end or report followed it before the crash)", n)
+	}
+	tk, a := h.running(tk.ID)
+	for _, in := range tk.Inputs {
+		if in.ReadAt != nil {
+			t.Errorf("input %q marked read without a turn end or report", in.Text)
+		}
+	}
+	// A report filed after they were sent: the session has taken them in.
+	if r := h.report(tk.ID, a.ID, core.ReportProgress, "on it"); !r.OK {
+		t.Fatalf("report = %+v", r)
+	}
+	h.eventually("inputs read after the report", func() bool {
+		tk, _ := h.ticket(tk.ID)
+		return tk.Inputs[0].ReadAt != nil && tk.Inputs[1].ReadAt != nil
 	})
 }
 
