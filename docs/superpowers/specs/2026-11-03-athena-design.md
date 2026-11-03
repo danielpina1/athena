@@ -23,7 +23,12 @@ The owner asked for it to be *extremely efficient* and to support *advanced comm
 ### Goals
 
 1. A request (GitHub mention/issue/PR comment, or a task typed in the dashboard) becomes a Ticket and is worked to completion by a Claude Code or Codex session on a suitable node, with the result delivered where it was asked (e.g. a pull request and a reply on GitHub).
-2. Tasks are not tied to one repository: a Ticket targets any repository a node has, or no repository (research, scripts, ops tasks).
+2. **Any repository, any task** (owner, repeated as a hard requirement). Nothing in Athena assumes a language, framework, build system, repository host or task type:
+   - **Any git repository**: GitHub, GitLab, Bitbucket, Gitea/self-hosted, or local-only with no remote. Worktrees (§6.1) work for all of them.
+   - **Any directory**: a non-git folder can be a Ticket's target (one active Ticket per non-git folder at a time, since it cannot be isolated with a worktree; further Tickets on it queue).
+   - **No repository**: research, writing, scripts, data work, ops tasks in a scratch directory.
+   - **Delivery adapts to the target**: GitHub → PR as the GitHub App (plan 2); other hosts → push the Ticket's branch and report its link (a host adapter for PR/MR creation, e.g. GitLab, plugs into the same Source/delivery interface later); local-only repos → the branch stays local and the dashboard shows its diff for review; no repository → the result is the Report plus any files left in the Ticket directory, viewable/downloadable from the dashboard.
+   - The worker prompt tells sessions to discover how a repository builds and tests itself (README, CI config, manifests) rather than assuming a toolchain.
 3. Runtime is selectable per Ticket: `claude`, `codex`, or a local model through either; with a configurable default.
 4. Multiple machines: a control server plus any number of nodes (macOS, Linux). Work is dispatched by node capability and load.
 5. Advanced inter-device communication, meaning all of:
@@ -261,9 +266,10 @@ Views (priority order, following reference `docs/005-panel.md`):
 
 1. **Needs you**: Tickets in person-stages, pending Approvals, offline-node Tickets — each with its one-tap action (answer, approve/deny, review link, retry, retry elsewhere, stop).
 2. **Tickets**: filter by stage/node/runtime/repo; Ticket detail with timeline (Triggers, Decisions, Reports, Approvals, agent messages), Placement, and a **live session view** (streamed output, tool activity) with an input box that sends an Input to the session.
-3. **New task**: free text; optional repository (from nodes' repositories), node pin, runtime, model (incl. local).
-4. **Nodes**: online state, slots in use, runtimes/versions, local models and GPU load, draining toggle, enroll a new node (§11).
-5. **Settings**: Policy, prompts (with the reference's override/versioning UX), execution environment, GitHub source, notification preferences.
+3. **Graph** (owner asked to see tasks as a graph): an interactive graph of work. Nodes are Tickets (shape/colour by stage, orange = needs you, ring = running), grouped into lanes by repository (or "no repository") with an optional machine overlay. Edges: `hand_off` parent → child, `wait_for` dependencies, `ask_agent` conversations (dashed, with message count), follow-ups routed to a Ticket, and **overlap warnings** between parallel Tickets on the same repository that touch the same files (computed from their branches' changed paths). Time can be scrubbed to replay how the graph grew. Clicking a node opens the Ticket detail; on the phone the graph is pan/zoom with a list fallback. Rendered with a force/DAG layout on canvas/SVG (builder's choice of library, e.g. `@xyflow/react` or `d3-force`), fed by the same protocol deltas.
+4. **New task**: free text; optional repository (from nodes' repositories), node pin, runtime, model (incl. local).
+5. **Nodes**: online state, slots in use, runtimes/versions, local models and GPU load, draining toggle, enroll a new node (§11).
+6. **Settings**: Policy, prompts (with the reference's override/versioning UX), execution environment, GitHub source, notification preferences.
 
 ### 10.2 Visibility over the running system
 
