@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 )
 
@@ -40,11 +41,12 @@ type RuleContext struct {
 
 // Rule names reported in Decision.Rule.
 const (
-	ruleInput      = "input"
-	ruleCredential = "credential-read"
-	ruleBlocked    = "blocked-command"
-	ruleWrite      = "write-outside-ticket"
-	ruleBashPrefix = "bash-escalate:"
+	ruleInput         = "input"
+	ruleCredential    = "credential-read"
+	ruleBlocked       = "blocked-command"
+	ruleWrite         = "write-outside-ticket"
+	ruleSessionConfig = "session-config-write"
+	ruleBashPrefix    = "bash-escalate:"
 )
 
 func allow() Decision { return Decision{Verdict: VerdictAllow} }
@@ -94,11 +96,32 @@ func str(m map[string]any, key string) string {
 // ---------------------------------------------------------------------------
 // paths
 
+// foldCase is true where the filesystem is case-insensitive by default
+// (APFS on macOS, NTFS), so ~/.SSH is ~/.ssh. EvalSymlinks keeps the caller's
+// spelling, so path comparisons must fold case there.
+var foldCase = runtime.GOOS == "darwin" || runtime.GOOS == "windows"
+
+func fold(s string) string {
+	if foldCase {
+		return strings.ToLower(s)
+	}
+	return s
+}
+
+// ciFlag is the regexp flag that makes text matching follow foldCase.
+func ciFlag() string {
+	if foldCase {
+		return "(?i)"
+	}
+	return ""
+}
+
 // within reports whether p equals root or lies below it. Both must be clean.
 func within(root, p string) bool {
 	if root == "" || p == "" {
 		return false
 	}
+	root, p = fold(root), fold(p)
 	if p == root {
 		return true
 	}
@@ -108,51 +131,82 @@ func within(root, p string) bool {
 	return strings.HasPrefix(p, root+string(filepath.Separator))
 }
 
-// absPath expands ~ and makes p absolute relative to the ticket dir.
+// relWithin returns p relative to root, keeping p's spelling. It requires
+// within(root, p) and avoids filepath.Rel, which compares case-sensitively.
+func relWithin(root, p string) string {
+	if len(p) <= len(root) {
+		return ""
+	}
+	return strings.TrimLeft(p[len(root):], string(filepath.Separator))
+}
+
+// absPath expands ~ and makes p absolute relative to the ticket dir. It does
+// not clean the result: ".." must be applied against the real filesystem (see
+// realpath), because after a symlink it does not mean what it means lexically.
 func (c RuleContext) absPath(p string) string {
+	sep := string(filepath.Separator)
 	switch {
 	case p == "~" && c.Home != "":
-		p = c.Home
+		return c.Home
 	case strings.HasPrefix(p, "~/") && c.Home != "":
-		p = filepath.Join(c.Home, p[2:])
-	case !filepath.IsAbs(p):
-		p = filepath.Join(c.TicketDir, p)
+		return c.Home + sep + p[2:]
+	case !filepath.IsAbs(p) && c.TicketDir != "":
+		return c.TicketDir + sep + p
 	}
-	return filepath.Clean(p)
+	return p
 }
 
-// resolveNearest resolves symlinks in p. If p does not exist, the nearest
-// existing parent is resolved and the missing tail re-attached. ok is false
-// when something on the way exists but cannot be resolved (a dangling or
-// looping symlink), in which case the caller must not trust the path.
-func resolveNearest(p string) (string, bool) {
-	cur := filepath.Clean(p)
-	var tail []string
-	for {
-		if _, err := os.Lstat(cur); err == nil {
-			r, err := filepath.EvalSymlinks(cur)
-			if err != nil {
-				return "", false
-			}
-			return filepath.Join(append([]string{r}, tail...)...), true
-		}
-		parent := filepath.Dir(cur)
-		if parent == cur {
-			return cur, true
-		}
-		tail = append([]string{filepath.Base(cur)}, tail...)
-		cur = parent
+// realpath resolves p the way the kernel does: component by component, left
+// to right, following symlinks as they are met and applying ".." to the
+// already-resolved parent. Components that do not exist are kept as written,
+// so a missing file under an existing directory resolves too. ok is false only
+// when resolution cannot be completed (too many links, unreadable link).
+func realpath(p string) (string, bool) {
+	sep := string(filepath.Separator)
+	if !filepath.IsAbs(p) {
+		return "", false
 	}
+	rest := strings.Split(p, sep)
+	cur := sep
+	for links := 0; len(rest) > 0; {
+		comp := rest[0]
+		rest = rest[1:]
+		switch comp {
+		case "", ".":
+			continue
+		case "..":
+			cur = filepath.Dir(cur)
+			continue
+		}
+		next := filepath.Join(cur, comp)
+		fi, err := os.Lstat(next)
+		if err != nil || fi.Mode()&os.ModeSymlink == 0 {
+			cur = next
+			continue
+		}
+		if links++; links > 40 {
+			return "", false
+		}
+		target, err := os.Readlink(next)
+		if err != nil {
+			return "", false
+		}
+		if filepath.IsAbs(target) {
+			cur = sep
+		}
+		rest = append(strings.Split(target, sep), rest...)
+	}
+	return cur, true
 }
 
-// variants returns p and, when different, its symlink-resolved form.
+// variants returns the lexically cleaned p and, when different, its
+// physical form (symlinks and ".." resolved against the filesystem).
 func variants(p string) []string {
 	if p == "" {
 		return nil
 	}
-	p = filepath.Clean(p)
-	out := []string{p}
-	if r, ok := resolveNearest(p); ok && r != p {
+	out := []string{filepath.Clean(p)}
+	if r, ok := realpath(p); ok && r != out[0] {
 		out = append(out, r)
 	}
 	return out
@@ -176,7 +230,7 @@ var credRel = []string{".ssh", ".aws", ".config/gh", ".netrc", ".codex/auth.json
 // bareCredRe matches credential names mentioned in free text (a Bash command
 // or a Glob pattern), however the home directory is spelled (~, $HOME, an
 // absolute path) or even when it is implied by a prior cd.
-var bareCredRe = regexp.MustCompile(`(?:^|[\s/"'=:~}])(?:\.ssh(?:/|\s|$|["';|&)])|\.aws/|\.config/gh(?:/|\s|$|["';|&)])|\.netrc(?:[\s"';|&)]|$)|\.codex/auth\.json|\.credentials\.json|\.claude\.json)`)
+var bareCredRe = regexp.MustCompile(`(?i)(?:^|[\s/"'=:~}])(?:\.ssh(?:/|\s|$|["';|&)])|\.aws/|\.config/gh(?:/|\s|$|["';|&)])|\.netrc(?:[\s"';|&)]|$)|\.codex/auth\.json|\.credentials\.json|\.claude\.json)`)
 
 func credentialRule(ctx RuleContext, tool string, in map[string]any) (Decision, bool) {
 	if fileTools[tool] {
@@ -266,14 +320,10 @@ func (c RuleContext) protectedPath(p string, ancestors bool) string {
 // siblings, and .credentials.json inside any ~/.claude* directory.
 func (c RuleContext) isClaudeCredential(p string) bool {
 	for _, h := range variants(c.Home) {
-		if !within(h, p) || p == h {
+		if !within(h, p) || fold(p) == fold(h) {
 			continue
 		}
-		rel, err := filepath.Rel(h, p)
-		if err != nil {
-			continue
-		}
-		parts := strings.Split(rel, string(filepath.Separator))
+		parts := strings.Split(fold(relWithin(h, p)), string(filepath.Separator))
 		if !strings.HasPrefix(parts[0], ".claude") {
 			continue
 		}
@@ -299,11 +349,11 @@ func (c RuleContext) protectedText(s string) string {
 	// Mentions of the ticket dir (which normally lives under the state dir)
 	// are fine.
 	for _, t := range variants(c.TicketDir) {
-		re := regexp.MustCompile(regexp.QuoteMeta(t) + `(/|[^\w.\-]|$)`)
+		re := regexp.MustCompile(ciFlag() + regexp.QuoteMeta(t) + `(/|[^\w.\-]|$)`)
 		s = re.ReplaceAllString(s, "$1")
 	}
 	for _, st := range c.stateSpellings() {
-		re := regexp.MustCompile(regexp.QuoteMeta(st) + `(?:/|[^\w.\-]|$)`)
+		re := regexp.MustCompile(ciFlag() + regexp.QuoteMeta(st) + `(?:/|[^\w.\-]|$)`)
 		if re.MatchString(s) {
 			return "reading the athena state directory is not allowed"
 		}
@@ -318,8 +368,7 @@ func (c RuleContext) stateSpellings() []string {
 		out = append(out, st)
 		for _, h := range variants(c.Home) {
 			if within(h, st) && st != h {
-				rel, _ := filepath.Rel(h, st)
-				rel = filepath.ToSlash(rel)
+				rel := filepath.ToSlash(relWithin(h, st))
 				out = append(out, "~/"+rel, "$HOME/"+rel, "${HOME}/"+rel)
 			}
 		}
@@ -338,6 +387,12 @@ var (
 var wrapperCmds = map[string]bool{
 	"sudo": true, "env": true, "command": true, "exec": true, "nohup": true,
 	"time": true, "nice": true, "xargs": true, "builtin": true,
+}
+
+// reservedWords can precede a command in a shell segment.
+var reservedWords = map[string]bool{
+	"do": true, "then": true, "else": true, "elif": true, "if": true,
+	"while": true, "until": true, "!": true, "{": true, "}": true, "time": true,
 }
 
 var shellCmds = map[string]bool{"sh": true, "bash": true, "zsh": true, "dash": true, "ksh": true}
@@ -367,18 +422,23 @@ func findBlocked(command string, blocked [][]string, depth int) string {
 	}
 	for _, seg := range segmentSplit.Split(command, -1) {
 		words := cleanWords(strings.Fields(seg))
-		// Skip env assignments and wrappers (sudo, env, nohup ...).
+		// Skip env assignments, shell reserved words (do, then, {, ...) and
+		// wrappers (sudo, env, nohup ...) to reach the command that runs.
 		for len(words) > 0 {
 			w := words[0]
-			if assignRe.MatchString(w) || wrapperCmds[baseName(w)] {
+			switch {
+			case assignRe.MatchString(w) || reservedWords[w]:
 				words = words[1:]
-				for len(words) > 0 && strings.HasPrefix(words[0], "-") && wrapperCmds[baseName(w)] {
+			case wrapperCmds[baseName(w)]:
+				words = words[1:]
+				for len(words) > 0 && strings.HasPrefix(words[0], "-") {
 					words = words[1:]
 				}
-				continue
+			default:
+				goto found
 			}
-			break
 		}
+	found:
 		if len(words) == 0 {
 			continue
 		}
@@ -451,13 +511,24 @@ func writeRule(ctx RuleContext, in map[string]any) (Decision, bool) {
 	if ctx.TicketDir == "" {
 		return escalate(ruleWrite, "no ticket directory to confine writes to"), true
 	}
-	target, ok := resolveNearest(ctx.absPath(p))
+	target, ok := realpath(ctx.absPath(p))
 	if !ok {
 		return escalate(ruleWrite, "write target "+p+" cannot be resolved"), true
 	}
-	base, ok := resolveNearest(filepath.Clean(ctx.TicketDir))
+	base, ok := realpath(ctx.TicketDir)
 	if !ok || !within(base, target) {
 		return escalate(ruleWrite, "write to "+p+" is outside the ticket directory"), true
+	}
+	// Files that configure the session itself: a worker must not rewire its
+	// own hooks or MCP config for a resumed session. Judged on the resolved
+	// path so case, symlink and ".." tricks do not dodge it.
+	rel := fold(relWithin(base, target))
+	parts := strings.Split(rel, string(filepath.Separator))
+	if parts[0] == ".athena" {
+		return deny(ruleSessionConfig, "the .athena directory is managed by athena and cannot be written"), true
+	}
+	if len(parts) == 2 && parts[0] == ".claude" && (parts[1] == "settings.json" || parts[1] == "settings.local.json") {
+		return escalate(ruleSessionConfig, "writing Claude Code settings needs approval"), true
 	}
 	return Decision{}, false
 }

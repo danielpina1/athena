@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -90,6 +91,15 @@ func TestEvaluate(t *testing.T) {
 		{"bash cat abs netrc", "Bash", in(map[string]any{"command": "cat " + h + "/.netrc"}), "deny", "credential"},
 		{"bash claude creds", "Bash", in(map[string]any{"command": "cat ~/.claude/.credentials.json"}), "deny", "credential"},
 		{"bash state db", "Bash", in(map[string]any{"command": "sqlite3 " + c.StateDir + "/athena.db .dump"}), "deny", "credential"},
+
+		// blocked commands behind shell keywords
+		{"blocked in for loop", "Bash", in(map[string]any{"command": "for f in *.tmp; do rm $f; done"}), "deny", "blocked"},
+		{"blocked after then", "Bash", in(map[string]any{"command": "if true; then rm x; fi"}), "deny", "blocked"},
+		{"blocked in braces", "Bash", in(map[string]any{"command": "{ rm x; }"}), "deny", "blocked"},
+		{"blocked after bang", "Bash", in(map[string]any{"command": "! rm x"}), "deny", "blocked"},
+		{"blocked in while", "Bash", in(map[string]any{"command": "while true; do sudo -n rm x; done"}), "deny", "blocked"},
+		{"blocked after else", "Bash", in(map[string]any{"command": "if a; then b; else rm x; fi"}), "deny", "blocked"},
+		{"keyword alone ok", "Bash", in(map[string]any{"command": "for f in a b; do echo $f; done"}), "allow", ""},
 
 		// blocked commands
 		{"blocked simple", "Bash", in(map[string]any{"command": "rm -rf x"}), "deny", "blocked"},
@@ -250,5 +260,129 @@ func TestStateDirAsHomeDotAthena(t *testing.T) {
 		if got := Evaluate(c, "Bash", in(map[string]any{"command": cmd})); got.Verdict != "deny" {
 			t.Errorf("%q = %+v, want deny", cmd, got)
 		}
+	}
+}
+
+func TestCredentialCaseInsensitive(t *testing.T) {
+	if !foldCase {
+		t.Skip("filesystem is case-sensitive on this platform")
+	}
+	c := newRuleEnv(t).ctx
+	h := c.Home
+	for _, tc := range []struct {
+		tool  string
+		input json.RawMessage
+	}{
+		{"Read", in(map[string]any{"file_path": h + "/.SSH/id_rsa"})},
+		{"Read", in(map[string]any{"file_path": h + "/.Ssh/id_rsa"})},
+		{"Read", in(map[string]any{"file_path": "~/.AWS/credentials"})},
+		{"Read", in(map[string]any{"file_path": h + "/.NETRC"})},
+		{"Read", in(map[string]any{"file_path": h + "/.Claude/.Credentials.json"})},
+		{"Read", in(map[string]any{"file_path": h + "/.CLAUDE.JSON"})},
+		{"Read", in(map[string]any{"file_path": strings.ToUpper(c.StateDir) + "/athena.db"})},
+		{"Grep", in(map[string]any{"pattern": "x", "path": strings.ToUpper(h)})},
+		{"Bash", in(map[string]any{"command": "cat ~/.SSH/id_rsa"})},
+		{"Bash", in(map[string]any{"command": "cat $HOME/.Aws/credentials"})},
+		{"Bash", in(map[string]any{"command": "cat " + strings.ToUpper(c.StateDir) + "/athena.db"})},
+	} {
+		if got := Evaluate(c, tc.tool, tc.input); got.Verdict != "deny" {
+			t.Errorf("%s %s = %+v, want deny", tc.tool, tc.input, got)
+		}
+	}
+}
+
+// ".." after a symlink is applied by the kernel to the link's target, not to
+// the directory holding the link, so lexical cleaning would be fooled.
+func TestDotDotAfterSymlink(t *testing.T) {
+	e := newRuleEnv(t)
+	c := e.ctx
+	sub := filepath.Join(e.outDir, "sub")
+	docs := filepath.Join(c.Home, "Documents")
+	for _, d := range []string{sub, docs} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(sub, filepath.Join(c.TicketDir, "deep")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(docs, filepath.Join(c.TicketDir, "docs")); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name  string
+		tool  string
+		input json.RawMessage
+		want  string
+	}{
+		{"write deep/../escape", "Write", in(map[string]any{"file_path": c.TicketDir + "/deep/../escape.txt", "content": "x"}), "escalate"},
+		{"write relative deep/../escape", "Write", in(map[string]any{"file_path": "deep/../escape.txt", "content": "x"}), "escalate"},
+		{"edit deep/../../escape", "Edit", in(map[string]any{"file_path": c.TicketDir + "/deep/../../escape.txt"}), "escalate"},
+		{"read docs/../.ssh", "Read", in(map[string]any{"file_path": c.TicketDir + "/docs/../.ssh/id_rsa"}), "deny"},
+		{"grep docs/../.ssh", "Grep", in(map[string]any{"pattern": "x", "path": c.TicketDir + "/docs/../.ssh"}), "deny"},
+		{"read docs/.. ancestor", "Grep", in(map[string]any{"pattern": "x", "path": c.TicketDir + "/docs/.."}), "deny"},
+		{"plain dotdot inside ok", "Write", in(map[string]any{"file_path": c.TicketDir + "/a/../b.txt", "content": "x"}), "allow"},
+		{"read plain dotdot inside ok", "Read", in(map[string]any{"file_path": c.TicketDir + "/a/../b.txt"}), "allow"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := Evaluate(c, tc.tool, tc.input); got.Verdict != tc.want {
+				t.Fatalf("Evaluate(%s %s) = %+v, want %s", tc.tool, tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+// Athena-generated session config must not be writable by the worker.
+func TestSessionConfigWrites(t *testing.T) {
+	e := newRuleEnv(t)
+	c := e.ctx
+	if err := os.MkdirAll(filepath.Join(c.TicketDir, ".athena"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(c.TicketDir, ".athena"), filepath.Join(c.TicketDir, "alias")); err != nil {
+		t.Fatal(err)
+	}
+	nested := c
+	nested.TicketDir = filepath.Join(c.StateDir, "work", "T1")
+	if err := os.MkdirAll(nested.TicketDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name  string
+		ctx   RuleContext
+		tool  string
+		path  string
+		want  string
+		rule  string
+		onlyF bool // needs a case-insensitive filesystem
+	}{
+		{"athena settings", c, "Write", ".athena/settings.json", "deny", "session-config", false},
+		{"athena abs", c, "Write", c.TicketDir + "/.athena/mcp.json", "deny", "session-config", false},
+		{"athena nested file", c, "Edit", ".athena/transcripts/t.jsonl", "deny", "session-config", false},
+		{"athena via dotdot", c, "Write", "sub/../.athena/x", "deny", "session-config", false},
+		{"athena via symlink", c, "Write", "alias/x", "deny", "session-config", false},
+		{"athena upper", c, "Write", ".ATHENA/x", "deny", "session-config", true},
+		{"athena inside state dir", nested, "Write", ".athena/x", "deny", "session-config", false},
+		{"claude settings", c, "Write", ".claude/settings.json", "escalate", "session-config", false},
+		{"claude settings local", c, "Edit", ".claude/settings.local.json", "escalate", "session-config", false},
+		{"claude settings multiedit", c, "MultiEdit", c.TicketDir + "/.claude/settings.json", "escalate", "session-config", false},
+		{"claude settings via dotdot", c, "Write", "a/../.claude/settings.json", "escalate", "session-config", false},
+		{"claude settings upper", c, "Write", ".Claude/Settings.JSON", "escalate", "session-config", true},
+		{"claude settings inside state dir", nested, "Write", ".claude/settings.json", "escalate", "session-config", false},
+		{"claude other file ok", c, "Write", ".claude/commands/x.md", "allow", "", false},
+		{"claude settings in subdir ok", c, "Write", "sub/.claude/settings.json", "allow", "", false},
+		{"athena-like name ok", c, "Write", ".athena-notes.md", "allow", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.onlyF && !foldCase {
+				t.Skip("case-sensitive filesystem")
+			}
+			got := Evaluate(tc.ctx, tc.tool, in(map[string]any{"file_path": tc.path, "content": "x"}))
+			if got.Verdict != tc.want || (tc.rule != "" && !hasPrefix(got.Rule, tc.rule)) {
+				t.Fatalf("Evaluate(%s %s) = %+v, want %s (%s)", tc.tool, tc.path, got, tc.want, tc.rule)
+			}
+		})
 	}
 }
