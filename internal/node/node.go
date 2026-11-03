@@ -443,6 +443,9 @@ type session struct {
 	stopReason  string
 	ticketEnded bool
 	sessionID   string
+	// unseenFailure is set when a tool call failed and the model has not taken a step since: it may have filed a
+	// result claim in the same step, before it saw the failure.
+	unseenFailure bool
 }
 
 func (n *Node) newSession(t core.Ticket, a core.Assignment, p placement) *session {
@@ -490,6 +493,18 @@ func (s *session) endedTicket() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.ticketEnded
+}
+
+func (s *session) setUnseenFailure(v bool) {
+	s.mu.Lock()
+	s.unseenFailure = v
+	s.mu.Unlock()
+}
+
+func (s *session) hasUnseenFailure() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.unseenFailure
 }
 
 func (s *session) currentSessionID() string {
@@ -777,7 +792,14 @@ func (r *runner) onEvent(ev claude.Event) {
 			r.unconfirmed = nil
 			r.delivered(ids)
 		}
+	case claude.ToolResult:
+		// The CLI runs the tool calls of one model step together: a ready report in the same step as a Write that
+		// was denied runs after the denial, but the model wrote it without knowing. Its next step has seen the result.
+		if e.IsError {
+			r.s.setUnseenFailure(true)
+		}
 	case claude.AssistantText, claude.ToolUse, claude.Result:
+		r.s.setUnseenFailure(false)
 		// A step of the session ran after the Inputs were sent: it took them in.
 		if r.initSeen && len(r.unread) > 0 && r.started {
 			ids := r.unread

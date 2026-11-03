@@ -287,6 +287,11 @@ func (e *Engine) FileReport(ticketID string, r ReportInput) error {
 		if a.State == AssignmentEnded {
 			return userErrorf("assignment %s of ticket %s has ended", a.ID, ticketID)
 		}
+		// A worker may file its report in the same step as a tool call that waits for approval (the real CLI runs
+		// them in parallel); a result claim then cannot be true yet, and the denial may make it false.
+		if t.PendingApproval != "" && (r.State == ReportReady || r.State == ReportDropped) {
+			return userErrorf("an action of ticket %s waits for the owner's approval; report %s after it is answered", ticketID, r.State)
+		}
 		attention := t.Attention
 		if r.Question != "" && (attention == nil || attention.Question != r.Question) {
 			attention = &Attention{ID: newID(), Question: r.Question}

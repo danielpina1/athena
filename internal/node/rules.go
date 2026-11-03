@@ -62,8 +62,9 @@ func escalate(rule, reason string) Decision {
 }
 
 // Evaluate applies the hook rules in order: credential reads (deny), blocked
-// commands (deny), writes outside the ticket dir (escalate), risky Bash
-// commands (escalate); anything else is allowed. Malformed input is denied.
+// commands (deny), writes outside the ticket dir (escalate; for Bash the
+// redirections and file commands that name a target), risky Bash commands
+// (escalate); anything else is allowed. Malformed input is denied.
 func Evaluate(ctx RuleContext, tool string, input json.RawMessage) Decision {
 	var in map[string]any
 	if len(input) == 0 || json.Unmarshal(input, &in) != nil || in == nil {
@@ -83,6 +84,9 @@ func Evaluate(ctx RuleContext, tool string, input json.RawMessage) Decision {
 		}
 	}
 	if tool == "Bash" {
+		if d, ok := bashWriteRule(ctx, str(in, "command")); ok {
+			return d
+		}
 		if d, ok := bashEscalateRule(ctx, str(in, "command")); ok {
 			return d
 		}
@@ -439,28 +443,10 @@ func findBlocked(command string, blocked [][]string, depth int) string {
 		return ""
 	}
 	for _, seg := range segmentSplit.Split(command, -1) {
-		words := cleanWords(strings.Fields(seg))
-		// Skip env assignments, shell reserved words (do, then, {, ...) and
-		// wrappers (sudo, env, nohup ...) to reach the command that runs.
-		for len(words) > 0 {
-			w := words[0]
-			switch {
-			case assignRe.MatchString(w) || reservedWords[w]:
-				words = words[1:]
-			case wrapperCmds[baseName(w)]:
-				words = words[1:]
-				for len(words) > 0 && strings.HasPrefix(words[0], "-") {
-					words = words[1:]
-				}
-			default:
-				goto found
-			}
-		}
-	found:
+		words := commandWords(seg)
 		if len(words) == 0 {
 			continue
 		}
-		words[0] = baseName(words[0])
 		for _, b := range blocked {
 			if hasWordPrefix(words, b) {
 				return strings.Join(b, " ")
@@ -480,6 +466,28 @@ func findBlocked(command string, blocked [][]string, depth int) string {
 		}
 	}
 	return ""
+}
+
+// commandWords returns the words of one command segment from the command that runs: env assignments, shell
+// reserved words and wrappers (sudo, env, nohup ...) are skipped, and the command is reduced to its base name.
+func commandWords(seg string) []string {
+	words := cleanWords(strings.Fields(seg))
+	for len(words) > 0 {
+		w := words[0]
+		switch {
+		case assignRe.MatchString(w) || reservedWords[w]:
+			words = words[1:]
+		case wrapperCmds[baseName(w)]:
+			words = words[1:]
+			for len(words) > 0 && strings.HasPrefix(words[0], "-") {
+				words = words[1:]
+			}
+		default:
+			words[0] = baseName(words[0])
+			return words
+		}
+	}
+	return nil
 }
 
 func hasWordPrefix(words, prefix []string) bool {
@@ -576,6 +584,105 @@ var (
 	pipInstallRe = regexp.MustCompile(`\bpip3?\s+install\b|-m\s+pip3?\s+install\b`)
 	venvInCmdRe  = regexp.MustCompile(`\bsource\s+\S*activate\b|(?:^|[;&|\s])\.\s+\S*activate\b|\bVIRTUAL_ENV=|\bvenv\S*/bin/`)
 )
+
+// redirectRe finds an output redirection and its target: >, >>, >|, &> and N>, as in `echo x > file` or `cmd 2>>log`.
+// A target that starts with & is a file descriptor (2>&1) unless it names a file (>&file).
+var redirectRe = regexp.MustCompile(`(?:\d*|&)>>?\|?\s*(\S+)`)
+
+// writeTargetCmds are commands whose arguments name the files they create or change: every argument for
+// the first group, the last one for the second (cp a b, mv a b, ln -s a b).
+var (
+	writeAllArgs = map[string]bool{"tee": true, "touch": true, "mkdir": true, "truncate": true}
+	writeLastArg = map[string]bool{"cp": true, "mv": true, "install": true, "ln": true}
+)
+
+// harmlessTargets are the devices a command may always write to.
+func harmlessTarget(p string) bool {
+	return p == "/dev/null" || p == "/dev/stdout" || p == "/dev/stderr" || p == "/dev/tty" || strings.HasPrefix(p, "/dev/fd/")
+}
+
+// bashWriteTargets lists the paths a shell command visibly writes: redirection targets, the files named by tee,
+// touch, mkdir, truncate, cp, mv, install, ln and `dd of=`. It is best effort: a script or program can write anywhere
+// without naming the path (a sandbox is the only complete answer), but a worker that is denied a Write must not get
+// the same write through `echo x > file`.
+func bashWriteTargets(command string, depth int) []string {
+	var out []string
+	for _, m := range redirectRe.FindAllStringSubmatch(command, -1) {
+		t := m[1]
+		if strings.HasPrefix(t, "&") {
+			t = t[1:]
+			if t == "-" || (t != "" && strings.Trim(t, "0123456789") == "") {
+				continue
+			}
+		}
+		if t = strings.Trim(t, `"'`); t != "" && !strings.HasPrefix(t, "(") && !harmlessTarget(t) {
+			out = append(out, t)
+		}
+	}
+	if depth > 3 {
+		return out
+	}
+	for _, seg := range segmentSplit.Split(command, -1) {
+		words := commandWords(seg)
+		if len(words) == 0 {
+			continue
+		}
+		var args []string
+		for _, w := range words[1:] {
+			if !strings.HasPrefix(w, "-") || w == "-" {
+				args = append(args, w)
+			}
+		}
+		switch cmd := words[0]; {
+		case writeAllArgs[cmd]:
+			out = append(out, args...)
+		case writeLastArg[cmd] && len(args) > 0:
+			out = append(out, args[len(args)-1])
+		case cmd == "dd":
+			for _, w := range words[1:] {
+				if v, ok := strings.CutPrefix(w, "of="); ok {
+					out = append(out, v)
+				}
+			}
+		case shellCmds[cmd]:
+			for i, w := range words[1:] {
+				if w == "-c" || (strings.HasPrefix(w, "-") && strings.HasSuffix(w, "c") && !strings.HasPrefix(w, "--")) {
+					out = append(out, bashWriteTargets(strings.Join(words[i+2:], " "), depth+1)...)
+					break
+				}
+			}
+		}
+	}
+	return out
+}
+
+// bashWriteRule escalates a Bash command that writes outside the ticket directory, like writeRule does for the
+// Write tools. A target it cannot resolve (a variable, a command substitution) is escalated too.
+func bashWriteRule(ctx RuleContext, command string) (Decision, bool) {
+	var base string
+	if ctx.TicketDir != "" {
+		base, _ = realpath(ctx.TicketDir)
+	}
+	for _, t := range bashWriteTargets(command, 0) {
+		t = strings.TrimSpace(t)
+		if t == "" {
+			continue
+		}
+		if strings.ContainsAny(t, "$`") {
+			return escalate(ruleWrite, "command writes to "+t+", which cannot be resolved"), true
+		}
+		target, ok := realpath(ctx.absPath(t))
+		if base == "" || !ok || !within(base, target) {
+			return escalate(ruleWrite, "command writes to "+t+" outside the ticket directory"), true
+		}
+		// The worker must not rewire its own session through the shell either.
+		rel := fold(relWithin(base, target))
+		if parts := strings.Split(rel, string(filepath.Separator)); parts[0] == fold(".athena") {
+			return deny(ruleSessionConfig, "the .athena directory is managed by athena and cannot be written"), true
+		}
+	}
+	return Decision{}, false
+}
 
 func bashEscalateRule(ctx RuleContext, command string) (Decision, bool) {
 	for _, p := range bashEscalations {

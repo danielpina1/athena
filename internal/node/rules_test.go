@@ -394,3 +394,63 @@ func TestSessionConfigWrites(t *testing.T) {
 		})
 	}
 }
+
+// TestBashWritesOutsideTicketDir: after the owner denied a Write to /tmp/x, the real CLI's worker (haiku) wrote the
+// file with `echo -n x > /tmp/x` and the hook allowed it. Bash writes that name a target outside the ticket
+// directory escalate like the Write tools do.
+func TestBashWritesOutsideTicketDir(t *testing.T) {
+	e := newRuleEnv(t)
+	c := e.ctx
+	c.Blocked = nil
+	out := e.outDir
+	cases := []struct {
+		name, cmd, want, rule string
+	}{
+		{"the live bypass", "echo -n x > /tmp/athena-live-outside.txt && cat /tmp/athena-live-outside.txt", "escalate", ruleWrite},
+		{"append", "echo x >> " + out + "/f", "escalate", ruleWrite},
+		{"no space", "echo x >" + out + "/f", "escalate", ruleWrite},
+		{"clobber", "echo x >| " + out + "/f", "escalate", ruleWrite},
+		{"stderr to file", "make 2> " + out + "/err", "escalate", ruleWrite},
+		{"both to file", "make &> " + out + "/all", "escalate", ruleWrite},
+		{"quoted target", `echo x > "` + out + `/f"`, "escalate", ruleWrite},
+		{"relative dotdot", "echo x > ../out/f", "escalate", ruleWrite},
+		{"through symlink", "echo x > link/f", "escalate", ruleWrite},
+		{"tilde", "echo x > ~/f", "escalate", ruleWrite},
+		{"unresolvable variable", "echo x > $TARGET", "escalate", ruleWrite},
+		{"tee", "echo x | tee " + out + "/f", "escalate", ruleWrite},
+		{"tee append flag", "echo x | tee -a " + out + "/f", "escalate", ruleWrite},
+		{"touch", "touch " + out + "/f", "escalate", ruleWrite},
+		{"mkdir", "mkdir -p " + out + "/d", "escalate", ruleWrite},
+		{"cp", "cp main.go " + out + "/main.go", "escalate", ruleWrite},
+		{"mv", "mv main.go " + out + "/", "escalate", ruleWrite},
+		{"dd", "dd if=/dev/zero of=" + out + "/f count=1", "escalate", ruleWrite},
+		{"inside sh -c", `sh -c "echo x > ` + out + `/f"`, "escalate", ruleWrite},
+		{"after sudo", "sudo tee " + out + "/f", "escalate", ruleWrite},
+		{"session config", "echo {} > .athena/settings.json", "deny", ruleSessionConfig},
+
+		{"inside redirect", "echo x > notes.txt", "allow", ""},
+		{"inside absolute", "echo x > " + c.TicketDir + "/sub/notes.txt", "allow", ""},
+		{"inside dotdot", "echo x > sub/../notes.txt", "allow", ""},
+		{"append inside", "echo x >> notes.txt", "allow", ""},
+		{"devnull", "make > /dev/null 2> /dev/null", "allow", ""},
+		{"fd dup", "make 2>&1 | tail -5", "allow", ""},
+		{"fd dup to stderr", "echo oops >&2", "allow", ""},
+		{"stdout device", "echo x > /dev/stdout", "allow", ""},
+		{"here-doc", "cat <<EOF\nhi\nEOF", "allow", ""},
+		{"here-doc to inside file", "cat > f.txt <<EOF\nhi\nEOF", "allow", ""},
+		{"input redirect", "sort < " + out + "/f", "allow", ""},
+		{"comparison in awk", "awk '$1 > 5' data.txt", "allow", ""},
+		{"cp inside", "cp main.go copy.go", "allow", ""},
+		{"touch inside", "touch a b", "allow", ""},
+		{"tee inside", "echo x | tee log.txt", "allow", ""},
+		{"read only", "ls " + out + " && cat " + out + "/f", "allow", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Evaluate(c, "Bash", in(map[string]any{"command": tc.cmd}))
+			if got.Verdict != tc.want || (tc.rule != "" && got.Rule != tc.rule) {
+				t.Fatalf("Evaluate(%q) = %+v, want %s %s", tc.cmd, got, tc.want, tc.rule)
+			}
+		})
+	}
+}

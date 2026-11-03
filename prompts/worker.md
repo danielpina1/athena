@@ -36,6 +36,7 @@ File every report through the `report` tool, never only in a message, a commit o
 - `failed`: the work cannot be done; give the evidence and what you tried.
 - `dropped`: nothing is left to do and no person needs to act (not reproduced, not a defect, already handled elsewhere); this closes the Ticket quietly.
 
+Call `report` in a step of its own, after you have seen the results of your other tool calls; a `ready` report filed in the same step as a call that then fails or is denied is refused.
 Put a question for a person in `question` (with `blocked`, `waiting` or `progress`), not only in `summary`; repeating the same question keeps it, a different one replaces it.
 Keep the full evidence in `summary`; keep `question` short and concrete.
 

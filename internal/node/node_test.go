@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/danielpina1/athena/internal/core"
+	"github.com/danielpina1/athena/internal/runtime/claude"
 	"github.com/danielpina1/athena/internal/store"
 	"github.com/danielpina1/athena/prompts"
 )
@@ -421,6 +422,39 @@ func TestReportOpEndsTicketAndStopsSession(t *testing.T) {
 		t.Fatalf("ticket not completed: %+v", tk.Ended)
 	}
 	h.eventually("session gone", func() bool { return h.n.liveCount() == 0 })
+}
+
+// TestReadyReportRefusedUntilFailureSeen: the real CLI (haiku) filed a ready report in the same model step as a Write
+// the owner denied, so the Ticket ended completed with a false claim. A result claim made before the model has taken
+// a step after a failed tool call is refused; progress and blocked reports are not.
+func TestReadyReportRefusedUntilFailureSeen(t *testing.T) {
+	h := newHarness(t, nil)
+	tk := h.submit("Task", "")
+	_, a := h.running(tk.ID)
+	s := h.n.lookup(tk.ID, a.ID)
+	if s == nil {
+		t.Fatal("no live session")
+	}
+	r := &runner{n: h.n, s: s, eng: h.eng, log: s.log, sent: map[string]bool{}}
+	r.onEvent(claude.ToolUse{ID: "w1", Name: "Write"})
+	r.onEvent(claude.ToolUse{ID: "r1", Name: "mcp__athena__report"})
+	r.onEvent(claude.ToolResult{ToolUseID: "w1", IsError: true})
+	for _, st := range []core.ReportState{core.ReportReady, core.ReportDropped} {
+		if got := h.report(tk.ID, a.ID, st, "wrote it"); got.OK || !strings.Contains(got.Error, "failed") {
+			t.Fatalf("%s report = %+v, want a refusal", st, got)
+		}
+	}
+	if tk, _ := h.ticket(tk.ID); tk.Ended != nil {
+		t.Fatalf("ticket ended: %+v", tk.Ended)
+	}
+	if got := h.report(tk.ID, a.ID, core.ReportBlocked, "denied"); !got.OK {
+		t.Fatalf("blocked report = %+v", got)
+	}
+	// The model's next step has seen the failure.
+	r.onEvent(claude.AssistantText{Text: "The write was denied."})
+	if got := h.report(tk.ID, a.ID, core.ReportReady, "done without it"); !got.OK {
+		t.Fatalf("ready report after the next step = %+v", got)
+	}
 }
 
 func TestEscalationCreatesApprovalAndWaits(t *testing.T) {

@@ -264,6 +264,11 @@ func (n *Node) handleReport(req ReportRequest) Response {
 	if s == nil {
 		return Response{Error: fmt.Sprintf("%s: ticket %q assignment %q", denyNoSession, req.Ticket, req.Assignment)}
 	}
+	if (req.Status == string(core.ReportReady) || req.Status == string(core.ReportDropped)) && s.hasUnseenFailure() {
+		s.log.Warn("report refused", "state", req.Status, "error", "tool call failed in the same step")
+		return Response{Error: "a tool call of yours failed in the step that filed this report, so you cannot have seen its result; " +
+			"read the result, then report again"}
+	}
 	err := n.engine().FileReport(req.Ticket, core.ReportInput{
 		AssignmentID: req.Assignment, State: core.ReportState(req.Status), Summary: req.Summary, Question: req.Question,
 	})

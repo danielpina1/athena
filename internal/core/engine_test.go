@@ -379,6 +379,27 @@ func TestQueries(t *testing.T) {
 	eq(t, "all tickets", len(list), 2)
 }
 
+// TestReportReadyRefusedWhileApprovalPending: the real CLI runs a Write and the report call in the same step, so a
+// ready report can arrive while the Write still waits for the owner. It must not end the Ticket completed.
+func TestReportReadyRefusedWhileApprovalPending(t *testing.T) {
+	h := newHarness(t)
+	id := h.accepted()
+	a := h.ticket(id).Assignments[0].ID
+	ap := h.request(id)
+	wantUserError(t, "ready", h.eng.FileReport(id, ReportInput{AssignmentID: a, State: ReportReady, Summary: "wrote it"}))
+	wantUserError(t, "dropped", h.eng.FileReport(id, ReportInput{AssignmentID: a, State: ReportDropped, Summary: "nothing"}))
+	if tk := h.ticket(id); tk.Ended != nil || tk.Assignments[0].Report != nil {
+		t.Fatalf("a refused report changed the ticket: ended %v report %v", tk.Ended, tk.Assignments[0].Report)
+	}
+	// Reports that claim no result are fine while the approval waits.
+	h.must(h.eng.FileReport(id, ReportInput{AssignmentID: a, State: ReportProgress, Summary: "waiting for approval"}))
+	h.must(h.eng.FileReport(id, ReportInput{AssignmentID: a, State: ReportBlocked, Summary: "needs approval", Question: "Approve?"}))
+	// Once the owner answers, a ready report is accepted.
+	h.must(h.eng.AnswerApproval(ap.ID, false, "no"))
+	h.must(h.eng.FileReport(id, ReportInput{AssignmentID: a, State: ReportReady, Summary: "done without it"}))
+	eq(t, "outcome", h.ticket(id).Ended.Outcome, OutcomeCompleted)
+}
+
 func TestReportValidation(t *testing.T) {
 	h := newHarness(t)
 	id := h.accepted()
