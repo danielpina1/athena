@@ -227,7 +227,8 @@ func (n *Node) decide(ctx context.Context, s *session, event string, raw json.Ra
 	}
 }
 
-// escalate asks a person through an Approval and waits up to ApprovalTimeout for the answer; no answer is a deny.
+// escalate asks a person through an Approval and waits up to ApprovalTimeout, or until the session stops, for the
+// answer; no answer is a deny and the Approval expires.
 func (n *Node) escalate(ctx context.Context, s *session, event, tool string, input json.RawMessage, d Decision, start time.Time) HookResponse {
 	eng := n.engine()
 	ap, err := eng.RequestApproval(core.Approval{
@@ -240,7 +241,15 @@ func (n *Node) escalate(ctx context.Context, s *session, event, tool string, inp
 		return denied("approval could not be requested: " + err.Error())
 	}
 	s.log.Info("approval requested", "approval", ap.ID, "rule", d.Rule)
+	// The wait ends with the session too: nobody can act on an answer once it stopped (a retry, a stop, a shutdown).
 	wctx, cancel := context.WithTimeout(ctx, n.cfg.ApprovalTimeout)
+	go func() {
+		select {
+		case <-s.stopCh:
+			cancel()
+		case <-wctx.Done():
+		}
+	}()
 	got, err := eng.WaitApproval(wctx, ap.ID)
 	cancel()
 	if err != nil {
@@ -271,6 +280,8 @@ func (n *Node) escalate(ctx context.Context, s *session, event, tool string, inp
 		}
 		if ctx.Err() != nil {
 			reason = "the athena node is shutting down"
+		} else if s.isStopped() {
+			reason = "the session ended before the owner answered"
 		}
 		return denied(reason + "; do not retry the same action, find another way or report blocked")
 	}

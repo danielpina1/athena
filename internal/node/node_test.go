@@ -547,6 +547,48 @@ func TestApprovalTimeoutDenies(t *testing.T) {
 	}
 }
 
+// An escalation dies with its session: when a retry stops the Assignment, its pending Approval expires at once and the
+// hook is denied, instead of the Ticket showing person/approval until the Approval times out.
+func TestEscalationExpiresWhenSessionStops(t *testing.T) {
+	h := newHarness(t, func(c *Config) { c.ApprovalTimeout = time.Minute })
+	t.Setenv("ATHENA_FAKE_FIXTURE", openTurnFixture(t))
+	tk := h.submit("Task", "")
+	_, a := h.running(tk.ID)
+	got := make(chan HookResponse, 1)
+	go func() {
+		got <- h.hook(EventPreToolUse, tk.ID, a.ID, map[string]any{"tool_name": "Bash", "tool_input": map[string]any{"command": "make deploy"}})
+	}()
+	var pending []core.Approval
+	h.eventually("approval pending", func() bool {
+		pending, _ = h.eng.PendingApprovals()
+		return len(pending) == 1
+	})
+	if r := h.report(tk.ID, a.ID, core.ReportBlocked, "stuck"); !r.OK {
+		t.Fatalf("report = %+v", r)
+	}
+	if err := h.eng.RetryTicket(tk.ID); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case r := <-got:
+		if r.Verdict != VerdictDeny {
+			t.Fatalf("verdict = %+v, want deny", r)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the hook kept waiting after its session stopped")
+	}
+	var ap *core.Approval
+	if err := h.st.Tx(func(tx *store.Tx) (err error) { ap, err = tx.GetApproval(pending[0].ID); return err }); err != nil {
+		t.Fatal(err)
+	}
+	if ap == nil || ap.State != core.ApprovalExpired {
+		t.Fatalf("approval = %+v, want expired", ap)
+	}
+	if _, st := h.ticket(tk.ID); st.Stage == "person" && st.Action == "approval" {
+		t.Fatalf("stage = %+v after the retry", st)
+	}
+}
+
 // expireFails is the real Engine except that ExpireApproval fails, as it would with the store gone.
 type expireFails struct{ *core.Engine }
 
