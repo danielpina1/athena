@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -585,9 +586,15 @@ var (
 	venvInCmdRe  = regexp.MustCompile(`\bsource\s+\S*activate\b|(?:^|[;&|\s])\.\s+\S*activate\b|\bVIRTUAL_ENV=|\bvenv\S*/bin/`)
 )
 
+// Placeholders that keep the & of a redirection (&>file, >&2) from splitting a command into segments.
+const (
+	ampOut = "\x01" // the & of &>
+	ampFd  = "\x02" // the & of >&
+)
+
 // redirectRe finds an output redirection and its target: >, >>, >|, &> and N>, as in `echo x > file` or `cmd 2>>log`.
-// A target that starts with & is a file descriptor (2>&1) unless it names a file (>&file).
-var redirectRe = regexp.MustCompile(`(?:\d*|&)>>?\|?\s*(\S+)`)
+// A target that starts with ampFd is a file descriptor (2>&1) unless it names a file (>&file).
+var redirectRe = regexp.MustCompile(`(?:\d*|` + ampOut + `)>>?` + ampFd + `?\s*(\S+)`)
 
 // writeTargetCmds are commands whose arguments name the files they create or change: every argument for
 // the first group, the last one for the second (cp a b, mv a b, ln -s a b).
@@ -596,34 +603,90 @@ var (
 	writeLastArg = map[string]bool{"cp": true, "mv": true, "install": true, "ln": true}
 )
 
-// harmlessTargets are the devices a command may always write to.
+// harmlessTarget reports the devices a command may always write to.
 func harmlessTarget(p string) bool {
 	return p == "/dev/null" || p == "/dev/stdout" || p == "/dev/stderr" || p == "/dev/tty" || strings.HasPrefix(p, "/dev/fd/")
 }
 
+// writeTarget is a path a command writes and the directory it was named from; dir is "" when a cd made the working
+// directory unknown.
+type writeTarget struct{ path, dir string }
+
+// shellVarRe matches the variables a target may use: the ticket directory, the current directory and the home.
+var shellVarRe = regexp.MustCompile(`\$\{(ATHENA_DIR|PWD|HOME)\}|\$(ATHENA_DIR|PWD|HOME)\b`)
+
+// expandVars replaces exactly $ATHENA_DIR, $PWD (the effective directory dir) and $HOME (and their ${} forms);
+// ok is false when the result still holds a variable, a command substitution or an unknown directory.
+func (c RuleContext) expandVars(p, dir string) (string, bool) {
+	ok := true
+	out := shellVarRe.ReplaceAllStringFunc(p, func(m string) string {
+		name := strings.Trim(m, "${}")
+		v := ""
+		switch name {
+		case "ATHENA_DIR":
+			v = c.TicketDir
+		case "PWD":
+			v = dir
+		case "HOME":
+			v = c.Home
+		}
+		if v == "" {
+			ok = false
+		}
+		return v
+	})
+	return out, ok && !strings.ContainsAny(out, "$`")
+}
+
+// resolveFrom makes p (after variables and ~) absolute against dir and resolves it on the filesystem.
+func (c RuleContext) resolveFrom(p, dir string) (string, bool) {
+	p, ok := c.expandVars(p, dir)
+	if !ok {
+		return "", false
+	}
+	p = c.absPathIn(p, dir)
+	if !filepath.IsAbs(p) {
+		return "", false
+	}
+	return realpath(p)
+}
+
+// absPathIn is absPath for a command that runs in dir; a relative p stays relative when dir is unknown.
+func (c RuleContext) absPathIn(p, dir string) string {
+	if !filepath.IsAbs(p) && !strings.HasPrefix(p, "~") {
+		if dir == "" {
+			return p
+		}
+		return dir + string(filepath.Separator) + p
+	}
+	return c.absPath(p)
+}
+
 // bashWriteTargets lists the paths a shell command visibly writes: redirection targets, the files named by tee,
-// touch, mkdir, truncate, cp, mv, install, ln and `dd of=`. It is best effort: a script or program can write anywhere
-// without naming the path (a sandbox is the only complete answer), but a worker that is denied a Write must not get
-// the same write through `echo x > file`.
-func bashWriteTargets(command string, depth int) []string {
-	var out []string
-	for _, m := range redirectRe.FindAllStringSubmatch(command, -1) {
-		t := m[1]
-		if strings.HasPrefix(t, "&") {
-			t = t[1:]
-			if t == "-" || (t != "" && strings.Trim(t, "0123456789") == "") {
-				continue
+// touch, mkdir, truncate, cp, mv, install, ln and `dd of=`. Segments run in order and cd/pushd change the directory
+// later relative targets are named from. It is best effort: a script or program can write anywhere without naming the
+// path (a sandbox is the only complete answer), but a worker that is denied a Write must not get the same write
+// through `echo x > file`.
+func (c RuleContext) bashWriteTargets(command, dir string, depth int) []writeTarget {
+	command = strings.ReplaceAll(command, ">|", ">") // clobber: the | must not split the command
+	command = strings.ReplaceAll(command, "&>", ampOut+">")
+	command = strings.ReplaceAll(command, ">&", ">"+ampFd)
+	var out []writeTarget
+	add := func(p, d string) { out = append(out, writeTarget{p, d}) }
+	for _, seg := range segmentSplit.Split(command, -1) {
+		for _, m := range redirectRe.FindAllStringSubmatch(seg, -1) {
+			t := m[1]
+			if strings.HasPrefix(t, ampFd) {
+				t = t[1:]
+				if t == "-" || (t != "" && strings.Trim(t, "0123456789") == "") {
+					continue
+				}
+			}
+			if t = strings.Trim(t, `"'`); t != "" && !strings.HasPrefix(t, "(") && !harmlessTarget(t) {
+				add(t, dir)
 			}
 		}
-		if t = strings.Trim(t, `"'`); t != "" && !strings.HasPrefix(t, "(") && !harmlessTarget(t) {
-			out = append(out, t)
-		}
-	}
-	if depth > 3 {
-		return out
-	}
-	for _, seg := range segmentSplit.Split(command, -1) {
-		words := commandWords(seg)
+		words := commandWords(strings.NewReplacer(ampOut, "&", ampFd, "&").Replace(seg))
 		if len(words) == 0 {
 			continue
 		}
@@ -634,52 +697,98 @@ func bashWriteTargets(command string, depth int) []string {
 			}
 		}
 		switch cmd := words[0]; {
+		case cmd == "cd" || cmd == "pushd":
+			dir = c.changeDir(args, dir)
+		case cmd == "popd":
+			dir = ""
 		case writeAllArgs[cmd]:
-			out = append(out, args...)
+			for _, a := range args {
+				add(a, dir)
+			}
 		case writeLastArg[cmd] && len(args) > 0:
-			out = append(out, args[len(args)-1])
+			add(args[len(args)-1], dir)
 		case cmd == "dd":
 			for _, w := range words[1:] {
 				if v, ok := strings.CutPrefix(w, "of="); ok {
-					out = append(out, v)
+					add(v, dir)
 				}
 			}
-		case shellCmds[cmd]:
+		case shellCmds[cmd] && depth <= 3:
 			for i, w := range words[1:] {
 				if w == "-c" || (strings.HasPrefix(w, "-") && strings.HasSuffix(w, "c") && !strings.HasPrefix(w, "--")) {
-					out = append(out, bashWriteTargets(strings.Join(words[i+2:], " "), depth+1)...)
+					out = append(out, c.bashWriteTargets(strings.Join(words[i+2:], " "), dir, depth+1)...)
 					break
 				}
+			}
+			// Splitting ignores quotes, so the rest of a quoted script lands in the next segments, which then run in
+			// whatever directory the script's cd chose: treat it as unknown.
+			if slices.ContainsFunc(words[1:], func(w string) bool { return w == "cd" || w == "pushd" || w == "popd" }) {
+				dir = ""
 			}
 		}
 	}
 	return out
 }
 
-// bashWriteRule escalates a Bash command that writes outside the ticket directory, like writeRule does for the
-// Write tools. A target it cannot resolve (a variable, a command substitution) is escalated too.
+// changeDir returns the directory after `cd args` from dir; "" when it cannot be known (cd -, a variable, no
+// current directory).
+func (c RuleContext) changeDir(args []string, dir string) string {
+	target := "~"
+	switch len(args) {
+	case 0:
+	case 1:
+		target = args[0]
+	default:
+		return ""
+	}
+	if target == "-" {
+		return ""
+	}
+	r, ok := c.resolveFrom(target, dir)
+	if !ok {
+		return ""
+	}
+	return r
+}
+
+// bashWriteRule judges a Bash command's write targets like writeRule judges a Write tool call, but over all of them:
+// a target in .athena denies the command even when another target only needs an approval. A target it cannot
+// resolve (an unknown variable, a command substitution, a directory a cd made unknown) escalates.
 func bashWriteRule(ctx RuleContext, command string) (Decision, bool) {
 	var base string
 	if ctx.TicketDir != "" {
 		base, _ = realpath(ctx.TicketDir)
 	}
-	for _, t := range bashWriteTargets(command, 0) {
-		t = strings.TrimSpace(t)
-		if t == "" {
+	var esc *Decision
+	note := func(d Decision) {
+		if esc == nil {
+			esc = &d
+		}
+	}
+	for _, t := range ctx.bashWriteTargets(command, base, 0) {
+		p := strings.TrimSpace(t.path)
+		if p == "" {
 			continue
 		}
-		if strings.ContainsAny(t, "$`") {
-			return escalate(ruleWrite, "command writes to "+t+", which cannot be resolved"), true
+		target, ok := ctx.resolveFrom(p, t.dir)
+		switch {
+		case !ok:
+			note(escalate(ruleWrite, "command writes to "+p+", which cannot be resolved"))
+			continue
+		case base == "" || !within(base, target):
+			note(escalate(ruleWrite, "command writes to "+p+" outside the ticket directory"))
+			continue
 		}
-		target, ok := realpath(ctx.absPath(t))
-		if base == "" || !ok || !within(base, target) {
-			return escalate(ruleWrite, "command writes to "+t+" outside the ticket directory"), true
-		}
-		// The worker must not rewire its own session through the shell either.
-		rel := fold(relWithin(base, target))
-		if parts := strings.Split(rel, string(filepath.Separator)); parts[0] == fold(".athena") {
+		parts := strings.Split(fold(relWithin(base, target)), string(filepath.Separator))
+		if parts[0] == fold(".athena") {
 			return deny(ruleSessionConfig, "the .athena directory is managed by athena and cannot be written"), true
 		}
+		if len(parts) == 2 && parts[0] == fold(".claude") && (parts[1] == fold("settings.json") || parts[1] == fold("settings.local.json")) {
+			note(escalate(ruleSessionConfig, "writing Claude Code settings needs approval"))
+		}
+	}
+	if esc != nil {
+		return *esc, true
 	}
 	return Decision{}, false
 }
