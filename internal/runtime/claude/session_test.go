@@ -593,3 +593,51 @@ func TestTranscriptPathAppendsAcrossSessions(t *testing.T) {
 		t.Fatalf("a transcript was also written in the working dir: %v", err)
 	}
 }
+
+// TestChildEnvironmentIsAllowlisted: a worker session sees only the basic process variables, the locale, XDG,
+// Claude Code's and Anthropic's own variables (its credentials among them), Athena's variables without secret-looking
+// names, and Options.Env; never the server's other variables, such as its tokens and cloud keys.
+func TestChildEnvironmentIsAllowlisted(t *testing.T) {
+	envLog := filepath.Join(t.TempDir(), "env.log")
+	t.Setenv("GITHUB_TOKEN", "ghp_parent")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "aws_parent")
+	t.Setenv("FOO", "bar")
+	t.Setenv("LC_ALL", "C")
+	t.Setenv("XDG_CONFIG_HOME", "/xdg")
+	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-parent")
+	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "oauth-parent")
+	t.Setenv("ATHENA_FROM_PARENT", "kept")
+	t.Setenv("ATHENA_TOKEN", "dropped")
+	t.Setenv("ATHENA_FAKE_ENV_LOG", envLog)
+	s, err := Start(context.Background(), withStubs(t, Options{
+		Binary: fakeBinary(t),
+		Dir:    t.TempDir(),
+		Env:    []string{"ATHENA_TICKET=T-7", "ATHENA_SOCKET=/tmp/n.sock"},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = s.Close()
+	collect(t, s)
+	_ = s.Wait()
+	env := map[string]string{}
+	for _, l := range lines(t, envLog) {
+		if k, v, ok := strings.Cut(l, "="); ok {
+			env[k] = v
+		}
+	}
+	for _, k := range []string{"GITHUB_TOKEN", "AWS_SECRET_ACCESS_KEY", "FOO", "ATHENA_TOKEN"} {
+		if v, ok := env[k]; ok {
+			t.Errorf("child has %s=%q", k, v)
+		}
+	}
+	for k, want := range map[string]string{
+		"PATH": os.Getenv("PATH"), "HOME": os.Getenv("HOME"), "LC_ALL": "C", "XDG_CONFIG_HOME": "/xdg",
+		"ANTHROPIC_API_KEY": "sk-ant-parent", "CLAUDE_CODE_OAUTH_TOKEN": "oauth-parent",
+		"ATHENA_FROM_PARENT": "kept", "ATHENA_TICKET": "T-7", "ATHENA_SOCKET": "/tmp/n.sock",
+	} {
+		if got, ok := env[k]; !ok || got != want {
+			t.Errorf("child %s = %q (present %v), want %q", k, got, ok, want)
+		}
+	}
+}

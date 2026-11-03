@@ -10,10 +10,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/danielpina1/athena/internal/redact"
 )
 
 const (
@@ -40,7 +43,8 @@ type Options struct {
 	SettingsPath       string // --settings; the only settings source Athena allows
 	MCPConfigPath      string // --mcp-config; only these servers are loaded
 	AppendSystemPrompt string
-	// Env is added to the parent environment of the child process.
+	// Env is added to the child's environment, which is otherwise only the allowlisted part of the parent's
+	// (childEnv).
 	Env []string
 	// CloseGrace is how long Close waits after closing stdin before it kills
 	// the process. Default 10s.
@@ -105,7 +109,7 @@ type Session struct {
 	stderr     *tailBuffer
 }
 
-// Start launches the process. The child's environment is the parent's plus o.Env.
+// Start launches the process. The child's environment is the allowlisted part of the parent's plus o.Env.
 func Start(ctx context.Context, o Options) (*Session, error) {
 	if o.Dir == "" {
 		return nil, errors.New("claude: Options.Dir is required")
@@ -167,7 +171,7 @@ func Start(ctx context.Context, o Options) (*Session, error) {
 	cmd := exec.CommandContext(ctx, o.Binary, buildArgs(o)...)
 	s.cmd = cmd
 	cmd.Dir = o.Dir
-	cmd.Env = append(os.Environ(), o.Env...)
+	cmd.Env = childEnv(os.Environ(), o.Env)
 	cmd.Stdout = pw
 	cmd.Stderr = s.stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true} // own group: Ctrl-C and kills stay scoped
@@ -202,6 +206,42 @@ func Start(ctx context.Context, o Options) (*Session, error) {
 		close(s.done)
 	}()
 	return s, nil
+}
+
+// envNames are the parent variables a session inherits by name; envPrefixes those it inherits by prefix.
+var (
+	envNames    = []string{"PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "TERM", "LANG"}
+	envPrefixes = []string{"LC_", "XDG_", "CLAUDE_", "ANTHROPIC_", "ATHENA_"}
+)
+
+// childEnv returns a session's environment: the parent's variables named in envNames or starting with one of
+// envPrefixes, except those whose name looks secret (redact.SecretName), then extra. Claude Code's own CLAUDE_ and
+// ANTHROPIC_ variables are kept whatever their name: they carry the credentials the session needs. The server's other
+// variables, its tokens and cloud keys among them, never reach a worker.
+func childEnv(parent, extra []string) []string {
+	var env []string
+	for _, kv := range parent {
+		name, _, ok := strings.Cut(kv, "=")
+		if !ok || !inheritable(name) {
+			continue
+		}
+		env = append(env, kv)
+	}
+	return append(env, extra...)
+}
+
+func inheritable(name string) bool {
+	if strings.HasPrefix(name, "CLAUDE_") || strings.HasPrefix(name, "ANTHROPIC_") {
+		return true
+	}
+	allowed := false
+	for _, n := range envNames {
+		allowed = allowed || name == n
+	}
+	for _, p := range envPrefixes {
+		allowed = allowed || strings.HasPrefix(name, p)
+	}
+	return allowed && !redact.SecretName(name)
 }
 
 // privateDir creates dir 0700, or makes an existing one 0700.
