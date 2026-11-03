@@ -93,6 +93,8 @@ func TestEvaluate(t *testing.T) {
 		{"bash state db", "Bash", in(map[string]any{"command": "sqlite3 " + c.StateDir + "/athena.db .dump"}), "deny", "credential"},
 
 		// blocked commands behind shell keywords
+		{"blocked after time -p", "Bash", in(map[string]any{"command": "time -p rm x"}), "deny", "blocked"},
+		{"blocked after time in loop", "Bash", in(map[string]any{"command": "while true; do time -p rm x; done"}), "deny", "blocked"},
 		{"blocked in for loop", "Bash", in(map[string]any{"command": "for f in *.tmp; do rm $f; done"}), "deny", "blocked"},
 		{"blocked after then", "Bash", in(map[string]any{"command": "if true; then rm x; fi"}), "deny", "blocked"},
 		{"blocked in braces", "Bash", in(map[string]any{"command": "{ rm x; }"}), "deny", "blocked"},
@@ -281,6 +283,11 @@ func TestCredentialCaseInsensitive(t *testing.T) {
 		{"Read", in(map[string]any{"file_path": h + "/.CLAUDE.JSON"})},
 		{"Read", in(map[string]any{"file_path": strings.ToUpper(c.StateDir) + "/athena.db"})},
 		{"Grep", in(map[string]any{"pattern": "x", "path": strings.ToUpper(h)})},
+		{"Read", in(map[string]any{"file_path": h + "/.\u017fsh/id_rsa"})},
+		{"Read", in(map[string]any{"file_path": h + "/.\u017fSH/id_rsa"})},
+		{"Read", in(map[string]any{"file_path": h + "/.claude/.credential\u017f.json"})},
+		{"Read", in(map[string]any{"file_path": filepath.Dir(c.StateDir) + "/\u017ftate" + "/athena.db"})},
+		{"Bash", in(map[string]any{"command": "cat ~/.\u017fsh/id_rsa"})},
 		{"Bash", in(map[string]any{"command": "cat ~/.SSH/id_rsa"})},
 		{"Bash", in(map[string]any{"command": "cat $HOME/.Aws/credentials"})},
 		{"Bash", in(map[string]any{"command": "cat " + strings.ToUpper(c.StateDir) + "/athena.db"})},
@@ -369,6 +376,7 @@ func TestSessionConfigWrites(t *testing.T) {
 		{"claude settings multiedit", c, "MultiEdit", c.TicketDir + "/.claude/settings.json", "escalate", "session-config", false},
 		{"claude settings via dotdot", c, "Write", "a/../.claude/settings.json", "escalate", "session-config", false},
 		{"claude settings upper", c, "Write", ".Claude/Settings.JSON", "escalate", "session-config", true},
+		{"claude settings long s", c, "Write", ".claude/\u017fettings.json", "escalate", "session-config", true},
 		{"claude settings inside state dir", nested, "Write", ".claude/settings.json", "escalate", "session-config", false},
 		{"claude other file ok", c, "Write", ".claude/commands/x.md", "allow", "", false},
 		{"claude settings in subdir ok", c, "Write", "sub/.claude/settings.json", "allow", "", false},

@@ -10,6 +10,8 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // Decision is the outcome of evaluating one tool call against the hook rules.
@@ -101,11 +103,23 @@ func str(m map[string]any, key string) string {
 // spelling, so path comparisons must fold case there.
 var foldCase = runtime.GOOS == "darwin" || runtime.GOOS == "windows"
 
+// fold maps every rune to the smallest member of its unicode.SimpleFold orbit,
+// the canonical form for filesystems that fold with simple case folding: "S",
+// "s" and U+017F (long s) all become "S", so ".ſsh" folds to ".Ssh" like ".ssh".
+// ToLower would miss such characters.
 func fold(s string) string {
-	if foldCase {
-		return strings.ToLower(s)
+	if !foldCase {
+		return s
 	}
-	return s
+	return strings.Map(func(r rune) rune {
+		min := r
+		for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
+			if f < min {
+				min = f
+			}
+		}
+		return min
+	}, s)
 }
 
 // ciFlag is the regexp flag that makes text matching follow foldCase.
@@ -134,10 +148,14 @@ func within(root, p string) bool {
 // relWithin returns p relative to root, keeping p's spelling. It requires
 // within(root, p) and avoids filepath.Rel, which compares case-sensitively.
 func relWithin(root, p string) string {
-	if len(p) <= len(root) {
-		return ""
+	// Fold-equal spellings can differ in byte length (s vs long s), so skip
+	// by runes, not bytes.
+	n := utf8.RuneCountInString(root)
+	for i := 0; i < n && len(p) > 0; i++ {
+		_, size := utf8.DecodeRuneInString(p)
+		p = p[size:]
 	}
-	return strings.TrimLeft(p[len(root):], string(filepath.Separator))
+	return strings.TrimLeft(p, string(filepath.Separator))
 }
 
 // absPath expands ~ and makes p absolute relative to the ticket dir. It does
@@ -324,13 +342,13 @@ func (c RuleContext) isClaudeCredential(p string) bool {
 			continue
 		}
 		parts := strings.Split(fold(relWithin(h, p)), string(filepath.Separator))
-		if !strings.HasPrefix(parts[0], ".claude") {
+		if !strings.HasPrefix(parts[0], fold(".claude")) {
 			continue
 		}
-		if len(parts) == 1 && strings.HasPrefix(parts[0], ".claude.json") {
+		if len(parts) == 1 && strings.HasPrefix(parts[0], fold(".claude.json")) {
 			return true
 		}
-		if len(parts) >= 2 && (parts[1] == ".credentials.json" || parts[1] == "credentials.json") {
+		if len(parts) >= 2 && (parts[1] == fold(".credentials.json") || parts[1] == fold("credentials.json")) {
 			return true
 		}
 	}
@@ -392,7 +410,7 @@ var wrapperCmds = map[string]bool{
 // reservedWords can precede a command in a shell segment.
 var reservedWords = map[string]bool{
 	"do": true, "then": true, "else": true, "elif": true, "if": true,
-	"while": true, "until": true, "!": true, "{": true, "}": true, "time": true,
+	"while": true, "until": true, "!": true, "{": true, "}": true,
 }
 
 var shellCmds = map[string]bool{"sh": true, "bash": true, "zsh": true, "dash": true, "ksh": true}
@@ -524,10 +542,10 @@ func writeRule(ctx RuleContext, in map[string]any) (Decision, bool) {
 	// path so case, symlink and ".." tricks do not dodge it.
 	rel := fold(relWithin(base, target))
 	parts := strings.Split(rel, string(filepath.Separator))
-	if parts[0] == ".athena" {
+	if parts[0] == fold(".athena") {
 		return deny(ruleSessionConfig, "the .athena directory is managed by athena and cannot be written"), true
 	}
-	if len(parts) == 2 && parts[0] == ".claude" && (parts[1] == "settings.json" || parts[1] == "settings.local.json") {
+	if len(parts) == 2 && parts[0] == fold(".claude") && (parts[1] == fold("settings.json") || parts[1] == fold("settings.local.json")) {
 		return escalate(ruleSessionConfig, "writing Claude Code settings needs approval"), true
 	}
 	return Decision{}, false
