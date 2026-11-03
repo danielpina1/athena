@@ -22,12 +22,15 @@ const (
 	cmdAnswerApproval    = "answer_approval"
 	cmdExpireApproval    = "expire_approval"
 	cmdRecordUsage       = "record_usage"
+	cmdReceive           = "receive"
+	cmdBindThread        = "bind_thread"
+	cmdThreadClosed      = "thread_closed"
 )
 
 var commandNames = []string{
 	cmdSubmit, cmdAssignmentStarted, cmdInputsDelivered, cmdDeliveryFailed, cmdInputsRead, cmdTurnEnded,
 	cmdFileReport, cmdPersonInput, cmdStop, cmdRetry, cmdRequestApproval, cmdAnswerApproval, cmdExpireApproval,
-	cmdRecordUsage,
+	cmdRecordUsage, cmdReceive, cmdBindThread, cmdThreadClosed,
 }
 
 // TicketStats are a Ticket's performance numbers (spec §10.3). The Engine updates them in the same transaction as the

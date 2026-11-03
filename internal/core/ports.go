@@ -85,6 +85,8 @@ const (
 	EventInputAdded        = "input.added"
 	EventApprovalRequested = "approval.requested"
 	EventApprovalAnswered  = "approval.answered"
+	EventTriggerReceived   = "trigger.received"
+	EventThreadSubscribed  = "thread.subscribed"
 )
 
 // Event is what the Engine reports after a committed change.

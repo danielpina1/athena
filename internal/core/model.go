@@ -72,6 +72,9 @@ type Input struct {
 	Text      string    `json:"text,omitempty"`
 	// Human is set when a person wrote the Trigger.
 	Human bool `json:"human,omitempty"`
+	// Context is set when the Trigger reached the Ticket only on Threads it follows for context: the Ticket reads it
+	// but does not own it, and it neither lifts a wait for a person nor resumes the Ticket.
+	Context bool `json:"context,omitempty"`
 	// ReadAt is when the worker's Session took the Input into a step; nil while it waits.
 	ReadAt *time.Time `json:"readAt,omitempty"`
 	// DeliveredTo is the Assignment the Input was last delivered to.
@@ -279,6 +282,9 @@ type Disposition struct {
 	Filtered string `json:"filtered,omitempty"`
 	// Reached lists the Tickets it reached by fan-out or a person's requeue.
 	Reached []string `json:"reached,omitempty"`
+	// Context lists the Tickets of Reached it reached only on Threads they follow for context, which makes it none of
+	// theirs.
+	Context []string `json:"context,omitempty"`
 	// Attached lists the Tickets a Decision attached it to.
 	Attached []string `json:"attached,omitempty"`
 	// Requeued is when a person last queued it for a fresh Eval.
@@ -376,7 +382,7 @@ func (t *Ticket) LatestAssignment() *Assignment {
 }
 
 // WaitsForPerson reports whether the latest Assignment reported blocked or failed and no person's message
-// reached the Ticket since. A later report that is neither, a person's message, or a retry (a new Assignment) lifts it.
+// reached the Ticket since, other than on a Thread it follows only for context. A later report that is neither, a person's message, or a retry (a new Assignment) lifts it.
 func (t *Ticket) WaitsForPerson() bool {
 	a := t.LatestAssignment()
 	if a == nil || a.Report == nil {
@@ -386,10 +392,46 @@ func (t *Ticket) WaitsForPerson() bool {
 		return false
 	}
 	for _, in := range t.Inputs {
-		// TODO(context): reference also requires !context (an Input from a Thread followed only for context).
-		if in.Kind == InputTrigger && in.Human && in.At.After(a.Report.At) {
+		// A person's message on a Thread the Ticket follows only for context is not addressed to its worker.
+		if in.Kind == InputTrigger && in.Human && !in.Context && in.At.After(a.Report.At) {
 			return false
 		}
 	}
 	return true
+}
+
+// FollowsDone reports whether a Ticket that follows Threads is done with them, and the outcome it then ends with: no
+// Thread it opened (Own) is still open or, when it opened none, every Thread it follows closed. The outcome is that of
+// the latest of those closes. A Ticket that follows no Thread is never done with them.
+func (t *Ticket) FollowsDone() (TicketOutcome, bool) {
+	c := t.followsDone()
+	if c == nil {
+		return "", false
+	}
+	return c.Outcome, true
+}
+
+// followsDone is FollowsDone's latest close, or nil while the Ticket is not done with its Threads.
+func (t *Ticket) followsDone() *Close {
+	var own, all []Follow
+	for _, f := range t.Follows {
+		all = append(all, f)
+		if f.Own {
+			own = append(own, f)
+		}
+	}
+	counted := all
+	if len(own) > 0 {
+		counted = own
+	}
+	var latest *Close
+	for _, f := range counted {
+		if f.Closed == nil {
+			return nil
+		}
+		if latest == nil || !f.Closed.At.Before(latest.At) {
+			latest = f.Closed
+		}
+	}
+	return latest
 }

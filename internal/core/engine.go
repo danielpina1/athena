@@ -78,18 +78,44 @@ type Engine struct {
 	// reg and cmdHist are set by SetMetrics before the first command; nil without metrics.
 	reg     *metrics.Registry
 	cmdHist map[string]*metrics.Histogram
+	// policy, scope and wake come from Options; each may be nil.
+	policy func() Policy
+	scope  SourceScope
+	wake   func()
 }
 
-// NewEngine returns an Engine. now defaults to time.Now and emit to a no-op. emit, like the Executor, runs after commit
-// while the command still holds the Engine: it must not block or call an Engine command (queries are fine).
+// Options configure an Engine beyond its Repositories and Executor. Every field may be left zero.
+type Options struct {
+	// Now is the clock; it defaults to time.Now.
+	Now func() time.Time
+	// Emit receives the Events after commit; it defaults to a no-op.
+	Emit func(Event)
+	// Policy returns the current Policy. Without one, every Mandate revalidates, as an owner task's always does.
+	Policy func() Policy
+	// Scope tells which Threads the Sources listen to. Without one, every Thread is listened to.
+	Scope SourceScope
+	// Wake is called after a command that enqueued external work committed, such as the effects runner's Wake.
+	Wake func()
+}
+
+// NewEngine returns an Engine with the plan 1 options: a clock and an event sink (see Options).
 func NewEngine(repos Repositories, exec Executor, now func() time.Time, emit func(Event)) *Engine {
+	return NewEngineWith(repos, exec, Options{Now: now, Emit: emit})
+}
+
+// NewEngineWith returns an Engine configured by opts. Emit and Wake, like the Executor, run after commit while the
+// command still holds the Engine: they must not block or call an Engine command (queries are fine). Policy and the
+// Scope's Listens run inside a command's transaction and must not call the Engine either.
+func NewEngineWith(repos Repositories, exec Executor, opts Options) *Engine {
+	now, emit := opts.Now, opts.Emit
 	if now == nil {
 		now = time.Now
 	}
 	if emit == nil {
 		emit = func(Event) {}
 	}
-	return &Engine{repos: repos, exec: exec, now: now, emit: emit, waiters: map[string]chan struct{}{}}
+	return &Engine{repos: repos, exec: exec, now: now, emit: emit, waiters: map[string]chan struct{}{},
+		policy: opts.Policy, scope: opts.Scope, wake: opts.Wake}
 }
 
 // --- Owner tasks ---
@@ -269,6 +295,8 @@ func (e *Engine) TurnEnded(ticketID, assignmentID string) error {
 // FileReport records a worker's report on the open Ticket's current Assignment. Its Question asks a person (a new
 // question replaces the current one, and a ready report clears it). A blocked or failed report holds back automatic
 // Inputs until a person's message arrives; a dropped report ends the Ticket dropped, and a ready one ends it completed.
+// A Ticket that follows Threads ends with them instead (FollowsDone): a ready report ends it only once it is done with
+// them, as the latest close did, and a dropped one after such a close ends it as that close did.
 func (e *Engine) FileReport(ticketID string, r ReportInput) error {
 	switch r.State {
 	case ReportProgress, ReportWaiting, ReportReady, ReportBlocked, ReportFailed, ReportDropped:
@@ -338,13 +366,24 @@ func (e *Engine) FileReport(ticketID string, r ReportInput) error {
 			data["question"] = r.Question
 		}
 		o.event(EventReportFiled, t, a.ID, data)
-		switch r.State {
-		case ReportDropped:
+		// A Ticket that follows Threads ends with them: ready ends it only once it is done with them, as they ended, and
+		// dropped after a close it deferred ends it as that close did.
+		done, isDone := t.FollowsDone()
+		switch {
+		case r.State == ReportDropped && isDone:
+			if err := o.end(t, EndByExecutor, done, ""); err != nil {
+				return err
+			}
+		case r.State == ReportDropped:
 			if err := o.end(t, EndByExecutor, OutcomeDropped, ""); err != nil {
 				return err
 			}
-		case ReportReady:
+		case r.State == ReportReady && len(t.Follows) == 0:
 			if err := o.end(t, EndByExecutor, OutcomeCompleted, ""); err != nil {
+				return err
+			}
+		case r.State == ReportReady && isDone:
+			if err := o.end(t, EndByExecutor, done, ""); err != nil {
 				return err
 			}
 		}
@@ -357,7 +396,7 @@ func (e *Engine) FileReport(ticketID string, r ReportInput) error {
 // AddPersonInput gives a Ticket the owner's message: it is recorded as a person's Trigger and reaches the Ticket as a
 // human Input, which answers its question (clearing Attention), releases a blocked or failed report, and goes to the
 // running Assignment (or launches a pending one again). An ended Ticket resumes with a new Assignment, unless a person
-// stopped it.
+// stopped it or its Mandate no longer revalidates.
 func (e *Engine) AddPersonInput(ticketID, text string) error {
 	if strings.TrimSpace(text) == "" {
 		return userErrorf("a message needs text")
@@ -369,6 +408,9 @@ func (e *Engine) AddPersonInput(ticketID, text string) error {
 		}
 		if t.Ended != nil && t.Ended.By == EndByHuman {
 			return userErrorf("ticket %s was stopped", ticketID)
+		}
+		if t.Ended != nil && !o.revalidates(t) {
+			return userErrorf("the mandate of ticket %s no longer holds; it needs a new accept", ticketID)
 		}
 		trigger := &Trigger{ID: newID(), Source: ownerSource, Actor: OwnerActor, Human: true, At: o.at, Text: text}
 		if err := o.tx.PutTrigger(trigger); err != nil {
@@ -495,6 +537,10 @@ type op struct {
 	tx      Tx
 	at      time.Time
 	effects []effect
+	// policy is the Engine's Policy getter, nil without one.
+	policy func() Policy
+	// enqueued is set once the command enqueued external work; Wake runs after it committed.
+	enqueued bool
 	// reg is the Engine's registry; observations wait in metrics until the command committed.
 	reg     *metrics.Registry
 	metrics []func(*metrics.Registry)
@@ -523,7 +569,7 @@ func (e *Engine) run(fn func(o *op) error) error {
 	var o *op
 	err := e.repos.Tx(func(tx Tx) error {
 		// A fresh op per attempt, so nothing collected by a failed attempt leaks.
-		o = &op{tx: tx, at: e.now(), reg: e.reg}
+		o = &op{tx: tx, at: e.now(), reg: e.reg, policy: e.policy}
 		return fn(o)
 	})
 	if err != nil {
@@ -555,6 +601,9 @@ func (e *Engine) run(fn func(o *op) error) error {
 			e.exec.Stop(t, a, fx.reason)
 		}
 	}
+	if o.enqueued && e.wake != nil {
+		e.wake()
+	}
 	return nil
 }
 
@@ -576,7 +625,33 @@ func (o *op) stop(t *Ticket, assignmentID, reason string) {
 }
 
 func (o *op) event(typ string, t *Ticket, assignmentID string, data map[string]any) {
-	o.effects = append(o.effects, effect{kind: effectEvent, event: Event{Type: typ, TicketID: t.ID, AssignmentID: assignmentID, At: o.at, Data: data}})
+	o.emitEvent(Event{Type: typ, TicketID: t.ID, AssignmentID: assignmentID, At: o.at, Data: data})
+}
+
+// emitEvent queues an Event that need not concern one Ticket.
+func (o *op) emitEvent(ev Event) {
+	o.effects = append(o.effects, effect{kind: effectEvent, event: ev})
+}
+
+// enqueue records external work for the effects runner in the command's transaction; the Engine's Wake runs once the
+// command committed.
+func (o *op) enqueue(kind, key string, payload []byte) error {
+	if err := o.tx.Enqueue(kind, key, payload); err != nil {
+		return err
+	}
+	o.enqueued = true
+	return nil
+}
+
+// revalidates reports whether an ended Ticket's Mandate still holds under the current Policy before it resumes. An
+// owner task's Mandate needs no Source, and without a Policy every Mandate holds.
+func (o *op) revalidates(t *Ticket) bool {
+	m := t.Mandate
+	if o.policy == nil || m.PolicyVersion == OwnerPolicyVersion || m.Basis.Via == ViaOwner {
+		return true
+	}
+	p := o.policy()
+	return p == nil || p.Revalidate(m)
 }
 
 // require loads a Ticket, or fails with a UserError when there is none.
@@ -650,7 +725,7 @@ func (o *op) wake(t *Ticket) {
 	}
 	var first *Input
 	for _, id := range t.Undelivered {
-		if in := findInput(t, id); in != nil && in.Kind == InputTrigger && in.Human {
+		if in := findInput(t, id); in != nil && in.Kind == InputTrigger && in.Human && !in.Context {
 			first = in
 			break
 		}
@@ -685,6 +760,12 @@ func (o *op) requeueUntaken(t *Ticket, replaced string) {
 // failed delivery are dropped, and its pending Approvals expire. reason says why in words; one equal to the outcome
 // is not recorded.
 func (o *op) end(t *Ticket, by TicketEndBy, outcome TicketOutcome, reason string) error {
+	return o.endAt(t, by, outcome, reason, o.at)
+}
+
+// endAt is end with the time the ending fact happened, such as a pull request's close, which may be earlier than now;
+// the Ticket's last change and its Assignments' ends are still now.
+func (o *op) endAt(t *Ticket, by TicketEndBy, outcome TicketOutcome, reason string, at time.Time) error {
 	if t.Ended != nil {
 		return nil
 	}
@@ -700,7 +781,7 @@ func (o *op) end(t *Ticket, by TicketEndBy, outcome TicketOutcome, reason string
 			stopping = append(stopping, a.ID)
 		}
 	}
-	ended := &Ended{At: o.at, By: by, Outcome: outcome}
+	ended := &Ended{At: at, By: by, Outcome: outcome}
 	if reason != "" && reason != string(outcome) {
 		ended.Reason = reason
 	}

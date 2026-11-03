@@ -107,6 +107,19 @@ func (r *memRepos) trigger(id string) *Trigger {
 	return &t
 }
 
+// thread returns the stored Thread with the given key, or nil.
+func (r *memRepos) thread(key string) *Thread {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	raw, ok := r.threads[key]
+	if !ok {
+		return nil
+	}
+	var t Thread
+	mustUnmarshal(raw, &t)
+	return &t
+}
+
 // approval returns the stored Approval with the given ID, or nil.
 func (r *memRepos) approval(id string) *Approval {
 	r.mu.Lock()
@@ -507,11 +520,21 @@ var base = time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC)
 
 func newHarness(t *testing.T) *harness {
 	t.Helper()
+	return newHarnessWith(t, nil)
+}
+
+// newHarnessWith is newHarness with Engine Options beyond the clock and the event log, which configure sets.
+func newHarnessWith(t *testing.T, configure func(*Options)) *harness {
+	t.Helper()
 	repos := newMemRepos()
 	h := &harness{t: t, repos: repos}
 	h.exec = &fakeExec{t: t, repos: repos, strict: true}
 	h.events = &eventLog{t: t, repos: repos, strict: true}
-	h.eng = NewEngine(repos, h.exec, h.now, h.events.emit)
+	opts := Options{Now: h.now, Emit: h.events.emit}
+	if configure != nil {
+		configure(&opts)
+	}
+	h.eng = NewEngineWith(repos, h.exec, opts)
 	return h
 }
 
