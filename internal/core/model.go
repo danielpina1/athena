@@ -213,7 +213,8 @@ func (t *Ticket) WaitsForPerson() bool {
 		return false
 	}
 	for _, in := range t.Inputs {
-		if in.Human && in.At.After(a.Report.At) {
+		// TODO(context): reference also requires !context (an Input from a Thread followed only for context).
+		if in.Kind == InputTrigger && in.Human && in.At.After(a.Report.At) {
 			return false
 		}
 	}

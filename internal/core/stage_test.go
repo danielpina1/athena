@@ -156,6 +156,9 @@ func TestWaitsForPerson(t *testing.T) {
 		{"blocked, bot input after", newTicket(assignments(reportedAt(ReportBlocked)), func(t *Ticket) { t.Inputs = []Input{bot} }), true},
 		{"blocked, human input before", newTicket(assignments(reportedAt(ReportBlocked)), func(t *Ticket) { t.Inputs = []Input{human(earlier.Add(-time.Minute))} }), true},
 		{"blocked, human input after", newTicket(assignments(reportedAt(ReportBlocked)), func(t *Ticket) { t.Inputs = []Input{human(later)} }), false},
+		{"blocked, human text input after", newTicket(assignments(reportedAt(ReportBlocked)), func(t *Ticket) {
+			t.Inputs = []Input{{ID: "i", Kind: InputText, At: later, Human: true}}
+		}), true},
 		{"ready", newTicket(assignments(reported(ReportReady))), false},
 		{"no assignment", newTicket(assignments()), false},
 		{"assignment without report", newTicket(), false},
@@ -176,5 +179,15 @@ func TestLatestAssignment(t *testing.T) {
 	tk := newTicket(assignments(assignment(), assignment(func(a *Assignment) { a.ID = "b" })))
 	if got := tk.LatestAssignment(); got == nil || got.ID != "b" {
 		t.Fatalf("LatestAssignment = %+v", got)
+	}
+}
+
+// Only a trigger Input is a person's message; a human text Input does not release a blocked Ticket.
+func TestStageHumanTextInputDoesNotRelease(t *testing.T) {
+	tk := newTicket(assignments(reportedAt(ReportBlocked)), func(t *Ticket) {
+		t.Inputs = []Input{{ID: "i", Kind: InputText, At: later, Human: true}}
+	})
+	if got := TicketStage(tk); got != (Stage{"person", "blocked"}) {
+		t.Fatalf("stage = %+v, want person/blocked", got)
 	}
 }
