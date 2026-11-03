@@ -69,6 +69,10 @@ type Engine struct {
 	emit  func(Event)
 	// mu serializes commands, from their transaction through their effects, so effects run in commit order.
 	mu sync.Mutex
+	// waiters holds, per pending Approval someone waits on, the channel that closes when it is answered or expires.
+	// It has its own lock so a waiter never needs mu.
+	waitMu  sync.Mutex
+	waiters map[string]chan struct{}
 }
 
 // NewEngine returns an Engine. now defaults to time.Now and emit to a no-op. emit, like the Executor, runs after commit
@@ -80,7 +84,7 @@ func NewEngine(repos Repositories, exec Executor, now func() time.Time, emit fun
 	if emit == nil {
 		emit = func(Event) {}
 	}
-	return &Engine{repos: repos, exec: exec, now: now, emit: emit}
+	return &Engine{repos: repos, exec: exec, now: now, emit: emit, waiters: map[string]chan struct{}{}}
 }
 
 // --- Owner tasks ---
@@ -306,9 +310,13 @@ func (e *Engine) FileReport(ticketID string, r ReportInput) error {
 		o.event(EventReportFiled, t, a.ID, data)
 		switch r.State {
 		case ReportDropped:
-			o.end(t, EndByExecutor, OutcomeDropped, "")
+			if err := o.end(t, EndByExecutor, OutcomeDropped, ""); err != nil {
+				return err
+			}
 		case ReportReady:
-			o.end(t, EndByExecutor, OutcomeCompleted, "")
+			if err := o.end(t, EndByExecutor, OutcomeCompleted, ""); err != nil {
+				return err
+			}
 		}
 		return o.tx.PutTicket(t)
 	})
@@ -353,7 +361,9 @@ func (e *Engine) StopTicket(ticketID, reason string) error {
 		if err != nil || t.Ended != nil {
 			return err
 		}
-		o.end(t, EndByHuman, OutcomeStopped, reason)
+		if err := o.end(t, EndByHuman, OutcomeStopped, reason); err != nil {
+			return err
+		}
 		return o.tx.PutTicket(t)
 	})
 }
@@ -432,6 +442,8 @@ const (
 	effectDeliver
 	effectStop
 	effectEvent
+	// effectRelease wakes the waiters of an Approval that is no longer pending.
+	effectRelease
 )
 
 // effect is an Executor call or an Event a command produces; it runs after the command commits. Executor calls
@@ -442,6 +454,7 @@ type effect struct {
 	assignmentID string
 	reason       string
 	event        Event
+	approvalID   string
 }
 
 // op is one command in progress: its transaction, its time and the effects it collected.
@@ -467,6 +480,10 @@ func (e *Engine) command(fn func(o *op) error) error {
 	for _, fx := range o.effects {
 		if fx.kind == effectEvent {
 			e.emit(fx.event)
+			continue
+		}
+		if fx.kind == effectRelease {
+			e.release(fx.approvalID)
 			continue
 		}
 		t := cloneTicket(fx.ticket)
@@ -610,10 +627,14 @@ func (o *op) requeueUntaken(t *Ticket, replaced string) {
 }
 
 // end ends an open Ticket with its outcome: its Assignments end and stop, and what waited for it, its question and a
-// failed delivery are dropped. reason says why in words; one equal to the outcome is not recorded.
-func (o *op) end(t *Ticket, by TicketEndBy, outcome TicketOutcome, reason string) {
+// failed delivery are dropped, and its pending Approvals expire. reason says why in words; one equal to the outcome
+// is not recorded.
+func (o *op) end(t *Ticket, by TicketEndBy, outcome TicketOutcome, reason string) error {
 	if t.Ended != nil {
-		return
+		return nil
+	}
+	if err := o.expireTicketApprovals(t); err != nil {
+		return err
 	}
 	var stopping []string
 	for i := range t.Assignments {
@@ -644,6 +665,7 @@ func (o *op) end(t *Ticket, by TicketEndBy, outcome TicketOutcome, reason string
 	for _, id := range stopping {
 		o.stop(t, id, stopReason)
 	}
+	return nil
 }
 
 // --- Helpers ---

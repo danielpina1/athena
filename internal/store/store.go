@@ -30,6 +30,14 @@ var migrations = []string{
 	CREATE INDEX tickets_ended ON tickets (ended);
 	CREATE TABLE triggers (id TEXT PRIMARY KEY, doc TEXT NOT NULL);
 	CREATE TABLE decisions (id TEXT PRIMARY KEY, doc TEXT NOT NULL);`,
+	// 2
+	`CREATE TABLE approvals (
+		id TEXT PRIMARY KEY,
+		state TEXT NOT NULL,
+		ticket_id TEXT NOT NULL,
+		doc TEXT NOT NULL
+	);
+	CREATE INDEX approvals_state ON approvals (state);`,
 }
 
 const schemaKey = "schema"

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 
 	"github.com/danielpina1/athena/internal/core"
 )
@@ -79,6 +80,66 @@ func (tx *Tx) PutDecision(d *core.Decision) error {
 	return tx.putDoc("decisions", d.ID, d)
 }
 
+// GetApproval returns the Approval with the given ID, or nil, nil if there is none.
+func (tx *Tx) GetApproval(id string) (*core.Approval, error) {
+	var doc string
+	err := tx.sql.QueryRow(`SELECT doc FROM approvals WHERE id = ?`, id).Scan(&doc)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: get approval %q: %w", id, err)
+	}
+	return decodeApproval(doc)
+}
+
+// PutApproval inserts or replaces an Approval.
+func (tx *Tx) PutApproval(a *core.Approval) error {
+	doc, err := json.Marshal(a)
+	if err != nil {
+		return fmt.Errorf("store: encode approval %q: %w", a.ID, err)
+	}
+	_, err = tx.sql.Exec(`INSERT INTO approvals (id, state, ticket_id, doc) VALUES (?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET state = excluded.state, ticket_id = excluded.ticket_id, doc = excluded.doc`,
+		a.ID, a.State, a.TicketID, string(doc))
+	if err != nil {
+		return fmt.Errorf("store: put approval %q: %w", a.ID, err)
+	}
+	return nil
+}
+
+// PendingApprovals returns every Approval still pending, oldest first.
+func (tx *Tx) PendingApprovals() ([]*core.Approval, error) {
+	rows, err := tx.sql.Query(`SELECT doc FROM approvals WHERE state = ?`, core.ApprovalPending)
+	if err != nil {
+		return nil, fmt.Errorf("store: pending approvals: %w", err)
+	}
+	defer rows.Close()
+	var out []*core.Approval
+	for rows.Next() {
+		var doc string
+		if err := rows.Scan(&doc); err != nil {
+			return nil, fmt.Errorf("store: pending approvals: %w", err)
+		}
+		a, err := decodeApproval(doc)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: pending approvals: %w", err)
+	}
+	// The table keeps no creation column, so order by the document's own time.
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].CreatedAt.Before(out[j].CreatedAt)
+		}
+		return out[i].ID < out[j].ID
+	})
+	return out, nil
+}
+
 // putDoc upserts a JSON document into one of the (id, doc) tables; table is a constant, never user input.
 func (tx *Tx) putDoc(table, id string, v any) error {
 	doc, err := json.Marshal(v)
@@ -99,4 +160,12 @@ func decodeTicket(doc string) (*core.Ticket, error) {
 		return nil, fmt.Errorf("store: decode ticket: %w", err)
 	}
 	return &t, nil
+}
+
+func decodeApproval(doc string) (*core.Approval, error) {
+	var a core.Approval
+	if err := json.Unmarshal([]byte(doc), &a); err != nil {
+		return nil, fmt.Errorf("store: decode approval: %w", err)
+	}
+	return &a, nil
 }

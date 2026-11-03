@@ -16,6 +16,9 @@ func TicketStage(t *Ticket) Stage {
 	if t.Delivery != nil {
 		return Stage{"person", "delivery"}
 	}
+	if t.PendingApproval != "" {
+		return Stage{"person", "approval"}
+	}
 	if t.Attention != nil {
 		return Stage{"person", "answer"}
 	}

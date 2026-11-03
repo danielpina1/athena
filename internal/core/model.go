@@ -172,6 +172,8 @@ type Ticket struct {
 	Origin      Origin           `json:"origin"`
 	Execution   *Execution       `json:"execution,omitempty"`
 	Delivery    *DeliveryFailure `json:"delivery,omitempty"`
+	// PendingApproval is the ID of an Approval of this Ticket waiting for a person; empty if none.
+	PendingApproval string `json:"pendingApproval,omitempty"`
 }
 
 // Trigger is one immutable event produced by a source; Text is untrusted external data.

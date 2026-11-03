@@ -27,6 +27,12 @@ type Tx interface {
 	PutTrigger(t *Trigger) error
 	// PutDecision inserts or replaces a Decision.
 	PutDecision(d *Decision) error
+	// GetApproval returns the Approval with the given ID, or nil, nil if there is none.
+	GetApproval(id string) (*Approval, error)
+	// PutApproval inserts or replaces an Approval.
+	PutApproval(a *Approval) error
+	// PendingApprovals returns every Approval still pending, oldest first.
+	PendingApprovals() ([]*Approval, error)
 	// NextSeq returns the next value of the named counter: 1 on first use, then one more each call.
 	// It moves only if the transaction commits.
 	NextSeq(name string) (int, error)

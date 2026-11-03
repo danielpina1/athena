@@ -45,6 +45,7 @@ func newTicket(mods ...func(*Ticket)) *Ticket {
 
 func assignments(as ...Assignment) func(*Ticket) { return func(t *Ticket) { t.Assignments = as } }
 func withDelivery(t *Ticket)                     { t.Delivery = &DeliveryFailure{Error: "offline"} }
+func withApproval(t *Ticket)                     { t.PendingApproval = "ap" }
 func withAttention(t *Ticket)                    { t.Attention = &Attention{ID: "q", Question: "?"} }
 func withEnded(t *Ticket) {
 	t.Ended = &Ended{By: EndByExecutor, Outcome: OutcomeClosed, Reason: "closed"}
@@ -78,6 +79,10 @@ func TestTicketStage(t *testing.T) {
 		{"an ended Ticket", newTicket(withEnded, withAttention, assignments(reported(ReportFailed))), Stage{Stage: "ended"}},
 		{"an undelivered Input", newTicket(withDelivery), Stage{"person", "delivery"}},
 		{"delivery before answer and review", newTicket(withDelivery, withAttention, assignments(reported(ReportReady))), Stage{"person", "delivery"}},
+		{"a pending Approval", newTicket(withApproval), Stage{"person", "approval"}},
+		{"delivery before an Approval", newTicket(withDelivery, withApproval), Stage{"person", "delivery"}},
+		{"an Approval before answer and review", newTicket(withApproval, withAttention, assignments(reported(ReportReady))), Stage{"person", "approval"}},
+		{"an ended Ticket with an Approval", newTicket(withEnded, withApproval), Stage{Stage: "ended"}},
 		{"an Attention", newTicket(withAttention), Stage{"person", "answer"}},
 		{"answer before review", newTicket(withAttention, assignments(reported(ReportReady))), Stage{"person", "answer"}},
 		{"answer before a failure", newTicket(withAttention, assignments(reported(ReportFailed))), Stage{"person", "answer"}},

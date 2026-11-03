@@ -16,6 +16,7 @@ type memRepos struct {
 	tickets   map[string][]byte
 	triggers  map[string][]byte
 	decisions map[string][]byte
+	approvals map[string][]byte
 	seqs      map[string]int
 	// failWith, when set, makes every Tx roll back with this error after its function ran.
 	failWith error
@@ -24,7 +25,7 @@ type memRepos struct {
 }
 
 func newMemRepos() *memRepos {
-	return &memRepos{tickets: map[string][]byte{}, triggers: map[string][]byte{}, decisions: map[string][]byte{}, seqs: map[string]int{}}
+	return &memRepos{tickets: map[string][]byte{}, triggers: map[string][]byte{}, decisions: map[string][]byte{}, approvals: map[string][]byte{}, seqs: map[string]int{}}
 }
 
 func (r *memRepos) Tx(fn func(Tx) error) error {
@@ -34,6 +35,7 @@ func (r *memRepos) Tx(fn func(Tx) error) error {
 		tickets:   cloneMap(r.tickets),
 		triggers:  cloneMap(r.triggers),
 		decisions: cloneMap(r.decisions),
+		approvals: cloneMap(r.approvals),
 		seqs:      map[string]int{},
 	}
 	for k, v := range r.seqs {
@@ -48,7 +50,7 @@ func (r *memRepos) Tx(fn func(Tx) error) error {
 	if r.failWith != nil {
 		return r.failWith
 	}
-	r.tickets, r.triggers, r.decisions, r.seqs = tx.tickets, tx.triggers, tx.decisions, tx.seqs
+	r.tickets, r.triggers, r.decisions, r.approvals, r.seqs = tx.tickets, tx.triggers, tx.decisions, tx.approvals, tx.seqs
 	return nil
 }
 
@@ -85,6 +87,19 @@ func (r *memRepos) trigger(id string) *Trigger {
 	return &t
 }
 
+// approval returns the stored Approval with the given ID, or nil.
+func (r *memRepos) approval(id string) *Approval {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	raw, ok := r.approvals[id]
+	if !ok {
+		return nil
+	}
+	var a Approval
+	mustUnmarshal(raw, &a)
+	return &a
+}
+
 func (r *memRepos) decisionList() []Decision {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -104,8 +119,50 @@ func (r *memRepos) counts() (tickets, triggers, decisions int) {
 }
 
 type memTx struct {
-	tickets, triggers, decisions map[string][]byte
-	seqs                         map[string]int
+	tickets, triggers, decisions, approvals map[string][]byte
+	seqs                                    map[string]int
+}
+
+func (tx *memTx) GetApproval(id string) (*Approval, error) {
+	raw, ok := tx.approvals[id]
+	if !ok {
+		return nil, nil
+	}
+	var a Approval
+	if err := json.Unmarshal(raw, &a); err != nil {
+		return nil, err
+	}
+	return &a, nil
+}
+
+func (tx *memTx) PutApproval(a *Approval) error {
+	raw, err := json.Marshal(a)
+	if err != nil {
+		return err
+	}
+	tx.approvals[a.ID] = raw
+	return nil
+}
+
+// PendingApprovals lists the pending Approvals, oldest first, as the SQLite store does.
+func (tx *memTx) PendingApprovals() ([]*Approval, error) {
+	var out []*Approval
+	for id := range tx.approvals {
+		a, err := tx.GetApproval(id)
+		if err != nil {
+			return nil, err
+		}
+		if a.State == ApprovalPending {
+			out = append(out, a)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].CreatedAt.Before(out[j].CreatedAt)
+		}
+		return out[i].ID < out[j].ID
+	})
+	return out, nil
 }
 
 func (tx *memTx) GetTicket(id string) (*Ticket, error) {

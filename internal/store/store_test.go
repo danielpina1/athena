@@ -1,6 +1,8 @@
 package store
 
 import (
+	"database/sql"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -114,8 +116,8 @@ func TestReopenPersists(t *testing.T) {
 	if err := s2.Tx(func(tx *Tx) (err error) { ok, err = tx.KVGet("schema", &schema); return }); err != nil {
 		t.Fatal(err)
 	}
-	if !ok || schema != 1 {
-		t.Fatalf("schema = %d (found %v), want 1", schema, ok)
+	if !ok || schema != len(migrations) {
+		t.Fatalf("schema = %d (found %v), want %d", schema, ok, len(migrations))
 	}
 }
 
@@ -266,5 +268,144 @@ func TestOpenRelativePath(t *testing.T) {
 				t.Fatalf("db not at relative path: %v", err)
 			}
 		})
+	}
+}
+
+func sampleApproval(id, ticket string, created time.Time) *core.Approval {
+	answered := created.Add(time.Minute)
+	return &core.Approval{
+		ID: id, TicketID: ticket, AssignmentID: "as1", Tool: "Bash", Summary: "rm -rf build", Rule: "destructive",
+		Input: json.RawMessage(`{"command":"rm -rf build"}`), State: core.ApprovalPending, CreatedAt: created,
+		AnsweredAt: &answered, Answer: "ok",
+	}
+}
+
+func TestApprovalRoundTrip(t *testing.T) {
+	s, path := openTemp(t)
+	a := sampleApproval("ap1", "t1", t0)
+	var missing *core.Approval
+	if err := s.Tx(func(tx *Tx) (err error) {
+		if missing, err = tx.GetApproval("ap1"); err != nil {
+			return err
+		}
+		return tx.PutApproval(a)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if missing != nil {
+		t.Fatalf("GetApproval before put = %+v, want nil", missing)
+	}
+	read := func(s *Store, id string) (got *core.Approval) {
+		t.Helper()
+		if err := s.Tx(func(tx *Tx) (err error) { got, err = tx.GetApproval(id); return }); err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	if got := read(s, "ap1"); !reflect.DeepEqual(got, a) {
+		t.Fatalf("round trip:\n got  %+v\n want %+v", got, a)
+	}
+
+	// Pending ones list oldest first; answered ones drop out; an overwrite keeps one row.
+	b := sampleApproval("ap0", "t2", t0.Add(time.Hour))
+	c := sampleApproval("ap2", "t1", t0.Add(-time.Hour))
+	if err := s.Tx(func(tx *Tx) error {
+		for _, x := range []*core.Approval{b, c} {
+			if err := tx.PutApproval(x); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ids := func() (out []string) {
+		if err := s.Tx(func(tx *Tx) error {
+			list, err := tx.PendingApprovals()
+			for _, x := range list {
+				out = append(out, x.ID)
+			}
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	if got, want := ids(), []string{"ap2", "ap1", "ap0"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("pending = %v, want %v", got, want)
+	}
+	a.State = core.ApprovalApproved
+	if err := s.Tx(func(tx *Tx) error { return tx.PutApproval(a) }); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := ids(), []string{"ap2", "ap0"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("pending after answer = %v, want %v", got, want)
+	}
+	if got := read(s, "ap1"); got.State != core.ApprovalApproved {
+		t.Fatalf("state = %q after overwrite", got.State)
+	}
+
+	// Survives a reopen.
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s2, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+	if got := read(s2, "ap0"); !reflect.DeepEqual(got, b) {
+		t.Fatalf("after reopen: %+v, want %+v", got, b)
+	}
+}
+
+func TestMigration1To2(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "athena.db")
+	// Build a database exactly as release 1 left it: only migration 1 applied.
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(migrations[0]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO kv (key, value) VALUES ('schema', '1')`); err != nil {
+		t.Fatal(err)
+	}
+	tk, err := json.Marshal(sampleTicket("t1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO tickets (id, ended, updated_at, doc) VALUES ('t1', 0, '2026-01-01T00:00:00Z', ?)`, string(tk)); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE name='approvals'`).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("schema 1 already has approvals (n=%d, err=%v)", n, err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open on schema 1: %v", err)
+	}
+	defer s.Close()
+	var schema int
+	if err := s.Tx(func(tx *Tx) error {
+		_, err := tx.KVGet("schema", &schema)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if schema != 2 {
+		t.Fatalf("schema = %d after upgrade, want 2", schema)
+	}
+	if get(t, s, "t1") == nil {
+		t.Fatal("ticket lost in the upgrade")
+	}
+	if err := s.Tx(func(tx *Tx) error { return tx.PutApproval(sampleApproval("ap1", "t1", t0)) }); err != nil {
+		t.Fatalf("PutApproval after upgrade: %v", err)
 	}
 }
