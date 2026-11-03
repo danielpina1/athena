@@ -86,6 +86,8 @@ type Store struct {
 	db *sql.DB
 	// txSeconds is the store_tx_seconds histogram; nil (the default) records nothing.
 	txSeconds atomic.Pointer[metrics.Histogram]
+	// clock overrides time.Now for stored times (effects); nil means time.Now.
+	clock atomic.Pointer[func() time.Time]
 }
 
 // SetMetrics makes the Store record the latency of every transaction, from begin to commit or rollback, as
@@ -182,7 +184,7 @@ func (s *Store) Tx(fn func(tx *Tx) error) (err error) {
 			panic(r)
 		}
 	}()
-	if err := fn(&Tx{sql: sqlTx}); err != nil {
+	if err := fn(&Tx{sql: sqlTx, now: s.Now}); err != nil {
 		if rbErr := sqlTx.Rollback(); rbErr != nil {
 			return errors.Join(err, rbErr)
 		}
@@ -197,6 +199,7 @@ func (s *Store) Tx(fn func(tx *Tx) error) (err error) {
 // Tx is the handle for one transaction; it is valid only inside the function passed to Store.Tx.
 type Tx struct {
 	sql *sql.Tx
+	now func() time.Time
 }
 
 // kvGetJSON loads the JSON value stored under key into v. It reports false if key is absent.

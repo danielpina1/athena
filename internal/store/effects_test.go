@@ -106,3 +106,44 @@ func TestEnqueueRollsBack(t *testing.T) {
 		t.Fatalf("rows = %+v, want one with seq 1", rows)
 	}
 }
+
+func TestEffectSettlingIgnoresReplacedPayload(t *testing.T) {
+	s, _ := openTemp(t)
+	now := time.Date(2026, 11, 3, 9, 0, 0, 0, time.UTC)
+	s.SetClock(func() time.Time { return now })
+	inTx(t, s, func(tx core.Tx) error { return tx.Enqueue("reply", "k", []byte("new")) })
+
+	// A run that started with the older payload must not delete or reschedule the newer message.
+	if done, err := s.CompleteEffect("reply", "k", []byte("old")); err != nil || done {
+		t.Fatalf("CompleteEffect(old) = %v, %v, want no-op", done, err)
+	}
+	if done, err := s.DelayEffect("reply", "k", []byte("old"), now.Add(time.Hour)); err != nil || done {
+		t.Fatalf("DelayEffect(old) = %v, %v, want no-op", done, err)
+	}
+	if n, _, err := s.FailEffect("reply", "k", []byte("old"), "x", now, func(int) time.Duration { return time.Hour }); err != nil || n != 0 {
+		t.Fatalf("FailEffect(old) = %d, %v, want no-op", n, err)
+	}
+	if got := effectRows(t, s); len(got) != 1 || got[0].Attempts != 0 || !got[0].DueAt.Equal(now) {
+		t.Fatalf("rows = %+v, want the row untouched and due at the clock's now", got)
+	}
+
+	n, due, err := s.FailEffect("reply", "k", []byte("new"), "boom", now, func(a int) time.Duration { return time.Duration(a) * time.Minute })
+	if err != nil || n != 1 || !due.Equal(now.Add(time.Minute)) {
+		t.Fatalf("FailEffect = %d, %v, %v", n, due, err)
+	}
+	if next, ok, err := s.NextEffectDue("reply", now); err != nil || !ok || !next.Equal(now.Add(time.Minute)) {
+		t.Fatalf("NextEffectDue = %v, %v, %v", next, ok, err)
+	}
+	if _, ok, err := s.NextEffectDue("reply", now.Add(time.Minute)); err != nil || ok {
+		t.Fatalf("NextEffectDue at the due time = %v, %v, want none", ok, err)
+	}
+	if due, err := s.DueEffects("reply", now.Add(time.Minute), 10); err != nil || len(due) != 1 {
+		t.Fatalf("DueEffects = %v, %v", due, err)
+	}
+	if done, err := s.CompleteEffect("reply", "k", []byte("new")); err != nil || !done {
+		t.Fatalf("CompleteEffect(new) = %v, %v", done, err)
+	}
+	if got := effectRows(t, s); len(got) != 0 {
+		t.Fatalf("rows = %+v", got)
+	}
+}
