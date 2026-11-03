@@ -376,6 +376,17 @@ func TestStartRunsSessionAndReportsStarted(t *testing.T) {
 	if got := h.stdin(); !strings.Contains(got, "with more detail") || !strings.Contains(got, tk.ID) {
 		t.Errorf("first message lacks the task: %q", got)
 	}
+	var mcpCfg struct {
+		MCPServers map[string]struct {
+			Env map[string]string `json:"env"`
+		} `json:"mcpServers"`
+	}
+	if raw, err := os.ReadFile(filepath.Join(dir, ".athena", "mcp.json")); err != nil || json.Unmarshal(raw, &mcpCfg) != nil {
+		t.Fatalf("mcp.json: %v", err)
+	}
+	if env := mcpCfg.MCPServers["athena"].Env; env["ATHENA_ASSIGNMENT"] != a.ID || env["ATHENA_TICKET"] != tk.ID {
+		t.Errorf("mcp.json env = %v, want ATHENA_ASSIGNMENT=%s ATHENA_TICKET=%s", env, a.ID, tk.ID)
+	}
 	if ign, err := os.ReadFile(filepath.Join(dir, ".athena", ".gitignore")); err != nil || strings.TrimSpace(string(ign)) != "*" {
 		t.Errorf(".athena/.gitignore = %q, %v", ign, err)
 	}
@@ -493,6 +504,34 @@ func TestApprovalTimeoutDenies(t *testing.T) {
 	}
 	if _, st := h.ticket(tk.ID); st.Stage != "working" {
 		t.Fatalf("stage = %+v, want working after the expiry", st)
+	}
+}
+
+// expireFails is the real Engine except that ExpireApproval fails, as it would with the store gone.
+type expireFails struct{ *core.Engine }
+
+func (expireFails) ExpireApproval(string) error { return fmt.Errorf("store closed") }
+
+func TestEscalationDeniesPromptlyWhenExpiryFails(t *testing.T) {
+	h := newHarness(t, func(c *Config) { c.ApprovalTimeout = 50 * time.Millisecond })
+	h.n.SetEngine(expireFails{h.eng})
+	tk := h.submit("Task", "")
+	_, a := h.running(tk.ID)
+	got := make(chan HookResponse, 1)
+	go func() {
+		got <- h.hook(EventPreToolUse, tk.ID, a.ID, map[string]any{"tool_name": "Bash", "tool_input": map[string]any{"command": "make deploy"}})
+	}()
+	select {
+	case r := <-got:
+		if r.Verdict != VerdictDeny {
+			t.Fatalf("verdict = %+v, want deny", r)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("hook hung after the expiry failed")
+	}
+	// The approval is still pending (expiry failed); Serve must still shut down (checked by the harness cleanup).
+	if pending, _ := h.eng.PendingApprovals(); len(pending) != 1 {
+		t.Fatalf("pending approvals = %d, want 1", len(pending))
 	}
 }
 
@@ -749,26 +788,43 @@ func TestTicketEndRemovesWorktreeUnlessUnpushed(t *testing.T) {
 	repo := newRepo(t)
 	clean := h.submit("Nothing to keep", repo)
 	work := h.submit("Has a commit", repo)
-	clean, ca := h.running(clean.ID)
-	work, wa := h.running(work.ID)
-	dc, dw := TicketDir(h.cfg.WorkRoot, clean), TicketDir(h.cfg.WorkRoot, work)
+	dirty := h.submit("Modified file", repo)
+	untracked := h.submit("New file", repo)
+	var dirs []string
+	var as []core.Assignment
+	for _, tk := range []core.Ticket{clean, work, dirty, untracked} {
+		tk, a := h.running(tk.ID)
+		dirs = append(dirs, TicketDir(h.cfg.WorkRoot, tk))
+		as = append(as, a)
+	}
+	dc, dw, dd, du := dirs[0], dirs[1], dirs[2], dirs[3]
 	if err := os.WriteFile(filepath.Join(dw, "new.txt"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	git(t, dw, "add", "new.txt")
 	git(t, dw, "commit", "-q", "-m", "work")
-
-	if r := h.report(clean.ID, ca.ID, core.ReportReady, "done"); !r.OK {
-		t.Fatal(r)
+	if err := os.WriteFile(filepath.Join(dd, "README"), []byte("changed\n"), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	if r := h.report(work.ID, wa.ID, core.ReportReady, "done"); !r.OK {
-		t.Fatal(r)
+	if err := os.WriteFile(filepath.Join(du, "scratch.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for i, tk := range []core.Ticket{clean, work, dirty, untracked} {
+		if r := h.report(tk.ID, as[i].ID, core.ReportReady, "done"); !r.OK {
+			t.Fatal(r)
+		}
 	}
 	h.eventually("clean worktree removed", func() bool { _, err := os.Stat(dc); return os.IsNotExist(err) })
 	h.eventually("sessions gone", func() bool { return h.n.liveCount() == 0 })
 	h.n.Close() // waits for cleanup to finish
-	if _, err := os.Stat(filepath.Join(dw, "new.txt")); err != nil {
-		t.Fatalf("worktree with an unpushed commit was removed: %v", err)
+	for _, f := range []string{filepath.Join(dw, "new.txt"), filepath.Join(dd, "README"), filepath.Join(du, "scratch.txt")} {
+		if _, err := os.Stat(f); err != nil {
+			t.Errorf("worktree work was removed (%s): %v", f, err)
+		}
+	}
+	if b, _ := os.ReadFile(filepath.Join(dd, "README")); string(b) != "changed\n" {
+		t.Errorf("modified file lost its change: %q", b)
 	}
 	if got := git(t, repo, "branch", "--list", "athena/t-0001"); got == "" {
 		t.Error("branch of the removed worktree was deleted")

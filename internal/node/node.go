@@ -939,7 +939,7 @@ func (n *Node) prepare(s *session) error {
 	if err := claude.WriteSettings(filepath.Join(adir, "settings.json"), n.cfg.AthenaBin, n.cfg.SocketPath, hookTimeout); err != nil {
 		return err
 	}
-	return claude.WriteMCPConfig(filepath.Join(adir, "mcp.json"), n.cfg.AthenaBin, n.cfg.SocketPath, s.t.ID)
+	return claude.WriteMCPConfig(filepath.Join(adir, "mcp.json"), n.cfg.AthenaBin, n.cfg.SocketPath, s.t.ID, s.a.ID)
 }
 
 // ensureWorktree creates dir as a worktree of repo on branch, from the repository's HEAD for a new branch; an
@@ -961,13 +961,23 @@ func ensureWorktree(repo, dir, branch string) error {
 	return err
 }
 
-// cleanupWorktree removes an ended Ticket's worktree when its branch has no commits that exist nowhere else (no
-// other branch, no remote); otherwise it keeps it, so no work is lost. The branch itself is kept.
+// cleanupWorktree removes an ended Ticket's worktree when nothing in it would be lost: no uncommitted or untracked
+// changes (Athena's own .athena directory is ignored) and no commits on its branch that exist nowhere else (no other
+// branch, no remote). Otherwise it keeps it and logs why. The branch itself is kept.
 func cleanupWorktree(p placement, t core.Ticket, log *slog.Logger) {
 	if p.repo == "" {
 		return
 	}
 	if _, err := os.Stat(p.workDir); err != nil {
+		return
+	}
+	dirty, err := gitOut(p.workDir, "status", "--porcelain")
+	if err != nil {
+		log.Warn("keeping worktree: cannot read its status", "dir", p.workDir, "error", err)
+		return
+	}
+	if dirty != "" {
+		log.Info("kept worktree with uncommitted changes", "dir", p.workDir)
 		return
 	}
 	branch := branchName(t)
@@ -977,11 +987,12 @@ func cleanupWorktree(p placement, t core.Ticket, log *slog.Logger) {
 		return
 	}
 	if count != "0" {
-		log.Info("keeping worktree: its branch has unpushed commits", "dir", p.workDir, "branch", branch, "commits", count)
+		log.Info("kept worktree with unpushed commits", "dir", p.workDir, "branch", branch, "commits", count)
 		return
 	}
-	if _, err := gitOut(p.repo, "worktree", "remove", "--force", p.workDir); err != nil {
-		log.Warn("remove worktree", "dir", p.workDir, "error", err)
+	// No --force: git itself refuses if anything changed since the check.
+	if _, err := gitOut(p.repo, "worktree", "remove", p.workDir); err != nil {
+		log.Warn("keeping worktree: remove failed", "dir", p.workDir, "error", err)
 		return
 	}
 	log.Info("removed worktree", "dir", p.workDir)

@@ -102,14 +102,14 @@ func TestWriteSettingsRejectsEmpty(t *testing.T) {
 
 func TestWriteMCPConfigShape(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "mcp.json")
-	if err := WriteMCPConfig(path, "/opt/athena", "/run/athena.sock", "tkt-1"); err != nil {
+	if err := WriteMCPConfig(path, "/opt/athena", "/run/athena.sock", "tkt-1", "asg-1"); err != nil {
 		t.Fatal(err)
 	}
 	want := map[string]any{"mcpServers": map[string]any{"athena": map[string]any{
 		"type":    "stdio",
 		"command": "/opt/athena",
 		"args":    []any{"mcp", "--ticket", "tkt-1"},
-		"env":     map[string]any{"ATHENA_SOCKET": "/run/athena.sock", "ATHENA_TICKET": "tkt-1"},
+		"env":     map[string]any{"ATHENA_SOCKET": "/run/athena.sock", "ATHENA_TICKET": "tkt-1", "ATHENA_ASSIGNMENT": "asg-1"},
 	}}}
 	if got := readJSON(t, path); !reflect.DeepEqual(got, want) {
 		gb, _ := json.MarshalIndent(got, "", " ")
@@ -118,5 +118,8 @@ func TestWriteMCPConfigShape(t *testing.T) {
 	st, _ := os.Stat(path)
 	if st.Mode().Perm() != 0o600 {
 		t.Fatalf("mode = %o, want 600", st.Mode().Perm())
+	}
+	if err := WriteMCPConfig(path, "/opt/athena", "/run/athena.sock", "tkt-1", ""); err == nil {
+		t.Fatal("WriteMCPConfig accepted an empty assignment")
 	}
 }

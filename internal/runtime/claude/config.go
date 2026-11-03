@@ -88,10 +88,11 @@ type mcpServer struct {
 }
 
 // WriteMCPConfig writes the file passed with --mcp-config: one stdio server
-// named "athena" running `<athenaBin> mcp --ticket <ticketID>`.
-func WriteMCPConfig(path, athenaBin, socket, ticketID string) error {
-	if athenaBin == "" || socket == "" || ticketID == "" {
-		return errors.New("claude: athena binary, socket and ticket are all required")
+// named "athena" running `<athenaBin> mcp --ticket <ticketID>`, with the
+// socket, ticket and assignment in its env (not left to env inheritance).
+func WriteMCPConfig(path, athenaBin, socket, ticketID, assignmentID string) error {
+	if athenaBin == "" || socket == "" || ticketID == "" || assignmentID == "" {
+		return errors.New("claude: athena binary, socket, ticket and assignment are all required")
 	}
 	cfg := struct {
 		MCPServers map[string]mcpServer `json:"mcpServers"`
@@ -99,7 +100,7 @@ func WriteMCPConfig(path, athenaBin, socket, ticketID string) error {
 		Type:    "stdio",
 		Command: athenaBin,
 		Args:    []string{"mcp", "--ticket", ticketID},
-		Env:     map[string]string{"ATHENA_SOCKET": socket, "ATHENA_TICKET": ticketID},
+		Env:     map[string]string{"ATHENA_SOCKET": socket, "ATHENA_TICKET": ticketID, "ATHENA_ASSIGNMENT": assignmentID},
 	}}}
 	return writeJSON(path, cfg)
 }

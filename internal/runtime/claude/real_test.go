@@ -52,7 +52,7 @@ func TestRealClaude(t *testing.T) {
 	if err := WriteSettings(settings, stub, "/tmp/athena-test.sock", 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := WriteMCPConfig(mcp, stub, "/tmp/athena-test.sock", "tkt-real"); err != nil {
+	if err := WriteMCPConfig(mcp, stub, "/tmp/athena-test.sock", "tkt-real", "asg-real"); err != nil {
 		t.Fatal(err)
 	}
 

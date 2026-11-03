@@ -210,9 +210,12 @@ func (n *Node) escalate(ctx context.Context, s *session, tool string, input json
 		if xerr := eng.ExpireApproval(ap.ID); xerr != nil {
 			s.log.Error("expire approval", "approval", ap.ID, "error", xerr)
 		}
-		// An answer may have landed just before the expiry; it wins.
-		if got, err = eng.WaitApproval(context.Background(), ap.ID); err != nil || got.State == core.ApprovalPending {
-			return denied("approval not answered")
+		// An answer may have landed just before the expiry; it wins. Look without waiting: a settled Approval
+		// returns at once, and one still pending (the expiry failed) must not hold the hook.
+		done, stop := context.WithCancel(context.Background())
+		stop()
+		if got, err = eng.WaitApproval(done, ap.ID); err != nil || got.State == core.ApprovalPending {
+			return denied("approval not answered; do not retry the same action, find another way or report blocked")
 		}
 	}
 	switch got.State {
