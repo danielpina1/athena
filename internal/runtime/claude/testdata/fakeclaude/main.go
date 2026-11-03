@@ -10,6 +10,7 @@
 //	ATHENA_FAKE_ARGS_LOG           file receiving {"args":[...],"env":{ATHENA_*}} as JSON
 //	ATHENA_FAKE_ARGS_APPEND        file receiving the same record as one JSON line per invocation (appended)
 //	ATHENA_FAKE_ENV_LOG            file receiving the whole environment, one NAME=value per line
+//	ATHENA_FAKE_STDERR             text written to stderr at startup
 //	ATHENA_FAKE_EXIT_MID_TURN      when set, replay half of the fixture, then exit 3
 //	ATHENA_FAKE_EXIT_MID_TURN_ONCE path of a marker file: the first invocation that finds it missing creates it
 //	                               and behaves as ATHENA_FAKE_EXIT_MID_TURN; later ones replay normally
@@ -49,6 +50,9 @@ func main() {
 	}
 	if p := os.Getenv("ATHENA_FAKE_ENV_LOG"); p != "" {
 		_ = os.WriteFile(p, []byte(strings.Join(os.Environ(), "\n")+"\n"), 0o600)
+	}
+	if v := os.Getenv("ATHENA_FAKE_STDERR"); v != "" {
+		_, _ = os.Stderr.WriteString(v)
 	}
 	exitMidTurn := os.Getenv("ATHENA_FAKE_EXIT_MID_TURN") != ""
 	if p := os.Getenv("ATHENA_FAKE_EXIT_MID_TURN_ONCE"); p != "" {

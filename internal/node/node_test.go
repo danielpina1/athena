@@ -697,7 +697,7 @@ func TestCrashLoopReportsFailed(t *testing.T) {
 		return r != nil && r.State == core.ReportFailed
 	})
 	tk, st := h.ticket(tk.ID)
-	if got := tk.LatestAssignment().Report.Summary; got != "session crashed repeatedly" {
+	if got := tk.LatestAssignment().Report.Summary; !strings.HasPrefix(got, "session crashed repeatedly: exit status 3") {
 		t.Fatalf("summary = %q", got)
 	}
 	if st != (core.Stage{Stage: "person", Action: "failed"}) {
@@ -717,6 +717,39 @@ func TestCrashLoopReportsFailed(t *testing.T) {
 		tk, _ := h.ticket(tk.ID)
 		return len(tk.Undelivered) == 0 && strings.Contains(h.stdin(), "please try again") && h.n.liveCount() == 1
 	})
+}
+
+// A crash loop's failed report says why the process ended: its exit status and the end of its stderr, secrets masked.
+func TestCrashReportCarriesCause(t *testing.T) {
+	h := newHarness(t, nil)
+	t.Setenv("ATHENA_FAKE_EXIT_MID_TURN", "1")
+	t.Setenv("ATHENA_FAKE_STDERR", "starting up\n\nfatal: ANTHROPIC_API_KEY=sk-ant-s3cret rejected by the API\n\n")
+	tk := h.submit("Doomed task", "")
+	h.eventually("failed report", func() bool {
+		tk, _ := h.ticket(tk.ID)
+		r := tk.LatestAssignment().Report
+		return r != nil && r.State == core.ReportFailed
+	})
+	tk, _ = h.ticket(tk.ID)
+	got := tk.LatestAssignment().Report.Summary
+	for _, want := range []string{crashSummary, "exit status 3", "fatal: ANTHROPIC_API_KEY=*** rejected by the API"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("summary = %q, want it to contain %q", got, want)
+		}
+	}
+	if strings.Contains(got, "sk-ant-s3cret") {
+		t.Errorf("summary leaks the key: %q", got)
+	}
+}
+
+func TestCrashCauseIsBounded(t *testing.T) {
+	got := crashCause(fmt.Errorf("exit status 1"), strings.Repeat("x", 1000)+"\n"+strings.Repeat("é", 400)+"\n")
+	if n := len([]rune(got)); n > summaryMaxRunes {
+		t.Fatalf("cause has %d runes, want at most %d: %q", n, summaryMaxRunes, got)
+	}
+	if !strings.HasPrefix(got, "exit status 1") || !strings.HasSuffix(got, "é") {
+		t.Fatalf("cause = %q, want the exit status and the end of the last line", got)
+	}
 }
 
 // Review Focus 4: several Inputs arriving mid-turn are all delivered in order, exactly once, each marked delivered.

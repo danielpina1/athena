@@ -14,9 +14,11 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/danielpina1/athena/internal/core"
 	"github.com/danielpina1/athena/internal/metrics"
+	"github.com/danielpina1/athena/internal/redact"
 	"github.com/danielpina1/athena/internal/runtime/claude"
 	"github.com/danielpina1/athena/prompts"
 )
@@ -645,14 +647,15 @@ func (r *runner) run() {
 		r.spawned = time.Now()
 		n.spawnHist.Observe(r.spawned.Sub(spawnStart))
 		r.log.Info("session started", "resume", resumeID != "", "recovering", recovering)
-		if !r.drive(sess, recovering) {
+		crashed, cause := r.drive(sess, recovering)
+		if !crashed {
 			return
 		}
 		r.usage.Crashes++
 		r.flushUsage()
 		crashes++
 		if crashes > maxRestarts {
-			r.fail(crashSummary)
+			r.fail(crashSummary + ": " + cause)
 			return
 		}
 		if r.sessionID != "" {
@@ -666,9 +669,9 @@ func (r *runner) run() {
 }
 
 // drive runs one process: it sends the first message, then turns events and delivery requests into Engine facts
-// until the process exits (reported true: a crash) or the session is stopped (false). It always drains the events
-// and closes the process.
-func (r *runner) drive(sess *claude.Session, recovering bool) (crashed bool) {
+// until the process exits (reported true: a crash, with its cause) or the session is stopped (false). It always
+// drains the events and closes the process.
+func (r *runner) drive(sess *claude.Session, recovering bool) (crashed bool, cause string) {
 	s := r.s
 	events := sess.Events()
 	r.initSeen = false
@@ -698,10 +701,43 @@ loop:
 	err := sess.Wait()
 	r.flushUsage()
 	if s.isStopped() {
-		return false
+		return false, ""
 	}
-	r.log.Warn("session process ended unexpectedly", "error", err, "killed", sess.Killed())
-	return crashed
+	cause = crashCause(err, sess.Stderr())
+	r.log.Warn("session process ended unexpectedly", "error", err, "killed", sess.Killed(), "cause", cause)
+	return crashed, cause
+}
+
+// crashCause says why a session process ended: its exit status, then the last non-empty lines of its stderr with
+// secrets masked, at most summaryMaxRunes in all (the end of the stderr is kept).
+func crashCause(err error, stderr string) string {
+	cause := "exited"
+	if err != nil {
+		cause = err.Error()
+	}
+	room := summaryMaxRunes - utf8.RuneCountInString(cause) - len(": ")
+	var tail []string
+	lines := strings.Split(redact.String(stderr), "\n")
+	for i := len(lines) - 1; i >= 0 && room > 0; i-- {
+		line := []rune(strings.TrimSpace(lines[i]))
+		if len(line) == 0 {
+			continue
+		}
+		if len(tail) > 0 {
+			if room -= len(" | "); room <= 1 {
+				break
+			}
+		}
+		if len(line) > room {
+			line = append([]rune("…"), line[len(line)-room+1:]...)
+		}
+		room -= len(line)
+		tail = append([]string{string(line)}, tail...)
+	}
+	if len(tail) == 0 {
+		return cause
+	}
+	return cause + ": " + strings.Join(tail, " | ")
 }
 
 func (r *runner) sendFirst(sess *claude.Session, recovering bool) {
