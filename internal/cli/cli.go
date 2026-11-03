@@ -14,11 +14,15 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"text/tabwriter"
 	"time"
 
+	"github.com/danielpina1/athena/internal/core"
+	"github.com/danielpina1/athena/internal/metrics"
 	"github.com/danielpina1/athena/internal/node"
 	"github.com/danielpina1/athena/internal/server"
 )
@@ -37,6 +41,7 @@ var usage = map[string]string{
 	"approvals": "athena approvals",
 	"approve":   "athena approve <id> [--note N]",
 	"deny":      "athena deny <id> [--note N]",
+	"metrics":   "athena metrics [--window 1h|24h|start]",
 }
 
 // Run runs one command and returns its exit code: 0 on success, 1 when it failed, 2 on a usage error.
@@ -66,6 +71,8 @@ func Run(ctx context.Context, cmd string, args []string, stdout, stderr io.Write
 		return c.retry(args)
 	case "approvals":
 		return c.approvals(args)
+	case "metrics":
+		return c.metrics(args)
 	default: // approve, deny
 		return c.answer(args, cmd == "approve")
 	}
@@ -247,6 +254,7 @@ func printDetail(w io.Writer, d server.TicketDetail, now time.Time) {
 	if a := d.Approval; a != nil {
 		fmt.Fprintf(w, "approval:  %s %s: %s\n", a.ID, a.Tool, a.Summary)
 	}
+	printStats(w, d.Stats)
 	fmt.Fprintln(w, "assignments:")
 	for _, a := range d.Assignments {
 		line := fmt.Sprintf("  %s  %s", a.ID, a.State)
@@ -263,6 +271,108 @@ func printDetail(w io.Writer, d server.TicketDetail, now time.Time) {
 		if r := a.Report; r != nil {
 			fmt.Fprintf(w, "    report: %s: %s\n", r.State, r.Summary)
 		}
+	}
+}
+
+// printStats prints a Ticket's performance numbers.
+func printStats(w io.Writer, s core.TicketStats) {
+	fmt.Fprintln(w, "stats:")
+	fmt.Fprintf(w, "  queue wait:      %s\n", formatSeconds(s.QueueWait.Seconds()))
+	fmt.Fprintf(w, "  first output:    %s\n", formatSeconds(s.TimeToFirstOutput.Seconds()))
+	fmt.Fprintf(w, "  first report:    %s\n", formatSeconds(s.TimeToFirstReport.Seconds()))
+	fmt.Fprintf(w, "  active time:     %s\n", formatSeconds(s.ActiveTime.Seconds()))
+	fmt.Fprintf(w, "  person wait:     %s\n", formatSeconds(s.PersonWaitTime.Seconds()))
+	fmt.Fprintf(w, "  turns:           %d\n", s.Turns)
+	fmt.Fprintf(w, "  tool calls:      %d (%d errors)\n", s.ToolCalls, s.ToolErrors)
+	fmt.Fprintf(w, "  hooks:           %d denials, %d escalations\n", s.HookDenials, s.Escalations)
+	fmt.Fprintf(w, "  attention:       %d questions, %d messages from you\n", s.Questions, s.PersonMessages)
+	fmt.Fprintf(w, "  retries/crashes: %d / %d\n", s.Retries, s.Crashes)
+	fmt.Fprintf(w, "  tokens:          %d in, %d out, %d cache read (%.0f%% cache hits)\n",
+		s.InputTokens, s.OutputTokens, s.CacheReadTokens, 100*s.CacheHitRatio())
+	fmt.Fprintf(w, "  cost:            $%.4f\n", s.CostUSD)
+}
+
+// formatSeconds renders a duration given in seconds with three significant digits: 12µs, 3.4ms, 1.25s, 2m5s.
+func formatSeconds(sec float64) string {
+	d := time.Duration(sec * float64(time.Second))
+	switch {
+	case d <= 0:
+		return "0"
+	case d < time.Millisecond:
+		return fmt.Sprintf("%dµs", d.Microseconds())
+	case d < 100*time.Millisecond:
+		return fmt.Sprintf("%.1fms", float64(d)/float64(time.Millisecond))
+	case d < time.Second:
+		return fmt.Sprintf("%dms", d.Milliseconds())
+	case d < time.Minute:
+		return fmt.Sprintf("%.2fs", d.Seconds())
+	default:
+		return d.Round(time.Second).String()
+	}
+}
+
+func (c *command) metrics(args []string) int {
+	window := c.fs.String("window", "1h", "period to report: 1h, 24h or start (since the server started)")
+	if _, code, ok := c.parse(args, 0, 0); !ok {
+		return code
+	}
+	var snap metrics.Snapshot
+	if err := call(c.stateDir, server.Request{Op: server.OpMetrics, Window: *window}, &snap); err != nil {
+		return c.fail(err)
+	}
+	printMetrics(c.stdout, snap)
+	return 0
+}
+
+// printMetrics prints a snapshot as a table: histograms with their count and percentiles, then counters and gauges
+// with their value. Series without a sample in the window are left out.
+func printMetrics(out io.Writer, snap metrics.Snapshot) {
+	w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "NAME\tLABELS\tCOUNT\tP50\tP95\tP99\tVALUE")
+	for _, h := range snap.Histograms {
+		if h.Count == 0 {
+			continue
+		}
+		fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\t%s\t-\n", h.Name, formatLabels(h.Labels), h.Count,
+			formatSeconds(h.P50), formatSeconds(h.P95), formatSeconds(h.P99))
+	}
+	for _, v := range snap.Counters {
+		if v.Value != 0 {
+			fmt.Fprintf(w, "%s\t%s\t-\t-\t-\t-\t%s\n", v.Name, formatLabels(v.Labels), formatValue(v.Name, v.Value))
+		}
+	}
+	for _, v := range snap.Gauges {
+		fmt.Fprintf(w, "%s\t%s\t-\t-\t-\t-\t%s\n", v.Name, formatLabels(v.Labels), formatValue(v.Name, v.Value))
+	}
+	w.Flush()
+}
+
+func formatLabels(l map[string]string) string {
+	if len(l) == 0 {
+		return "-"
+	}
+	keys := make([]string, 0, len(l))
+	for k := range l {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	parts := make([]string, len(keys))
+	for i, k := range keys {
+		parts[i] = k + "=" + l[k]
+	}
+	return strings.Join(parts, ",")
+}
+
+func formatValue(name string, v float64) string {
+	switch {
+	case strings.HasSuffix(name, "_bytes"):
+		return fmt.Sprintf("%.1f MB", v/(1<<20))
+	case strings.HasSuffix(name, "_usd_total"):
+		return fmt.Sprintf("$%.4f", v)
+	case v == float64(int64(v)):
+		return strconv.FormatInt(int64(v), 10)
+	default:
+		return strconv.FormatFloat(v, 'f', 3, 64)
 	}
 }
 

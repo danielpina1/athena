@@ -12,7 +12,10 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sync/atomic"
+	"time"
 
+	"github.com/danielpina1/athena/internal/metrics"
 	_ "modernc.org/sqlite" // pure-Go SQLite driver, registered as "sqlite"
 )
 
@@ -45,7 +48,13 @@ const schemaKey = "schema"
 // Store is a SQLite-backed repository. It is safe for concurrent use; transactions are serialized.
 type Store struct {
 	db *sql.DB
+	// txSeconds is the store_tx_seconds histogram; nil (the default) records nothing.
+	txSeconds atomic.Pointer[metrics.Histogram]
 }
+
+// SetMetrics makes the Store record the latency of every transaction, from begin to commit or rollback, as
+// store_tx_seconds in r. A nil r stops recording.
+func (s *Store) SetMetrics(r *metrics.Registry) { s.txSeconds.Store(r.Histogram("store_tx_seconds")) }
 
 // Open opens (creating if needed) the database at path and applies pending migrations.
 // The parent directory is created 0700 and the file 0600.
@@ -123,6 +132,10 @@ func (s *Store) migrate() error {
 // Tx runs fn in a transaction: committed if fn returns nil, rolled back if it returns an error or panics
 // (a panic is re-raised). Transactions are serialized, so fn must not start another Tx on the same Store.
 func (s *Store) Tx(fn func(tx *Tx) error) (err error) {
+	if h := s.txSeconds.Load(); h != nil {
+		start := time.Now()
+		defer func() { h.Observe(time.Since(start)) }()
+	}
 	sqlTx, err := s.db.Begin()
 	if err != nil {
 		return fmt.Errorf("store: begin: %w", err)

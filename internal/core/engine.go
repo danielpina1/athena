@@ -10,6 +10,8 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	"github.com/danielpina1/athena/internal/metrics"
 )
 
 // The Engine is the single writer of Triggers, Decisions, Tickets and Assignments, ported from the reference
@@ -73,6 +75,9 @@ type Engine struct {
 	// It has its own lock so a waiter never needs mu.
 	waitMu  sync.Mutex
 	waiters map[string]chan struct{}
+	// reg and cmdHist are set by SetMetrics before the first command; nil without metrics.
+	reg     *metrics.Registry
+	cmdHist map[string]*metrics.Histogram
 }
 
 // NewEngine returns an Engine. now defaults to time.Now and emit to a no-op. emit, like the Executor, runs after commit
@@ -98,7 +103,7 @@ func (e *Engine) SubmitOwnerTask(text string, opts TaskOptions) (Ticket, error) 
 		return Ticket{}, userErrorf("a task needs text")
 	}
 	var created *Ticket
-	err := e.command(func(o *op) error {
+	err := e.command(cmdSubmit, func(o *op) error {
 		n, err := o.tx.NextSeq(ticketSeq)
 		if err != nil {
 			return err
@@ -143,7 +148,7 @@ func (e *Engine) SubmitOwnerTask(text string, opts TaskOptions) (Ticket, error) 
 // AssignmentStarted is the Executor's fact that an Assignment runs, in the runtime session sessionID; the Inputs that
 // wait for it go out. A start of an unknown or ended Assignment, such as one a retry replaced, changes nothing.
 func (e *Engine) AssignmentStarted(ticketID, assignmentID, sessionID string) error {
-	return e.command(func(o *op) error {
+	return e.command(cmdAssignmentStarted, func(o *op) error {
 		t, err := o.require(ticketID)
 		if err != nil {
 			return err
@@ -155,6 +160,12 @@ func (e *Engine) AssignmentStarted(ticketID, assignmentID, sessionID string) err
 		a.State = AssignmentRunning
 		if a.StartedAt == nil {
 			a.StartedAt = o.timestamp()
+			// From the Assignment's creation to its session starting: the wait for a slot plus the launch.
+			wait := nonNegative(o.at.Sub(a.CreatedAt))
+			t.Stats.QueueWait += wait
+			if o.reg != nil {
+				o.observe(func(r *metrics.Registry) { r.Histogram("dispatch_seconds").Observe(wait) })
+			}
 		}
 		if sessionID != "" {
 			a.SessionID = sessionID
@@ -171,7 +182,7 @@ func (e *Engine) AssignmentStarted(ticketID, assignmentID, sessionID string) err
 // InputsDelivered is the Executor's fact that Inputs reached the Assignment that runs the open Ticket, which clears a
 // failed delivery. A fact about an Assignment that no longer runs, or about Inputs that no longer wait, changes nothing.
 func (e *Engine) InputsDelivered(ticketID, assignmentID string, inputIDs []string) error {
-	return e.command(func(o *op) error {
+	return e.command(cmdInputsDelivered, func(o *op) error {
 		t, err := o.running(ticketID, assignmentID)
 		if t == nil || err != nil {
 			return err
@@ -206,7 +217,7 @@ func (e *Engine) InputsDelivered(ticketID, assignmentID string, inputIDs []strin
 // DeliveryFailed is the Executor's fact that delivering Inputs to the Assignment that runs the open Ticket failed; the
 // Ticket shows it until a delivery succeeds, a new Assignment starts or the Ticket ends.
 func (e *Engine) DeliveryFailed(ticketID, assignmentID, errMsg string) error {
-	return e.command(func(o *op) error {
+	return e.command(cmdDeliveryFailed, func(o *op) error {
 		t, err := o.running(ticketID, assignmentID)
 		if t == nil || err != nil {
 			return err
@@ -219,7 +230,7 @@ func (e *Engine) DeliveryFailed(ticketID, assignmentID, errMsg string) error {
 // InputsRead is the Executor's fact that the worker's Session of an open Ticket took the trigger Inputs inputIDs into
 // a step, from which its model reads them.
 func (e *Engine) InputsRead(ticketID string, inputIDs []string) error {
-	return e.command(func(o *op) error {
+	return e.command(cmdInputsRead, func(o *op) error {
 		t, err := o.require(ticketID)
 		if err != nil || t.Ended != nil {
 			return err
@@ -241,7 +252,7 @@ func (e *Engine) InputsRead(ticketID string, inputIDs []string) error {
 
 // TurnEnded is the Executor's fact that a turn of the worker of the Assignment that runs the open Ticket ended.
 func (e *Engine) TurnEnded(ticketID, assignmentID string) error {
-	return e.command(func(o *op) error {
+	return e.command(cmdTurnEnded, func(o *op) error {
 		t, err := o.running(ticketID, assignmentID)
 		if t == nil || err != nil {
 			return err
@@ -263,7 +274,7 @@ func (e *Engine) FileReport(ticketID string, r ReportInput) error {
 	if r.Question != "" && r.State == ReportReady {
 		return userErrorf("a ready report cannot ask a question")
 	}
-	return e.command(func(o *op) error {
+	return e.command(cmdFileReport, func(o *op) error {
 		t, err := o.require(ticketID)
 		if err != nil {
 			return err
@@ -294,12 +305,22 @@ func (e *Engine) FileReport(ticketID string, r ReportInput) error {
 		}
 		attention := t.Attention
 		if r.Question != "" && (attention == nil || attention.Question != r.Question) {
-			attention = &Attention{ID: newID(), Question: r.Question}
+			// A replaced question keeps the time the Ticket began waiting.
+			since := o.at
+			if attention != nil && !attention.At.IsZero() {
+				since = attention.At
+			}
+			attention = &Attention{ID: newID(), Question: r.Question, At: since}
+			t.Stats.Questions++
 		}
 		if r.State == ReportReady {
+			o.settleAttention(t)
 			attention = nil
 		}
 		t.Attention = attention
+		if !hasReport(t) {
+			t.Stats.TimeToFirstReport = nonNegative(o.at.Sub(t.CreatedAt))
+		}
 		a.Report = &Report{State: r.State, Summary: r.Summary, At: o.at}
 		t.UpdatedAt = o.at
 		if r.State == ReportBlocked || r.State == ReportFailed {
@@ -337,7 +358,7 @@ func (e *Engine) AddPersonInput(ticketID, text string) error {
 	if strings.TrimSpace(text) == "" {
 		return userErrorf("a message needs text")
 	}
-	return e.command(func(o *op) error {
+	return e.command(cmdPersonInput, func(o *op) error {
 		t, err := o.require(ticketID)
 		if err != nil {
 			return err
@@ -349,7 +370,9 @@ func (e *Engine) AddPersonInput(ticketID, text string) error {
 		if err := o.tx.PutTrigger(trigger); err != nil {
 			return err
 		}
+		o.settleAttention(t)
 		t.Attention = nil
+		t.Stats.PersonMessages++
 		input := Input{ID: newID(), Kind: InputTrigger, At: o.at, TriggerID: trigger.ID, Text: text, Human: true}
 		o.addInput(t, input)
 		o.event(EventInputAdded, t, "", map[string]any{"inputId": input.ID})
@@ -361,7 +384,7 @@ func (e *Engine) AddPersonInput(ticketID, text string) error {
 // StopTicket is a person's stop, which withdraws the Ticket's Mandate: it ends stopped, by a human, and its
 // Assignments stop. Stopping an ended Ticket changes nothing.
 func (e *Engine) StopTicket(ticketID, reason string) error {
-	return e.command(func(o *op) error {
+	return e.command(cmdStop, func(o *op) error {
 		t, err := o.require(ticketID)
 		if err != nil || t.Ended != nil {
 			return err
@@ -377,7 +400,7 @@ func (e *Engine) StopTicket(ticketID, reason string) error {
 // (CanRetry): the stalled Assignment ends and a new one starts under the same Mandate, receiving first the Inputs the
 // old one had delivered but whose worker never read.
 func (e *Engine) RetryTicket(ticketID string) error {
-	return e.command(func(o *op) error {
+	return e.command(cmdRetry, func(o *op) error {
 		t, err := o.require(ticketID)
 		if err != nil {
 			return err
@@ -387,6 +410,7 @@ func (e *Engine) RetryTicket(ticketID string) error {
 			return userErrorf("ticket %s is not waiting for a retry", ticketID)
 		}
 		replaced := latest.ID
+		t.Stats.Retries++
 		o.endAssignment(t, latest, reasonRetried)
 		o.requeueUntaken(t, replaced)
 		assignment := o.newAssignment(t)
@@ -467,20 +491,42 @@ type op struct {
 	tx      Tx
 	at      time.Time
 	effects []effect
+	// reg is the Engine's registry; observations wait in metrics until the command committed.
+	reg     *metrics.Registry
+	metrics []func(*metrics.Registry)
 }
 
-// command runs fn in one transaction and, only once it committed, its effects in order.
-func (e *Engine) command(fn func(o *op) error) error {
+// observe queues a metrics observation that runs once the command committed. Callers check o.reg first, so that no
+// closure is made without metrics.
+func (o *op) observe(f func(*metrics.Registry)) { o.metrics = append(o.metrics, f) }
+
+// command runs the named command: fn in one transaction and, only once it committed, its effects in order. With
+// metrics, its latency from arrival (lock wait included) to the last effect is recorded as engine_command_seconds.
+func (e *Engine) command(name string, fn func(o *op) error) error {
+	h := e.cmdHist[name]
+	if h == nil {
+		return e.run(fn)
+	}
+	start := time.Now()
+	err := e.run(fn)
+	h.Observe(time.Since(start))
+	return err
+}
+
+func (e *Engine) run(fn func(o *op) error) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	var o *op
 	err := e.repos.Tx(func(tx Tx) error {
 		// A fresh op per attempt, so nothing collected by a failed attempt leaks.
-		o = &op{tx: tx, at: e.now()}
+		o = &op{tx: tx, at: e.now(), reg: e.reg}
 		return fn(o)
 	})
 	if err != nil {
 		return err
+	}
+	for _, f := range o.metrics {
+		f(e.reg)
 	}
 	for _, fx := range o.effects {
 		if fx.kind == effectEvent {
@@ -641,6 +687,7 @@ func (o *op) end(t *Ticket, by TicketEndBy, outcome TicketOutcome, reason string
 	if err := o.expireTicketApprovals(t); err != nil {
 		return err
 	}
+	o.settleAttention(t)
 	var stopping []string
 	for i := range t.Assignments {
 		if a := &t.Assignments[i]; a.State != AssignmentEnded {
@@ -658,6 +705,12 @@ func (o *op) end(t *Ticket, by TicketEndBy, outcome TicketOutcome, reason string
 	t.UpdatedAt = o.at
 	t.Attention = nil
 	t.Delivery = nil
+	runtime, model := runtimeModel(t)
+	if o.reg != nil {
+		o.observe(func(r *metrics.Registry) {
+			r.Counter("tickets_ended_total", "outcome", string(outcome), "runtime", runtime, "model", model).Add(1)
+		})
+	}
 	data := map[string]any{"by": by, "outcome": outcome}
 	if ended.Reason != "" {
 		data["reason"] = ended.Reason
@@ -678,6 +731,41 @@ func (o *op) end(t *Ticket, by TicketEndBy, outcome TicketOutcome, reason string
 // automatic reports whether an Input is a message no person wrote, such as a bot's or a note.
 func automatic(in *Input) bool {
 	return in != nil && (in.Kind == InputNote || (in.Kind == InputTrigger && !in.Human))
+}
+
+// settleAttention adds the time the Ticket waited for a person's answer so far to its stats; the caller clears or
+// replaces the Attention.
+func (o *op) settleAttention(t *Ticket) {
+	if a := t.Attention; a != nil && !a.At.IsZero() {
+		t.Stats.PersonWaitTime += nonNegative(o.at.Sub(a.At))
+	}
+}
+
+// hasReport reports whether any Assignment of the Ticket has reported.
+func hasReport(t *Ticket) bool {
+	for i := range t.Assignments {
+		if t.Assignments[i].Report != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func nonNegative(d time.Duration) time.Duration { return max(d, 0) }
+
+// runtimeModel returns the metric labels of a Ticket's runtime and model; the model is "default" when the task named
+// none.
+func runtimeModel(t *Ticket) (runtime, model string) {
+	runtime, model = "unknown", "default"
+	if x := t.Execution; x != nil {
+		if x.Runtime != "" {
+			runtime = x.Runtime
+		}
+		if x.Model != "" {
+			model = x.Model
+		}
+	}
+	return runtime, model
 }
 
 func runningAssignment(t *Ticket) *Assignment {

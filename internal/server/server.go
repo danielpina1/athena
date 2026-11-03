@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/danielpina1/athena/internal/core"
+	"github.com/danielpina1/athena/internal/metrics"
 	"github.com/danielpina1/athena/internal/node"
 	"github.com/danielpina1/athena/internal/store"
 )
@@ -95,8 +96,22 @@ func Run(ctx context.Context, cfg Config) (err error) {
 		return err
 	}
 	defer st.Close()
+	// One registry for the whole server: the store, the Engine and the node record into it.
+	reg := metrics.NewRegistry()
+	st.SetMetrics(reg)
+	resCtx, resCancel := context.WithCancel(context.Background())
+	resDone := make(chan struct{})
+	go func() {
+		defer close(resDone)
+		sampleResources(resCtx, reg)
+	}()
+	defer func() {
+		resCancel()
+		<-resDone
+	}()
 
 	ncfg := cfg.Node
+	ncfg.Metrics = reg
 	ncfg.StateDir = stateDir
 	ncfg.SocketPath = filepath.Join(stateDir, NodeSocket)
 	if ncfg.WorkRoot == "" {
@@ -129,6 +144,7 @@ func Run(ctx context.Context, cfg Config) (err error) {
 		logger.Info("event", attrs...)
 	}
 	eng := core.NewEngine(st.Repos(), n, time.Now, emit)
+	eng.SetMetrics(reg)
 	n.SetEngine(eng)
 	expirePendingApprovals(eng, logger)
 
@@ -167,7 +183,7 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	}
 	logger.Info("athena server started", "stateDir", stateDir, "pid", os.Getpid())
 
-	c := &control{stateDir: stateDir, eng: eng, workRoot: ncfg.WorkRoot, model: ncfg.Model, log: logger}
+	c := &control{stateDir: stateDir, eng: eng, workRoot: ncfg.WorkRoot, model: ncfg.Model, log: logger, reg: reg}
 	ctrlCtx, ctrlCancel := context.WithCancel(context.Background())
 	defer ctrlCancel()
 	var conns sync.WaitGroup

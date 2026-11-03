@@ -1,4 +1,4 @@
-.PHONY: check build
+.PHONY: check build bench bench-baseline
 
 check:
 	go vet ./...
@@ -7,3 +7,12 @@ check:
 
 build:
 	CGO_ENABLED=0 go build -o bin/athena ./cmd/athena
+
+# Measure the performance budgets (spec 10.3) against a fake runtime, write bench/results.json and fail on a budget
+# breach or a regression of more than 10% against bench/baseline.json.
+bench:
+	ATHENA_BENCH=1 go test -count=1 -v -run TestBudgets -bench . ./bench/...
+
+# Record the current numbers as the baseline (commit bench/baseline.json); do it only when a slower result is intended.
+bench-baseline:
+	ATHENA_BENCH=1 ATHENA_BENCH_UPDATE=1 go test -count=1 -v -run TestBudgets ./bench/...

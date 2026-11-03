@@ -353,3 +353,45 @@ func TestFormatAge(t *testing.T) {
 		}
 	}
 }
+
+func TestMetricsCommand(t *testing.T) {
+	dir := startServer(t)
+	ctx := context.Background()
+	code, out, errOut := athena(ctx, "task", "--state-dir", dir, "measure me")
+	if code != 0 {
+		t.Fatalf("task: %d %s", code, errOut)
+	}
+	id := strings.TrimSpace(out)
+	aid := runningAssignment(t, dir, id)
+	if r := <-hook(t, dir, id, aid, "echo hi"); r.Verdict != node.VerdictAllow {
+		t.Fatalf("hook = %+v", r)
+	}
+
+	code, out, errOut = athena(ctx, "metrics", "--state-dir", dir, "--window", "1h")
+	if code != 0 {
+		t.Fatalf("metrics: %d %s", code, errOut)
+	}
+	for _, name := range []string{"engine_command_seconds", "hook_decision_seconds"} {
+		found := false
+		for _, l := range strings.Split(out, "\n") {
+			f := strings.Fields(l)
+			if len(f) >= 3 && f[0] == name && f[2] != "0" {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("no %s row with a non-zero count in:\n%s", name, out)
+		}
+	}
+	if !strings.Contains(out, "command=submit") || !strings.Contains(out, "verdict=allow") {
+		t.Errorf("labels missing in:\n%s", out)
+	}
+	if code, _, errOut := athena(ctx, "metrics", "--state-dir", dir, "--window", "7d"); code != 1 || !strings.Contains(errOut, "window") {
+		t.Errorf("bad window: %d %q", code, errOut)
+	}
+	// status prints the stats.
+	_, o, _ := athena(ctx, "status", "--state-dir", dir, id)
+	if !strings.Contains(o, "stats:") || !strings.Contains(o, "queue wait") {
+		t.Errorf("status lacks stats:\n%s", o)
+	}
+}

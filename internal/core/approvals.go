@@ -43,7 +43,7 @@ const reasonTicketEnded = "ticket ended"
 // that one stays the Ticket's PendingApproval.
 func (e *Engine) RequestApproval(a Approval) (Approval, error) {
 	var out Approval
-	err := e.command(func(o *op) error {
+	err := e.command(cmdRequestApproval, func(o *op) error {
 		t, err := o.require(a.TicketID)
 		if err != nil {
 			return err
@@ -60,6 +60,7 @@ func (e *Engine) RequestApproval(a Approval) (Approval, error) {
 		if t.PendingApproval == "" {
 			t.PendingApproval = a.ID
 		}
+		t.Stats.Escalations++
 		t.UpdatedAt = o.at
 		if err := o.tx.PutApproval(&a); err != nil {
 			return err
@@ -85,7 +86,7 @@ func (e *Engine) AnswerApproval(id string, approve bool, note string) error {
 	if approve {
 		state = ApprovalApproved
 	}
-	return e.command(func(o *op) error {
+	return e.command(cmdAnswerApproval, func(o *op) error {
 		a, err := o.requireApproval(id)
 		if err != nil {
 			return err
@@ -100,7 +101,7 @@ func (e *Engine) AnswerApproval(id string, approve bool, note string) error {
 // ExpireApproval closes a pending Approval nobody answered in time. Expiring one that is no longer pending changes
 // nothing, so an expiry that races an answer is harmless.
 func (e *Engine) ExpireApproval(id string) error {
-	return e.command(func(o *op) error {
+	return e.command(cmdExpireApproval, func(o *op) error {
 		a, err := o.requireApproval(id)
 		if err != nil || a.State != ApprovalPending {
 			return err
@@ -212,19 +213,22 @@ func (o *op) settleApproval(a *Approval, state, note string) error {
 	if err != nil {
 		return err
 	}
-	if t != nil && t.PendingApproval == a.ID {
-		t.PendingApproval = ""
-		pending, err := o.tx.PendingApprovals()
-		if err != nil {
-			return err
-		}
-		for _, p := range pending {
-			if p.TicketID == t.ID && p.ID != a.ID {
-				t.PendingApproval = p.ID
-				break
+	if t != nil {
+		t.Stats.PersonWaitTime += nonNegative(o.at.Sub(a.CreatedAt))
+		if t.PendingApproval == a.ID {
+			t.PendingApproval = ""
+			pending, err := o.tx.PendingApprovals()
+			if err != nil {
+				return err
 			}
+			for _, p := range pending {
+				if p.TicketID == t.ID && p.ID != a.ID {
+					t.PendingApproval = p.ID
+					break
+				}
+			}
+			t.UpdatedAt = o.at
 		}
-		t.UpdatedAt = o.at
 		if err := o.tx.PutTicket(t); err != nil {
 			return err
 		}
@@ -252,6 +256,7 @@ func (o *op) expireTicketApprovals(t *Ticket) error {
 		a.State = ApprovalExpired
 		a.AnsweredAt = o.timestamp()
 		a.Answer = reasonTicketEnded
+		t.Stats.PersonWaitTime += nonNegative(o.at.Sub(a.CreatedAt))
 		if err := o.tx.PutApproval(a); err != nil {
 			return err
 		}

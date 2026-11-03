@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/danielpina1/athena/internal/core"
+	"github.com/danielpina1/athena/internal/metrics"
 	"github.com/danielpina1/athena/internal/node"
 )
 
@@ -34,6 +35,7 @@ const (
 	OpApprovals = "approvals"
 	OpAnswer    = "answer"
 	OpLogs      = "logs"
+	OpMetrics   = "metrics"
 )
 
 // Request is one control request; Op says which of its fields count.
@@ -48,6 +50,8 @@ type Request struct {
 	Approve bool   `json:"approve,omitempty"`
 	Note    string `json:"note,omitempty"`
 	Follow  bool   `json:"follow,omitempty"`
+	// Window is the period of a metrics request: "1h" (the default), "24h" or "start" for since the server started.
+	Window string `json:"window,omitempty"`
 }
 
 // Response answers a request: OK with its Data, or the Error that refused it.
@@ -91,6 +95,8 @@ type TicketDetail struct {
 	// Undelivered counts the Inputs waiting for the worker.
 	Undelivered int           `json:"undelivered"`
 	Approval    *ApprovalView `json:"approval,omitempty"`
+	// Stats are the Ticket's performance numbers.
+	Stats core.TicketStats `json:"stats"`
 }
 
 // StageString renders a Ticket's stage: "ended:<outcome>", or the stage with its action as "stage/action".
@@ -119,6 +125,7 @@ type control struct {
 	workRoot string
 	model    string
 	log      *slog.Logger
+	reg      *metrics.Registry
 }
 
 // serveConn answers one connection; ctx ends with the server.
@@ -231,9 +238,28 @@ func (c *control) handle(req Request) (any, error) {
 		return out, nil
 	case OpAnswer:
 		return nil, c.eng.AnswerApproval(req.ID, req.Approve, req.Note)
+	case OpMetrics:
+		window, err := parseWindow(req.Window)
+		if err != nil {
+			return nil, err
+		}
+		return c.reg.Snapshot(window), nil
 	default:
 		return nil, userErrorf("unknown op %q", req.Op)
 	}
+}
+
+// parseWindow turns a metrics window name into its duration: 0 is since start.
+func parseWindow(name string) (time.Duration, error) {
+	switch name {
+	case "", "1h":
+		return time.Hour, nil
+	case "24h":
+		return 24 * time.Hour, nil
+	case "start":
+		return 0, nil
+	}
+	return 0, userErrorf("unknown window %q (use 1h, 24h or start)", name)
 }
 
 func summary(t *core.Ticket) TicketSummary {
@@ -249,7 +275,7 @@ func (c *control) detail(id string) (TicketDetail, error) {
 	if err != nil {
 		return TicketDetail{}, err
 	}
-	d := TicketDetail{TicketSummary: summary(&t), Ended: t.Ended, Assignments: t.Assignments, Undelivered: len(t.Undelivered)}
+	d := TicketDetail{TicketSummary: summary(&t), Ended: t.Ended, Assignments: t.Assignments, Undelivered: len(t.Undelivered), Stats: t.Stats}
 	if d.Assignments == nil {
 		d.Assignments = []core.Assignment{}
 	}

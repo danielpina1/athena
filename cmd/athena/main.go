@@ -42,7 +42,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case "mcp":
 		return runMCP(args[1:], stderr)
 	case "server", "task", "status", "logs", "reply", "stop", "retry",
-		"approvals", "approve", "deny":
+		"approvals", "approve", "deny", "metrics":
 		return cli.Run(context.Background(), cmd, args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "athena: unknown command %q\n", cmd)

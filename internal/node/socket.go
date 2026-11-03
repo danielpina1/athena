@@ -139,6 +139,7 @@ func allowed(reason string) HookResponse { return HookResponse{Verdict: VerdictA
 func denied(reason string) HookResponse  { return HookResponse{Verdict: VerdictDeny, Reason: reason} }
 
 func (n *Node) handleHook(ctx context.Context, req HookRequest) HookResponse {
+	start := time.Now()
 	s := n.lookup(req.Ticket, req.Assignment)
 	if req.Event == EventStop {
 		// Never block a Stop: a blocking answer would loop the session.
@@ -147,21 +148,52 @@ func (n *Node) handleHook(ctx context.Context, req HookRequest) HookResponse {
 				s.log.Error("record turn end", "error", err)
 			}
 		}
+		n.observeHook(req.Event, VerdictAllow, start)
 		return allowed("")
 	}
 	if s == nil {
 		n.log.Warn("hook from an unknown session", "ticket", req.Ticket, "assignment", req.Assignment, "event", req.Event)
+		n.observeHook(req.Event, VerdictDeny, start)
 		return denied(denyNoSession)
 	}
 	switch req.Event {
 	case EventPostToolUse:
+		n.observeHook(req.Event, VerdictAllow, start)
 		return allowed("")
 	case EventSessionStart:
-		return HookResponse{Verdict: VerdictAllow, AdditionalContext: n.sessionContext(s)}
+		resp := HookResponse{Verdict: VerdictAllow, AdditionalContext: n.sessionContext(s)}
+		n.observeHook(req.Event, VerdictAllow, start)
+		return resp
 	case EventPreToolUse, EventPermissionRequest:
-		return n.decide(ctx, s, req.Event, req.Input)
+		resp := n.decide(ctx, s, req.Event, req.Input, start)
+		if resp.Verdict == VerdictDeny {
+			n.recordUsage(s, core.UsageDelta{HookDenials: 1})
+		}
+		return resp
 	default:
+		n.observeHook(req.Event, VerdictDeny, start)
 		return denied(fmt.Sprintf("unknown hook event %q", req.Event))
+	}
+}
+
+// observeHook records the latency of a hook decision made since start as hook_decision_seconds{event,verdict}. The
+// wait for a person's answer to an escalation is not part of it.
+func (n *Node) observeHook(event, verdict string, start time.Time) {
+	if n.reg == nil {
+		return
+	}
+	switch event {
+	case EventPreToolUse, EventPermissionRequest, EventPostToolUse, EventStop, EventSessionStart:
+	default:
+		event = "other"
+	}
+	n.reg.Histogram("hook_decision_seconds", "event", event, "verdict", verdict).Observe(time.Since(start))
+}
+
+// recordUsage adds usage observed outside the session's runner to the Ticket's stats. It holds no node lock.
+func (n *Node) recordUsage(s *session, u core.UsageDelta) {
+	if err := n.engine().RecordUsage(s.t.ID, s.a.ID, u); err != nil {
+		s.log.Error("record usage", "error", err)
 	}
 }
 
@@ -171,12 +203,13 @@ func (n *Node) ruleContext(s *session) RuleContext {
 }
 
 // decide applies the hook rules to one tool call; an escalation becomes an Approval the call waits for.
-func (n *Node) decide(ctx context.Context, s *session, event string, raw json.RawMessage) HookResponse {
+func (n *Node) decide(ctx context.Context, s *session, event string, raw json.RawMessage, start time.Time) HookResponse {
 	var in struct {
 		ToolName  string          `json:"tool_name"`
 		ToolInput json.RawMessage `json:"tool_input"`
 	}
 	if err := json.Unmarshal(raw, &in); err != nil || in.ToolName == "" {
+		n.observeHook(event, VerdictDeny, start)
 		return denied("hook input names no tool")
 	}
 	d := Evaluate(n.ruleContext(s), in.ToolName, in.ToolInput)
@@ -184,21 +217,24 @@ func (n *Node) decide(ctx context.Context, s *session, event string, raw json.Ra
 	s.log.Info("hook decision", "event", event, "tool", in.ToolName, "verdict", d.Verdict, "rule", d.Rule)
 	switch d.Verdict {
 	case VerdictAllow:
+		n.observeHook(event, VerdictAllow, start)
 		return allowed("")
 	case VerdictEscalate:
-		return n.escalate(ctx, s, in.ToolName, in.ToolInput, d)
+		return n.escalate(ctx, s, event, in.ToolName, in.ToolInput, d, start)
 	default:
+		n.observeHook(event, VerdictDeny, start)
 		return denied(d.Reason)
 	}
 }
 
 // escalate asks a person through an Approval and waits up to ApprovalTimeout for the answer; no answer is a deny.
-func (n *Node) escalate(ctx context.Context, s *session, tool string, input json.RawMessage, d Decision) HookResponse {
+func (n *Node) escalate(ctx context.Context, s *session, event, tool string, input json.RawMessage, d Decision, start time.Time) HookResponse {
 	eng := n.engine()
 	ap, err := eng.RequestApproval(core.Approval{
 		TicketID: s.t.ID, AssignmentID: s.a.ID, Tool: tool, Rule: d.Rule, Input: input,
 		Summary: summarize(tool, input, d.Reason),
 	})
+	n.observeHook(event, VerdictEscalate, start)
 	if err != nil {
 		s.log.Error("request approval", "error", err)
 		return denied("approval could not be requested: " + err.Error())
@@ -260,6 +296,10 @@ func summarize(tool string, input json.RawMessage, reason string) string {
 }
 
 func (n *Node) handleReport(req ReportRequest) Response {
+	if n.reg != nil {
+		start := time.Now()
+		defer func() { n.reg.Histogram("mcp_tool_seconds", "tool", "report").Observe(time.Since(start)) }()
+	}
 	s := n.lookup(req.Ticket, req.Assignment)
 	if s == nil {
 		return Response{Error: fmt.Sprintf("%s: ticket %q assignment %q", denyNoSession, req.Ticket, req.Assignment)}

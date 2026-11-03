@@ -942,6 +942,10 @@ func (b blockingEngine) WaitApproval(context.Context, string) (core.Approval, er
 	return core.Approval{}, fmt.Errorf("released")
 }
 func (b blockingEngine) ExpireApproval(string) error { b.wait(); return nil }
+func (b blockingEngine) RecordUsage(string, string, core.UsageDelta) error {
+	b.wait()
+	return nil
+}
 
 func TestExecutorMethodsNeverBlock(t *testing.T) {
 	eng := blockingEngine{release: make(chan struct{})}

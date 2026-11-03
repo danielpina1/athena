@@ -1,0 +1,49 @@
+{
+  "go": "go1.27.2",
+  "goos": "darwin",
+  "goarch": "arm64",
+  "results": [
+    {
+      "name": "hook_decision",
+      "unit": "ns",
+      "samples": 3000,
+      "p50": 158166,
+      "p99": 380500,
+      "max": 2990667,
+      "budget": 10000000
+    },
+    {
+      "name": "engine_command",
+      "unit": "ns",
+      "samples": 500,
+      "p50": 82708,
+      "p99": 140875,
+      "max": 504958,
+      "budget": 5000000
+    },
+    {
+      "name": "dispatch",
+      "unit": "ns",
+      "samples": 60,
+      "p50": 11128209,
+      "p99": 21279625,
+      "max": 25925291,
+      "budget": 100000000
+    },
+    {
+      "name": "dispatch_worktree",
+      "unit": "ns",
+      "samples": 40,
+      "p50": 52731833,
+      "p99": 89347292,
+      "max": 92998000,
+      "budget": 100000000
+    },
+    {
+      "name": "server_idle_rss",
+      "unit": "bytes",
+      "value": 18268160,
+      "budget": 104857600
+    }
+  ]
+}

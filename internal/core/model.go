@@ -81,6 +81,8 @@ type Attention struct {
 	ID        string `json:"id"`
 	Question  string `json:"question"`
 	TriggerID string `json:"triggerId,omitempty"`
+	// At is when the Ticket began waiting for a person's answer; a replaced question keeps it.
+	At time.Time `json:"at,omitzero"`
 }
 
 // TicketEndBy says who ended a Ticket.
@@ -174,6 +176,8 @@ type Ticket struct {
 	Delivery    *DeliveryFailure `json:"delivery,omitempty"`
 	// PendingApproval is the ID of an Approval of this Ticket waiting for a person; empty if none.
 	PendingApproval string `json:"pendingApproval,omitempty"`
+	// Stats are the Ticket's performance numbers, updated in the same transaction as the command that causes them.
+	Stats TicketStats `json:"stats"`
 }
 
 // Trigger is one immutable event produced by a source; Text is untrusted external data.

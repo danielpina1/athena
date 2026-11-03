@@ -9,12 +9,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/danielpina1/athena/internal/core"
+	"github.com/danielpina1/athena/internal/metrics"
 	"github.com/danielpina1/athena/internal/runtime/claude"
 	"github.com/danielpina1/athena/prompts"
 )
@@ -35,6 +37,8 @@ const (
 	// branchPrefix names the branch of a Ticket's worktree: athena/<lowercased ticket id>.
 	branchPrefix = "athena/"
 	slugMaxLen   = 40
+	// runtimeClaude is the runtime label of the metrics this node records.
+	runtimeClaude = "claude"
 )
 
 // Config configures a Node.
@@ -57,6 +61,9 @@ type Config struct {
 	ClaudeBinary string
 	// ApprovalTimeout is how long an escalated tool call waits for a person before it is denied (default 30m).
 	ApprovalTimeout time.Duration
+	// Metrics receives the node's timings and gauges (session_spawn_seconds, session_init_seconds,
+	// hook_decision_seconds, mcp_tool_seconds, slots_in_use, tool_calls_total); nil records nothing.
+	Metrics *metrics.Registry
 }
 
 // EngineCallbacks is the part of *core.Engine the node calls: the Executor callbacks, the Ticket query and Approvals.
@@ -71,6 +78,9 @@ type EngineCallbacks interface {
 	RequestApproval(a core.Approval) (core.Approval, error)
 	WaitApproval(ctx context.Context, id string) (core.Approval, error)
 	ExpireApproval(id string) error
+	// RecordUsage adds what the node observed to the Ticket's stats. It takes the Engine's lock: never call it while
+	// holding a node lock that Start, Deliver or Stop also take.
+	RecordUsage(ticketID, assignmentID string, u core.UsageDelta) error
 }
 
 var _ EngineCallbacks = (*core.Engine)(nil)
@@ -103,6 +113,12 @@ type Node struct {
 
 	// restartDelay is the pause before restart n (1-based) of a crashed session.
 	restartDelay func(n int) time.Duration
+
+	// Metric handles; nil without Config.Metrics.
+	reg        *metrics.Registry
+	slotsGauge *metrics.Gauge
+	spawnHist  *metrics.Histogram
+	initHist   *metrics.Histogram
 }
 
 type engineRef struct{ e EngineCallbacks }
@@ -137,6 +153,10 @@ func New(cfg Config, eng EngineCallbacks) *Node {
 		done:         make(chan struct{}),
 		live:         map[string]*session{},
 		restartDelay: func(n int) time.Duration { return time.Duration(n) * time.Second },
+		reg:          cfg.Metrics,
+		slotsGauge:   cfg.Metrics.Gauge("slots_in_use"),
+		spawnHist:    cfg.Metrics.Histogram("session_spawn_seconds", "runtime", runtimeClaude),
+		initHist:     cfg.Metrics.Histogram("session_init_seconds", "runtime", runtimeClaude),
 	}
 	if eng != nil {
 		n.SetEngine(eng)
@@ -357,6 +377,7 @@ func (n *Node) onEnded(st *loopState, s *session) {
 		delete(n.live, s.t.ID)
 	}
 	n.mu.Unlock()
+	n.slotsGauge.Set(float64(n.liveCount()))
 	if k := s.place.dirKey; k != "" && st.busy[k] == s.t.ID {
 		delete(st.busy, k)
 	}
@@ -402,6 +423,7 @@ func (n *Node) schedule(st *loopState) {
 		n.mu.Lock()
 		n.live[s.t.ID] = s
 		n.mu.Unlock()
+		n.slotsGauge.Set(float64(n.liveCount()))
 		if k := s.place.dirKey; k != "" {
 			st.busy[k] = s.t.ID
 		}
@@ -559,6 +581,14 @@ type runner struct {
 	unread      []string
 	sessionID   string
 	initSeen    bool
+
+	// usage is what the session did since the last RecordUsage; tools maps the ids of tool calls in flight to their
+	// tool; firstSent and firstOutput time the Ticket's time to first output.
+	usage      core.UsageDelta
+	tools      map[string]string
+	spawned    time.Time
+	firstSent  time.Time
+	outputSeen bool
 }
 
 func (n *Node) run(s *session) {
@@ -596,6 +626,7 @@ func (r *runner) run() {
 	adir := filepath.Join(s.place.workDir, ".athena")
 	env := append([]string{"ATHENA_ASSIGNMENT=" + s.a.ID}, n.variables(s)...)
 	for crashes := 0; ; {
+		spawnStart := time.Now()
 		sess, err := claude.Start(n.ctx, claude.Options{
 			Binary:             n.cfg.ClaudeBinary,
 			Dir:                s.place.workDir,
@@ -611,10 +642,14 @@ func (r *runner) run() {
 			r.fail("start claude: " + err.Error())
 			return
 		}
+		r.spawned = time.Now()
+		n.spawnHist.Observe(r.spawned.Sub(spawnStart))
 		r.log.Info("session started", "resume", resumeID != "", "recovering", recovering)
 		if !r.drive(sess, recovering) {
 			return
 		}
+		r.usage.Crashes++
+		r.flushUsage()
 		crashes++
 		if crashes > maxRestarts {
 			r.fail(crashSummary)
@@ -653,13 +688,15 @@ loop:
 			crashed = false
 			r.log.Info("session stopped", "reason", s.reason())
 			_ = sess.Close()
-			for range events {
+			for ev := range events {
+				r.account(ev) // a last Result still counts
 			}
 			break loop
 		}
 	}
 	_ = sess.Close()
 	err := sess.Wait()
+	r.flushUsage()
 	if s.isStopped() {
 		return false
 	}
@@ -690,6 +727,9 @@ func (r *runner) sendFirst(sess *claude.Session, recovering bool) {
 	}
 	if len(ids) > 0 {
 		b.WriteString("\n" + renderInputs(t, ids))
+	}
+	if r.firstSent.IsZero() {
+		r.firstSent = time.Now()
 	}
 	if err := sess.Send(b.String()); err != nil {
 		r.log.Warn("send first message", "error", err)
@@ -774,10 +814,69 @@ func (r *runner) delivered(ids []string) {
 	}
 }
 
+// account adds an event to the usage the runner has not yet recorded and feeds the tool call counters; a Result ends
+// a turn and records it.
+func (r *runner) account(ev claude.Event) {
+	switch e := ev.(type) {
+	case claude.AssistantText:
+		r.firstOutput()
+	case claude.ToolUse:
+		r.firstOutput()
+		r.usage.ToolCalls++
+		if r.tools == nil {
+			r.tools = map[string]string{}
+		}
+		r.tools[e.ID] = e.Name
+	case claude.ToolResult:
+		tool, ok := r.tools[e.ToolUseID]
+		if !ok {
+			tool = "unknown"
+		}
+		delete(r.tools, e.ToolUseID)
+		if e.IsError {
+			r.usage.ToolErrors++
+		}
+		r.n.reg.Counter("tool_calls_total", "tool", tool, "error", strconv.FormatBool(e.IsError)).Add(1)
+	case claude.Result:
+		r.usage.Turns += max(e.NumTurns, 1)
+		r.usage.ActiveTime += time.Duration(e.DurationMS) * time.Millisecond
+		r.usage.InputTokens += int64(e.InputTokens)
+		r.usage.OutputTokens += int64(e.OutputTokens)
+		r.usage.CacheReadTokens += int64(e.CacheReadTokens)
+		r.usage.CostUSD += e.CostUSD
+		r.flushUsage()
+	}
+}
+
+// firstOutput times the first output of the first message the worker was sent.
+func (r *runner) firstOutput() {
+	if r.outputSeen || r.firstSent.IsZero() {
+		return
+	}
+	r.outputSeen = true
+	r.usage.TimeToFirstOutput = time.Since(r.firstSent)
+}
+
+// flushUsage records the pending usage on the Ticket. It runs on the runner's goroutine and holds no node lock.
+func (r *runner) flushUsage() {
+	u := r.usage
+	if u == (core.UsageDelta{}) {
+		return
+	}
+	r.usage = core.UsageDelta{}
+	if err := r.eng.RecordUsage(r.s.t.ID, r.s.a.ID, u); err != nil {
+		r.log.Error("record usage", "error", err)
+	}
+}
+
 func (r *runner) onEvent(ev claude.Event) {
+	r.account(ev)
 	switch e := ev.(type) {
 	case claude.Init:
 		r.initSeen = true
+		if !r.spawned.IsZero() {
+			r.n.initHist.Observe(time.Since(r.spawned))
+		}
 		if e.SessionID != "" {
 			r.sessionID = e.SessionID
 			r.s.setSessionID(e.SessionID)
@@ -959,6 +1058,11 @@ func place(workRoot string, t core.Ticket) (placement, error) {
 	if st, err := os.Stat(real); err != nil || !st.IsDir() {
 		return placement{}, fmt.Errorf("%s is not a directory", dir)
 	}
+	// A directory with a .git entry is its repository's top level; asking git for it costs a process (~20 ms), which
+	// counts against the dispatch budget, so only other directories (a subdirectory of a repository) are asked.
+	if _, err := os.Lstat(filepath.Join(real, ".git")); err == nil {
+		return placement{workDir: td, repo: real}, nil
+	}
 	if top, err := gitOut(real, "rev-parse", "--show-toplevel"); err == nil && top != "" {
 		return placement{workDir: td, repo: top}, nil
 	}
@@ -1009,6 +1113,12 @@ func ensureWorktree(repo, dir, branch string) error {
 		}
 		return nil
 	}
+	// A new Ticket's branch does not exist yet: creating it with the worktree is the one git call the common case needs
+	// (each git process costs ~20 ms, which counts against the dispatch budget).
+	if _, err := gitOut(repo, "worktree", "add", "-b", branch, dir, "HEAD"); err == nil {
+		return nil
+	}
+	// The branch exists (a resumed Ticket) or a removed worktree is still registered: prune, then reuse the branch.
 	_, _ = gitOut(repo, "worktree", "prune")
 	var err error
 	if _, berr := gitOut(repo, "rev-parse", "--verify", "--quiet", "refs/heads/"+branch); berr == nil {

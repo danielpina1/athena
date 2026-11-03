@@ -41,7 +41,7 @@ func TestNoArgs(t *testing.T) {
 func TestOwnerCommandsWired(t *testing.T) {
 	dir := t.TempDir()
 	sock := filepath.Join(dir, "athena.sock")
-	for _, cmd := range []string{"task", "status", "logs", "reply", "stop", "retry", "approvals", "approve", "deny"} {
+	for _, cmd := range []string{"task", "status", "logs", "reply", "stop", "retry", "approvals", "approve", "deny", "metrics"} {
 		args := []string{cmd, "--state-dir", dir}
 		switch cmd {
 		case "task", "logs", "stop", "retry", "approve", "deny":
