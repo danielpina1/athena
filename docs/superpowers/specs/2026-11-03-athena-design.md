@@ -138,6 +138,17 @@ Exact flags and methods must be verified against the installed CLI versions duri
 
 The reference's background-work rules (shell commands backgrounded after a few seconds so the worker can receive new Inputs; a 30-minute cap on post-turn background work; handoff frees the slot) are re-expressed with each tool's own mechanisms. Where a tool cannot express a rule exactly, the builder documents the deviation.
 
+### 6.1a Multi-runtime Tickets (use both usage limits)
+
+Owner asked to combine Claude Code and Codex in one Ticket so both accounts' usage limits are used. A Ticket's runtime may be `claude`, `codex`, or **`auto`** (default once plan 5 lands), and a Ticket's Assignments may run on different runtimes over its life. Each Assignment records its own `Runtime` and `Model`.
+
+- **Quota-aware choice.** Each node tracks, per account/runtime, live usage state from the runtimes themselves (rate-limit/usage-limit events and errors in the stream, reset times when reported, recent token burn) and reports it with its heartbeat. For `auto`, the dispatcher picks the runtime with headroom (ties → the Ticket's previous runtime for a warm session, then the owner's preferred default). The dashboard shows both accounts' headroom and reset times.
+- **Failover mid-Ticket.** When a session hits a usage limit, the node ends that Assignment cleanly and the Engine starts a new Assignment on the other runtime **in the same worktree**: work-in-progress is committed to the Ticket branch first (checkpoint), and the new session starts with a handoff note (the Ticket's Inputs, latest Reports, `git log`/`diff --stat` of the branch, and a summary of the previous session's last turn). When the first runtime's limit resets, later Assignments may move back. The Ticket's stage never shows a person stage just because a limit was hit.
+- **Pairing within one Ticket** (owner-selectable per Ticket, or a Policy default): 
+  - *Implement + review*: one runtime implements; before `ready`, a session on the other runtime reviews the branch diff read-only and returns findings; the implementer addresses them (bounded rounds). Spreads usage and adds an independent second opinion.
+  - *Split*: the lead session uses `hand_off` (§8.4) to create child Tickets pinned to the other runtime for separable pieces; children work in their own worktrees branched from the parent's branch and the lead merges their branches back. Two sessions never write the same worktree at the same time.
+- **Accounting**: spend, tokens and attention cost are tracked per Assignment and per runtime, so the Performance page (§10.3) shows how each Ticket used each account.
+
 ### 6.2 Hooks
 
 Athena installs its own hooks in every session it starts (via the generated settings / `CODEX_HOME`, never by editing the user's global config or the repository). Every hook command is the node binary itself: `athena hook <event>`, which talks to the local node program over a Unix socket and returns within milliseconds.
