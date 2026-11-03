@@ -183,3 +183,24 @@ func TestParseMultipleBlocksAndErrorResult(t *testing.T) {
 		t.Fatalf("result = %+v", r)
 	}
 }
+
+// An error result from the real CLI (max-turns.jsonl: `--max-turns 1` and a task needing two tool calls) carries its
+// reason in "errors", not in "result".
+func TestParseErrorResultFixture(t *testing.T) {
+	evs := parseAll(t, "max-turns.jsonl")
+	var r *Result
+	for _, ev := range evs {
+		if res, ok := ev.(Result); ok {
+			r = &res
+		}
+	}
+	if r == nil {
+		t.Fatal("no result in max-turns.jsonl")
+	}
+	if !r.IsError || r.Subtype != "error_max_turns" || r.Text != "" {
+		t.Fatalf("result = %+v", *r)
+	}
+	if len(r.Errors) != 1 || r.Errors[0] != "Reached maximum number of turns (1)" {
+		t.Fatalf("errors = %q", r.Errors)
+	}
+}

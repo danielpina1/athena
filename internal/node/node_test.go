@@ -406,8 +406,10 @@ func TestStartIsIdempotentAndDeliverCoalesces(t *testing.T) {
 	h.n.Deliver(tk, a)
 	h.n.Deliver(tk, a)
 	h.never("a second claude process", 300*time.Millisecond, func() bool { return len(h.invocations()) > 1 })
-	if n := strings.Count(h.stdin(), "\n"); n != 1 {
-		t.Fatalf("stdin got %d lines, want 1 (no duplicate delivery)", n)
+	// The fixture's turn ends without a report, so the worker is also nudged once; the task itself goes once.
+	in := h.stdin()
+	if n := strings.Count(in, "\n") - strings.Count(in, nudgeText); n != 1 {
+		t.Fatalf("stdin got %d lines besides the nudge, want 1 (no duplicate delivery):\n%s", n, in)
 	}
 }
 
@@ -789,6 +791,125 @@ func TestInputReadOnlyAtTurnEndOrReport(t *testing.T) {
 		tk, _ := h.ticket(tk.ID)
 		return tk.Inputs[0].ReadAt != nil && tk.Inputs[1].ReadAt != nil
 	})
+}
+
+// A turn that ends in an error (here a real `error_max_turns` result; also an expired login or a rate limit) leaves the
+// CLI waiting with stdin open: the Assignment reports failed with the subtype and the reason instead of staying working.
+func TestErrorResultReportsFailed(t *testing.T) {
+	h := newHarness(t, nil)
+	t.Setenv("ATHENA_FAKE_FIXTURE", claudeFixture(t, "max-turns.jsonl"))
+	tk := h.submit("Two files", "")
+	h.eventually("failed report", func() bool {
+		tk, _ := h.ticket(tk.ID)
+		r := tk.LatestAssignment().Report
+		return r != nil && r.State == core.ReportFailed
+	})
+	tk, st := h.ticket(tk.ID)
+	got := tk.LatestAssignment().Report.Summary
+	if !strings.Contains(got, "error_max_turns") || !strings.Contains(got, "Reached maximum number of turns (1)") {
+		t.Fatalf("summary = %q, want the subtype and the reason", got)
+	}
+	if st != (core.Stage{Stage: "person", Action: "failed"}) {
+		t.Fatalf("stage = %+v, want person/failed", st)
+	}
+	if n := len(h.invocations()); n != 1 {
+		t.Fatalf("claude started %d times, want 1 (the process lives on)", n)
+	}
+	if strings.Contains(h.stdin(), nudgeText) {
+		t.Fatal("a failed turn was nudged")
+	}
+}
+
+// The documented shape of an API failure: is_error with subtype success and the message in "result". Its text is
+// masked before it reaches the report.
+func TestErrorResultTextIsRedacted(t *testing.T) {
+	h := newHarness(t, nil)
+	init, _, _ := strings.Cut(string(must(os.ReadFile(claudeFixture(t, "simple-turn.jsonl")))), "\n")
+	fx := filepath.Join(t.TempDir(), "api-error.jsonl")
+	result := `{"type":"result","subtype":"success","is_error":true,"session_id":"` + fixtureSessionID +
+		`","num_turns":1,"result":"API Error: 401 authorization: Bearer sk-ant-s3cret is invalid · Please run /login"}`
+	if err := os.WriteFile(fx, []byte(init+"\n"+result+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ATHENA_FAKE_FIXTURE", fx)
+	tk := h.submit("Doomed", "")
+	h.eventually("failed report", func() bool {
+		tk, _ := h.ticket(tk.ID)
+		r := tk.LatestAssignment().Report
+		return r != nil && r.State == core.ReportFailed
+	})
+	tk, _ = h.ticket(tk.ID)
+	got := tk.LatestAssignment().Report.Summary
+	if strings.Contains(got, "sk-ant-s3cret") || !strings.Contains(got, "API Error: 401") || !strings.Contains(got, "Please run /login") {
+		t.Fatalf("summary = %q, want the masked API error", got)
+	}
+}
+
+func must[T any](v T, err error) T {
+	if err != nil {
+		panic(err)
+	}
+	return v
+}
+
+// A turn that ends without a Report since the worker's last Input gets one nudge; a second such turn reports blocked.
+func TestTurnWithoutReportIsNudgedThenBlocked(t *testing.T) {
+	h := newHarness(t, nil)
+	t.Setenv("ATHENA_FAKE_LATER_FIXTURE", fixtureLines(t, "simple-turn.jsonl", func(_ int, l string) bool {
+		return strings.Contains(l, `"type":"result"`)
+	}))
+	tk := h.submit("Silent task", "")
+	h.eventually("blocked report", func() bool {
+		tk, _ := h.ticket(tk.ID)
+		r := tk.LatestAssignment().Report
+		return r != nil && r.State == core.ReportBlocked
+	})
+	tk, st := h.ticket(tk.ID)
+	if got := tk.LatestAssignment().Report.Summary; got != "worker ended its turn twice without reporting" {
+		t.Fatalf("summary = %q", got)
+	}
+	if st != (core.Stage{Stage: "person", Action: "blocked"}) {
+		t.Fatalf("stage = %+v, want person/blocked", st)
+	}
+	if n := strings.Count(h.stdin(), nudgeText); n != 1 {
+		t.Fatalf("nudged %d times, want 1:\n%s", n, h.stdin())
+	}
+}
+
+// A turn that ends after the worker reported since its last Input is not nudged.
+func TestReportedTurnIsNotNudged(t *testing.T) {
+	h := newHarness(t, nil)
+	t.Setenv("ATHENA_FAKE_FIXTURE", openTurnFixture(t))
+	tk := h.submit("Task", "")
+	_, a := h.running(tk.ID)
+	s := h.n.lookup(tk.ID, a.ID)
+	var sent []string
+	r := &runner{n: h.n, s: s, eng: h.eng, log: s.log, sent: map[string]bool{}, started: true, initSeen: true,
+		send: func(text string) error { sent = append(sent, text); return nil }}
+	r.inputSent()
+	if got := h.report(tk.ID, a.ID, core.ReportProgress, "on it"); !got.OK {
+		t.Fatalf("report = %+v", got)
+	}
+	r.onEvent(claude.Result{Subtype: "success"})
+	r.onEvent(claude.Result{Subtype: "success"})
+	if len(sent) != 0 {
+		t.Fatalf("sent %q after a reported turn", sent)
+	}
+	// A new Input without a Report: the turn's end is nudged once.
+	r.inputSent()
+	r.onEvent(claude.Result{Subtype: "success"})
+	if len(sent) != 1 || sent[0] != nudgeText {
+		t.Fatalf("sent %q, want one nudge", sent)
+	}
+	if tk, _ := h.ticket(tk.ID); tk.LatestAssignment().Report.State != core.ReportProgress {
+		t.Fatalf("report = %+v, want the progress report kept", tk.LatestAssignment().Report)
+	}
+}
+
+// openTurnFixture is a turn that never ends: the init line only.
+func openTurnFixture(t *testing.T) string {
+	t.Helper()
+	return fixtureLines(t, "simple-turn.jsonl", func(i int, _ string) bool { return i == 0 })
 }
 
 // A crash loop's failed report says why the process ended: its exit status and the end of its stderr, secrets masked.

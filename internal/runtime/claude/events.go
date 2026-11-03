@@ -48,6 +48,8 @@ type Result struct {
 	DurationMS      int
 	// Text is the final assistant message of the turn ("result" in the CLI).
 	Text string
+	// Errors says why an error result failed ("errors" in the CLI, e.g. "Reached maximum number of turns (1)").
+	Errors []string
 }
 
 // Unknown is any line the driver does not model. Raw is the complete line.
@@ -141,13 +143,14 @@ func ParseEvents(line []byte) ([]Event, error) {
 
 	case "result":
 		var r struct {
-			SessionID  string  `json:"session_id"`
-			Subtype    string  `json:"subtype"`
-			IsError    bool    `json:"is_error"`
-			CostUSD    float64 `json:"total_cost_usd"`
-			NumTurns   int     `json:"num_turns"`
-			DurationMS int     `json:"duration_ms"`
-			Result     string  `json:"result"`
+			SessionID  string   `json:"session_id"`
+			Subtype    string   `json:"subtype"`
+			IsError    bool     `json:"is_error"`
+			CostUSD    float64  `json:"total_cost_usd"`
+			NumTurns   int      `json:"num_turns"`
+			DurationMS int      `json:"duration_ms"`
+			Result     string   `json:"result"`
+			Errors     []string `json:"errors"`
 			Usage      struct {
 				InputTokens     int `json:"input_tokens"`
 				OutputTokens    int `json:"output_tokens"`
@@ -168,6 +171,7 @@ func ParseEvents(line []byte) ([]Event, error) {
 			NumTurns:        r.NumTurns,
 			DurationMS:      r.DurationMS,
 			Text:            r.Result,
+			Errors:          r.Errors,
 		}}, nil
 	}
 	return unknown(), nil

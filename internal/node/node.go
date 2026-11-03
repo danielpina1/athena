@@ -36,6 +36,10 @@ const (
 	recoveryNote   = "Your previous process ended unexpectedly; continue the task."
 	recoveryAdvice = " Check your directory and git history before repeating any outside action."
 	crashSummary   = "session crashed repeatedly"
+	// nudgeText is sent, once, when a turn ends without a Report since the worker's last Input; blockedSummary is the
+	// report filed when the next turn ends without one too.
+	nudgeText      = "Your turn ended without a report. Call the report tool now with your status."
+	blockedSummary = "worker ended its turn twice without reporting"
 	// branchPrefix names the branch of a Ticket's worktree: athena/<lowercased ticket id>.
 	branchPrefix = "athena/"
 	slugMaxLen   = 40
@@ -607,6 +611,12 @@ type runner struct {
 	initSeen    bool
 	// model is the model the sessions run with: the Ticket's, or the node's default.
 	model string
+	// send writes a message to the current process.
+	send func(text string) error
+	// inputReports is the session's Report count when it was last sent an Input (or its first message); nudged is set
+	// once a turn that ended without a Report since then was nudged.
+	inputReports int
+	nudged       bool
 
 	// usage is what the session did since the last RecordUsage; tools maps the ids of tool calls in flight to their
 	// tool; firstSent and firstOutput time the Ticket's time to first output.
@@ -707,6 +717,7 @@ func (r *runner) drive(sess *claude.Session, recovering bool) (crashed bool, cau
 	s := r.s
 	events := sess.Events()
 	r.initSeen = false
+	r.send = sess.Send
 	r.sendFirst(sess, recovering)
 	crashed = true
 loop:
@@ -809,6 +820,7 @@ func (r *runner) sendFirst(sess *claude.Session, recovering bool) {
 	for i := range r.unread {
 		r.unread[i].reports = r.s.reportCount()
 	}
+	r.inputSent()
 	r.markSent(ids)
 }
 
@@ -872,6 +884,7 @@ func (r *runner) markSent(ids []string) {
 		return
 	}
 	// Read the Report count after the send: a Report filed before it cannot have seen these Inputs.
+	r.inputSent()
 	reports := r.s.reportCount()
 	for _, id := range ids {
 		r.sent[id] = true
@@ -978,11 +991,72 @@ func (r *runner) onEvent(ev claude.Event) {
 		r.s.setUnseenFailure(false)
 	case claude.Result:
 		r.s.setUnseenFailure(false)
-		// The turn that took in everything sent before its end is over. A failed turn (an API error) may not have
-		// reached the model: its Inputs stay unread, so a retry or a crash sends them again.
-		if !e.IsError {
-			r.markRead(-1)
+		// A failed turn (an API error, an expired login, a rate limit, too many turns) leaves the CLI waiting for the
+		// next message: report it, or the Ticket stays working with nothing running. Its Inputs may not have reached
+		// the model, so they stay unread and a retry sends them again. A turn Athena itself ends (a stop) never gets
+		// here: the stop drains the events without onEvent, and fail does nothing once the session is stopped.
+		if e.IsError || (e.Subtype != "" && e.Subtype != "success") {
+			r.nudged = false
+			r.fail(turnFailure(e))
+			return
 		}
+		// The turn that took in everything sent before its end is over.
+		r.markRead(-1)
+		r.turnEnded()
+	}
+}
+
+// turnFailure is the summary of a failed turn's report: its subtype and its reason, secrets masked.
+func turnFailure(e claude.Result) string {
+	why := strings.TrimSpace(e.Text)
+	if why == "" {
+		why = strings.Join(e.Errors, "; ")
+	}
+	subtype := e.Subtype
+	if subtype == "" || subtype == "success" {
+		subtype = "error"
+	}
+	summary := "turn failed (" + subtype + ")"
+	if why != "" {
+		summary += ": " + redact.String(why)
+	}
+	if utf8.RuneCountInString(summary) > summaryMaxRunes {
+		summary = string([]rune(summary)[:summaryMaxRunes-1]) + "…"
+	}
+	return summary
+}
+
+// inputSent notes that the session was just sent an Input: the turn that takes it in must end with a Report.
+func (r *runner) inputSent() {
+	r.inputReports = r.s.reportCount()
+	r.nudged = false
+}
+
+// turnEnded checks that a turn that ended well filed a Report since the worker's last Input: the first time it did
+// not, the worker is nudged to report; the second, the Assignment reports blocked.
+func (r *runner) turnEnded() {
+	if r.s.reportCount() > r.inputReports {
+		r.nudged = false
+		return
+	}
+	if !r.nudged {
+		r.nudged = true
+		if r.send == nil {
+			return
+		}
+		r.log.Info("turn ended without a report; nudging the worker")
+		if err := r.send(nudgeText); err != nil {
+			r.log.Warn("send nudge", "error", err)
+		}
+		return
+	}
+	r.inputSent() // start over: the turn of the next Input is checked afresh
+	if r.s.isStopped() {
+		return
+	}
+	r.log.Warn("worker ended its turn twice without reporting")
+	if err := r.eng.FileReport(r.s.t.ID, core.ReportInput{AssignmentID: r.s.a.ID, State: core.ReportBlocked, Summary: blockedSummary}); err != nil {
+		r.log.Error("file blocked report", "error", err)
 	}
 }
 

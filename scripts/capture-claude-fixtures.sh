@@ -53,5 +53,10 @@ echo "== mid-turn-input"
 { msg "Create a file a.txt containing a, then say done."; sleep 2; msg "Also create b.txt containing b."; sleep 25; } \
   | claude "${common[@]}" > "$out/mid-turn-input.jsonl" || true
 
-for f in simple-turn resume-turn mid-turn-input; do scrub "$out/$f.jsonl"; done
+echo "== max-turns"
+# One turn allowed, a task needing two tool calls: the turn ends in an error result (exit 1 once stdin closes).
+msg "Create a file hi.txt containing hi, then create bye.txt containing bye, then say done." \
+  | claude "${common[@]}" --max-turns 1 > "$out/max-turns.jsonl" || true
+
+for f in simple-turn resume-turn mid-turn-input max-turns; do scrub "$out/$f.jsonl"; done
 wc -l "$out"/*.jsonl
