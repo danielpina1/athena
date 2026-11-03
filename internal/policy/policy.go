@@ -238,7 +238,10 @@ func (p *policy) admit(t core.Trigger, strength string, basis core.MandateBasis)
 		if !inferredAllowed(p.s.Mode) {
 			return p.refuse(t, CodeModeOff, nil)
 		}
-		basis.Observation = p.s.Mode == ModeObserve
+		// Observation marks a candidate admitted through an unaddressed cell: the Source receives such messages in
+		// that scope. It does not depend on the accept mode.
+		basis.Observation = basis.Via == core.ViaAdmission &&
+			(basis.Row == CellListedUnaddressed || basis.Row == CellUnlistedUnaddressed)
 	}
 	return core.Gate{Strength: strength, Basis: basis}
 }
@@ -273,7 +276,7 @@ func (p *policy) Revalidate(m core.Mandate) bool {
 	if m.Basis.Via == core.ViaOwner {
 		return true // an owner task needs no Source
 	}
-	if p.scope == nil || m.Scope == "" || !p.scope.Listens(m.Scope) {
+	if p.scope == nil || m.Thread == "" || !p.scope.Listens(m.Thread) {
 		return false
 	}
 	if !requesterHolds(p.s, m) {

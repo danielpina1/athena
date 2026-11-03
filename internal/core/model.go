@@ -134,6 +134,9 @@ type Mandate struct {
 	PolicyVersion string   `json:"policyVersion"`
 	Actor         ActorRef `json:"actor"`
 	Scope         string   `json:"scope,omitempty"`
+	// Thread is the key of the Thread the Mandate's work started on; revalidation asks the Source whether it still
+	// listens to it. Owner Mandates have none.
+	Thread string `json:"thread,omitempty"`
 	// Basis records how the gate admitted the Trigger; revalidation reads it.
 	Basis MandateBasis `json:"basis,omitzero"`
 }
