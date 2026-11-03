@@ -857,6 +857,7 @@ func cloneTicket(t *Ticket) Ticket {
 	c.Origin.TriggerIDs = slices.Clone(t.Origin.TriggerIDs)
 	c.Execution = clonePtr(t.Execution)
 	c.Delivery = clonePtr(t.Delivery)
+	c.SessionCosts = maps.Clone(t.SessionCosts)
 	return c
 }
 

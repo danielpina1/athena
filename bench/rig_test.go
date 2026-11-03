@@ -314,6 +314,49 @@ func measureDispatch(tb testing.TB, n int, repo bool) []time.Duration {
 	return out
 }
 
+// measureSpawn returns n latencies of starting the fake runtime and waiting for it to exit (its stdin is closed): the
+// reference cost of the process a dispatch starts, which a busy machine, or a security scanner, inflates.
+func measureSpawn(tb testing.TB, n int) []time.Duration {
+	fake := fakeClaude(tb)
+	out := make([]time.Duration, 0, n)
+	for i := 0; i < n; i++ {
+		cmd := exec.Command(fake)
+		start := time.Now()
+		if err := cmd.Run(); err != nil {
+			tb.Fatal(err)
+		}
+		out = append(out, time.Since(start))
+	}
+	return out
+}
+
+// measureGitWorktree returns n latencies of the one git process a repo task's dispatch cannot do without,
+// `git worktree add -b`, run directly: git is an external program like the model, and on a loaded machine (or behind
+// macOS's xcrun shim) its start alone takes tens of milliseconds, so dispatch_worktree is judged net of it.
+func measureGitWorktree(tb testing.TB, n int) []time.Duration {
+	repo := newRepo(tb)
+	out := make([]time.Duration, 0, n)
+	for i := 0; i < n+3; i++ {
+		dir := filepath.Join(tb.TempDir(), "wt")
+		branch := fmt.Sprintf("b%d", i)
+		start := time.Now()
+		cmd := exec.Command("git", "-C", repo, "worktree", "add", "-q", "-b", branch, dir, "HEAD")
+		if b, err := cmd.CombinedOutput(); err != nil {
+			tb.Fatalf("git worktree add: %v\n%s", err, b)
+		}
+		d := time.Since(start)
+		if i >= 3 {
+			out = append(out, d)
+		}
+		for _, args := range [][]string{{"worktree", "remove", "--force", dir}, {"branch", "-q", "-D", branch}} {
+			if b, err := exec.Command("git", append([]string{"-C", repo}, args...)...).CombinedOutput(); err != nil {
+				tb.Fatalf("git %v: %v\n%s", args, err, b)
+			}
+		}
+	}
+	return out
+}
+
 // newRepo makes a small git repository with one commit.
 func newRepo(tb testing.TB) string {
 	tb.Helper()

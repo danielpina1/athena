@@ -181,3 +181,38 @@ func TestEngineRecordsMetrics(t *testing.T) {
 		}
 	}
 }
+
+// A session reports its cumulative cost on every turn, also from a resumed process: only the growth counts, per session.
+func TestRecordUsageSessionCostIsCumulative(t *testing.T) {
+	h := newHarness(t)
+	reg := metrics.NewRegistry()
+	h.eng.SetMetrics(reg)
+	id := h.accepted()
+	for _, c := range []struct {
+		session string
+		total   float64
+	}{
+		{"s1", 0.010}, {"s1", 0.015}, // two turns of one process
+		{"s1", 0.015}, // a repeated report adds nothing
+		{"s1", 0.020}, // a resumed process carries on from 0.015
+		{"s2", 0.004}, // another session starts from 0
+		{"s1", 0.012}, // a lower total is ignored
+	} {
+		h.must(h.eng.RecordUsage(id, "", UsageDelta{SessionID: c.session, SessionCostUSD: c.total, OutputTokens: 10}))
+	}
+	h.must(h.eng.RecordUsage(id, "", UsageDelta{CostUSD: 0.001}))
+	got := h.ticket(id).Stats
+	if math.Abs(got.CostUSD-0.025) > 1e-9 {
+		t.Errorf("cost = %v, want 0.025 (0.020 + 0.004 + 0.001)", got.CostUSD)
+	}
+	eq(t, "output tokens are per turn and summed", got.OutputTokens, int64(60))
+	var metric float64
+	for _, c := range reg.Snapshot(0).Counters {
+		if c.Name == "cost_usd_total" {
+			metric += c.Value
+		}
+	}
+	if math.Abs(metric-0.025) > 1e-9 {
+		t.Errorf("cost_usd_total = %v, want 0.025", metric)
+	}
+}

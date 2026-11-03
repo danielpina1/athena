@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -994,5 +995,47 @@ func TestApprovalSummaryRedactsSecrets(t *testing.T) {
 	}
 	if !strings.Contains(got, "make deploy") || !strings.Contains(got, "GITHUB_TOKEN=***") {
 		t.Fatalf("summary = %q", got)
+	}
+}
+
+// The Result of every turn carries the session's cumulative cost but that turn's tokens; a resumed process carries the
+// cost on. The Ticket's cost is the session's true total and its tokens the sum (fixtures captured from the real CLI).
+func TestUsageFromCumulativeResults(t *testing.T) {
+	h := newHarness(t, nil)
+	t.Setenv("ATHENA_FAKE_FIXTURE", claudeFixture(t, "two-turns.jsonl"))
+	tk := h.submit("Two turns", "")
+	h.running(tk.ID)
+	stats := func() core.TicketStats {
+		cur, _ := h.ticket(tk.ID)
+		return cur.Stats
+	}
+	h.eventually("both results recorded", func() bool { return stats().Turns == 2 })
+	s := stats()
+	if math.Abs(s.CostUSD-0.0229594) > 1e-9 {
+		t.Errorf("cost = %v, want the session total 0.0229594", s.CostUSD)
+	}
+	if s.InputTokens != 20 || s.OutputTokens != 83 || s.CacheReadTokens != 21983+29721 {
+		t.Errorf("tokens = %d in, %d out, %d cache read; want 20, 83, 51704", s.InputTokens, s.OutputTokens, s.CacheReadTokens)
+	}
+	if s.ActiveTime != 5795*time.Millisecond {
+		t.Errorf("active time = %v, want 5.795s (the per-turn durations)", s.ActiveTime)
+	}
+
+	// A retry resumes the same session in a new process, whose Result starts from the earlier cost.
+	_, a := h.running(tk.ID)
+	if r := h.report(tk.ID, a.ID, core.ReportFailed, "stuck"); !r.OK {
+		t.Fatalf("report: %+v", r)
+	}
+	t.Setenv("ATHENA_FAKE_FIXTURE", claudeFixture(t, "resumed-turn.jsonl"))
+	if err := h.eng.RetryTicket(tk.ID); err != nil {
+		t.Fatal(err)
+	}
+	h.eventually("resumed result recorded", func() bool { return stats().Turns == 3 })
+	s = stats()
+	if math.Abs(s.CostUSD-0.0268904) > 1e-9 {
+		t.Errorf("cost after resume = %v, want 0.0268904, not the sum of the reported totals", s.CostUSD)
+	}
+	if s.InputTokens != 30 || s.OutputTokens != 124 {
+		t.Errorf("tokens after resume = %d in, %d out; want 30, 124", s.InputTokens, s.OutputTokens)
 	}
 }

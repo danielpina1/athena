@@ -101,7 +101,12 @@ type UsageDelta struct {
 	OutputTokens    int64
 	CacheReadTokens int64
 
-	CostUSD float64
+	// CostUSD is an increment of cost. SessionCostUSD is instead the cumulative cost the runtime reports for the session
+	// SessionID so far (Claude Code's total_cost_usd, which grows across turns and across resumed processes); the
+	// Engine adds its growth since the last one it recorded for that session.
+	CostUSD        float64
+	SessionID      string
+	SessionCostUSD float64
 }
 
 // RecordUsage adds an executor's observations to the Ticket's stats in one transaction. It records them whether or not
@@ -127,6 +132,15 @@ func (e *Engine) RecordUsage(ticketID, assignmentID string, u UsageDelta) error 
 		s.OutputTokens += u.OutputTokens
 		s.CacheReadTokens += u.CacheReadTokens
 		s.CostUSD += u.CostUSD
+		cost := u.CostUSD
+		if u.SessionCostUSD > t.SessionCosts[u.SessionID] {
+			if t.SessionCosts == nil {
+				t.SessionCosts = map[string]float64{}
+			}
+			cost += u.SessionCostUSD - t.SessionCosts[u.SessionID]
+			s.CostUSD += u.SessionCostUSD - t.SessionCosts[u.SessionID]
+			t.SessionCosts[u.SessionID] = u.SessionCostUSD
+		}
 		runtime, model := runtimeModel(t)
 		if o.reg != nil {
 			o.observe(func(r *metrics.Registry) {
@@ -138,8 +152,8 @@ func (e *Engine) RecordUsage(ticketID, assignmentID string, u UsageDelta) error 
 						r.Counter("tokens_total", "kind", k.kind, "runtime", runtime, "model", model).Add(k.n)
 					}
 				}
-				if u.CostUSD > 0 {
-					r.Counter("cost_usd_total", "runtime", runtime, "model", model).AddFloat(u.CostUSD)
+				if cost > 0 {
+					r.Counter("cost_usd_total", "runtime", runtime, "model", model).AddFloat(cost)
 				}
 			})
 		}

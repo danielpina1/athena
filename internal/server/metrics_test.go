@@ -61,7 +61,8 @@ func TestMetricsCommand(t *testing.T) {
 	// The fixture's Result reaches the Ticket's stats through the node: wait for it.
 	eventually(t, "usage recorded", func() bool {
 		s.ok(Request{Op: OpMetrics, Window: "1h"}, &snap)
-		return counterSum(snap, "tokens_total", map[string]string{"kind": "output"}) > 0
+		return counterSum(snap, "tokens_total", map[string]string{"kind": "output"}) > 0 &&
+			counterSum(snap, "cost_usd_total", map[string]string{"runtime": "claude"}) > 0
 	})
 
 	for _, c := range []struct {

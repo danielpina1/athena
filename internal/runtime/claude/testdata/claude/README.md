@@ -6,6 +6,7 @@ dir become `/home/user`, `/home/user/work`). Re-run the script to refresh.
 
 - `simple-turn.jsonl`: one user message, a `Write` tool use, tool result, final text, `result`.
 - `resume-turn.jsonl`: same session continued with `--resume <session_id>`; the model answers from the resumed history.
+- `two-turns.jsonl` and `resumed-turn.jsonl`: trimmed (init + `result` lines only) from a live check with `claude` 2.1.280: two turns in one process, then one turn of a `--resume`d process of the same session. `usage` and `duration_ms` are per turn, but `total_cost_usd` is cumulative for the whole session and the resumed process carries the earlier cost on (0.0179, 0.0230, then 0.0269 in the resumed process).
 - `mid-turn-input.jsonl`: a second user message written 2 s after the first, while the first turn is running. The CLI folds it into the running turn: one `result` (`num_turns` 3) covers both messages, both files are written.
 
 ## stdin message shape (verified)

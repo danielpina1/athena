@@ -843,7 +843,8 @@ func (r *runner) account(ev claude.Event) {
 		r.usage.InputTokens += int64(e.InputTokens)
 		r.usage.OutputTokens += int64(e.OutputTokens)
 		r.usage.CacheReadTokens += int64(e.CacheReadTokens)
-		r.usage.CostUSD += e.CostUSD
+		// total_cost_usd is the session's cumulative cost (carried across resumed processes); the Engine records its growth.
+		r.usage.SessionID, r.usage.SessionCostUSD = e.SessionID, e.CostUSD
 		r.flushUsage()
 	}
 }

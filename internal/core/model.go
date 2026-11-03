@@ -178,6 +178,9 @@ type Ticket struct {
 	PendingApproval string `json:"pendingApproval,omitempty"`
 	// Stats are the Ticket's performance numbers, updated in the same transaction as the command that causes them.
 	Stats TicketStats `json:"stats"`
+	// SessionCosts is, per runtime session, the cumulative cost it last reported: a runtime reports a session's total
+	// cost on every turn, and a resumed process carries it on, so only the growth is added to Stats.CostUSD.
+	SessionCosts map[string]float64 `json:"sessionCosts,omitempty"`
 }
 
 // Trigger is one immutable event produced by a source; Text is untrusted external data.
