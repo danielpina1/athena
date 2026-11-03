@@ -2,11 +2,13 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 
+	"github.com/danielpina1/athena/internal/cli"
 	"github.com/danielpina1/athena/internal/node"
 )
 
@@ -41,8 +43,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runMCP(args[1:], stderr)
 	case "server", "task", "status", "logs", "reply", "stop", "retry",
 		"approvals", "approve", "deny":
-		fmt.Fprintf(stderr, "athena %s: not implemented\n", cmd)
-		return 1
+		return cli.Run(context.Background(), cmd, args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "athena: unknown command %q\n", cmd)
 		return 2

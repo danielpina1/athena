@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -37,15 +38,34 @@ func TestNoArgs(t *testing.T) {
 	}
 }
 
-func TestNotImplementedSubcommands(t *testing.T) {
-	for _, cmd := range []string{"server", "task", "status", "logs", "reply", "stop", "retry", "approvals", "approve", "deny"} {
-		var out, errb bytes.Buffer
-		if code := run([]string{cmd}, &out, &errb); code != 1 {
-			t.Errorf("%s: exit code = %d, want 1", cmd, code)
+func TestOwnerCommandsWired(t *testing.T) {
+	dir := t.TempDir()
+	sock := filepath.Join(dir, "athena.sock")
+	for _, cmd := range []string{"task", "status", "logs", "reply", "stop", "retry", "approvals", "approve", "deny"} {
+		args := []string{cmd, "--state-dir", dir}
+		switch cmd {
+		case "task", "logs", "stop", "retry", "approve", "deny":
+			args = append(args, "x")
+		case "reply":
+			args = append(args, "T-1", "hi")
 		}
-		if want := "athena " + cmd + ": not implemented\n"; errb.String() != want {
+		var out, errb bytes.Buffer
+		if code := run(args, &out, &errb); code != 1 {
+			t.Errorf("%s: exit code = %d, want 1 (stderr %q)", cmd, code, errb.String())
+		}
+		if want := "athena server is not running (no " + sock + ")\n"; errb.String() != want {
 			t.Errorf("%s: stderr = %q, want %q", cmd, errb.String(), want)
 		}
+	}
+}
+
+func TestServerUsage(t *testing.T) {
+	var out, errb bytes.Buffer
+	if code := run([]string{"server", "--state-dir", t.TempDir(), "extra"}, &out, &errb); code != 2 {
+		t.Fatalf("exit code = %d, want 2", code)
+	}
+	if !strings.Contains(errb.String(), "usage: athena server") {
+		t.Fatalf("stderr = %q, want usage", errb.String())
 	}
 }
 
