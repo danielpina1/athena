@@ -118,6 +118,8 @@ New in Athena (additions to the domain, not changes):
 
 Each Assignment runs in one long-lived **worker session** on one node, in a per-Ticket working directory under the node's execution root (default `<stateDir>/work/<ticket-short-name>`), as in the reference.
 
+**Parallel Tickets on the same repository** (owner asked): a Ticket that targets a repository never runs in the owner's checkout. The node creates a **git worktree** for it from the node's clone (`git worktree add -b athena/<ticket-id> <work-root>/<ticket-short-name> <base>`; base = the repository's default branch, freshly fetched), so any number of Tickets can work on the same repository at once, each on its own branch, and each delivers its own PR. When a Ticket ends, its worktree is removed (`git worktree remove`) after its branch is pushed or the Ticket is dropped; the branch is kept until its PR closes. Merge conflicts between parallel Tickets surface on their PRs and are resolved by the later Ticket's session (rebase), escalating to a person when a resolution needs judgment.
+
 | | Claude Code | Codex |
 | --- | --- | --- |
 | Process | `claude -p --input-format stream-json --output-format stream-json --verbose` | `codex app-server` (JSON-RPC over stdio — the interface the official Codex SDK and IDE extensions use) |
