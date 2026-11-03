@@ -8,7 +8,10 @@
 //	ATHENA_FAKE_REPEAT             replay the fixture this many times (default 1)
 //	ATHENA_FAKE_STDIN_LOG          file every stdin line is appended to
 //	ATHENA_FAKE_ARGS_LOG           file receiving {"args":[...],"env":{ATHENA_*}} as JSON
+//	ATHENA_FAKE_ARGS_APPEND        file receiving the same record as one JSON line per invocation (appended)
 //	ATHENA_FAKE_EXIT_MID_TURN      when set, replay half of the fixture, then exit 3
+//	ATHENA_FAKE_EXIT_MID_TURN_ONCE path of a marker file: the first invocation that finds it missing creates it
+//	                               and behaves as ATHENA_FAKE_EXIT_MID_TURN; later ones replay normally
 //	ATHENA_FAKE_IGNORE_STDIN_CLOSE when set, keep running after stdin reaches EOF
 //	ATHENA_FAKE_NO_READ_STDIN      when set, never read stdin (a hung child)
 package main
@@ -24,18 +27,31 @@ import (
 )
 
 func main() {
-	if p := os.Getenv("ATHENA_FAKE_ARGS_LOG"); p != "" {
-		rec := struct {
-			Args []string          `json:"args"`
-			Env  map[string]string `json:"env"`
-		}{Args: os.Args[1:], Env: map[string]string{}}
-		for _, kv := range os.Environ() {
-			if k, v, ok := strings.Cut(kv, "="); ok && strings.HasPrefix(k, "ATHENA_") {
-				rec.Env[k] = v
-			}
+	rec := struct {
+		Args []string          `json:"args"`
+		Env  map[string]string `json:"env"`
+	}{Args: os.Args[1:], Env: map[string]string{}}
+	for _, kv := range os.Environ() {
+		if k, v, ok := strings.Cut(kv, "="); ok && strings.HasPrefix(k, "ATHENA_") {
+			rec.Env[k] = v
 		}
-		b, _ := json.Marshal(rec)
+	}
+	b, _ := json.Marshal(rec)
+	if p := os.Getenv("ATHENA_FAKE_ARGS_LOG"); p != "" {
 		_ = os.WriteFile(p, b, 0o600)
+	}
+	if p := os.Getenv("ATHENA_FAKE_ARGS_APPEND"); p != "" {
+		if f, err := os.OpenFile(p, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err == nil {
+			_, _ = f.Write(append(b, '\n'))
+			_ = f.Close()
+		}
+	}
+	exitMidTurn := os.Getenv("ATHENA_FAKE_EXIT_MID_TURN") != ""
+	if p := os.Getenv("ATHENA_FAKE_EXIT_MID_TURN_ONCE"); p != "" {
+		if f, err := os.OpenFile(p, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600); err == nil {
+			_ = f.Close()
+			exitMidTurn = true
+		}
 	}
 
 	if os.Getenv("ATHENA_FAKE_NO_READ_STDIN") != "" {
@@ -64,7 +80,7 @@ func main() {
 			}
 			if !replayed && !strings.Contains(line, `"control_request"`) {
 				replayed = true
-				replay(out)
+				replay(out, exitMidTurn)
 			}
 		}
 		if err != nil {
@@ -82,7 +98,7 @@ func main() {
 	}
 }
 
-func replay(out *bufio.Writer) {
+func replay(out *bufio.Writer, exitMidTurn bool) {
 	path := os.Getenv("ATHENA_FAKE_FIXTURE")
 	if path == "" {
 		return
@@ -96,7 +112,7 @@ func replay(out *bufio.Writer) {
 	if v, err := strconv.Atoi(os.Getenv("ATHENA_FAKE_REPEAT")); err == nil && v > 0 {
 		n = v
 	}
-	if os.Getenv("ATHENA_FAKE_EXIT_MID_TURN") != "" {
+	if exitMidTurn {
 		half := lines[:len(lines)/2]
 		for _, l := range half {
 			_, _ = out.WriteString(l)

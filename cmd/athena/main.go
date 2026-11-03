@@ -2,6 +2,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -36,8 +37,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return 2
 		}
 		return node.RunHook(args[1], stdin, stdout, stderr, os.Getenv("ATHENA_SOCKET"))
+	case "mcp":
+		return runMCP(args[1:], stderr)
 	case "server", "task", "status", "logs", "reply", "stop", "retry",
-		"approvals", "approve", "deny", "mcp":
+		"approvals", "approve", "deny":
 		fmt.Fprintf(stderr, "athena %s: not implemented\n", cmd)
 		return 1
 	default:
@@ -45,3 +48,25 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 }
+
+// runMCP implements `athena mcp --ticket <id>`, the stdio MCP server of one worker session.
+func runMCP(args []string, stderr io.Writer) int {
+	fs := flag.NewFlagSet("athena mcp", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	ticket := fs.String("ticket", "", "the Ticket whose session this server serves")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *ticket == "" || fs.NArg() > 0 {
+		fmt.Fprintln(stderr, "usage: athena mcp --ticket <id>")
+		return 2
+	}
+	if err := runMCPServer(*ticket, os.Getenv("ATHENA_SOCKET")); err != nil {
+		fmt.Fprintf(stderr, "athena mcp: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+// runMCPServer serves MCP on stdio; tests replace it.
+var runMCPServer = node.RunMCP

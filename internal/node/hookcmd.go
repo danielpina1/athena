@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"os"
 	"time"
 )
@@ -84,25 +83,8 @@ func RunHook(event string, stdin io.Reader, stdout, stderr io.Writer, socket str
 // askNode sends one request and waits for one response line.
 func askNode(socket string, req HookRequest) (HookResponse, error) {
 	var resp HookResponse
-	if socket == "" {
-		return resp, errors.New("ATHENA_SOCKET is not set")
-	}
-	conn, err := net.DialTimeout("unix", socket, dialTimeout)
-	if err != nil {
-		return resp, fmt.Errorf("connect %s: %w", socket, err)
-	}
-	defer conn.Close()
-	line, err := json.Marshal(req)
-	if err != nil {
-		return resp, err
-	}
-	if _, err := conn.Write(append(line, '\n')); err != nil {
-		return resp, fmt.Errorf("send request: %w", err)
-	}
-	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
-		return resp, fmt.Errorf("read response: %w", err)
-	}
-	return resp, nil
+	err := callNode(socket, req, &resp)
+	return resp, err
 }
 
 // writeOutput renders resp in the output shape of the event.
