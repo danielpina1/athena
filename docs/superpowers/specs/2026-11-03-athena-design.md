@@ -335,7 +335,7 @@ Measured from plan 1 onward by an in-process metrics core (`internal/metrics`: c
 | Router | decisions per hour, decision latency, tokens per decision |
 | Resources | RSS, CPU, goroutines per process; disk use of work roots; GPU utilization/VRAM (local inference) |
 
-**Performance budgets, enforced** (the §2 efficiency targets become tests): `make bench` runs Go benchmarks and an end-to-end harness with a fake runtime and asserts: hook decision p99 < 10 ms; engine command p99 < 5 ms; dispatch latency p99 < 100 ms (excluding model time); dashboard action → session input p95 < 250 ms (plan 3+); node idle RSS < 30 MB, control server < 100 MB. Results are stored as a baseline in the repo; CI fails on any budget breach or a > 10% regression against the baseline.
+**Performance budgets, enforced** (the §2 efficiency targets become tests): `make bench` runs Go benchmarks and an end-to-end harness with a fake runtime and asserts: hook decision p99 < 10 ms; engine command p99 < 5 ms; dispatch latency p99 < 100 ms (excluding model time, and — for repository Tickets — excluding the external `git worktree add` process, whose cost scales with repository size; raw repository dispatch is still guarded by the regression rule); dashboard action → session input p95 < 250 ms (plan 3+); node idle RSS < 30 MB, control server < 100 MB. Results are stored as a baseline in the repo; CI fails on any budget breach or a > 10% regression against the baseline.
 
 **Surfaces**: plan 1 ships `athena metrics` (current values and percentiles over the last 1 h / 24 h) and per-Ticket stats in `athena status <id>`; plan 9 adds the dashboard Performance page (scoreboard, latency percentiles over time, cost and attention trends) and Prometheus export of the same metrics.
 
