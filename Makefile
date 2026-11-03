@@ -1,0 +1,9 @@
+.PHONY: check build
+
+check:
+	go vet ./...
+	go test -race ./...
+	CGO_ENABLED=0 go build ./...
+
+build:
+	CGO_ENABLED=0 go build -o bin/athena ./cmd/athena
