@@ -40,6 +40,9 @@ type RuleContext struct {
 	// `pip install` is routine. Commands that activate or call a venv
 	// themselves are recognised from the command text.
 	VenvActive bool
+
+	// tainted names the expandable variables a Bash command assigns or may change; set by bashWriteRule.
+	tainted map[string]bool
 }
 
 // Rule names reported in Decision.Rule.
@@ -161,6 +164,12 @@ func relWithin(root, p string) string {
 		p = p[size:]
 	}
 	return strings.TrimLeft(p, string(filepath.Separator))
+}
+
+// otherTilde reports a ~ form absPath does not understand (~user, ~+, ~-): it names a directory this process cannot
+// resolve, so it must not be read as relative to the ticket directory.
+func otherTilde(p string) bool {
+	return strings.HasPrefix(p, "~") && p != "~" && !strings.HasPrefix(p, "~/")
 }
 
 // absPath expands ~ and makes p absolute relative to the ticket dir. It does
@@ -538,6 +547,9 @@ func writeRule(ctx RuleContext, in map[string]any) (Decision, bool) {
 	if ctx.TicketDir == "" {
 		return escalate(ruleWrite, "no ticket directory to confine writes to"), true
 	}
+	if otherTilde(p) {
+		return escalate(ruleWrite, "write target "+p+" cannot be resolved"), true
+	}
 	target, ok := realpath(ctx.absPath(p))
 	if !ok {
 		return escalate(ruleWrite, "write target "+p+" cannot be resolved"), true
@@ -622,6 +634,10 @@ func (c RuleContext) expandVars(p, dir string) (string, bool) {
 	out := shellVarRe.ReplaceAllStringFunc(p, func(m string) string {
 		name := strings.Trim(m, "${}")
 		v := ""
+		if c.tainted[name] {
+			ok = false
+			return ""
+		}
 		switch name {
 		case "ATHENA_DIR":
 			v = c.TicketDir
@@ -642,6 +658,9 @@ func (c RuleContext) expandVars(p, dir string) (string, bool) {
 func (c RuleContext) resolveFrom(p, dir string) (string, bool) {
 	p, ok := c.expandVars(p, dir)
 	if !ok {
+		return "", false
+	}
+	if otherTilde(p) {
 		return "", false
 	}
 	p = c.absPathIn(p, dir)
@@ -751,10 +770,30 @@ func (c RuleContext) changeDir(args []string, dir string) string {
 	return r
 }
 
+var (
+	expandable   = []string{"ATHENA_DIR", "PWD", "HOME"}
+	varChangeCmd = `export|declare|typeset|local|readonly|read|unset|for|getopts|mapfile|readarray|eval|printf`
+)
+
+// taintedVars returns the expandable variables the command assigns (NAME=, NAME+=, also after env or export) or hands
+// to a builtin that can change them: their value in the command is not the one Athena set.
+func taintedVars(command string) map[string]bool {
+	out := map[string]bool{}
+	for _, n := range expandable {
+		assign := regexp.MustCompile(`\b` + n + `\s*\+?=`)
+		builtin := regexp.MustCompile(`(?:^|[\s;&|(])(?:` + varChangeCmd + `)\s[^;&|\n]*\b` + n + `\b`)
+		if assign.MatchString(command) || builtin.MatchString(command) {
+			out[n] = true
+		}
+	}
+	return out
+}
+
 // bashWriteRule judges a Bash command's write targets like writeRule judges a Write tool call, but over all of them:
 // a target in .athena denies the command even when another target only needs an approval. A target it cannot
 // resolve (an unknown variable, a command substitution, a directory a cd made unknown) escalates.
 func bashWriteRule(ctx RuleContext, command string) (Decision, bool) {
+	ctx.tainted = taintedVars(command)
 	var base string
 	if ctx.TicketDir != "" {
 		base, _ = realpath(ctx.TicketDir)
