@@ -244,3 +244,27 @@ func TestPragmas(t *testing.T) {
 		t.Fatalf("journal_mode=%s synchronous=%d foreign_keys=%d, want wal/2/1", mode, sync, fk)
 	}
 }
+
+func TestOpenRelativePath(t *testing.T) {
+	for _, rel := range []string{
+		filepath.Join("state", "a.db"),
+		filepath.Join("my state", "a b#c?d.db"),
+	} {
+		t.Run(rel, func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			s, err := Open(rel)
+			if err != nil {
+				t.Fatalf("Open(%q): %v", rel, err)
+			}
+			defer s.Close()
+			want := sampleTicket("t1")
+			put(t, s, want)
+			if got := get(t, s, "t1"); !reflect.DeepEqual(got, want) {
+				t.Fatalf("round trip mismatch: %+v", got)
+			}
+			if _, err := os.Stat(rel); err != nil {
+				t.Fatalf("db not at relative path: %v", err)
+			}
+		})
+	}
+}

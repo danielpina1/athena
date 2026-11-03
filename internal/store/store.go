@@ -42,6 +42,11 @@ type Store struct {
 // Open opens (creating if needed) the database at path and applies pending migrations.
 // The parent directory is created 0700 and the file 0600.
 func Open(path string) (*Store, error) {
+	// An absolute path is required for the file: URI below (a relative one would parse as an authority).
+	path, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("store: resolve path: %w", err)
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("store: create dir: %w", err)
 	}
