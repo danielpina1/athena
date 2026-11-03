@@ -264,6 +264,23 @@ func TestCLICommands(t *testing.T) {
 	}
 }
 
+func TestTaskResolvesRelativeDirAgainstClient(t *testing.T) {
+	dir := startServer(t)
+	cwd := t.TempDir()
+	if err := os.Mkdir(filepath.Join(cwd, "proj"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(cwd)
+	code, out, errOut := athena(context.Background(), "task", "Work in proj", "--dir", "proj", "--state-dir", dir)
+	if code != 0 {
+		t.Fatalf("task: exit %d, stderr %q", code, errOut)
+	}
+	d := detail(t, dir, strings.TrimSpace(out))
+	if want := filepath.Join(cwd, "proj"); d.SourceDir != want {
+		t.Fatalf("source dir = %q, want %q (resolved against the client's directory)", d.SourceDir, want)
+	}
+}
+
 func TestApproveFromCLI(t *testing.T) {
 	dir := startServer(t)
 	ctx := context.Background()

@@ -34,7 +34,7 @@ var ErrExited = errors.New("claude: process has exited")
 // Options configures one Claude Code session.
 type Options struct {
 	Binary             string // default "claude"
-	Dir                string // working directory; the transcript lives in <Dir>/.athena
+	Dir                string // working directory; the transcript lives in <Dir>/.athena unless TranscriptPath is set
 	Model              string
 	ResumeID           string
 	SettingsPath       string // --settings; the only settings source Athena allows
@@ -45,6 +45,9 @@ type Options struct {
 	// CloseGrace is how long Close waits after closing stdin before it kills
 	// the process. Default 10s.
 	CloseGrace time.Duration
+	// TranscriptPath, when set, is the file every stdout line is appended to instead of <Dir>/.athena/transcript.jsonl.
+	// Its directory is created 0700 and the file 0600.
+	TranscriptPath string
 }
 
 // buildArgs returns the argument list for o.
@@ -127,15 +130,22 @@ func Start(ctx context.Context, o Options) (*Session, error) {
 	}
 
 	adir := filepath.Join(o.Dir, ".athena")
-	if err := os.MkdirAll(adir, 0o700); err != nil {
-		return nil, fmt.Errorf("claude: create %s: %w", adir, err)
+	if err := privateDir(adir); err != nil {
+		return nil, err
 	}
-	if err := os.Chmod(adir, 0o700); err != nil {
-		return nil, fmt.Errorf("claude: chmod %s: %w", adir, err)
+	trPath := o.TranscriptPath
+	if trPath == "" {
+		trPath = filepath.Join(adir, "transcript.jsonl")
+	} else if err := privateDir(filepath.Dir(trPath)); err != nil {
+		return nil, err
 	}
-	tr, err := os.OpenFile(filepath.Join(adir, "transcript.jsonl"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	tr, err := os.OpenFile(trPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("claude: open transcript: %w", err)
+	}
+	if err := tr.Chmod(0o600); err != nil {
+		tr.Close()
+		return nil, fmt.Errorf("claude: chmod transcript: %w", err)
 	}
 
 	s := &Session{
@@ -192,6 +202,17 @@ func Start(ctx context.Context, o Options) (*Session, error) {
 		close(s.done)
 	}()
 	return s, nil
+}
+
+// privateDir creates dir 0700, or makes an existing one 0700.
+func privateDir(dir string) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("claude: create %s: %w", dir, err)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return fmt.Errorf("claude: chmod %s: %w", dir, err)
+	}
+	return nil
 }
 
 func (s *Session) wait() {

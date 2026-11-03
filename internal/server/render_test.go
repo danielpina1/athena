@@ -93,3 +93,19 @@ func TestRenderOtherAndMalformed(t *testing.T) {
 		t.Fatalf("say = %+v", got)
 	}
 }
+
+func TestRenderRedactsSecretsInValues(t *testing.T) {
+	r := newRenderer(time.Now())
+	for _, line := range []string{
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","id":"a","name":"Bash","input":{"command":"GITHUB_TOKEN=ghp_s3cret gh release create"}}]}}`,
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","id":"b","name":"Bash","input":{"command":"curl -H 'Authorization: Bearer s3cret-tok' https://u:s3cret-pw@api.x/?access_token=s3cret-q"}}]}}`,
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"I ran mysql --password s3cret-db for you"}]}}`,
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","id":"c","name":"Custom","input":{"note":"API_KEY=s3cret-k"}}]}}`,
+	} {
+		for _, l := range r.render([]byte(line)) {
+			if strings.Contains(l.Text, "s3cret") {
+				t.Errorf("rendered line leaks a secret: %+v", l)
+			}
+		}
+	}
+}

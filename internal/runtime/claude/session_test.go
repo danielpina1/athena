@@ -556,3 +556,40 @@ func TestCloseDoesNotHangOnBlockedSend(t *testing.T) {
 	}
 	collect(t, s)
 }
+
+func TestTranscriptPathAppendsAcrossSessions(t *testing.T) {
+	dir := t.TempDir()
+	tr := filepath.Join(t.TempDir(), "transcripts", "T-0001.jsonl")
+	for i := 0; i < 2; i++ {
+		s, err := Start(context.Background(), withStubs(t, Options{
+			Binary:         fakeBinary(t),
+			Dir:            dir,
+			TranscriptPath: tr,
+			Env:            []string{"ATHENA_FAKE_FIXTURE=" + fixtureAbs(t, "simple-turn.jsonl")},
+		}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Send("go"); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Close(); err != nil {
+			t.Fatal(err)
+		}
+		collect(t, s)
+		_ = s.Wait()
+	}
+	fixture := lines(t, fixtureAbs(t, "simple-turn.jsonl"))
+	if got := lines(t, tr); !reflect.DeepEqual(got, append(append([]string{}, fixture...), fixture...)) {
+		t.Fatalf("transcript has %d lines, want %d (both sessions appended)", len(got), 2*len(fixture))
+	}
+	if st, _ := os.Stat(tr); st.Mode().Perm() != 0o600 {
+		t.Fatalf("transcript mode = %o", st.Mode().Perm())
+	}
+	if st, _ := os.Stat(filepath.Dir(tr)); st.Mode().Perm() != 0o700 {
+		t.Fatalf("transcript dir mode = %o", st.Mode().Perm())
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".athena", "transcript.jsonl")); !os.IsNotExist(err) {
+		t.Fatalf("a transcript was also written in the working dir: %v", err)
+	}
+}

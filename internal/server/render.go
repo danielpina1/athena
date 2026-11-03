@@ -9,6 +9,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/danielpina1/athena/internal/redact"
 	"github.com/danielpina1/athena/internal/runtime/claude"
 )
 
@@ -66,7 +67,8 @@ func (r *renderer) render(line []byte) []LogLine {
 			subtype = blockTypes(head.Message.Content)
 		}
 		kind, text := describe(ev, head.Type, subtype)
-		out = append(out, LogLine{At: r.last, Kind: kind, Text: text})
+		// Values were masked before they were cut; a last pass catches anything a cut put back together.
+		out = append(out, LogLine{At: r.last, Kind: kind, Text: redact.String(text)})
 	}
 	return out
 }
@@ -93,7 +95,7 @@ func describe(ev claude.Event, typ, subtype string) (kind, text string) {
 	case claude.Init:
 		return "init", strings.TrimSpace(fmt.Sprintf("session %s model %s", e.SessionID, e.Model))
 	case claude.AssistantText:
-		return "say", truncate(oneLine(e.Text), sayMaxRunes)
+		return "say", clip(e.Text, sayMaxRunes)
 	case claude.ToolUse:
 		if s := summarizeInput(e.Input); s != "" {
 			return "tool", e.Name + " " + s
@@ -129,7 +131,7 @@ func summarizeInput(raw json.RawMessage) string {
 	}
 	for _, k := range primaryKeys {
 		if v, ok := in[k].(string); ok && v != "" && !sensitiveKey(k) {
-			return truncate(oneLine(v), summaryMaxRunes)
+			return clip(v, summaryMaxRunes)
 		}
 	}
 	keys := make([]string, 0, len(in))
@@ -145,7 +147,7 @@ func summarizeInput(raw json.RawMessage) string {
 		default:
 			switch v := in[k].(type) {
 			case string:
-				parts = append(parts, k+"="+oneLine(v))
+				parts = append(parts, k+"="+redact.String(oneLine(v)))
 			case float64, bool:
 				parts = append(parts, fmt.Sprintf("%s=%v", k, v))
 			case nil:
@@ -158,14 +160,18 @@ func summarizeInput(raw json.RawMessage) string {
 	return truncate(strings.Join(parts, " "), summaryMaxRunes)
 }
 
-// sensitiveWords mark a key whose value may be a secret.
-var sensitiveWords = []string{"env", "token", "secret", "password", "passwd", "credential", "auth", "cookie", "key", "private"}
-
-// sensitiveKey reports whether a key is env-like: it names environment variables or a secret.
+// sensitiveKey reports whether a key is env-like: it holds environment variables ("env", "environment") or its name
+// looks secret (redact.SecretName: token, password, key, ... on word boundaries).
 func sensitiveKey(k string) bool {
-	lk := strings.ToLower(k)
-	return slices.ContainsFunc(sensitiveWords, func(w string) bool { return strings.Contains(lk, w) })
+	switch strings.ToLower(k) {
+	case "env", "environ", "environment":
+		return true
+	}
+	return redact.SecretName(k)
 }
+
+// clip makes s one line, masks the secrets in it and cuts it to n runes.
+func clip(s string, n int) string { return truncate(redact.String(oneLine(s)), n) }
 
 // oneLine collapses all whitespace runs, newlines included, into single spaces.
 func oneLine(s string) string { return strings.Join(strings.Fields(s), " ") }

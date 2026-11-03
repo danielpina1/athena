@@ -165,10 +165,19 @@ func (c *command) task(args []string) int {
 	if !ok {
 		return code
 	}
+	// The server runs elsewhere: a relative directory means this command's working directory.
+	taskDir := *dir
+	if taskDir != "" {
+		abs, err := filepath.Abs(taskDir)
+		if err != nil {
+			return c.fail(fmt.Errorf("athena task: directory %s: %w", taskDir, err))
+		}
+		taskDir = abs
+	}
 	var out struct {
 		ID string `json:"id"`
 	}
-	if err := call(c.stateDir, server.Request{Op: server.OpSubmit, Text: strings.Join(pos, " "), Dir: *dir, Model: *model}, &out); err != nil {
+	if err := call(c.stateDir, server.Request{Op: server.OpSubmit, Text: strings.Join(pos, " "), Dir: taskDir, Model: *model}, &out); err != nil {
 		return c.fail(err)
 	}
 	fmt.Fprintln(c.stdout, out.ID)

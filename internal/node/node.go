@@ -571,6 +571,9 @@ func (r *runner) run() {
 	if resumeID == "" {
 		resumeID = previousSessionID(s.t, s.a.ID)
 	}
+	if recovering {
+		r.seedUnread()
+	}
 	model := n.cfg.Model
 	if s.t.Execution != nil && s.t.Execution.Model != "" {
 		model = s.t.Execution.Model
@@ -587,6 +590,7 @@ func (r *runner) run() {
 			MCPConfigPath:      filepath.Join(adir, "mcp.json"),
 			AppendSystemPrompt: prompts.Worker,
 			Env:                env,
+			TranscriptPath:     n.transcriptPath(s.t.ID),
 		})
 		if err != nil {
 			r.fail("start claude: " + err.Error())
@@ -704,6 +708,23 @@ func (r *runner) deliver(sess *claude.Session) {
 		return
 	}
 	r.markSent(ids)
+}
+
+// seedUnread takes over, when a new runner resumes a running Assignment (a node restart, or a relaunch after its
+// process gave up), the trigger Inputs an earlier process of the Assignment received but no step of it read: they may
+// never have reached the session's history, so the first message sends them again, once, after the recovery note.
+func (r *runner) seedUnread() {
+	t, _, err := r.eng.Ticket(r.s.t.ID)
+	if err != nil {
+		r.log.Error("read ticket", "error", err)
+		t = r.s.t
+	}
+	for _, in := range t.Inputs {
+		if in.Kind == core.InputTrigger && in.DeliveredTo == r.s.a.ID && in.ReadAt == nil && !slices.Contains(t.Undelivered, in.ID) && !r.sent[in.ID] {
+			r.sent[in.ID] = true
+			r.unread = append(r.unread, in.ID)
+		}
+	}
 }
 
 // pending returns the Ticket's waiting Inputs not yet sent to this Assignment, in order.
@@ -835,6 +856,21 @@ func renderInputs(t core.Ticket, ids []string) string {
 }
 
 // --- directories ---
+
+// TranscriptPath returns the file a Ticket's sessions append their stream-json output to, across Assignments:
+// <stateDir>/transcripts/<ticket id>.jsonl. It lives outside the Ticket's directory, so it survives the removal of a
+// worktree, and in the state directory, which sessions may not read.
+func TranscriptPath(stateDir, ticketID string) string {
+	return filepath.Join(stateDir, "transcripts", ticketID+".jsonl")
+}
+
+// transcriptPath is the Ticket's TranscriptPath, or "" (the session's own default) without a state directory.
+func (n *Node) transcriptPath(ticketID string) string {
+	if n.cfg.StateDir == "" {
+		return ""
+	}
+	return TranscriptPath(n.cfg.StateDir, ticketID)
+}
 
 // TicketDir returns a Ticket's directory: <workRoot>/<slug of its title>-<lowercased ticket id>.
 func TicketDir(workRoot string, t core.Ticket) string {

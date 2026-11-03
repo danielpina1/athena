@@ -15,6 +15,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/danielpina1/athena/internal/core"
+	"github.com/danielpina1/athena/internal/redact"
 )
 
 const (
@@ -239,7 +240,7 @@ func (n *Node) escalate(ctx context.Context, s *session, tool string, input json
 	}
 }
 
-// summarize says in a line what an escalated tool call would do.
+// summarize says in a line what an escalated tool call would do, with secrets in it masked.
 func summarize(tool string, input json.RawMessage, reason string) string {
 	var in map[string]any
 	_ = json.Unmarshal(input, &in)
@@ -250,7 +251,7 @@ func summarize(tool string, input json.RawMessage, reason string) string {
 			break
 		}
 	}
-	s := reason + " — " + what
+	s := redact.String(reason + " — " + what)
 	if utf8.RuneCountInString(s) > summaryMaxRunes {
 		r := []rune(s)
 		s = string(r[:summaryMaxRunes-1]) + "…"

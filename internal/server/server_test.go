@@ -2,6 +2,7 @@ package server
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -491,8 +492,10 @@ func TestLogsFollowEndsWithTicket(t *testing.T) {
 	s.stop()
 }
 
-// Review Focus 2: a restart resumes the running Assignment's session and delivers what waited for it exactly once.
+// Review Focus 2: a restart resumes the running Assignment's session and sends it, once, what may not have reached
+// its history: the Inputs the old process received but never read, then those still waiting.
 func TestRestartResumesRunningAssignment(t *testing.T) {
+	// The first process takes the task but never runs a step: the task stays unread.
 	fake := newFakeEnv(t, openTurnFixture(t))
 	dir := newStateDir(t)
 	s := startServer(t, dir)
@@ -512,36 +515,50 @@ func TestRestartResumesRunningAssignment(t *testing.T) {
 		if len(tk.Undelivered) != 1 || tk.LatestAssignment().State != core.AssignmentRunning {
 			t.Fatalf("before restart: undelivered %v, assignment %+v", tk.Undelivered, tk.LatestAssignment())
 		}
+		if in := tk.Inputs[0]; in.DeliveredTo != a.ID || in.ReadAt != nil {
+			t.Fatalf("before restart: task input %+v, want delivered and unread", in)
+		}
 	})
 
+	// The resumed process runs a step, so it reads what it is sent.
+	t.Setenv("ATHENA_FAKE_FIXTURE", steppingTurnFixture(t))
 	s = startServer(t, dir)
 	eventually(t, "a second claude start", func() bool { return len(fake.invocations(t)) == 2 })
 	if rid, ok := argValue(fake.invocations(t)[1], "--resume"); !ok || rid != fixtureSessionID {
 		t.Fatalf("second start args = %v, want --resume %s", fake.invocations(t)[1], fixtureSessionID)
 	}
-	eventually(t, "follow-up delivered", func() bool {
-		d := s.detail(id)
-		return d.Undelivered == 0 && strings.Contains(fake.stdin(t), "follow-up-c3d4")
+	eventually(t, "both inputs read", func() bool {
+		var read bool
+		// The store allows a reader beside the running server.
+		offline(t, dir, func(e *core.Engine) {
+			tk, _, _ := e.Ticket(id)
+			read = len(tk.Undelivered) == 0 && len(tk.Inputs) == 2 && tk.Inputs[0].ReadAt != nil && tk.Inputs[1].ReadAt != nil
+		})
+		return read
 	})
-	if !strings.Contains(fake.stdin(t), recoveryText) {
-		t.Errorf("no recovery note in stdin:\n%s", fake.stdin(t))
-	}
-	d := s.detail(id)
-	if len(d.Assignments) != 1 || d.Assignments[0].ID != a.ID || d.Stage != "working" {
-		t.Fatalf("after restart: %+v", d)
-	}
-
-	// A further restart sends nothing again.
-	s.stop()
-	s = startServer(t, dir)
-	eventually(t, "a third claude start", func() bool { return len(fake.invocations(t)) == 3 })
-	s.running(id)
-	time.Sleep(300 * time.Millisecond)
 	s.stop()
 	in := fake.stdin(t)
-	for _, text := range []string{"body-a1b2", "follow-up-c3d4"} {
-		if n := strings.Count(in, text); n != 1 {
-			t.Errorf("%q sent %d times, want exactly 1:\n%s", text, n, in)
+	second := in[strings.Index(in, recoveryText):]
+	note, task, follow := strings.Index(second, recoveryText), strings.Index(second, "body-a1b2"), strings.Index(second, "follow-up-c3d4")
+	if !(note >= 0 && note < task && task < follow) {
+		t.Fatalf("resumed first message = %q, want the recovery note, then the unread task, then the follow-up", second)
+	}
+
+	// A further restart sends nothing again: everything is in the session's history now.
+	s = startServer(t, dir)
+	n := len(fake.invocations(t))
+	eventually(t, "another claude start", func() bool { return len(fake.invocations(t)) == n+1 })
+	s.running(id)
+	time.Sleep(300 * time.Millisecond)
+	d := s.detail(id)
+	if len(d.Assignments) != 1 || d.Assignments[0].ID != a.ID || d.Stage != "working" {
+		t.Fatalf("after restarts: %+v", d)
+	}
+	s.stop()
+	in = fake.stdin(t)
+	for text, want := range map[string]int{"body-a1b2": 2, "follow-up-c3d4": 1} {
+		if got := strings.Count(in, text); got != want {
+			t.Errorf("%q sent %d times, want %d (once more after the first restart, never after):\n%s", text, got, want, in)
 		}
 	}
 	offline(t, dir, func(e *core.Engine) {
@@ -552,6 +569,28 @@ func TestRestartResumesRunningAssignment(t *testing.T) {
 			}
 		}
 	})
+}
+
+// steppingTurnFixture is a turn that runs one step (a tool use) and never ends.
+func steppingTurnFixture(t *testing.T) string {
+	t.Helper()
+	lines, err := os.ReadFile(claudeFixture(t, "simple-turn.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	all := strings.Split(string(lines), "\n")
+	out := all[0] + "\n"
+	for _, l := range all {
+		if strings.Contains(l, `"type":"assistant"`) && strings.Contains(l, `"tool_use"`) {
+			out += l + "\n"
+			break
+		}
+	}
+	p := filepath.Join(t.TempDir(), "stepping-turn.jsonl")
+	if err := os.WriteFile(p, []byte(out), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
 }
 
 func TestRestartStartsPendingAssignment(t *testing.T) {
@@ -633,12 +672,112 @@ func TestStageString(t *testing.T) {
 }
 
 func TestUserAndInternalErrors(t *testing.T) {
-	if r := errorResponse(&core.UserError{Msg: "nope"}, nil); r.OK || r.Error != "nope" {
+	var logBuf bytes.Buffer
+	log := slog.New(slog.NewJSONHandler(&logBuf, nil))
+	req := Request{Op: OpTicket, ID: "T-0007"}
+	if r := errorResponse(&core.UserError{Msg: "nope"}, log, req); r.OK || r.Error != "nope" {
 		t.Fatalf("user error = %+v", r)
 	}
-	if r := errorResponse(errors.New("disk on fire"), discardLogger()); r.OK || r.Error != "internal error: disk on fire" {
-		t.Fatalf("internal error = %+v", r)
+	if logBuf.Len() != 0 {
+		t.Fatalf("a user error was logged: %s", logBuf.String())
 	}
+	if r := errorResponse(errors.New("disk on fire at /secret/path"), log, req); r.OK || r.Error != "internal error" {
+		t.Fatalf("internal error = %+v, want a plain internal error", r)
+	}
+	for _, want := range []string{`"op":"ticket"`, `"ticket":"T-0007"`, "disk on fire"} {
+		if !strings.Contains(logBuf.String(), want) {
+			t.Errorf("log lacks %s: %s", want, logBuf.String())
+		}
+	}
+}
+
+func TestSubmitRequiresAbsoluteDir(t *testing.T) {
+	newFakeEnv(t, openTurnFixture(t))
+	dir := newStateDir(t)
+	startServer(t, dir)
+	r, err := call(dir, Request{Op: OpSubmit, Text: "x", Dir: "relative/dir"})
+	if err != nil || r.OK || !strings.Contains(r.Error, "absolute") {
+		t.Fatalf("submit with a relative dir = %+v, %v; want a refusal", r, err)
+	}
+}
+
+// R25a: no hook of a previous process can still wait for an Approval, so startup expires every pending one.
+func TestStartupExpiresPendingApprovals(t *testing.T) {
+	newFakeEnv(t, openTurnFixture(t))
+	dir := newStateDir(t)
+	var id, apID string
+	offline(t, dir, func(e *core.Engine) {
+		tk, err := e.SubmitOwnerTask("Waiting on a person", core.TaskOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		id = tk.ID
+		ap, err := e.RequestApproval(core.Approval{TicketID: id, AssignmentID: tk.LatestAssignment().ID, Tool: "Bash", Summary: "deploy"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		apID = ap.ID
+	})
+	s := startServer(t, dir)
+	var list []ApprovalView
+	s.ok(Request{Op: OpApprovals}, &list)
+	if len(list) != 0 {
+		t.Fatalf("pending approvals after startup = %+v", list)
+	}
+	if d := s.detail(id); d.Approval != nil || strings.HasPrefix(d.Stage, "person") {
+		t.Fatalf("ticket still waits for the approval: %+v", d)
+	}
+	if r, err := call(dir, Request{Op: OpAnswer, ID: apID, Approve: true}); err != nil || r.OK || !strings.Contains(r.Error, "expired") {
+		t.Fatalf("answer after startup = %+v, %v; want already expired", r, err)
+	}
+}
+
+// R23: the transcript lives in the state dir, so an ended Ticket whose worktree was removed still shows its log.
+func TestLogsSurviveWorktreeRemoval(t *testing.T) {
+	newFakeEnv(t, claudeFixture(t, "simple-turn.jsonl"))
+	dir := newStateDir(t)
+	repo := newRepo(t)
+	s := startServer(t, dir)
+	var sub struct {
+		ID string `json:"id"`
+	}
+	s.ok(Request{Op: OpSubmit, Text: "In a repo", Dir: repo}, &sub)
+	a := s.running(sub.ID)
+	wt := s.detail(sub.ID).Dir
+	if _, err := os.Stat(wt); err != nil {
+		t.Fatalf("worktree: %v", err)
+	}
+	eventually(t, "transcript written", func() bool { return len(s.logs(sub.ID, false)) > 0 })
+	var resp node.Response
+	nodeCall(t, dir, node.ReportRequest{Op: node.OpReport, Ticket: sub.ID, Assignment: a.ID, Status: "ready", Summary: "done"}, &resp)
+	if !resp.OK {
+		t.Fatalf("report = %+v", resp)
+	}
+	eventually(t, "worktree removed", func() bool {
+		_, err := os.Stat(wt)
+		return os.IsNotExist(err)
+	})
+	lines := s.logs(sub.ID, false)
+	if len(lines) == 0 || lines[0].Kind != "init" {
+		t.Fatalf("logs of the ended ticket = %+v, want its transcript", lines)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "transcripts", sub.ID+".jsonl")); err != nil {
+		t.Fatalf("transcript not in the state dir: %v", err)
+	}
+}
+
+func newRepo(t *testing.T) string {
+	t.Helper()
+	repo := t.TempDir()
+	for _, args := range [][]string{
+		{"init", "-q", "-b", "main"},
+		{"-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "init"},
+	} {
+		if out, err := exec.Command("git", append([]string{"-C", repo}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	return repo
 }
 
 func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }

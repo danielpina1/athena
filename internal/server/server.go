@@ -130,6 +130,7 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	}
 	eng := core.NewEngine(st.Repos(), n, time.Now, emit)
 	n.SetEngine(eng)
+	expirePendingApprovals(eng, logger)
 
 	nodeCtx, nodeCancel := context.WithCancel(context.Background())
 	defer nodeCancel()
@@ -166,7 +167,7 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	}
 	logger.Info("athena server started", "stateDir", stateDir, "pid", os.Getpid())
 
-	c := &control{eng: eng, workRoot: ncfg.WorkRoot, model: ncfg.Model, log: logger}
+	c := &control{stateDir: stateDir, eng: eng, workRoot: ncfg.WorkRoot, model: ncfg.Model, log: logger}
 	ctrlCtx, ctrlCancel := context.WithCancel(context.Background())
 	defer ctrlCancel()
 	var conns sync.WaitGroup
@@ -205,6 +206,23 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	conns.Wait()
 	// The deferred steps close the node, wait for its socket and close the store, in that order.
 	return runErr
+}
+
+// expirePendingApprovals expires every Approval still pending from a previous run: the hook that waited for it died
+// with that run's sessions, so nobody can act on an answer.
+func expirePendingApprovals(eng *core.Engine, log *slog.Logger) {
+	pending, err := eng.PendingApprovals()
+	if err != nil {
+		log.Error("startup: list pending approvals", "error", err)
+		return
+	}
+	for _, a := range pending {
+		if err := eng.ExpireApproval(a.ID); err != nil {
+			log.Error("startup: expire approval", "ticket", a.TicketID, "assignment", a.AssignmentID, "approval", a.ID, "error", err)
+			continue
+		}
+		log.Info("expired approval from a previous run", "ticket", a.TicketID, "assignment", a.AssignmentID, "approval", a.ID)
+	}
 }
 
 // recoverAssignments starts again every open Ticket's latest Assignment that is running or pending: the node resumes

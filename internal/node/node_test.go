@@ -931,3 +931,30 @@ func TestExecutorMethodsNeverBlock(t *testing.T) {
 	close(eng.release)
 	n.Close()
 }
+
+func TestTranscriptLivesInStateDir(t *testing.T) {
+	h := newHarness(t, nil)
+	tk := h.submit("Logged task", "")
+	h.running(tk.ID)
+	tr := TranscriptPath(h.cfg.StateDir, tk.ID)
+	if want := filepath.Join(h.cfg.StateDir, "transcripts", "T-0001.jsonl"); tr != want {
+		t.Fatalf("TranscriptPath = %q, want %q", tr, want)
+	}
+	h.eventually("transcript written", func() bool {
+		b, err := os.ReadFile(tr)
+		return err == nil && strings.Contains(string(b), fixtureSessionID)
+	})
+	if _, err := os.Stat(filepath.Join(TicketDir(h.cfg.WorkRoot, tk), ".athena", "transcript.jsonl")); !os.IsNotExist(err) {
+		t.Fatalf("transcript also written in the ticket dir: %v", err)
+	}
+}
+
+func TestApprovalSummaryRedactsSecrets(t *testing.T) {
+	got := summarize("Bash", json.RawMessage(`{"command":"GITHUB_TOKEN=ghp_s3cret make deploy --password hunter2"}`), "command needs approval (deploy)")
+	if strings.Contains(got, "ghp_s3cret") || strings.Contains(got, "hunter2") {
+		t.Fatalf("summary leaks a secret: %q", got)
+	}
+	if !strings.Contains(got, "make deploy") || !strings.Contains(got, "GITHUB_TOKEN=***") {
+		t.Fatalf("summary = %q", got)
+	}
+}

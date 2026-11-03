@@ -114,6 +114,7 @@ const (
 
 // control serves the control socket.
 type control struct {
+	stateDir string
 	eng      *core.Engine
 	workRoot string
 	model    string
@@ -152,28 +153,29 @@ func (c *control) serveConn(ctx context.Context, conn net.Conn) {
 			cancel()
 		}()
 		if err := c.logs(ctx, req, send); err != nil {
-			_ = send(errorResponse(err, c.log))
+			_ = send(errorResponse(err, c.log, req))
 		}
 		return
 	}
 	data, err := c.handle(req)
 	if err != nil {
-		_ = send(errorResponse(err, c.log))
+		_ = send(errorResponse(err, c.log, req))
 		return
 	}
 	_ = send(Response{OK: true, Data: data})
 }
 
-// errorResponse turns an error into a refusal: a UserError's own message, anything else an internal error (logged).
-func errorResponse(err error, log *slog.Logger) Response {
+// errorResponse turns an error into a refusal: a UserError's own message, anything else a plain "internal error" whose
+// detail goes only to the log.
+func errorResponse(err error, log *slog.Logger, req Request) Response {
 	var ue *core.UserError
 	if errors.As(err, &ue) {
 		return Response{Error: ue.Msg}
 	}
 	if log != nil {
-		log.Error("control request failed", "error", err)
+		log.Error("control request failed", "op", req.Op, "ticket", req.ID, "error", err)
 	}
-	return Response{Error: "internal error: " + err.Error()}
+	return Response{Error: "internal error"}
 }
 
 func userErrorf(format string, args ...any) error {
@@ -185,13 +187,13 @@ func (c *control) handle(req Request) (any, error) {
 	case OpPing:
 		return nil, nil
 	case OpSubmit:
+		// A relative directory would resolve against the server's working directory, not the client's.
 		dir := req.Dir
 		if dir != "" {
-			abs, err := filepath.Abs(dir)
-			if err != nil {
-				return nil, userErrorf("directory %s: %v", dir, err)
+			if !filepath.IsAbs(dir) {
+				return nil, userErrorf("directory %s must be an absolute path", dir)
 			}
-			dir = abs
+			dir = filepath.Clean(dir)
 		}
 		t, err := c.eng.SubmitOwnerTask(req.Text, core.TaskOptions{Dir: dir, Model: req.Model})
 		if err != nil {
@@ -286,11 +288,8 @@ func (c *control) logs(ctx context.Context, req Request, send func(Response) err
 	if err != nil {
 		return err
 	}
-	wd, err := node.WorkingDir(c.workRoot, t)
-	if err != nil {
-		return userErrorf("ticket %s has no directory: %v", t.ID, err)
-	}
-	path := filepath.Join(wd, ".athena", "transcript.jsonl")
+	// The node keeps the transcript in the state dir, so it outlives the Ticket's worktree.
+	path := node.TranscriptPath(c.stateDir, t.ID)
 	tl := &tail{path: path, r: newRenderer(t.CreatedAt)}
 	defer tl.close()
 	for {
