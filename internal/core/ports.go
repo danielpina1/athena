@@ -96,3 +96,55 @@ type Event struct {
 	At           time.Time
 	Data         map[string]any
 }
+
+// SourceScope tells the core which Threads a Source still listens to. Implementations route by the Source prefix of
+// the Thread key.
+type SourceScope interface {
+	// Listens reports whether the Source of the Thread key currently receives that Thread.
+	Listens(thread string) bool
+}
+
+// Gate is the Policy's judgement of one Trigger on its Thread.
+type Gate struct {
+	// Strength is explicit or inferred when the Trigger is admitted, empty when it is not.
+	Strength string `json:"strength,omitempty"`
+	// Basis records how the Trigger was admitted; it becomes the Mandate's Basis on accept.
+	Basis MandateBasis `json:"basis,omitzero"`
+	// Reason says why the Trigger was not admitted; it is zero when it was.
+	Reason Reason `json:"reason,omitzero"`
+}
+
+// RuleJudgement is an assessor's verdict on one enabled rule: whether the candidate matches it and the evidence.
+type RuleJudgement struct {
+	Name     string `json:"name"`
+	Matches  bool   `json:"matches"`
+	Evidence string `json:"evidence,omitempty"`
+}
+
+// Assessment is what the main Session returns for an inferred candidate: one judgement per enabled rule and its
+// direction.
+type Assessment struct {
+	Rules  []RuleJudgement `json:"rules"`
+	Accept bool            `json:"accept"`
+	Reason string          `json:"reason,omitempty"`
+}
+
+// Policy is a stateless snapshot of the settings that decide who may start work. It never changes after it is built;
+// a settings change produces a new Policy with a new Version.
+type Policy interface {
+	// Version identifies the rules, accept mode and Source parts the Policy was built from.
+	Version() string
+	// EvalTimeout is how long an Eval may run after its candidate reached the main Session.
+	EvalTimeout() time.Duration
+	// Gate judges a Trigger on its Thread, given the Tickets that may subscribe to the Thread.
+	Gate(t Trigger, th Thread, tickets []Ticket) Gate
+	// Revalidate reports whether an existing Mandate still holds before its Ticket resumes.
+	Revalidate(m Mandate) bool
+	// AdmitsInferred reports whether proactive work is accepted now: the accept mode is auto and the named rules,
+	// at least one, are all enabled.
+	AdmitsInferred(rules []string) bool
+	// Assess converts an Assessment of a candidate of the given strength into an Engine outcome: the Decision kind
+	// (accept or ignore), its reasons and whether an ignore records "would accept". An error means the assessment
+	// failed.
+	Assess(a Assessment, strength string) (kind string, reasons []Reason, wouldAccept bool, err error)
+}
