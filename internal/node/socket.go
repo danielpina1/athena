@@ -167,6 +167,8 @@ func (n *Node) handleHook(ctx context.Context, req HookRequest) HookResponse {
 	case EventPreToolUse, EventPermissionRequest:
 		resp := n.decide(ctx, s, req.Event, req.Input, start)
 		if resp.Verdict == VerdictDeny {
+			// A rule's, the owner's or an expiry's deny: the tool call fails, maybe beside a report in the same step.
+			s.noteDenial()
 			n.recordUsage(s, core.UsageDelta{HookDenials: 1})
 		}
 		return resp

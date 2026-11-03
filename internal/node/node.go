@@ -473,8 +473,11 @@ type session struct {
 	ticketEnded bool
 	sessionID   string
 	// unseenFailure is set when a tool call failed and the model has not taken a step since: it may have filed a
-	// result claim in the same step, before it saw the failure.
+	// result claim in the same step, before it saw the failure. deniedUnseen is set when the node denied a tool call
+	// and its failed result has not been read from stdout yet: the deny answers the hook before stdout shows the
+	// result, and events of the same step written before it may still be read meanwhile.
 	unseenFailure bool
+	deniedUnseen  bool
 	// reports counts the Reports the session filed through the socket.
 	reports int
 }
@@ -527,16 +530,40 @@ func (s *session) endedTicket() bool {
 	return s.ticketEnded
 }
 
-func (s *session) setUnseenFailure(v bool) {
+// stepTaken records a step of the model after the last failed tool result it was shown.
+func (s *session) stepTaken() {
 	s.mu.Lock()
-	s.unseenFailure = v
+	s.unseenFailure = false
+	s.mu.Unlock()
+}
+
+// toolFailed records a failed tool result read from stdout; it is also the result of a deny the node gave.
+func (s *session) toolFailed() {
+	s.mu.Lock()
+	s.unseenFailure = true
+	s.deniedUnseen = false
+	s.mu.Unlock()
+}
+
+// noteDenial records that the node denied a tool call of the session.
+func (s *session) noteDenial() {
+	s.mu.Lock()
+	s.deniedUnseen = true
+	s.mu.Unlock()
+}
+
+// turnOver clears both: whatever failed in the turn, its end has been seen.
+func (s *session) turnOver() {
+	s.mu.Lock()
+	s.unseenFailure = false
+	s.deniedUnseen = false
 	s.mu.Unlock()
 }
 
 func (s *session) hasUnseenFailure() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.unseenFailure
+	return s.unseenFailure || s.deniedUnseen
 }
 
 // noteReport records that the session filed a Report and wakes its runner.
@@ -985,12 +1012,12 @@ func (r *runner) onEvent(ev claude.Event) {
 		// The CLI runs the tool calls of one model step together: a ready report in the same step as a Write that
 		// was denied runs after the denial, but the model wrote it without knowing. Its next step has seen the result.
 		if e.IsError {
-			r.s.setUnseenFailure(true)
+			r.s.toolFailed()
 		}
 	case claude.AssistantText, claude.ToolUse:
-		r.s.setUnseenFailure(false)
+		r.s.stepTaken()
 	case claude.Result:
-		r.s.setUnseenFailure(false)
+		r.s.turnOver()
 		// A failed turn (an API error, an expired login, a rate limit, too many turns) leaves the CLI waiting for the
 		// next message: report it, or the Ticket stays working with nothing running. Its Inputs may not have reached
 		// the model, so they stay unread and a retry sends them again. A turn Athena itself ends (a stop) never gets

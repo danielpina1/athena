@@ -463,6 +463,34 @@ func TestReadyReportRefusedUntilFailureSeen(t *testing.T) {
 	}
 }
 
+// The node's own deny reaches the hook before the failed tool result reaches stdout: a result claim filed in the same
+// step is refused from the deny on, even while events of that step written before the result are still read.
+func TestHookDenialRefusesSameStepReport(t *testing.T) {
+	h := newHarness(t, nil)
+	t.Setenv("ATHENA_FAKE_FIXTURE", openTurnFixture(t))
+	tk := h.submit("Task", "")
+	_, a := h.running(tk.ID)
+	s := h.n.lookup(tk.ID, a.ID)
+	r := &runner{n: h.n, s: s, eng: h.eng, log: s.log, sent: map[string]bool{}}
+	if v := h.hook(EventPreToolUse, tk.ID, a.ID, map[string]any{"tool_name": "Bash", "tool_input": map[string]any{"command": "rm -rf build"}}); v.Verdict != VerdictDeny {
+		t.Fatalf("verdict = %+v, want deny", v)
+	}
+	if got := h.report(tk.ID, a.ID, core.ReportReady, "built"); got.OK || !strings.Contains(got.Error, "failed") {
+		t.Fatalf("ready report right after the deny = %+v, want a refusal", got)
+	}
+	// The step's own tool_use line, read late, is not a later step.
+	r.onEvent(claude.ToolUse{ID: "b1", Name: "Bash"})
+	r.onEvent(claude.ToolUse{ID: "r1", Name: "mcp__athena__report"})
+	if got := h.report(tk.ID, a.ID, core.ReportReady, "built"); got.OK {
+		t.Fatalf("ready report before the failed result was seen = %+v, want a refusal", got)
+	}
+	r.onEvent(claude.ToolResult{ToolUseID: "b1", IsError: true})
+	r.onEvent(claude.AssistantText{Text: "rm is blocked."})
+	if got := h.report(tk.ID, a.ID, core.ReportReady, "built without it"); !got.OK {
+		t.Fatalf("ready report after the next step = %+v", got)
+	}
+}
+
 func TestEscalationCreatesApprovalAndWaits(t *testing.T) {
 	h := newHarness(t, nil)
 	tk := h.submit("Task", "")

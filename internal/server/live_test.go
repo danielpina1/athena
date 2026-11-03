@@ -360,8 +360,8 @@ func TestLiveWriteOutsideEscalates(t *testing.T) {
 	nudged := false
 	await(t, 3*time.Minute, "a report after the denial", func() bool {
 		d = s.detail(id)
-		// A worker may end its turn with plain text instead of a report (haiku did once in six runs). Athena does not
-		// nudge it, so the owner does.
+		// A worker may end its turn with plain text instead of a report (haiku did once in six runs). Athena nudges it
+		// once and then reports blocked; should it still be idle without a report, the owner asks too.
 		if la := d.Assignments[len(d.Assignments)-1]; !nudged && la.IdleAt != nil && la.Report == nil {
 			nudged = true
 			t.Log("worker went idle without a report; replying to ask for one")
