@@ -325,6 +325,9 @@ func TestStartRunsSessionAndReportsStarted(t *testing.T) {
 	if a.SessionID != fixtureSessionID {
 		t.Fatalf("SessionID = %q, want %q", a.SessionID, fixtureSessionID)
 	}
+	if a.Model != "sonnet" {
+		t.Fatalf("Model = %q, want the node's default sonnet (the task named none)", a.Model)
+	}
 	if in := tk.Inputs[0]; in.DeliveredTo != a.ID || in.DeliveredAt == nil {
 		t.Fatalf("first input not marked delivered: %+v", in)
 	}
@@ -956,8 +959,11 @@ func TestStopTicketClosesSession(t *testing.T) {
 // blockingEngine blocks every callback until released, to prove Start/Deliver/Stop never call the Engine.
 type blockingEngine struct{ release chan struct{} }
 
-func (b blockingEngine) wait()                                          { <-b.release }
-func (b blockingEngine) AssignmentStarted(string, string, string) error { b.wait(); return nil }
+func (b blockingEngine) wait() { <-b.release }
+func (b blockingEngine) AssignmentStarted(string, string, string, string) error {
+	b.wait()
+	return nil
+}
 func (b blockingEngine) InputsDelivered(string, string, []string) error { b.wait(); return nil }
 func (b blockingEngine) DeliveryFailed(string, string, string) error    { b.wait(); return nil }
 func (b blockingEngine) InputsRead(string, []string) error              { b.wait(); return nil }

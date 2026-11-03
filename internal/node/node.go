@@ -70,7 +70,7 @@ type Config struct {
 
 // EngineCallbacks is the part of *core.Engine the node calls: the Executor callbacks, the Ticket query and Approvals.
 type EngineCallbacks interface {
-	AssignmentStarted(ticketID, assignmentID, sessionID string) error
+	AssignmentStarted(ticketID, assignmentID, sessionID, model string) error
 	InputsDelivered(ticketID, assignmentID string, inputIDs []string) error
 	DeliveryFailed(ticketID, assignmentID, errMsg string) error
 	InputsRead(ticketID string, inputIDs []string) error
@@ -583,6 +583,8 @@ type runner struct {
 	unread      []string
 	sessionID   string
 	initSeen    bool
+	// model is the model the sessions run with: the Ticket's, or the node's default.
+	model string
 
 	// usage is what the session did since the last RecordUsage; tools maps the ids of tool calls in flight to their
 	// tool; firstSent and firstOutput time the Ticket's time to first output.
@@ -625,6 +627,7 @@ func (r *runner) run() {
 	if s.t.Execution != nil && s.t.Execution.Model != "" {
 		model = s.t.Execution.Model
 	}
+	r.model = model
 	adir := filepath.Join(s.place.workDir, ".athena")
 	env := append([]string{"ATHENA_ASSIGNMENT=" + s.a.ID}, n.variables(s)...)
 	for crashes := 0; ; {
@@ -918,7 +921,7 @@ func (r *runner) onEvent(ev claude.Event) {
 			r.sessionID = e.SessionID
 			r.s.setSessionID(e.SessionID)
 		}
-		if err := r.eng.AssignmentStarted(r.s.t.ID, r.s.a.ID, e.SessionID); err != nil {
+		if err := r.eng.AssignmentStarted(r.s.t.ID, r.s.a.ID, e.SessionID, r.model); err != nil {
 			r.log.Error("record start", "error", err)
 			return
 		}

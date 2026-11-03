@@ -114,7 +114,7 @@ func TestAssignmentStartedDeliversWaitingInputs(t *testing.T) {
 	tk := h.submit("Fix it")
 	a := tk.Assignments[0].ID
 	h.tick(1)
-	h.must(h.eng.AssignmentStarted(tk.ID, a, "sess-1"))
+	h.must(h.eng.AssignmentStarted(tk.ID, a, "sess-1", ""))
 	stored := h.ticket(tk.ID)
 	started := base.Add(1e9)
 	eq(t, "assignment", stored.Assignments[0], Assignment{ID: a, State: AssignmentRunning, CreatedAt: base, StartedAt: &started, SessionID: "sess-1"})
@@ -133,7 +133,7 @@ func TestAssignmentStartedDeliversWaitingInputs(t *testing.T) {
 	eq(t, "delivered to", stored.Inputs[0].DeliveredTo, a)
 
 	// Unknown ticket is a UserError.
-	wantUserError(t, "unknown ticket", h.eng.AssignmentStarted("T-9999", a, ""))
+	wantUserError(t, "unknown ticket", h.eng.AssignmentStarted("T-9999", a, "", ""))
 }
 
 func TestReportQuestionSetsAttention(t *testing.T) {
@@ -496,7 +496,7 @@ func TestRefKeepsInputsUndeliveredUntilAssignmentRuns(t *testing.T) {
 	eq(t, "undelivered", len(stored.Undelivered), 2)
 	eq(t, "no deliveries", h.exec.count("deliver"), 0)
 	eq(t, "start asked again", h.exec.count("start"), 2)
-	h.must(h.eng.AssignmentStarted(tk.ID, stored.Assignments[0].ID, "s"))
+	h.must(h.eng.AssignmentStarted(tk.ID, stored.Assignments[0].ID, "s", ""))
 	h.settle(false)
 	eq(t, "delivered", h.delivered, [][2]string{{tk.ID, stored.Undelivered[0]}, {tk.ID, stored.Undelivered[1]}})
 }
@@ -734,7 +734,7 @@ func TestRefLateStartOfReplacedAssignment(t *testing.T) {
 	h.must(h.eng.RetryTicket(id))
 	before := h.ticket(id)
 	delivers := h.exec.count("deliver")
-	h.must(h.eng.AssignmentStarted(id, first, "late"))
+	h.must(h.eng.AssignmentStarted(id, first, "late", ""))
 	h.settle(false)
 	eq(t, "assignments", h.ticket(id).Assignments, before.Assignments)
 	eq(t, "delivers", h.exec.count("deliver"), delivers)

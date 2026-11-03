@@ -425,7 +425,7 @@ func (h *harness) settle(launch bool) {
 		}
 		h.exec.mu.Unlock()
 		if next != nil {
-			h.must(h.eng.AssignmentStarted(next.TicketID, next.AssignmentID, "session-"+next.AssignmentID))
+			h.must(h.eng.AssignmentStarted(next.TicketID, next.AssignmentID, "session-"+next.AssignmentID, ""))
 			continue
 		}
 		if ticketID == "" {

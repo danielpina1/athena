@@ -141,7 +141,11 @@ func (e *Engine) RecordUsage(ticketID, assignmentID string, u UsageDelta) error 
 			s.CostUSD += u.SessionCostUSD - t.SessionCosts[u.SessionID]
 			t.SessionCosts[u.SessionID] = u.SessionCostUSD
 		}
-		runtime, model := runtimeModel(t)
+		a := findAssignment(t, assignmentID)
+		if a == nil {
+			a = t.LatestAssignment()
+		}
+		runtime, model := runtimeModel(t, a)
 		if o.reg != nil {
 			o.observe(func(r *metrics.Registry) {
 				for _, k := range []struct {

@@ -48,6 +48,9 @@ type Assignment struct {
 	IdleAt *time.Time `json:"idleAt,omitempty"`
 	// SessionID is the runtime session to resume.
 	SessionID string `json:"sessionId,omitempty"`
+	// Model is the model the Executor runs the Assignment with: the Ticket's, or the Executor's default when it names
+	// none.
+	Model string `json:"model,omitempty"`
 }
 
 // InputKind says what an Input carries.

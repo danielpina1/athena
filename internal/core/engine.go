@@ -145,9 +145,10 @@ func (e *Engine) SubmitOwnerTask(text string, opts TaskOptions) (Ticket, error) 
 
 // --- Executor callbacks ---
 
-// AssignmentStarted is the Executor's fact that an Assignment runs, in the runtime session sessionID; the Inputs that
-// wait for it go out. A start of an unknown or ended Assignment, such as one a retry replaced, changes nothing.
-func (e *Engine) AssignmentStarted(ticketID, assignmentID, sessionID string) error {
+// AssignmentStarted is the Executor's fact that an Assignment runs, in the runtime session sessionID with model (the
+// model the Executor chose, its default when the Ticket names none); the Inputs that wait for it go out. A start of
+// an unknown or ended Assignment, such as one a retry replaced, changes nothing.
+func (e *Engine) AssignmentStarted(ticketID, assignmentID, sessionID, model string) error {
 	return e.command(cmdAssignmentStarted, func(o *op) error {
 		t, err := o.require(ticketID)
 		if err != nil {
@@ -169,6 +170,9 @@ func (e *Engine) AssignmentStarted(ticketID, assignmentID, sessionID string) err
 		}
 		if sessionID != "" {
 			a.SessionID = sessionID
+		}
+		if model != "" {
+			a.Model = model
 		}
 		t.UpdatedAt = o.at
 		if t.Ended == nil && len(t.Undelivered) > 0 {
@@ -705,7 +709,7 @@ func (o *op) end(t *Ticket, by TicketEndBy, outcome TicketOutcome, reason string
 	t.UpdatedAt = o.at
 	t.Attention = nil
 	t.Delivery = nil
-	runtime, model := runtimeModel(t)
+	runtime, model := runtimeModel(t, t.LatestAssignment())
 	if o.reg != nil {
 		o.observe(func(r *metrics.Registry) {
 			r.Counter("tickets_ended_total", "outcome", string(outcome), "runtime", runtime, "model", model).Add(1)
@@ -753,9 +757,9 @@ func hasReport(t *Ticket) bool {
 
 func nonNegative(d time.Duration) time.Duration { return max(d, 0) }
 
-// runtimeModel returns the metric labels of a Ticket's runtime and model; the model is "default" when the task named
-// none.
-func runtimeModel(t *Ticket) (runtime, model string) {
+// runtimeModel returns the metric labels of a Ticket's runtime and model. The model is the one the Executor ran the
+// Assignment a with (nil for none), else the one the task named, else "default" (no Executor has run the Ticket).
+func runtimeModel(t *Ticket, a *Assignment) (runtime, model string) {
 	runtime, model = "unknown", "default"
 	if x := t.Execution; x != nil {
 		if x.Runtime != "" {
@@ -764,6 +768,9 @@ func runtimeModel(t *Ticket) (runtime, model string) {
 		if x.Model != "" {
 			model = x.Model
 		}
+	}
+	if a != nil && a.Model != "" {
+		model = a.Model
 	}
 	return runtime, model
 }

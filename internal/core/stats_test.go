@@ -15,7 +15,7 @@ func TestTicketStatsAccumulate(t *testing.T) {
 	first := tk.Assignments[0].ID
 
 	h.tick(2)
-	h.must(h.eng.AssignmentStarted(tk.ID, first, "sess-1"))
+	h.must(h.eng.AssignmentStarted(tk.ID, first, "sess-1", ""))
 	h.tick(3)
 	h.must(h.eng.FileReport(tk.ID, ReportInput{State: ReportProgress, Summary: "looking"}))
 	h.tick(5)
@@ -145,7 +145,7 @@ func TestEngineRecordsMetrics(t *testing.T) {
 	tk := h.submit("Measure me")
 	a := tk.Assignments[0].ID
 	h.tick(2)
-	h.must(h.eng.AssignmentStarted(tk.ID, a, "s"))
+	h.must(h.eng.AssignmentStarted(tk.ID, a, "s", ""))
 	h.must(h.eng.RecordUsage(tk.ID, a, UsageDelta{InputTokens: 7, OutputTokens: 3, CacheReadTokens: 5, CostUSD: 0.5}))
 	h.must(h.eng.FileReport(tk.ID, ReportInput{State: ReportReady, Summary: "done"}))
 
@@ -214,5 +214,29 @@ func TestRecordUsageSessionCostIsCumulative(t *testing.T) {
 	}
 	if math.Abs(metric-0.025) > 1e-9 {
 		t.Errorf("cost_usd_total = %v, want 0.025", metric)
+	}
+}
+
+// A task that names no model runs on the node's default: the Executor reports the model it started the Assignment
+// with, the Assignment keeps it, and the metrics are labelled with it rather than "default".
+func TestMetricsUseTheEffectiveModel(t *testing.T) {
+	h := newHarness(t)
+	reg := metrics.NewRegistry()
+	h.eng.SetMetrics(reg)
+	tk, err := h.eng.SubmitOwnerTask("No model named", TaskOptions{Dir: "/work/x"})
+	h.must(err)
+	a := tk.Assignments[0].ID
+	h.must(h.eng.AssignmentStarted(tk.ID, a, "s", "sonnet"))
+	eq(t, "assignment model", h.ticket(tk.ID).Assignments[0].Model, "sonnet")
+	h.must(h.eng.RecordUsage(tk.ID, a, UsageDelta{OutputTokens: 3, CostUSD: 0.5}))
+	h.must(h.eng.FileReport(tk.ID, ReportInput{State: ReportReady, Summary: "done"}))
+	models := map[string]string{}
+	for _, c := range reg.Snapshot(0).Counters {
+		models[c.Name] = c.Labels["model"]
+	}
+	for _, name := range []string{"tokens_total", "cost_usd_total", "tickets_ended_total"} {
+		if models[name] != "sonnet" {
+			t.Errorf("%s model label = %q, want sonnet (have %v)", name, models[name], models)
+		}
 	}
 }
