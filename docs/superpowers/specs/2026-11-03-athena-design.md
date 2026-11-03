@@ -292,6 +292,36 @@ Owner asked for concrete visibility. Mockup: `system-visibility.html` (desktop "
 
 Structured logging (`log/slog`, JSON) with Ticket/Assignment/node ids on every line; secrets redacted at the logger.
 
+### 10.3 Performance metrics (owner asked for these to be rich)
+
+Measured from plan 1 onward by an in-process metrics core (`internal/metrics`: counters, gauges, and log-bucketed histograms giving p50/p95/p99; bounded label sets: runtime, model, node, tool, outcome, repo). Every metric below is sliceable by runtime, model, node and repository and comparable over time.
+
+**Agent performance** (per Ticket, stored on the Ticket, and aggregated):
+
+| Area | Metrics |
+| --- | --- |
+| Outcomes | completed / merged / dropped / failed / stopped rates; **first-try success** (no retry, no crash, no human correction); retry and crash counts |
+| Speed | queue wait; time to first output; time to first Report; active time vs time waiting on a person; wall time to `ready`; time to merge |
+| Human attention (the reference's core metric) | questions asked, Approvals requested, approval wait, person messages per Ticket, notifications sent — "attention cost" per Ticket |
+| Cost | input/output tokens, **prompt-cache hit ratio**, $ per Ticket, $ per merged PR, $ saved by local models |
+| Work | turns, tool calls by tool, tool error rate, hook denials/escalations, lines changed, CI passing on first push, PR review rounds |
+
+**Runtime/model comparison**: a scoreboard of success rate, median time, median cost and attention cost per runtime × model × task kind (repo task / no-repo / ops), so the owner can see where Claude, Codex or a local model performs best and set defaults from evidence.
+
+**System performance**:
+
+| Area | Metrics |
+| --- | --- |
+| Engine & store | command latency, SQLite transaction latency, queue depth, effect backlog |
+| Execution | dispatch latency (pending → started), session spawn time, time to `Init`, **hook decision latency**, MCP tool latency, worker slot utilization |
+| Link (plan 3+) | RTT, event lag (node event → every dashboard), reconnects, buffered events, replayed messages, bytes/s per channel |
+| Router | decisions per hour, decision latency, tokens per decision |
+| Resources | RSS, CPU, goroutines per process; disk use of work roots; GPU utilization/VRAM (local inference) |
+
+**Performance budgets, enforced** (the §2 efficiency targets become tests): `make bench` runs Go benchmarks and an end-to-end harness with a fake runtime and asserts: hook decision p99 < 10 ms; engine command p99 < 5 ms; dispatch latency p99 < 100 ms (excluding model time); dashboard action → session input p95 < 250 ms (plan 3+); node idle RSS < 30 MB, control server < 100 MB. Results are stored as a baseline in the repo; CI fails on any budget breach or a > 10% regression against the baseline.
+
+**Surfaces**: plan 1 ships `athena metrics` (current values and percentiles over the last 1 h / 24 h) and per-Ticket stats in `athena status <id>`; plan 9 adds the dashboard Performance page (scoreboard, latency percentiles over time, cost and attention trends) and Prometheus export of the same metrics.
+
 ## 11. Security
 
 - **Network**: UniFi WireGuard VPN provides reachability and encryption between devices (incl. phone). Athena does not rely on it for authentication.

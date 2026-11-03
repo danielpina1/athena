@@ -261,6 +261,27 @@ Hook stdin/stdout follow Claude Code's hook contract (input JSON with `session_i
 - [ ] **Step 4: Run** `make check` → PASS.
 - [ ] **Step 5: Commit** `test: live smoke test with claude code`.
 
+### Task 11: Metrics core, per-Ticket stats and performance budgets
+
+Runs after Task 10. Spec §10.3.
+
+**Files:**
+- Create: `internal/metrics/metrics.go`, `internal/metrics/histogram.go`, `internal/core/stats.go`, `bench/bench_test.go`, `bench/baseline.json`
+- Modify: `internal/core/engine.go`, `internal/node/node.go`, `internal/node/socket.go`, `internal/store/store.go`, `internal/server/control.go`, `internal/cli/cli.go`, `Makefile` (target `bench`)
+- Test: `internal/metrics/metrics_test.go`, `internal/core/stats_test.go`, `internal/server/metrics_test.go`
+
+**Interfaces:**
+- Produces:
+  - `type Registry`; `func NewRegistry() *Registry`; `(*Registry) Counter(name string, labels ...string) *Counter` (`Add(int64)`), `Gauge(name, labels...) *Gauge` (`Set(float64)`), `Histogram(name, labels...) *Histogram` (`Observe(time.Duration)`, `ObserveValue(float64)`); `(*Registry) Snapshot() Snapshot` with p50/p95/p99, count, sum per histogram. Histograms: fixed log-scale buckets (base 2^(1/4), 1 µs … 1 h), lock-free per bucket (`atomic.Int64`). Label values bounded: unknown label keys panic in tests.
+  - `type TicketStats struct{ QueueWait, TimeToFirstOutput, TimeToFirstReport, ActiveTime, PersonWaitTime time.Duration; Turns, ToolCalls, ToolErrors, HookDenials, Escalations, Questions, PersonMessages, Retries, Crashes int; InputTokens, OutputTokens, CacheReadTokens int64; CostUSD float64 }` stored on `Ticket.Stats` (new field, JSON `stats`); `func (s TicketStats) CacheHitRatio() float64`; `func FirstTrySuccess(t *Ticket) bool`.
+  - Instrumentation names (exact): `engine_command_seconds{command}`, `store_tx_seconds`, `dispatch_seconds`, `session_spawn_seconds{runtime}`, `session_init_seconds{runtime}`, `hook_decision_seconds{event,verdict}`, `mcp_tool_seconds{tool}`, `slots_in_use`, `tickets_ended_total{outcome,runtime,model}`, `tokens_total{kind,runtime,model}`, `cost_usd_total{runtime,model}`, `tool_calls_total{tool,error}`, `process_rss_bytes`, `goroutines`.
+  - Control op `metrics{window}` and CLI `athena metrics [--window 1h|24h]` (table: name, labels, count, p50, p95, p99 or value); `athena status <id>` prints the Ticket's stats.
+- [ ] **Step 1: Write failing tests**: `TestHistogramPercentiles` (10k known samples → p50/p95/p99 within one bucket of exact); `TestHistogramConcurrent` (-race, 8 goroutines); `TestTicketStatsAccumulate` (engine + fake executor: a ticket with a question, a person reply, a retry and a Result event → exact counts, PersonWaitTime from question to reply, tokens/cost summed); `TestFirstTrySuccess`; `TestMetricsCommand` (in-process server → `athena metrics` lists `engine_command_seconds` and `hook_decision_seconds` with non-zero counts after one task).
+- [ ] **Step 2: Run** → FAIL. **Step 3: Implement** — the engine records stats inside the same transaction as the command that causes them; the node records spawn/init/hook/tool timings; usage and cost come from `claude.Result`.
+- [ ] **Step 4: Budgets.** `bench/bench_test.go`: `BenchmarkHookDecision`, `BenchmarkEngineCommand`, `BenchmarkDispatch` (fake runtime) and `TestBudgets` asserting p99 hook < 10 ms, engine command < 5 ms, dispatch < 100 ms, and server idle RSS < 100 MB; `make bench` writes results and compares with `bench/baseline.json`, failing on a budget breach or > 10% regression; record the first baseline.
+- [ ] **Step 5: Run** `make check` and `make bench` → PASS.
+- [ ] **Step 6: Commit** `feat(metrics): metrics core, ticket stats and performance budgets`.
+
 ---
 
 ## Spec coverage for plan 1
@@ -273,5 +294,6 @@ Hook stdin/stdout follow Claude Code's hook contract (input JSON with `session_i
 - §11 containment, fail-closed hooks, 0600 files, secret-safe logs: Tasks 3, 6, 8, 9.
 - §16.1 item 1 approval defaults: Task 6.
 - §10.2 basic `athena status` / `athena logs`: Task 9.
+- §10.3 metrics core, per-Ticket stats, `athena metrics`, enforced performance budgets: Task 11.
 
 Deferred by design to later plans (see roadmap): router, Policy, GitHub, Outbox (2); link protocol, auth, TLS, push (3); dashboard (4); Codex (5); multi-node (6); agent-to-agent (7); local inference (8); visibility (9).

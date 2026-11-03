@@ -14,6 +14,6 @@ The spec covers several subsystems, so it is built as a sequence of plans. Each 
 | 6 | Multi-node | `athena node` with enrollment, mTLS, capabilities, dispatcher, heartbeats, buffering, checkpoints, Retry elsewhere, per-Ticket GitHub tokens on nodes | §7, §11 device identity |
 | 7 | Agent-to-agent | `ask_agent`, `hand_off`, `wait_for`, `agents` across nodes with loop protection | §8.4 |
 | 8 | Local inference | Ollama/vLLM detection, authenticated proxy, Codex and Claude Code on local models, router/chores on local, `local_model` tool | §9 |
-| 9 | Visibility | System page, audit log, budgets and alerts, OTLP receiver, `athena top`, Prometheus export | §10.2 |
+| 9 | Visibility and performance | System and Performance pages (runtime/model scoreboard, latency percentiles, cost and attention trends), audit log, budgets and alerts, OTLP receiver, `athena top`, Prometheus export | §10.2, §10.3 |
 
 Basic structured logging and `athena status` / `athena logs` arrive in plan 1; plan 9 builds the full visibility layer on the events every earlier plan already emits.
