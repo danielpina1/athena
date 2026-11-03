@@ -241,8 +241,11 @@ func expirePendingApprovals(eng *core.Engine, log *slog.Logger) {
 	}
 }
 
-// recoverAssignments starts again every open Ticket's latest Assignment that is running or pending: the node resumes
-// a running one's session with a recovery note and sends it the Inputs that still wait (Ticket.Undelivered).
+// recoverAssignments starts again, of every open Ticket, a pending latest Assignment and a running one that was
+// interrupted: mid-work (no turn of its worker ended idle), sent an Input after its turn last ended, or with Inputs
+// still waiting. The node resumes a running one's session with a recovery note and sends it the Inputs that still
+// wait (Ticket.Undelivered). A running Assignment idle since its last turn keeps its Session without a process: the
+// node resumes it, with the recovery note, when its next Input arrives.
 func recoverAssignments(eng *core.Engine, n *node.Node, log *slog.Logger) {
 	tickets, err := eng.Tickets(false)
 	if err != nil {
@@ -254,9 +257,19 @@ func recoverAssignments(eng *core.Engine, n *node.Node, log *slog.Logger) {
 		if a == nil || (a.State != core.AssignmentRunning && a.State != core.AssignmentPending) {
 			continue
 		}
+		if a.State == core.AssignmentRunning && !interrupted(&t, a) {
+			log.Info("idle assignment resumes on its next input", "ticket", t.ID, "assignment", a.ID)
+			continue
+		}
 		log.Info("recovering assignment", "ticket", t.ID, "assignment", a.ID, "state", a.State, "undelivered", len(t.Undelivered))
 		n.Start(t, *a)
 	}
+}
+
+// interrupted reports whether a running Assignment was busy when the server stopped: no turn of its worker ended
+// since it started, an Input reached it after its last turn ended, or Inputs wait for it.
+func interrupted(t *core.Ticket, a *core.Assignment) bool {
+	return a.IdleAt == nil || (a.DeliveredAt != nil && a.DeliveredAt.After(*a.IdleAt)) || len(t.Undelivered) > 0
 }
 
 // ensurePrivateDir creates dir 0700, or tightens an existing one that others may enter.

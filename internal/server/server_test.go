@@ -492,8 +492,9 @@ func TestLogsFollowEndsWithTicket(t *testing.T) {
 	s.stop()
 }
 
-// Review Focus 2: a restart resumes the running Assignment's session and sends it, once, what may not have reached
-// its history: the Inputs the old process received but never read, then those still waiting.
+// Review Focus 2: a restart resumes the running Assignment interrupted mid-work and sends it, once, what may not have
+// reached its history: the Inputs the old process received but never read, then those still waiting. Once its turn
+// ended idle, a further restart leaves it alone.
 func TestRestartResumesRunningAssignment(t *testing.T) {
 	// The first process takes the task but never runs a step: the task stays unread.
 	fake := newFakeEnv(t, openTurnFixture(t))
@@ -542,6 +543,9 @@ func TestRestartResumesRunningAssignment(t *testing.T) {
 		})
 		return read
 	})
+	// Its turn then ends (the Stop hook) with nothing more sent: the Assignment is idle and keeps its Session.
+	var hr node.HookResponse
+	nodeCall(t, dir, node.HookRequest{Op: node.OpHook, Event: node.EventStop, Ticket: id, Assignment: a.ID, Input: json.RawMessage(`{}`)}, &hr)
 	s.stop()
 	in := fake.stdin(t)
 	second := in[strings.Index(in, recoveryText):]
@@ -550,14 +554,15 @@ func TestRestartResumesRunningAssignment(t *testing.T) {
 		t.Fatalf("resumed first message = %q, want the recovery note, then the unread task, then the follow-up", second)
 	}
 
-	// A further restart sends nothing again: everything is in the session's history now.
-	s = startServer(t, dir)
+	// A further restart starts nothing: the idle Assignment waits, running, for its next Input.
 	n := len(fake.invocations(t))
-	eventually(t, "another claude start", func() bool { return len(fake.invocations(t)) == n+1 })
-	s.running(id)
+	s = startServer(t, dir)
 	time.Sleep(300 * time.Millisecond)
+	if got := len(fake.invocations(t)); got != n {
+		t.Fatalf("claude started %d more times after a restart of an idle assignment, want 0", got-n)
+	}
 	d := s.detail(id)
-	if len(d.Assignments) != 1 || d.Assignments[0].ID != a.ID || d.Stage != "working" {
+	if len(d.Assignments) != 1 || d.Assignments[0].ID != a.ID || d.Assignments[0].State != core.AssignmentRunning {
 		t.Fatalf("after restarts: %+v", d)
 	}
 	s.stop()
@@ -575,6 +580,50 @@ func TestRestartResumesRunningAssignment(t *testing.T) {
 			}
 		}
 	})
+}
+
+// A Ticket idle after a report (its turn ended, nothing sent since) is not started on restart: it keeps its Session.
+// A person's reply then resumes that Session, with the recovery note.
+func TestRestartKeepsIdleAssignmentUntilInput(t *testing.T) {
+	fake := newFakeEnv(t, openTurnFixture(t))
+	dir := newStateDir(t)
+	s := startServer(t, dir)
+	id := s.submit("Ask me\nbody-9a8b")
+	a := s.running(id)
+	var resp node.Response
+	nodeCall(t, dir, node.ReportRequest{Op: node.OpReport, Ticket: id, Assignment: a.ID, Status: "progress", Summary: "need input", Question: "Which colour?"}, &resp)
+	if !resp.OK {
+		t.Fatalf("report = %+v", resp)
+	}
+	var hr node.HookResponse
+	nodeCall(t, dir, node.HookRequest{Op: node.OpHook, Event: node.EventStop, Ticket: id, Assignment: a.ID, Input: json.RawMessage(`{}`)}, &hr)
+	s.stop()
+
+	s = startServer(t, dir)
+	time.Sleep(300 * time.Millisecond)
+	if n := len(fake.invocations(t)); n != 1 {
+		t.Fatalf("claude started %d times, want 1 (no restart of an idle assignment)", n)
+	}
+	if d := s.detail(id); d.Stage != "person/answer" {
+		t.Fatalf("stage = %q, want person/answer", d.Stage)
+	}
+
+	s.ok(Request{Op: OpReply, ID: id, Text: "blue-7c6d"}, nil)
+	eventually(t, "the session resumed for the reply", func() bool { return len(fake.invocations(t)) == 2 })
+	if rid, ok := argValue(fake.invocations(t)[1], "--resume"); !ok || rid != fixtureSessionID {
+		t.Fatalf("second start args = %v, want --resume %s", fake.invocations(t)[1], fixtureSessionID)
+	}
+	eventually(t, "reply sent after the recovery note", func() bool {
+		in := fake.stdin(t)
+		i := strings.LastIndex(in, recoveryText)
+		return i >= 0 && strings.Contains(in[i:], "blue-7c6d")
+	})
+	if got := s.running(id); got.ID != a.ID {
+		t.Fatalf("running assignment = %s, want %s (the same, resumed)", got.ID, a.ID)
+	}
+	if n := strings.Count(fake.stdin(t), "body-9a8b"); n != 1 {
+		t.Fatalf("task sent %d times, want 1 (it was read)", n)
+	}
 }
 
 // steppingTurnFixture is a turn that runs one step (a tool use) and never ends.
