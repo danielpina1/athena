@@ -33,6 +33,25 @@ type Tx interface {
 	PutApproval(a *Approval) error
 	// PendingApprovals returns every Approval still pending, oldest first.
 	PendingApprovals() ([]*Approval, error)
+	// GetTrigger returns the Trigger with the given ID, or nil, nil if there is none.
+	GetTrigger(id string) (*Trigger, error)
+	// GetThread returns the Thread with the given key, or nil, nil if there is none.
+	GetThread(key string) (*Thread, error)
+	// PutThread inserts or replaces a Thread.
+	PutThread(t *Thread) error
+	// ActiveThreads returns every Thread with Triggers queued or an Eval in progress, ordered by key.
+	ActiveThreads() ([]*Thread, error)
+	// GetDecision returns the Decision with the given ID, or nil, nil if there is none.
+	GetDecision(id string) (*Decision, error)
+	// Decisions returns the Decisions made on a Thread, most recent first; limit <= 0 returns all.
+	Decisions(thread string, limit int) ([]*Decision, error)
+	// Enqueue records external work for the effects runner in the same transaction. Work is identified by
+	// (kind, key): enqueuing a key still waiting replaces its payload, makes it due now and keeps its place in line.
+	Enqueue(kind, key string, payload []byte) error
+	// KVGet returns the plain string stored under key; the bool is false if there is none.
+	KVGet(key string) (string, bool, error)
+	// KVSet stores a plain string under key.
+	KVSet(key, value string) error
 	// NextSeq returns the next value of the named counter: 1 on first use, then one more each call.
 	// It moves only if the transaction commits.
 	NextSeq(name string) (int, error)
