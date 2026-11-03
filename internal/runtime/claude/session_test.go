@@ -56,6 +56,25 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
+// withStubs fills in the settings and MCP config files Start requires.
+func withStubs(t *testing.T, o Options) Options {
+	t.Helper()
+	dir := t.TempDir()
+	if o.SettingsPath == "" {
+		o.SettingsPath = filepath.Join(dir, "settings.json")
+		if err := os.WriteFile(o.SettingsPath, []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if o.MCPConfigPath == "" {
+		o.MCPConfigPath = filepath.Join(dir, "mcp.json")
+		if err := os.WriteFile(o.MCPConfigPath, []byte(`{"mcpServers":{}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return o
+}
+
 func fixtureAbs(t *testing.T, name string) string {
 	t.Helper()
 	p, err := filepath.Abs(filepath.Join("testdata", "claude", name))
@@ -105,7 +124,7 @@ func lines(t *testing.T, path string) []string {
 func TestSessionAgainstFake(t *testing.T) {
 	dir := t.TempDir()
 	stdinLog := filepath.Join(t.TempDir(), "stdin.log")
-	s, err := Start(context.Background(), Options{
+	s, err := Start(context.Background(), withStubs(t, Options{
 		Binary: fakeBinary(t),
 		Dir:    dir,
 		Model:  "haiku",
@@ -113,7 +132,7 @@ func TestSessionAgainstFake(t *testing.T) {
 			"ATHENA_FAKE_FIXTURE=" + fixtureAbs(t, "simple-turn.jsonl"),
 			"ATHENA_FAKE_STDIN_LOG=" + stdinLog,
 		},
-	})
+	}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,11 +226,10 @@ func TestSessionResumeArgs(t *testing.T) {
 		Dir:                t.TempDir(),
 		Model:              "haiku",
 		ResumeID:           "sess-123",
-		SettingsPath:       "/x/settings.json",
-		MCPConfigPath:      "/x/mcp.json",
 		AppendSystemPrompt: "be brief",
 		Env:                []string{"ATHENA_FAKE_ARGS_LOG=" + argsLog, "ATHENA_TICKET=tkt-9", "ATHENA_NAME=worker"},
 	}
+	o = withStubs(t, o)
 	s, err := Start(context.Background(), o)
 	if err != nil {
 		t.Fatal(err)
@@ -235,8 +253,8 @@ func TestSessionResumeArgs(t *testing.T) {
 	}
 	want := []string{
 		"-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
-		"--model", "haiku", "--settings", "/x/settings.json", "--setting-sources", "",
-		"--mcp-config", "/x/mcp.json", "--strict-mcp-config", "--permission-mode", "default",
+		"--model", "haiku", "--settings", o.SettingsPath, "--setting-sources", "",
+		"--mcp-config", o.MCPConfigPath, "--strict-mcp-config", "--permission-mode", "default",
 		"--resume", "sess-123", "--append-system-prompt", "be brief",
 	}
 	if !reflect.DeepEqual(rec.Args, want) {
@@ -252,6 +270,15 @@ func TestSessionResumeArgs(t *testing.T) {
 
 func TestBuildArgsOmitsOptionalFlags(t *testing.T) {
 	args := buildArgs(Options{Model: "haiku", SettingsPath: "s", MCPConfigPath: "m"})
+	for _, flag := range []string{"--settings", "--mcp-config", "--setting-sources", "--strict-mcp-config"} {
+		found := false
+		for _, a := range args {
+			found = found || a == flag
+		}
+		if !found {
+			t.Fatalf("%s missing from %q", flag, args)
+		}
+	}
 	for _, a := range args {
 		if a == "--resume" || a == "--append-system-prompt" {
 			t.Fatalf("unexpected %s in %q", a, args)
@@ -269,12 +296,12 @@ func TestBuildArgsOmitsOptionalFlags(t *testing.T) {
 }
 
 func TestCloseKillsAfterTimeout(t *testing.T) {
-	s, err := Start(context.Background(), Options{
+	s, err := Start(context.Background(), withStubs(t, Options{
 		Binary:     fakeBinary(t),
 		Dir:        t.TempDir(),
 		CloseGrace: 300 * time.Millisecond,
 		Env:        []string{"ATHENA_FAKE_IGNORE_STDIN_CLOSE=1"},
-	})
+	}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -298,14 +325,14 @@ func TestCloseKillsAfterTimeout(t *testing.T) {
 }
 
 func TestExitMidTurnClosesEvents(t *testing.T) {
-	s, err := Start(context.Background(), Options{
+	s, err := Start(context.Background(), withStubs(t, Options{
 		Binary: fakeBinary(t),
 		Dir:    t.TempDir(),
 		Env: []string{
 			"ATHENA_FAKE_FIXTURE=" + fixtureAbs(t, "simple-turn.jsonl"),
 			"ATHENA_FAKE_EXIT_MID_TURN=1",
 		},
-	})
+	}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -332,14 +359,14 @@ func TestExitMidTurnClosesEvents(t *testing.T) {
 
 func TestReaderNeverBlocksOnUndrainedEvents(t *testing.T) {
 	dir := t.TempDir()
-	s, err := Start(context.Background(), Options{
+	s, err := Start(context.Background(), withStubs(t, Options{
 		Binary: fakeBinary(t),
 		Dir:    dir,
 		Env: []string{
 			"ATHENA_FAKE_FIXTURE=" + fixtureAbs(t, "simple-turn.jsonl"),
 			"ATHENA_FAKE_REPEAT=500",
 		},
-	})
+	}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -378,7 +405,7 @@ func TestReaderNeverBlocksOnUndrainedEvents(t *testing.T) {
 }
 
 func TestInterruptSendsSIGINT(t *testing.T) {
-	s, err := Start(context.Background(), Options{Binary: fakeBinary(t), Dir: t.TempDir()})
+	s, err := Start(context.Background(), withStubs(t, Options{Binary: fakeBinary(t), Dir: t.TempDir()}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -397,11 +424,11 @@ func TestInterruptSendsSIGINT(t *testing.T) {
 
 func TestInterruptTurnWritesControlRequest(t *testing.T) {
 	stdinLog := filepath.Join(t.TempDir(), "stdin.log")
-	s, err := Start(context.Background(), Options{
+	s, err := Start(context.Background(), withStubs(t, Options{
 		Binary: fakeBinary(t),
 		Dir:    t.TempDir(),
 		Env:    []string{"ATHENA_FAKE_STDIN_LOG=" + stdinLog},
-	})
+	}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -438,7 +465,7 @@ func TestStartErrors(t *testing.T) {
 
 func TestContextCancelKillsProcess(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	s, err := Start(ctx, Options{Binary: fakeBinary(t), Dir: t.TempDir()})
+	s, err := Start(ctx, withStubs(t, Options{Binary: fakeBinary(t), Dir: t.TempDir()}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -447,4 +474,85 @@ func TestContextCancelKillsProcess(t *testing.T) {
 	if err := s.Wait(); err == nil {
 		t.Fatal("Wait should report the kill")
 	}
+}
+
+func TestStartRequiresSettingsAndMCPConfig(t *testing.T) {
+	good := withStubs(t, Options{Binary: fakeBinary(t), Dir: t.TempDir()})
+	cases := map[string]func(o *Options){
+		"no settings":       func(o *Options) { o.SettingsPath = "" },
+		"no mcp config":     func(o *Options) { o.MCPConfigPath = "" },
+		"missing settings":  func(o *Options) { o.SettingsPath = filepath.Join(t.TempDir(), "nope.json") },
+		"missing mcp":       func(o *Options) { o.MCPConfigPath = filepath.Join(t.TempDir(), "nope.json") },
+		"settings is a dir": func(o *Options) { o.SettingsPath = t.TempDir() },
+	}
+	for name, mutate := range cases {
+		o := good
+		o.Dir = t.TempDir()
+		mutate(&o)
+		s, err := Start(context.Background(), o)
+		if err == nil {
+			s.Close()
+			t.Errorf("%s: Start must fail", name)
+		}
+		if _, statErr := os.Stat(filepath.Join(o.Dir, ".athena")); statErr == nil {
+			t.Errorf("%s: Start must fail before creating anything in Dir", name)
+		}
+	}
+	// And the valid options still start.
+	s, err := Start(context.Background(), good)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	collect(t, s)
+}
+
+func TestCloseDoesNotHangOnBlockedSend(t *testing.T) {
+	s, err := Start(context.Background(), withStubs(t, Options{
+		Binary:     fakeBinary(t),
+		Dir:        t.TempDir(),
+		CloseGrace: 300 * time.Millisecond,
+		Env:        []string{"ATHENA_FAKE_NO_READ_STDIN=1"},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sendErr := make(chan error, 1)
+	go func() { sendErr <- s.Send(strings.Repeat("x", 4<<20)) }() // far more than a pipe buffer
+	select {
+	case err := <-sendErr:
+		t.Fatalf("Send returned early (%v); the child should not be reading", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	closed := make(chan error, 1)
+	start := time.Now()
+	go func() { closed <- s.Close() }()
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close hung behind a Send blocked on a full stdin pipe")
+	}
+	if d := time.Since(start); d > 3*time.Second {
+		t.Fatalf("Close took %v, want about the 300ms grace", d)
+	}
+	if !s.Killed() {
+		t.Fatal("a child that never reads stdin must be killed after the grace")
+	}
+	select {
+	case err := <-sendErr:
+		if err == nil {
+			t.Fatal("the blocked Send must fail once the session is closed")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("blocked Send never returned")
+	}
+	// InterruptTurn must not stall either.
+	if err := s.InterruptTurn(); err == nil {
+		t.Fatal("InterruptTurn after Close must fail")
+	}
+	collect(t, s)
 }

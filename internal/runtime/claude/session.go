@@ -58,14 +58,10 @@ func buildArgs(o Options) []string {
 	if o.Model != "" {
 		args = append(args, "--model", o.Model)
 	}
-	if o.SettingsPath != "" {
-		args = append(args, "--settings", o.SettingsPath)
-	}
-	args = append(args, "--setting-sources", "")
-	if o.MCPConfigPath != "" {
-		args = append(args, "--mcp-config", o.MCPConfigPath)
-	}
-	args = append(args, "--strict-mcp-config", "--permission-mode", "default")
+	// Always passed: with --setting-sources "" the --settings file is the only
+	// source of hooks, so a session without it would run without Athena's hooks.
+	args = append(args, "--settings", o.SettingsPath, "--setting-sources", "",
+		"--mcp-config", o.MCPConfigPath, "--strict-mcp-config", "--permission-mode", "default")
 	if o.ResumeID != "" {
 		args = append(args, "--resume", o.ResumeID)
 	}
@@ -82,10 +78,12 @@ type Session struct {
 	stdout     *os.File // read end of the stdout pipe
 	closeGrace time.Duration
 
+	// stdinMu serialises writers only; it is never taken by Close, because a
+	// writer can block on a full pipe while holding it.
 	stdinMu     sync.Mutex
 	stdin       io.WriteCloser
-	stdinClosed bool
-	reqSeq      int
+	stdinClosed atomic.Bool
+	reqSeq      atomic.Int64
 
 	events chan Event
 
@@ -108,6 +106,18 @@ type Session struct {
 func Start(ctx context.Context, o Options) (*Session, error) {
 	if o.Dir == "" {
 		return nil, errors.New("claude: Options.Dir is required")
+	}
+	// Hooks fail closed: never start a session that would run without
+	// Athena's hooks or with MCP servers from anywhere but Athena's config.
+	for _, f := range []struct{ name, path string }{
+		{"SettingsPath", o.SettingsPath}, {"MCPConfigPath", o.MCPConfigPath},
+	} {
+		if f.path == "" {
+			return nil, fmt.Errorf("claude: Options.%s is required", f.name)
+		}
+		if st, err := os.Stat(f.path); err != nil || st.IsDir() {
+			return nil, fmt.Errorf("claude: Options.%s %q is not a readable file", f.name, f.path)
+		}
 	}
 	if o.Binary == "" {
 		o.Binary = "claude"
@@ -305,10 +315,7 @@ func (s *Session) Send(text string) error {
 // process alive for the next message (stream-json control request). The turn
 // ends with a Result of subtype error_during_execution.
 func (s *Session) InterruptTurn() error {
-	s.stdinMu.Lock()
-	s.reqSeq++
-	id := fmt.Sprintf("athena-%d", s.reqSeq)
-	s.stdinMu.Unlock()
+	id := fmt.Sprintf("athena-%d", s.reqSeq.Add(1))
 	line, err := json.Marshal(map[string]any{
 		"type":       "control_request",
 		"request_id": id,
@@ -328,10 +335,13 @@ func (s *Session) writeLine(line []byte) error {
 	}
 	s.stdinMu.Lock()
 	defer s.stdinMu.Unlock()
-	if s.stdinClosed {
+	if s.stdinClosed.Load() {
 		return errors.New("claude: session input is closed")
 	}
 	if _, err := s.stdin.Write(append(line, '\n')); err != nil {
+		if s.stdinClosed.Load() {
+			return errors.New("claude: session input is closed")
+		}
 		select {
 		case <-s.exited:
 			return ErrExited
@@ -366,12 +376,11 @@ func (s *Session) Close() error {
 	s.closeMu.Lock()
 	defer s.closeMu.Unlock()
 
-	s.stdinMu.Lock()
-	if !s.stdinClosed {
-		s.stdinClosed = true
+	// Closing the pipe also unblocks a Send stuck on a full pipe; the grace
+	// timer and kill below never depend on the writers' lock.
+	if s.stdinClosed.CompareAndSwap(false, true) {
 		_ = s.stdin.Close()
 	}
-	s.stdinMu.Unlock()
 
 	t := time.NewTimer(s.closeGrace)
 	defer t.Stop()

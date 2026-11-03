@@ -10,6 +10,7 @@
 //	ATHENA_FAKE_ARGS_LOG           file receiving {"args":[...],"env":{ATHENA_*}} as JSON
 //	ATHENA_FAKE_EXIT_MID_TURN      when set, replay half of the fixture, then exit 3
 //	ATHENA_FAKE_IGNORE_STDIN_CLOSE when set, keep running after stdin reaches EOF
+//	ATHENA_FAKE_NO_READ_STDIN      when set, never read stdin (a hung child)
 package main
 
 import (
@@ -35,6 +36,12 @@ func main() {
 		}
 		b, _ := json.Marshal(rec)
 		_ = os.WriteFile(p, b, 0o600)
+	}
+
+	if os.Getenv("ATHENA_FAKE_NO_READ_STDIN") != "" {
+		for {
+			time.Sleep(time.Hour)
+		}
 	}
 
 	var stdinLog *os.File
