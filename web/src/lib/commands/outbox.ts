@@ -1,6 +1,6 @@
 // The outbox: every Command the owner gives stays here until its CommandResult arrives, so a tap takes effect exactly
 // once even when the phone sleeps or the network drops mid-tap. Each open connection (after Welcome) gets every
-// command still without a result, in id order, by the same id; the server answers a repeat from its stored result
+// command still without a result, in order (a reload's commands first, then by id), by the same id; the server answers a repeat from its stored result
 // (kept 24 h) without acting twice, and a repeated result is ignored here. Commands live in IndexedDB `athena`, store
 // `outbox`, so they also survive a reload. The rules are docs/dev/dashboard.md's client contract.
 //
@@ -17,7 +17,6 @@ import {
 import { Channel, type Frame } from "@/gen/athena/v1/link_pb";
 import type { LinkClient } from "@/lib/link/client";
 import { useAthena, type AthenaState } from "@/lib/store/state";
-import { toast } from "@/ui/primitives/toast";
 import { newCommandId } from "./ids";
 
 /** A Command's action: a generated message or its init shape (the plain object form). */
@@ -28,12 +27,17 @@ export type SubmitOptions = {
   optimistic?: (s: AthenaState) => void;
   /** Undoes optimistic when the command fails; never run on success (the Deltas that follow are the truth). */
   rollback?: (s: AthenaState) => void;
+  /** Runs when the command succeeds, once. */
+  commit?: (s: AthenaState) => void;
 };
 
 export type OutboxOptions = {
   store?: typeof useAthena;
   now?: () => number;
-  /** Tells the owner something went wrong outside any one tap: a toast by default. */
+  /**
+   * Tells the owner something went wrong outside any one tap (commands dropped as too old). Nothing by default: the
+   * app's wiring passes a toast, so this module stays free of UI.
+   */
   notify?: (title: string, description: string) => void;
   /** Hears an unexpected error (IndexedDB, a throwing callback); console.error by default. */
   reportError?: (e: unknown) => void;
@@ -56,6 +60,15 @@ const CONNECTION_ACTIONS = new Set<Command["action"]["case"]>(["watchTicket", "u
 
 type Entry = {
   cmd: Command;
+  /**
+   * The send order: the commands a reload brought back first (negative, in id order), then the submits of this
+   * page in the order made, which is their id order too.
+   */
+  order: number;
+  /** Stored, or needing no storage: only a ready command is sent (persist, then send). */
+  ready: boolean;
+  /** A re-watch the outbox made on reconnect: nobody awaits it, so a refusal is told to onWatchLost. */
+  rewatch?: boolean;
   createdAt: number;
   /** Written to IndexedDB (false for the connection's own commands). */
   stored: boolean;
@@ -67,6 +80,7 @@ type Entry = {
   /** The promise of the submit that made it; a command loaded after a reload has none. */
   resolve?: (r: CommandResult) => void;
   rollback?: (s: AthenaState) => void;
+  commit?: (s: AthenaState) => void;
 };
 
 export class Outbox {
@@ -81,7 +95,11 @@ export class Outbox {
   private connection = 0;
   private reauth?: () => Promise<boolean>;
   private signOut?: () => void;
+  /** The connection the sign-out handler last ran for: once per connection, however many commands it refused. */
+  private signedOutOn = -1;
   private steppingUp = false;
+  private lastOrder = 0;
+  private readonly watchLost = new Set<(ticketId: string) => void>();
 
   /** The Tickets watched now, re-watched on every open. */
   private readonly watching = new Set<string>();
@@ -98,7 +116,7 @@ export class Outbox {
     this.send = send;
     this.store = opts.store ?? useAthena;
     this.now = opts.now ?? (() => Date.now());
-    this.notify = opts.notify ?? ((title, description) => toast({ title, description, tone: "danger" }));
+    this.notify = opts.notify ?? (() => {});
     this.reportError = opts.reportError ?? ((e) => console.error("outbox:", e));
     this.db = openDb(db).catch((e: unknown) => {
       // Private browsing or storage turned off: the outbox still works, in memory, until the page goes.
@@ -106,8 +124,10 @@ export class Outbox {
       return null;
     });
     this.loaded = this.work = this.write(async (db) => {
-      const stored = await all(db);
+      const stored = (await all(db)).sort((a, b) => cmpId(a.id, b.id));
+      let order = -stored.length;
       for (const rec of stored) {
+        order++;
         if (this.entries.has(rec.id)) continue;
         let cmd: Command;
         try {
@@ -117,7 +137,16 @@ export class Outbox {
           await del(db, rec.id);
           continue;
         }
-        this.entries.set(rec.id, { cmd, createdAt: rec.createdAt, stored: true, sentOn: 0, held: false, stepUps: 0 });
+        this.entries.set(rec.id, {
+          cmd,
+          order: order - 1,
+          ready: true,
+          createdAt: rec.createdAt,
+          stored: true,
+          sentOn: 0,
+          held: false,
+          stepUps: 0,
+        });
       }
       this.expire();
     });
@@ -128,7 +157,10 @@ export class Outbox {
     this.reauth = fn;
   }
 
-  /** Called when a command comes back unauthenticated: the commands stay and are sent after the next sign-in. */
+  /**
+   * Called when a command comes back unauthenticated, once per connection: the commands stay and are sent after the
+   * next sign-in.
+   */
   setSignOutHandler(fn: (() => void) | undefined): void {
     this.signOut = fn;
   }
@@ -138,30 +170,25 @@ export class Outbox {
    * Never rejects: a failure resolves `{ ok: false, code }`, after rollback.
    */
   submit(action: Action, opts: SubmitOptions = {}): Promise<CommandResult> {
-    const cmd = create(CommandSchema, { id: newCommandId(), action });
-    return new Promise<CommandResult>((resolve) => {
-      const stored = !CONNECTION_ACTIONS.has(cmd.action.case);
-      const e: Entry = { cmd, createdAt: this.now(), stored, sentOn: 0, held: false, stepUps: 0, resolve };
-      e.rollback = opts.rollback;
-      this.entries.set(cmd.id, e);
-      this.track(cmd.action);
-      if (opts.optimistic) this.guard(() => opts.optimistic!(this.store.getState()));
-      if (stored) {
-        const rec: Stored = { id: cmd.id, bytes: toBinary(CommandSchema, cmd), createdAt: e.createdAt };
-        this.work = this.write((db) => put(db, rec));
-      }
-      // After the commands a reload brought back, so the link carries them in id order.
-      void this.loaded.then(() => this.trySend(e));
-    });
+    return new Promise<CommandResult>((resolve) => this.add(action, opts, resolve));
   }
 
-  /** The link is open (after Welcome): sends every command without a result, in id order, then the watches. */
+  /**
+   * Fires when a watch the outbox re-sent after a reconnect is refused (the Ticket is gone, or too many are watched):
+   * the Ticket has left watched(). Returns the unsubscribe.
+   */
+  onWatchLost(cb: (ticketId: string) => void): () => void {
+    this.watchLost.add(cb);
+    return () => this.watchLost.delete(cb);
+  }
+
+  /** The link is open (after Welcome): sends every command without a result, in order, then the watches. */
   onOpen(): void {
     const connection = ++this.connection;
     void this.loaded.then(() => {
       if (connection !== this.connection) return; // a newer connection does it
       this.expire();
-      for (const e of this.sorted()) this.trySend(e);
+      this.flush();
       this.resendTracked();
     });
   }
@@ -182,6 +209,8 @@ export class Outbox {
         return;
       case "unauthenticated":
         // Nothing was done. Kept, and sent on the next open: after the owner signs in again.
+        if (this.signedOutOn === this.connection) return;
+        this.signedOutOn = this.connection;
         this.guard(() => this.signOut?.());
         return;
       default:
@@ -189,7 +218,7 @@ export class Outbox {
     }
   }
 
-  /** The commands without a result, in id order. */
+  /** The commands without a result, in send order. */
   pending(): Command[] {
     return this.sorted().map((e) => e.cmd);
   }
@@ -225,6 +254,49 @@ export class Outbox {
 
   // Internals.
 
+  private add(action: Action, opts: SubmitOptions, resolve?: (r: CommandResult) => void, rewatch = false): void {
+    const cmd = create(CommandSchema, { id: newCommandId(), action });
+    const stored = !CONNECTION_ACTIONS.has(cmd.action.case);
+    const e: Entry = {
+      cmd,
+      order: ++this.lastOrder,
+      ready: false,
+      createdAt: this.now(),
+      stored,
+      sentOn: 0,
+      held: false,
+      stepUps: 0,
+      resolve,
+      rollback: opts.rollback,
+      commit: opts.commit,
+      rewatch,
+    };
+    this.entries.set(cmd.id, e);
+    this.track(cmd.action);
+    if (opts.optimistic) this.guard(() => opts.optimistic!(this.store.getState()));
+    // Persist, then send; a command of the connection waits only for the reload's commands, to go after them.
+    let persisted = this.loaded;
+    if (stored) {
+      const rec: Stored = { id: cmd.id, bytes: toBinary(CommandSchema, cmd), createdAt: e.createdAt };
+      persisted = this.work = this.write((db) => put(db, rec));
+    }
+    void persisted.then(() => {
+      e.ready = true;
+      this.flush();
+    });
+  }
+
+  /**
+   * Sends, in order, every command not yet sent on this connection. It stops at the first one not yet stored, so
+   * nothing overtakes it; one waiting for a step-up is skipped.
+   */
+  private flush(): void {
+    for (const e of this.sorted()) {
+      if (!e.ready) return;
+      this.trySend(e);
+    }
+  }
+
   private trySend(e: Entry): void {
     if (e.held || e.sentOn === this.connection || this.entries.get(e.cmd.id) !== e) return;
     let sent: boolean | void = false;
@@ -242,9 +314,10 @@ export class Outbox {
     if (this.entries.get(e.cmd.id) !== e) return;
     this.entries.delete(e.cmd.id);
     if (e.stored) this.work = this.write((db) => del(db, e.cmd.id));
-    if (!r.ok) {
-      // A watch the server refused (an unknown Ticket, too many) is not watched.
-      if (e.cmd.action.case === "watchTicket") this.watching.delete(e.cmd.action.value.ticketId);
+    if (r.ok) {
+      if (e.commit) this.guard(() => e.commit!(this.store.getState()));
+    } else {
+      if (e.cmd.action.case === "watchTicket") this.watchRefused(e, e.cmd.action.value.ticketId);
       if (e.rollback) this.guard(() => e.rollback!(this.store.getState()));
     }
     e.resolve?.(r);
@@ -269,11 +342,11 @@ export class Outbox {
           h.held = false;
           h.stepUps++;
           h.sentOn = 0; // not answered: send it again, on this connection too
-          this.trySend(h);
         } else {
           this.finish(h, failure(h.cmd.id, "reauth_required", "step-up refused"));
         }
       }
+      if (ok) this.flush();
     })();
   }
 
@@ -290,6 +363,19 @@ export class Outbox {
       const what = dropped === 1 ? "An action" : `${dropped} actions`;
       this.guard(() => this.notify("Not sent", `${what} waited offline for over 23 hours. Try again.`));
     }
+  }
+
+  /**
+   * A watch the server refused (an unknown Ticket, too many) is not watched, unless a later watch of the same Ticket
+   * is pending: the owner's latest intent wins. A refused re-watch is told to onWatchLost.
+   */
+  private watchRefused(e: Entry, ticketId: string): void {
+    for (const later of this.entries.values()) {
+      const a = later.cmd.action;
+      if (later.order > e.order && a.case === "watchTicket" && a.value.ticketId === ticketId) return;
+    }
+    if (!this.watching.delete(ticketId) || !e.rewatch) return;
+    for (const cb of [...this.watchLost]) this.guard(() => cb(ticketId));
   }
 
   /** Keeps what is watched and the last visibility, for the next connection. */
@@ -317,15 +403,16 @@ export class Outbox {
       if (a.case === "visibility") pendingVisibility = true;
     }
     for (const id of this.watching) {
-      if (!pendingWatch.has(id)) void this.submit({ case: "watchTicket", value: { ticketId: id } });
+      if (!pendingWatch.has(id)) this.add({ case: "watchTicket", value: { ticketId: id } }, {}, undefined, true);
     }
     if (this.visible !== undefined && !pendingVisibility) {
-      void this.submit({ case: "visibility", value: { visible: this.visible } });
+      this.add({ case: "visibility", value: { visible: this.visible } }, {});
     }
   }
 
+  /** The commands in send order. */
   private sorted(): Entry[] {
-    return [...this.entries.values()].sort((a, b) => (a.cmd.id < b.cmd.id ? -1 : a.cmd.id > b.cmd.id ? 1 : 0));
+    return [...this.entries.values()].sort((a, b) => a.order - b.order);
   }
 
   /** Queues an IndexedDB step after the ones before it; without a database it does nothing. */
@@ -368,6 +455,10 @@ export function connectOutbox(client: LinkClient, outbox: Outbox): () => void {
     offStatus();
     offFrame();
   };
+}
+
+function cmpId(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
 }
 
 function failure(id: string, code: string, message: string): CommandResult {

@@ -46,7 +46,18 @@ export type AthenaData = {
    * mark, not the server's state; the Delta that ends the Ticket clears it.
    */
   stopping: ReadonlySet<string>;
+  /**
+   * Approvals the owner answered whose command has no result yet, by approval id: true for approve. This client's
+   * own optimistic mark; a Snapshot that still says pending gets it applied again, and the result, a rollback, or a
+   * Delta that answers the approval clears it.
+   */
+  answering: ReadonlyMap<string, boolean>;
 };
+
+/** An optimistic change: undo puts back what is still this client's guess; commit keeps it once the server agreed. */
+export type Optimistic = { undo(): void; commit(): void };
+
+const NO_CHANGE: Optimistic = { undo() {}, commit() {} };
 
 export type AthenaState = AthenaData & {
   /** Replaces the state with s; epoch is the Welcome's that s follows (omitted after a Resync: the epoch stays). */
@@ -58,12 +69,13 @@ export type AthenaState = AthenaData & {
   applyDelta(d: Delta): "ok" | "gap";
   reset(): void;
   /**
-   * Optimistically marks an approval answered and clears it from its Tickets' pending_approval_id. Returns the undo,
-   * which restores only what a Delta has not replaced since: the Deltas are the truth.
+   * Optimistically marks an approval answered and clears it from its Tickets' pending_approval_id. The undo restores
+   * only what a Delta has not replaced since: the Deltas are the truth. An approval already answered, or being
+   * answered, is left alone (a no-op), so two quick taps cannot tangle their rollbacks.
    */
-  markApprovalAnswered(id: string, approve: boolean): () => void;
-  /** Optimistically marks a Ticket as stopping. Returns the undo. */
-  markStopping(ticketId: string): () => void;
+  markApprovalAnswered(id: string, approve: boolean): Optimistic;
+  /** Optimistically marks a Ticket as stopping. A Ticket already stopping or ended is left alone (a no-op). */
+  markStopping(ticketId: string): Optimistic;
 };
 
 function empty(): AthenaData {
@@ -83,6 +95,7 @@ function empty(): AthenaData {
     prompts: undefined,
     details: new Map(),
     stopping: new Set(),
+    answering: new Map(),
   };
 }
 
@@ -104,6 +117,12 @@ function without(set: ReadonlySet<string>, k: string): ReadonlySet<string> {
   return next;
 }
 
+function withoutKey<V>(m: ReadonlyMap<string, V>, k: string): ReadonlyMap<string, V> {
+  const next = new Map(m);
+  next.delete(k);
+  return next;
+}
+
 /** The stopping marks that still apply to tickets: a Ticket that ended, or is gone, is no longer stopping. */
 function stillStopping(stopping: ReadonlySet<string>, tickets: Map<string, TicketSummary>): ReadonlySet<string> {
   if (stopping.size === 0) return stopping;
@@ -113,6 +132,36 @@ function stillStopping(stopping: ReadonlySet<string>, tickets: Map<string, Ticke
     if (t && t.stage !== "ended") next.add(id);
   }
   return next.size === stopping.size ? stopping : next;
+}
+
+/**
+ * The optimistic copies this client made, each mapped to the record it replaced. An undo restores a record only while
+ * the store still holds one of these copies; a record from the server is never in it.
+ */
+const guessed = new WeakMap<object, object>();
+
+/** approvals and tickets with approval id answered: the approval's state set, its Tickets' pending_approval_id cleared. */
+function answered(
+  approvals: Map<string, ApprovalView>,
+  tickets: Map<string, TicketSummary>,
+  id: string,
+  approve: boolean,
+): Pick<AthenaData, "approvals" | "tickets"> {
+  const before = approvals.get(id);
+  if (before) {
+    const after: ApprovalView = { ...before, state: approve ? "approved" : "denied", answeredAt: timestampNow() };
+    guessed.set(after, before);
+    approvals = upsert(approvals, id, after);
+  }
+  let changed: Map<string, TicketSummary> | undefined;
+  for (const t of tickets.values()) {
+    if (t.pendingApprovalId !== id) continue;
+    const after: TicketSummary = { ...t, pendingApprovalId: "" };
+    guessed.set(after, t);
+    changed ??= new Map(tickets);
+    changed.set(t.id, after);
+  }
+  return { approvals, tickets: changed ?? tickets };
 }
 
 /** The part of the state one Delta changes. */
@@ -129,8 +178,12 @@ function change(s: AthenaData, d: Delta): Partial<AthenaData> {
       const id = c.value.summary?.id;
       return id ? { details: upsert(s.details, id, c.value) } : {};
     }
-    case "approval":
-      return { approvals: upsert(s.approvals, c.value.id, c.value) };
+    case "approval": {
+      const approvals = upsert(s.approvals, c.value.id, c.value);
+      return c.value.state !== "pending" && s.answering.has(c.value.id)
+        ? { approvals, answering: withoutKey(s.answering, c.value.id) }
+        : { approvals };
+    }
     case "trigger":
       return { triggers: upsert(s.triggers, c.value.id, c.value) };
     case "thread":
@@ -157,13 +210,24 @@ function change(s: AthenaData, d: Delta): Partial<AthenaData> {
 export const useAthena = create<AthenaState>()((set, get) => ({
   ...empty(),
   applySnapshot(s, epoch) {
-    const tickets = byKey(s.tickets, (t) => t.id);
+    let tickets = byKey(s.tickets, (t) => t.id);
+    let approvals = byKey(s.approvals, (a) => a.id);
+    // An answer still in flight stays shown while the server still says pending; any other state is the truth.
+    const answering = new Map(get().answering);
+    for (const [id, approve] of answering) {
+      if (approvals.get(id)?.state !== "pending") {
+        answering.delete(id);
+        continue;
+      }
+      ({ approvals, tickets } = answered(approvals, tickets, id, approve));
+    }
     set({
       epoch: epoch ?? get().epoch,
       cursor: s.cursor,
       tickets,
       stopping: stillStopping(get().stopping, tickets),
-      approvals: byKey(s.approvals, (a) => a.id),
+      answering: answering.size === get().answering.size ? get().answering : answering,
+      approvals,
       triggers: byKey(s.triggers, (t) => t.id),
       threads: byKey(s.threads, (t) => t.key),
       decisions: byKey(s.decisions, (d) => d.id),
@@ -191,40 +255,46 @@ export const useAthena = create<AthenaState>()((set, get) => ({
   },
   markApprovalAnswered(id, approve) {
     const s = get();
-    const before = s.approvals.get(id);
-    const after = before && { ...before, state: approve ? "approved" : "denied", answeredAt: timestampNow() };
-    const changed: [TicketSummary, TicketSummary][] = [];
-    for (const t of s.tickets.values()) {
-      if (t.pendingApprovalId === id) changed.push([t, { ...t, pendingApprovalId: "" }]);
-    }
-    const patch: Partial<AthenaData> = {};
-    if (before && after) patch.approvals = upsert(s.approvals, id, after);
-    if (changed.length) {
-      const tickets = new Map(s.tickets);
-      for (const [, t] of changed) tickets.set(t.id, t);
-      patch.tickets = tickets;
-    }
-    set(patch);
-    return () => {
+    const approval = s.approvals.get(id);
+    if (s.answering.has(id) || (approval && approval.state !== "pending")) return NO_CHANGE;
+    set({ ...answered(s.approvals, s.tickets, id, approve), answering: new Map(s.answering).set(id, approve) });
+    const settle = () => {
       const now = get();
-      const undo: Partial<AthenaData> = {};
-      if (before && after && now.approvals.get(id) === after) undo.approvals = upsert(now.approvals, id, before);
-      const back = changed.filter(([, t]) => now.tickets.get(t.id) === t);
-      if (back.length) {
-        const tickets = new Map(now.tickets);
-        for (const [t] of back) tickets.set(t.id, t);
-        undo.tickets = tickets;
-      }
-      set(undo);
+      return now.answering.has(id) ? { answering: withoutKey(now.answering, id) } : {};
+    };
+    return {
+      undo() {
+        const now = get();
+        const undo: Partial<AthenaData> = settle();
+        const a = now.approvals.get(id);
+        const base = a && guessed.get(a);
+        if (base) undo.approvals = upsert(now.approvals, id, base as ApprovalView);
+        let tickets: Map<string, TicketSummary> | undefined;
+        for (const t of now.tickets.values()) {
+          const prev = guessed.get(t) as TicketSummary | undefined;
+          if (prev?.pendingApprovalId !== id) continue;
+          tickets ??= new Map(now.tickets);
+          tickets.set(t.id, prev);
+        }
+        if (tickets) undo.tickets = tickets;
+        set(undo);
+      },
+      commit() {
+        set(settle());
+      },
     };
   },
   markStopping(ticketId) {
     const s = get();
-    if (s.stopping.has(ticketId) || s.tickets.get(ticketId)?.stage === "ended") return () => {};
+    if (s.stopping.has(ticketId) || s.tickets.get(ticketId)?.stage === "ended") return NO_CHANGE;
     set({ stopping: new Set(s.stopping).add(ticketId) });
-    return () => {
-      const now = get();
-      if (now.stopping.has(ticketId)) set({ stopping: without(now.stopping, ticketId) });
+    return {
+      undo() {
+        const now = get();
+        if (now.stopping.has(ticketId)) set({ stopping: without(now.stopping, ticketId) });
+      },
+      // The Delta that ends the Ticket clears it, not the result: stopping takes the session a moment.
+      commit() {},
     };
   },
 }));

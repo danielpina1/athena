@@ -47,14 +47,63 @@ class FakeLink {
   }
 }
 
-/** Counts how often a promise settles: a promise settles once, so this counts the handlers the outbox ran. */
+/** The result a submit resolved with, once it has. "Once" is checked on the outbox's side effects instead. */
 function track(p: Promise<CommandResult>) {
-  const t = { settled: 0, result: undefined as CommandResult | undefined };
-  void p.then((r) => {
-    t.settled++;
-    t.result = r;
-  });
+  const t = { result: undefined as CommandResult | undefined };
+  void p.then((r) => (t.result = r));
   return t;
+}
+
+type Rec = { id: string };
+
+/**
+ * real, with a log of what IndexedDB committed: the ids put and deleted, each logged when its transaction completes
+ * (not when it was asked for), so a test can tell what was durable at a given moment.
+ */
+function spied(real: IDBFactory) {
+  const log = { committed: new Set<string>(), deleted: [] as string[] };
+  const bind = <T extends object>(t: T, p: string | symbol) => {
+    const v = Reflect.get(t, p, t);
+    return typeof v === "function" ? v.bind(t) : v;
+  };
+  const wrapTx = (tx: IDBTransaction) => {
+    const done: (() => void)[] = [];
+    const store = (st: IDBObjectStore) =>
+      new Proxy(st, {
+        get(t, p) {
+          if (p === "put") return (rec: Rec) => (done.push(() => log.committed.add(rec.id)), t.put(rec));
+          if (p === "delete") return (id: string) => (done.push(() => log.deleted.push(id)), t.delete(id));
+          return bind(t, p);
+        },
+      });
+    return new Proxy(tx, {
+      get: (t, p) => (p === "objectStore" ? (n: string) => store(t.objectStore(n)) : bind(t, p)),
+      set(t, p, v) {
+        if (p !== "oncomplete") return Reflect.set(t, p, v, t);
+        t.oncomplete = (ev) => {
+          for (const f of done) f();
+          v.call(t, ev);
+        };
+        return true;
+      },
+    });
+  };
+  const wrapDb = (db: IDBDatabase) =>
+    new Proxy(db, {
+      get: (t, p) =>
+        p === "transaction" ? (...a: Parameters<IDBDatabase["transaction"]>) => wrapTx(t.transaction(...a)) : bind(t, p),
+      set: (t, p, v) => Reflect.set(t, p, v, t),
+    });
+  const factory = {
+    open(name: string, version?: number) {
+      const req = real.open(name, version);
+      return new Proxy(req, {
+        get: (t, p) => (p === "result" ? wrapDb(t.result) : bind(t, p)),
+        set: (t, p, v) => Reflect.set(t, p, v, t),
+      });
+    },
+  } as unknown as IDBFactory;
+  return { factory, ...log };
 }
 
 describe("Outbox", () => {
@@ -68,13 +117,16 @@ describe("Outbox", () => {
   test("outbox resends by id after reconnect and resolves once", async () => {
     server = new FakeServer();
     client = new LinkClient({ url: "wss://athena.test/ws", clientId: "dev-1", WebSocketImpl: server.WebSocket });
-    const outbox = new Outbox(idb, linkSender(client));
+    const db = spied(idb);
+    const outbox = new Outbox(db.factory, linkSender(client));
     const off = connectOutbox(client, outbox);
     client.start();
     const s1 = server.welcome();
 
     const approve: Action = { case: "answerApproval", value: { approvalId: "A-1", approve: true } };
-    const t = track(outbox.submit(approve));
+    const commit = vi.fn();
+    const rollback = vi.fn();
+    const t = track(outbox.submit(approve, { commit, rollback }));
     await outbox.settled();
     const [first] = s1.sent("command");
     expect(first.action).toMatchObject(approve);
@@ -83,7 +135,7 @@ describe("Outbox", () => {
     // The phone loses the network before the result: nothing fails, the command waits.
     s1.serverClose(1006);
     await outbox.settled();
-    expect(t.settled).toBe(0);
+    expect(t.result).toBeUndefined();
     expect(outbox.pending().map((c) => c.id)).toEqual([first.id]);
 
     // The network comes back: the next connection carries the same command once, by the same id.
@@ -93,7 +145,7 @@ describe("Outbox", () => {
     expect(s1.sent("command").map((c) => c.id)).toEqual([first.id]);
     expect(s2.sent("command").map((c) => c.id)).toEqual([first.id]);
     expect(s2.violations).toEqual([]);
-    expect(t.settled).toBe(0);
+    expect(t.result).toBeUndefined();
 
     // The server answers the resend from its stored result; a repeat of it (a late answer to the first send) is
     // ignored. One result, never "failed" and never a second approve.
@@ -101,8 +153,10 @@ describe("Outbox", () => {
     s2.push(res, { durable: true });
     s2.push(res, { durable: true });
     await outbox.settled();
-    expect(t.settled).toBe(1);
     expect(t.result).toMatchObject({ id: first.id, ok: true });
+    expect(commit).toHaveBeenCalledTimes(1);
+    expect(rollback).not.toHaveBeenCalled();
+    expect(db.deleted).toEqual([first.id]);
     expect(outbox.pending()).toEqual([]);
 
     // Answered means gone: a third connection sends nothing, and a reload finds nothing.
@@ -120,7 +174,8 @@ describe("Outbox", () => {
   test("a command submitted offline is sent once on the next open", async () => {
     const link = new FakeLink();
     const outbox = new Outbox(idb, link.send);
-    const t = track(outbox.submit(reply()));
+    const commit = vi.fn();
+    void outbox.submit(reply(), { commit });
     await outbox.settled();
     expect(link.sent).toEqual([]);
     link.connect(outbox);
@@ -128,8 +183,9 @@ describe("Outbox", () => {
     const [id] = link.ids();
     expect(link.ids()).toHaveLength(1);
     outbox.onResult(ok(id));
+    outbox.onResult(ok(id));
     await outbox.settled();
-    expect(t.settled).toBe(1);
+    expect(commit).toHaveBeenCalledTimes(1);
   });
 
   test("outbox survives a page reload", async () => {
@@ -167,14 +223,15 @@ describe("Outbox", () => {
       return new Promise<boolean>((r) => (finishStepUp = r));
     });
     link.connect(outbox);
-    const t = track(outbox.submit({ case: "setPolicy", value: { baseRevision: 3, settingsJson: "{}" } }));
+    const commit = vi.fn();
+    const t = track(outbox.submit({ case: "setPolicy", value: { baseRevision: 3, settingsJson: "{}" } }, { commit }));
     await outbox.settled();
     const [id] = link.ids();
 
     outbox.onResult(fail(id, "reauth_required"));
     await outbox.settled();
     expect(stepUps).toBe(1);
-    expect(t.settled).toBe(0);
+    expect(t.result).toBeUndefined();
     expect(outbox.pending().map((c) => c.id)).toEqual([id]);
     // While the owner is at the passkey prompt the command is not resent, not even by a reconnect.
     link.connect(outbox);
@@ -185,9 +242,10 @@ describe("Outbox", () => {
     await outbox.settled();
     expect(link.ids()).toEqual([id]);
     outbox.onResult(ok(id));
+    outbox.onResult(ok(id));
     await outbox.settled();
-    expect(t.settled).toBe(1);
     expect(t.result?.ok).toBe(true);
+    expect(commit).toHaveBeenCalledTimes(1);
     expect(stepUps).toBe(1);
   });
 
@@ -212,13 +270,14 @@ describe("Outbox", () => {
     const signOut = vi.fn();
     outbox.setSignOutHandler(signOut);
     link.connect(outbox);
-    const t = track(outbox.submit(reply()));
+    const commit = vi.fn();
+    const t = track(outbox.submit(reply(), { commit }));
     await outbox.settled();
     const [id] = link.ids();
     outbox.onResult(fail(id, "unauthenticated"));
     await outbox.settled();
     expect(signOut).toHaveBeenCalledTimes(1);
-    expect(t.settled).toBe(0);
+    expect(t.result).toBeUndefined();
     expect(link.ids()).toEqual([id]); // not resent on the connection that refused it
     link.drop();
     link.connect(outbox); // signed in again
@@ -226,7 +285,8 @@ describe("Outbox", () => {
     expect(link.ids()).toEqual([id]);
     outbox.onResult(ok(id));
     await outbox.settled();
-    expect(t.settled).toBe(1);
+    expect(t.result?.ok).toBe(true);
+    expect(commit).toHaveBeenCalledTimes(1);
   });
 
   test("failure rolls back the optimistic change", async () => {
@@ -246,7 +306,6 @@ describe("Outbox", () => {
     outbox.onResult(fail(link.ids()[0], "conflict")); // a repeat rolls back nothing more
     await outbox.settled();
     expect(order).toEqual(["optimistic:0", "rollback:0"]);
-    expect(t.settled).toBe(1);
     expect(t.result).toMatchObject({ ok: false, code: "conflict" });
     expect(outbox.pending()).toEqual([]);
   });
@@ -385,12 +444,107 @@ describe("Outbox", () => {
     const link = new FakeLink();
     const outbox = new Outbox(broken, link.send, { reportError });
     link.connect(outbox);
-    const t = track(outbox.submit(reply()));
+    const commit = vi.fn();
+    const t = track(outbox.submit(reply(), { commit }));
     await outbox.settled();
+    expect(link.ids()).toHaveLength(1);
     outbox.onResult(ok(link.ids()[0]));
     await outbox.settled();
-    expect(t.settled).toBe(1);
+    expect(t.result?.ok).toBe(true);
+    expect(commit).toHaveBeenCalledTimes(1);
     expect(reportError).toHaveBeenCalled();
+  });
+
+  test("a command is sent only after IndexedDB committed it", async () => {
+    const db = spied(idb);
+    const durableAtSend: boolean[] = [];
+    const outbox = new Outbox(db.factory, (cmd) => {
+      durableAtSend.push(db.committed.has(cmd.id));
+      return true;
+    });
+    outbox.onOpen();
+    void outbox.submit(reply("one"));
+    await outbox.settled();
+    void outbox.submit(reply("two")); // after the load, with the database open
+    await outbox.settled();
+    expect(durableAtSend).toEqual([true, true]);
+  });
+
+  test("commands a reload brings back go before those submitted during the load", async () => {
+    const before = new Outbox(idb, () => false);
+    void before.submit(reply("old"));
+    await before.settled();
+
+    const link = new FakeLink();
+    const after = new Outbox(idb, link.send);
+    // Both before the stored commands are read: a submit, then the first open.
+    void after.submit(reply("new"));
+    link.connect(after);
+    await after.settled();
+    expect(link.actions()).toMatchObject([reply("old"), reply("new")]);
+    expect(link.ids()).toEqual(after.pending().map((c) => c.id));
+  });
+
+  test("a refused stale watch keeps a newer watch of the same Ticket", async () => {
+    const link = new FakeLink();
+    const outbox = new Outbox(idb, link.send);
+    link.connect(outbox);
+    void outbox.submit({ case: "watchTicket", value: { ticketId: "T-1" } });
+    void outbox.submit({ case: "unwatchTicket", value: { ticketId: "T-1" } });
+    void outbox.submit({ case: "watchTicket", value: { ticketId: "T-1" } });
+    await outbox.settled();
+    const [w1, u, w2] = link.ids();
+    outbox.onResult(fail(w1, "not_found"));
+    expect(outbox.watched()).toEqual(["T-1"]);
+    outbox.onResult(ok(u));
+    outbox.onResult(ok(w2));
+    expect(outbox.watched()).toEqual(["T-1"]);
+  });
+
+  test("a re-watch refused after reconnect is told to onWatchLost", async () => {
+    const link = new FakeLink();
+    const outbox = new Outbox(idb, link.send);
+    const lost = vi.fn();
+    outbox.onWatchLost(lost);
+    link.connect(outbox);
+    void outbox.submit({ case: "watchTicket", value: { ticketId: "T-1" } });
+    const direct = track(outbox.submit({ case: "watchTicket", value: { ticketId: "T-9" } }));
+    await outbox.settled();
+    const [w1, w9] = link.ids();
+    outbox.onResult(ok(w1));
+    outbox.onResult(fail(w9, "not_found"));
+    await outbox.settled();
+    // A refusal of the owner's own watch goes to its promise, not to onWatchLost.
+    expect(direct.result).toMatchObject({ ok: false, code: "not_found" });
+    expect(lost).not.toHaveBeenCalled();
+
+    link.drop();
+    link.connect(outbox);
+    await outbox.settled();
+    const [rewatch] = link.ids();
+    outbox.onResult(fail(rewatch, "not_found"));
+    expect(lost).toHaveBeenCalledTimes(1);
+    expect(lost).toHaveBeenCalledWith("T-1");
+    expect(outbox.watched()).toEqual([]);
+  });
+
+  test("sign-out runs once per connection however many commands it refused", async () => {
+    const link = new FakeLink();
+    const outbox = new Outbox(idb, link.send);
+    const signOut = vi.fn();
+    outbox.setSignOutHandler(signOut);
+    link.connect(outbox);
+    void outbox.submit(reply("one"));
+    void outbox.submit(reply("two"));
+    await outbox.settled();
+    for (const id of link.ids()) outbox.onResult(fail(id, "unauthenticated"));
+    expect(signOut).toHaveBeenCalledTimes(1);
+    link.drop();
+    link.connect(outbox);
+    await outbox.settled();
+    expect(link.ids()).toHaveLength(2);
+    for (const id of link.ids()) outbox.onResult(fail(id, "unauthenticated"));
+    expect(signOut).toHaveBeenCalledTimes(2);
   });
 });
 

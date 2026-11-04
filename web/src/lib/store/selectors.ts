@@ -135,3 +135,11 @@ export function selectCounts(s: Slice, now: number = Date.now()): Counts {
     mergedToday: selectMergedToday(s, now).length,
   }));
 }
+
+/**
+ * The owner's answer to an approval while its command has no result yet: true approve, false deny, undefined when not
+ * being answered. Needs you leaves an answered approval out with it (ruling R30).
+ */
+export function selectAnswering(s: Pick<AthenaData, "answering">, approvalId: string): boolean | undefined {
+  return s.answering.get(approvalId);
+}

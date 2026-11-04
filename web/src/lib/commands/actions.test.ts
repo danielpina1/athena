@@ -3,6 +3,7 @@ import { IDBFactory } from "fake-indexeddb";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { CommandResultSchema, type Command } from "@/gen/athena/v1/commands_pb";
 import { DeltaSchema, SnapshotSchema } from "@/gen/athena/v1/state_pb";
+import { selectAnswering } from "@/lib/store/selectors";
 import { useAthena } from "@/lib/store/state";
 import { stageLabel } from "@/ui/athena/StageBadge";
 import * as actions from "./actions";
@@ -97,6 +98,71 @@ describe("actions", () => {
       expect(st().approvals.get("A-1")?.state).toBe("pending");
       expect(st().approvals.get("A-1")?.answeredAt).toBeUndefined();
       expect(st().tickets.get("T-1")?.pendingApprovalId).toBe("A-1");
+    });
+
+    const prior = () => {
+      expect(st().approvals.get("A-1")?.state).toBe("pending");
+      expect(st().approvals.get("A-1")?.answeredAt).toBeUndefined();
+      expect(st().tickets.get("T-1")?.pendingApprovalId).toBe("A-1");
+      expect(selectAnswering(st(), "A-1")).toBeUndefined();
+    };
+
+    test("two answers to one approval that both fail restore the prior state", async () => {
+      const p1 = actions.answerApproval("A-1", true);
+      const p2 = actions.answerApproval("A-1", true);
+      await outbox.settled();
+      const [c1, c2] = sent.slice(-2);
+      outbox.onResult(create(CommandResultSchema, { id: c1.id, ok: false, code: "conflict" }));
+      outbox.onResult(create(CommandResultSchema, { id: c2.id, ok: false, code: "conflict" }));
+      await Promise.all([p1, p2]);
+      prior();
+    });
+
+    test("two answers that fail by clear restore the prior state", async () => {
+      void actions.answerApproval("A-1", true);
+      void actions.answerApproval("A-1", false);
+      await outbox.settled();
+      outbox.clear();
+      prior();
+    });
+
+    test("an answer in flight survives a new-epoch Snapshot that still says pending", async () => {
+      const p = actions.answerApproval("A-1", false);
+      expect(selectAnswering(st(), "A-1")).toBe(false);
+      st().applySnapshot(
+        create(SnapshotSchema, {
+          cursor: 1n,
+          tickets: [{ id: "T-1", stage: "person", action: "approval", pendingApprovalId: "A-1" }],
+          approvals: [{ id: "A-1", ticketId: "T-1", state: "pending" }],
+        }),
+        "e2",
+      );
+      expect(st().approvals.get("A-1")?.state).toBe("denied");
+      expect(st().tickets.get("T-1")?.pendingApprovalId).toBe("");
+      expect(selectAnswering(st(), "A-1")).toBe(false);
+      await outbox.settled();
+      answer("conflict");
+      await p;
+      prior(); // the rollback undoes the re-applied guess too
+    });
+
+    test("a Snapshot that says answered ends the answer in flight", () => {
+      void actions.answerApproval("A-1", true);
+      st().applySnapshot(
+        create(SnapshotSchema, { cursor: 4n, approvals: [{ id: "A-1", ticketId: "T-1", state: "denied" }] }),
+        "e2",
+      );
+      expect(selectAnswering(st(), "A-1")).toBeUndefined();
+      expect(st().approvals.get("A-1")?.state).toBe("denied");
+    });
+
+    test("the result clears the answer in flight and keeps the guess", async () => {
+      const p = actions.answerApproval("A-1", true);
+      await outbox.settled();
+      answer();
+      await p;
+      expect(selectAnswering(st(), "A-1")).toBeUndefined();
+      expect(st().approvals.get("A-1")?.state).toBe("approved");
     });
 
     test("a Delta that came first is the truth: the rollback leaves it", async () => {

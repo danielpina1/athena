@@ -3,6 +3,7 @@
 // owner). The few with an optimistic change make it at once and undo it on failure; the Deltas that follow are the
 // truth either way.
 import type { CommandResult } from "@/gen/athena/v1/commands_pb";
+import type { AthenaState, Optimistic } from "@/lib/store/state";
 import type { Action, Outbox, SubmitOptions } from "./outbox";
 
 let current: Outbox | undefined;
@@ -17,10 +18,14 @@ function submit(action: Action, opts?: SubmitOptions): Promise<CommandResult> {
   return current.submit(action, opts);
 }
 
-/** Runs mark as the optimistic change and its returned undo as the rollback. */
-function undoable(mark: (s: Parameters<NonNullable<SubmitOptions["optimistic"]>>[0]) => () => void): SubmitOptions {
-  let undo: (() => void) | undefined;
-  return { optimistic: (s) => (undo = mark(s)), rollback: () => undo?.() };
+/** Runs mark as the optimistic change: its undo on failure, its commit on success. */
+function undoable(mark: (s: AthenaState) => Optimistic): SubmitOptions {
+  let change: Optimistic | undefined;
+  return {
+    optimistic: (s) => (change = mark(s)),
+    rollback: () => change?.undo(),
+    commit: () => change?.commit(),
+  };
 }
 
 export function submitTask(t: { text: string; repo?: string; dir?: string; model?: string }) {
@@ -69,11 +74,18 @@ export function setPolicy(base: number, json: string) {
   return submit({ case: "setPolicy", value: { baseRevision: base, settingsJson: json } });
 }
 
-/** Starts the Ticket's detail Deltas; the outbox keeps it watched across reconnects until unwatch. */
+/**
+ * Starts the Ticket's detail Deltas (seq 0) on this connection. Not refcounted: a screen that can show one Ticket
+ * twice (list pane and pinned session, say) counts its own users and calls watch on the first and unwatch on the last.
+ * The outbox keeps the Ticket in watched() and re-sends the watch after every reconnect, until unwatch. A watch
+ * refused after a reconnect (the Ticket is gone) drops from watched() and fires Outbox.onWatchLost; a refusal of
+ * this call resolves its own promise `{ ok: false }`.
+ */
 export function watch(ticketId: string) {
   return submit({ case: "watchTicket", value: { ticketId } });
 }
 
+/** Stops the Ticket's detail Deltas and its re-watch after reconnects. Called by the last user (see watch). */
 export function unwatch(ticketId: string) {
   return submit({ case: "unwatchTicket", value: { ticketId } });
 }
