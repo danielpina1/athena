@@ -33,7 +33,11 @@ import (
 // The rig is the real store, Engine and node wired as `athena server` wires them, with the fake `claude` of the
 // runtime package as the runtime: no model, no network. What it measures is Athena's own overhead.
 
-const startTimeout = 20 * time.Second
+const (
+	startTimeout = 20 * time.Second
+	// stopTimeout is how long a server gets to exit after SIGINT.
+	stopTimeout = 10 * time.Second
+)
 
 var (
 	buildMu   sync.Mutex
@@ -393,6 +397,19 @@ func newRepo(tb testing.TB) string {
 	return dir
 }
 
+// stopServer interrupts a server subprocess and waits for it; one that has not exited after stopTimeout is killed.
+func stopServer(cmd *exec.Cmd) {
+	_ = cmd.Process.Signal(os.Interrupt)
+	done := make(chan struct{})
+	go func() { _ = cmd.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(stopTimeout):
+		_ = cmd.Process.Kill()
+		<-done
+	}
+}
+
 // idleRSS starts a real `athena server` with the fake runtime, leaves it idle past two samples of its resource
 // gauges and returns the process_rss_bytes it reports (its peak RSS where the OS offers nothing better).
 func idleRSS(tb testing.TB, idle time.Duration) uint64 {
@@ -404,10 +421,7 @@ func idleRSS(tb testing.TB, idle time.Duration) uint64 {
 	if err := cmd.Start(); err != nil {
 		tb.Fatal(err)
 	}
-	tb.Cleanup(func() {
-		_ = cmd.Process.Signal(os.Interrupt)
-		_ = cmd.Wait()
-	})
+	tb.Cleanup(func() { stopServer(cmd) })
 	deadline := time.Now().Add(startTimeout)
 	for {
 		if _, err := controlMetrics(dir); err == nil {
@@ -517,10 +531,7 @@ func startDashboard(tb testing.TB) *dashboard {
 	if err := cmd.Start(); err != nil {
 		tb.Fatal(err)
 	}
-	tb.Cleanup(func() {
-		_ = cmd.Process.Signal(os.Interrupt)
-		_ = cmd.Wait()
-	})
+	tb.Cleanup(func() { stopServer(cmd) })
 	d := &dashboard{tb: tb, dir: dir, origin: "http://localhost" + listen[strings.LastIndex(listen, ":"):], frames: make(chan *athenav1.Frame, 1<<14)}
 	for deadline := time.Now().Add(startTimeout); ; time.Sleep(20 * time.Millisecond) {
 		var st server.WebStatusResult
@@ -722,8 +733,8 @@ func measureLinkDelta(tb testing.TB, n int) []time.Duration {
 	return out
 }
 
-// measureStreamItem returns n latencies from a Reply (whose line the fake runtime answers) to the next item of the
-// Ticket's stream arriving on the link.
+// measureStreamItem returns n latencies from a Reply to the fake runtime's answer to it (its assistant line, a "say"
+// item) arriving on the link; the echo of the Reply's own user line (an "other" item) does not end a sample.
 func measureStreamItem(tb testing.TB, n int) []time.Duration {
 	d := startDashboard(tb)
 	out := make([]time.Duration, 0, n)
@@ -732,7 +743,7 @@ func measureStreamItem(tb testing.TB, n int) []time.Duration {
 		d.reply()
 		got := d.await(func(f *athenav1.Frame) bool {
 			for _, it := range f.GetStreamItems().GetItems() {
-				if f.GetStreamItems().GetTicketId() == d.ticket && it.GetOffset() > d.offset {
+				if f.GetStreamItems().GetTicketId() == d.ticket && it.GetOffset() > d.offset && it.GetKind() == "say" {
 					return true
 				}
 			}

@@ -19,6 +19,9 @@ type Report struct {
 
 // Result is one measured quantity: a latency in nanoseconds or a size in bytes (its Value).
 //
+// P95, set only for the dashboard's latencies (whose budgets are p95s), is the median over the rounds of each round's
+// p95; budgeted() prefers it to P99 when it is set, and Best is then the lowest round p95.
+//
 // For a latency, P99 is the median over the rounds of each round's p99, which the budget is judged on; Best is the
 // lowest round p99, which regressions are judged on: noise only ever slows a round, so the best of several rounds moves
 // little from run to run, and a real slowdown raises every round. Probe, for latencies that depend on what the machine

@@ -21,7 +21,8 @@ const (
 	dispatchBudget = 100 * time.Millisecond
 	rssBudget      = 100 << 20
 	// linkBudget is the p95 of the dashboard's latencies: a delta, a stream item and a command's result reaching a
-	// phone (spec §10.3); webRSSBudget the idle RSS with one client connected.
+	// phone (spec §10.3); the "_ms" and "_mb" in these budgets' names are the names the spec mandates, while a result
+	// stores nanoseconds and bytes (its Unit). webRSSBudget the idle RSS with one client connected.
 	linkBudget   = 250 * time.Millisecond
 	webRSSBudget = 100 << 20
 
