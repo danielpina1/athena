@@ -97,14 +97,22 @@ server starts, the server keeps running without the GitHub source and retries in
 
 ## 4. The Policy: who may start work, and what Athena does with it
 
-The Policy decides which GitHub accounts may start work and what happens to a message from them. Its first line is
-the **accept mode**:
+The Policy decides which GitHub accounts may start work and what happens to a message from them.
 
-| Mode | Meaning |
+**Explicit requests start work in every mode.** An account on `allowed` that mentions the App, an allowed account's
+follow-up on an issue or pull request Athena works on, and a mention that an `unlistedAddressed: "explicit"` cell
+admits are accepted whatever the mode, `observe` and `off` included: Athena posts its acknowledgement, starts a worker
+session on your machine and opens a pull request.
+
+The **accept mode** (the Policy's first line) governs everything else: the *inferred* (proactive) candidates, such as
+a message that does not mention the App, from an account the admission table lets in, or a follow-up from an account
+not on the list.
+
+| Mode | Inferred candidates |
 | --- | --- |
-| `off` | Athena ignores GitHub. |
-| `observe` | **The default.** Athena reads, routes and records Decisions (`athena decisions` shows "would accept") but never starts work and never writes to GitHub. |
-| `auto` | Athena accepts work from allowed accounts: it posts one acknowledgement, starts a Ticket and delivers a pull request. |
+| `off` | Not admitted: Athena records them as ignored. |
+| `observe` | **The default.** Routed and recorded as Decisions (`athena decisions` shows "would accept"); never started. |
+| `auto` | Accepted when every rule the router matched is enabled: one acknowledgement, a Ticket and a pull request. |
 
 Until you save a Policy, the mode is `observe` and **Allowed** holds the installation's account (you, for a personal
 installation). Look at it, edit it, save it:
@@ -144,16 +152,22 @@ field is refused. The shape, with your login in `allowed`:
   means. `ci` has only the last cell.
 - `rules`: named instructions for proactive work, each `{"name", "instructions", "enabled"}`.
 
-Run in `observe` first. Mention the App in an issue of the sandbox repository, then read what Athena would have done:
+To watch Athena before it acts, run in `observe` with nobody on the list, so that no message is an explicit request.
+Save a Policy with `"allowed": []` and `"unlistedAddressed": "inferred"` in the `issues` and `comments` rows, mention
+the App in an issue of the sandbox repository, then read what Athena would have done:
 
     athena triggers          # what arrived
     athena threads           # per issue/PR: queue, eval, tickets
     athena decisions         # accept / stop / ignore, with reasons, "(would accept)" in observe
 
-When the Decisions look right, **change `"mode"` to `"auto"` deliberately** and run `athena policy set` again. Do not
-add logins you do not trust to `allowed`: in `auto` mode an allowed account that mentions the App makes Athena open
-a worker session on your machine. Use `athena reevaluate <id>`, `athena dismiss <id>` and `athena unsubscribe <thread>`
-to steer a single Decision or Thread.
+A mention from an account on `allowed` is not a test: it is a real request in every mode, and Athena starts the work
+and writes to GitHub.
+
+When the Decisions look right, put your login back in `allowed`, set the cells back, and choose the mode: stay in
+`observe` to have Athena act only on explicit requests, or **change `"mode"` to `"auto"` deliberately** to let
+proactive work through too. Run `athena policy set` again. Do not add logins you do not trust to `allowed`: in every
+mode an allowed account that mentions the App makes Athena open a worker session on your machine. Use `athena
+reevaluate <id>`, `athena dismiss <id>` and `athena unsubscribe <thread>` to steer a single Decision or Thread.
 
 You can also give Athena work yourself, in a configured repository, without a mention:
 
@@ -163,12 +177,15 @@ You can also give Athena work yourself, in a configured repository, without a me
 
 - **The App is a separate identity from you.** Commits, pull requests and comments come from `<slug>[bot]`, with the
   bot's noreply commit email, not from your account. Its access is exactly the repositories you installed it on and the
-  permissions above; revoke it from the installation page at any time. What it does is attributed to the bot, never to you.
+  permissions above; revoke it from the installation page at any time. What it does is attributed to the bot, never to
+  you.
 - **The repository is public** (`danielpina1/athena`), and so are the issues, comments, branches and pull requests
   Athena writes on public repositories. Do not put secrets in task text, and install the App on private or sandbox
   repositories first. Anyone can mention the App, but only `allowed` accounts start work; for everyone else
   `admission` decides, and the default is to ignore them.
-- **Observe is the default; `auto` is a choice.** Nothing starts work or writes to GitHub until you set `"mode": "auto"`.
+- **Observe is the default; `auto` is a choice.** Observe holds back proactive work only. An explicit request (an
+  allowed account that mentions the App, or a cell set to `explicit`) starts work and writes to GitHub in every mode;
+  keep `allowed` to accounts you trust.
 - **Workers run as your OS user.** They have your files, your shell and your network. Athena confines them with rules
   (the Ticket's directory, blocked commands, no credential files, an Approval for anything else), but a script can do
   what a named path cannot, so the file-level isolation is **best effort**, not a security boundary.
@@ -193,20 +210,21 @@ You can also give Athena work yourself, in a configured repository, without a me
 ## Troubleshooting
 
 - `key file ... has mode 0644`: `chmod 600` the key.
-- `the installation does not reach owner/name`: add the repository to the installation (**Install App** > **Configure**),
-  or fix the `--repo` spelling.
+- `the installation does not reach owner/name`: add the repository to the installation (**Install App** >
+  **Configure**), or fix the `--repo` spelling.
 - Nothing happens after a mention: `athena status` (is the source healthy?), `athena triggers`, `athena decisions`.
-  In `observe` mode, "would accept" is the whole answer.
+  In `observe` mode, "would accept" on an inferred candidate is the whole answer.
 - A mention must name the App's slug as a whole word (`@athena-yourname`), outside quoted lines. The App's own comments
   never become Triggers.
 
 ## Live end-to-end test
 
 The test creates an issue in a **sandbox repository** that mentions the App, waits for the acknowledgement and a pull
-request from `athena/<ticket>` that adds a file `hello-<unix time>.txt` (a new name each run, so a second run still produces a diff), merges that pull request through the API with the App's token,
-waits for the Ticket to end `merged`, checks that no token or key reached `athena logs`, the transcripts or the server
-log, and cleans up by closing the issue and deleting the branch. It uses the real `claude` (haiku), costs a few cents,
-and merges a real pull request: point it only at a repository you do not mind changing.
+request from `athena/<ticket>` that adds a file `hello-<unix time>.txt` (a new name each run, so a second run still
+produces a diff), merges that pull request through the API with the App's token, waits for the Ticket to end
+`merged`, checks that no token or key reached `athena logs`, the transcripts or the server log, and cleans up by
+closing the issue and deleting the branch. It uses the real `claude` (haiku), costs a few cents, and merges a real
+pull request: point it only at a repository you do not mind changing.
 
 It needs `claude` and `gh` (logged in as you, since the issue must come from you and not from the App) on `PATH`.
 The server runs in a fresh temp state dir, configured from these variables; your own `~/.athena` is not used.
@@ -217,6 +235,8 @@ The server runs in a fresh temp state dir, configured from these variables; your
     go test -tags live -run LiveGitHub -v -timeout 30m ./internal/server
 
 With `ATHENA_LIVE_GITHUB` or `ATHENA_LIVE_REPO` unset it skips with `set ATHENA_LIVE_GITHUB=1 and ATHENA_LIVE_REPO to
-run`. When `ATHENA_LIVE_GITHUB=1` is set, a missing `claude`, `gh` or App variable fails the test instead of skipping it. The whole test (server start, acknowledgement,
-pull request, merge and the Ticket's end) shares one 25-minute deadline, inside the documented `-timeout 30m`. The test saves its own Policy in the temp state dir (mode `auto`, your `gh` login allowed). Run it with the
-default branch of the sandbox free of required checks or reviews, or the merge step will be refused.
+run`. When `ATHENA_LIVE_GITHUB=1` is set, a missing `claude`, `gh` or App variable fails the test instead of skipping
+it. The whole test (server start, acknowledgement, pull request, merge and the Ticket's end) shares one 25-minute
+deadline, inside the documented `-timeout 30m`. The test saves its own Policy in the temp state dir (mode `auto`, your
+`gh` login allowed). Run it with the default branch of the sandbox free of required checks or reviews, or the merge
+step will be refused.

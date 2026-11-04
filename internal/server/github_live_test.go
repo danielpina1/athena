@@ -36,10 +36,10 @@ import (
 	"github.com/danielpina1/athena/internal/sources/github"
 )
 
-// liveGHSkip is the message of the skip when the variables are unset.
 // liveGHBudget is the time the whole test may wait; docs/dev/github-app.md documents go test -timeout 30m.
 const liveGHBudget = 25 * time.Minute
 
+// liveGHSkip is the message of the skip when the variables are unset.
 const liveGHSkip = "set ATHENA_LIVE_GITHUB=1 and ATHENA_LIVE_REPO to run"
 
 // liveTokenRe matches the token shapes Athena redacts: ghs_, ghu_, gho_, ghp_ and github_pat_.
@@ -222,7 +222,7 @@ func TestLiveGitHubMention(t *testing.T) {
 	})
 
 	// 2. Within 10 minutes: an acknowledgement by the App's bot, a Ticket, and a pull request from its branch that
-	// touches hello.txt.
+	// adds this run's file.
 	thread := github.ThreadKey(repo, number)
 	var ticket string
 	await(t, left(), "a Ticket on "+thread, func() bool {
