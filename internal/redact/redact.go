@@ -1,5 +1,5 @@
 // Package redact masks secrets in text shown to a person: assignments and flags whose name looks secret,
-// Authorization headers, Bearer tokens, URL userinfo and sensitive query parameters.
+// Authorization headers, Bearer tokens, GitHub tokens, URL userinfo and sensitive query parameters.
 package redact
 
 import (
@@ -12,9 +12,13 @@ import (
 const Mask = "***"
 
 var (
-	authHeader = regexp.MustCompile(`(?i)\b(authorization)\s*:\s*(?:(?:bearer|basic|token|digest)\s+)?[^\s"']+`)
-	bearer     = regexp.MustCompile(`(?i)\b(bearer)\s+[^\s"']+`)
-	userinfo   = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.-]*://)[^/\s@"']+@`)
+	// authHeader also matches a header printed as a Go map (Authorization:[Bearer x]).
+	authHeader = regexp.MustCompile(`(?i)\b(authorization)\s*:\s*\[?(?:(?:bearer|basic|token|digest)\s+)?[^\s"'\]]+`)
+	// githubToken is a GitHub token by its prefix: installation (ghs_), user (ghu_), OAuth (gho_), personal (ghp_) and
+	// refresh (ghr_) tokens and fine-grained personal access tokens (github_pat_).
+	githubToken = regexp.MustCompile(`\b(?:gh[opsur]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)`)
+	bearer      = regexp.MustCompile(`(?i)\b(bearer)\s+[^\s"']+`)
+	userinfo    = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.-]*://)[^/\s@"']+@`)
 	// flagArg is a long flag followed by its value as the next word: --password hunter2.
 	flagArg = regexp.MustCompile(`(--[A-Za-z][A-Za-z0-9_-]*)(\s+)("[^"]*"|'[^']*'|[^\s"'-][^\s"']*)`)
 	// assignment is NAME=value: an environment variable, a --flag=value or a query parameter.
@@ -30,6 +34,7 @@ var secretWords = map[string]bool{
 
 // String returns s with secrets masked. It is idempotent.
 func String(s string) string {
+	s = githubToken.ReplaceAllString(s, Mask)
 	s = authHeader.ReplaceAllString(s, "$1: "+Mask)
 	s = bearer.ReplaceAllString(s, "$1 "+Mask)
 	s = userinfo.ReplaceAllString(s, "${1}"+Mask+"@")

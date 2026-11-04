@@ -8,26 +8,45 @@ import (
 
 // Names of the Engine's commands, the values of the `command` label of engine_command_seconds.
 const (
-	cmdSubmit            = "submit"
-	cmdAssignmentStarted = "assignment_started"
-	cmdInputsDelivered   = "inputs_delivered"
-	cmdDeliveryFailed    = "delivery_failed"
-	cmdInputsRead        = "inputs_read"
-	cmdTurnEnded         = "turn_ended"
-	cmdFileReport        = "file_report"
-	cmdPersonInput       = "person_input"
-	cmdStop              = "stop"
-	cmdRetry             = "retry"
-	cmdRequestApproval   = "request_approval"
-	cmdAnswerApproval    = "answer_approval"
-	cmdExpireApproval    = "expire_approval"
-	cmdRecordUsage       = "record_usage"
+	cmdSubmit             = "submit"
+	cmdAssignmentStarted  = "assignment_started"
+	cmdInputsDelivered    = "inputs_delivered"
+	cmdDeliveryFailed     = "delivery_failed"
+	cmdInputsRead         = "inputs_read"
+	cmdTurnEnded          = "turn_ended"
+	cmdFileReport         = "file_report"
+	cmdPersonInput        = "person_input"
+	cmdStop               = "stop"
+	cmdRetry              = "retry"
+	cmdRequestApproval    = "request_approval"
+	cmdAnswerApproval     = "answer_approval"
+	cmdExpireApproval     = "expire_approval"
+	cmdRecordUsage        = "record_usage"
+	cmdReceive            = "receive"
+	cmdBindThread         = "bind_thread"
+	cmdThreadClosed       = "thread_closed"
+	cmdEvaluateDue        = "evaluate_due"
+	cmdCandidateDelivered = "candidate_delivered"
+	cmdDecide             = "decide"
+	cmdAttach             = "attach"
+	cmdHandback           = "handback"
+	cmdReevaluate         = "reevaluate"
+	cmdDismiss            = "dismiss"
+	cmdPolicyChanged      = "policy_changed"
+	cmdFollowForContext   = "follow_for_context"
+	cmdMarkUnrelated      = "mark_unrelated"
+	cmdUnsubscribe        = "unsubscribe"
+	cmdNote               = "note"
+	cmdRequestStatus      = "request_status"
+	cmdReply              = "reply"
 )
 
 var commandNames = []string{
 	cmdSubmit, cmdAssignmentStarted, cmdInputsDelivered, cmdDeliveryFailed, cmdInputsRead, cmdTurnEnded,
 	cmdFileReport, cmdPersonInput, cmdStop, cmdRetry, cmdRequestApproval, cmdAnswerApproval, cmdExpireApproval,
-	cmdRecordUsage,
+	cmdRecordUsage, cmdReceive, cmdBindThread, cmdThreadClosed, cmdEvaluateDue, cmdCandidateDelivered, cmdDecide,
+	cmdAttach, cmdHandback, cmdReevaluate, cmdDismiss, cmdPolicyChanged, cmdFollowForContext, cmdMarkUnrelated,
+	cmdUnsubscribe, cmdNote, cmdRequestStatus, cmdReply,
 }
 
 // TicketStats are a Ticket's performance numbers (spec §10.3). The Engine updates them in the same transaction as the

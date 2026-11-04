@@ -164,6 +164,9 @@ func TestWaitsForPerson(t *testing.T) {
 		{"blocked, human text input after", newTicket(assignments(reportedAt(ReportBlocked)), func(t *Ticket) {
 			t.Inputs = []Input{{ID: "i", Kind: InputText, At: later, Human: true}}
 		}), true},
+		{"blocked, human context input after", newTicket(assignments(reportedAt(ReportBlocked)), func(t *Ticket) {
+			t.Inputs = []Input{{ID: "i", Kind: InputTrigger, At: later, Human: true, Context: true}}
+		}), true},
 		{"ready", newTicket(assignments(reported(ReportReady))), false},
 		{"no assignment", newTicket(assignments()), false},
 		{"assignment without report", newTicket(), false},

@@ -105,6 +105,24 @@ func WriteMCPConfig(path, athenaBin, socket, ticketID, assignmentID string) erro
 	return writeJSON(path, cfg)
 }
 
+// WriteRouterMCPConfig writes the router's --mcp-config: one stdio server named "athena" running
+// `<athenaBin> mcp --role router`, with the socket and the router start's token in its env. The router's ops carry
+// that token instead of any Ticket or Assignment.
+func WriteRouterMCPConfig(path, athenaBin, socket, token string) error {
+	if athenaBin == "" || socket == "" || token == "" {
+		return errors.New("claude: athena binary, socket and router token are all required")
+	}
+	cfg := struct {
+		MCPServers map[string]mcpServer `json:"mcpServers"`
+	}{map[string]mcpServer{"athena": {
+		Type:    "stdio",
+		Command: athenaBin,
+		Args:    []string{"mcp", "--role", "router"},
+		Env:     map[string]string{"ATHENA_SOCKET": socket, "ATHENA_ROUTER_TOKEN": token},
+	}}}
+	return writeJSON(path, cfg)
+}
+
 // writeJSON writes v as indented JSON with mode 0600, atomically.
 func writeJSON(path string, v any) error {
 	b, err := json.MarshalIndent(v, "", "  ")

@@ -4,6 +4,7 @@ package claude
 
 import (
 	"encoding/json"
+	"strings"
 )
 
 // Event is one thing a Claude Code session reported on stdout.
@@ -34,6 +35,15 @@ type ToolResult struct {
 	IsError   bool
 }
 
+// UserEcho is a user message the session took into its conversation, echoed back with --replay-user-messages
+// (checked against Claude Code 2.1.280: a message sent mid-turn is echoed only when a turn takes it in, not when it is
+// read). UUID is the uuid the message was sent with (Session.SendMessage), empty when the echo carries none; Text is
+// its content, text blocks joined by newlines.
+type UserEcho struct {
+	Text string
+	UUID string
+}
+
 // Result ends a turn. A session emits one Result per turn (messages that
 // arrive mid-turn are folded into the running turn).
 type Result struct {
@@ -62,6 +72,7 @@ func (Init) isEvent()          {}
 func (AssistantText) isEvent() {}
 func (ToolUse) isEvent()       {}
 func (ToolResult) isEvent()    {}
+func (UserEcho) isEvent()      {}
 func (Result) isEvent()        {}
 func (Unknown) isEvent()       {}
 
@@ -69,6 +80,8 @@ type envelope struct {
 	Type      string `json:"type"`
 	Subtype   string `json:"subtype"`
 	SessionID string `json:"session_id"`
+	IsReplay  bool   `json:"isReplay"`
+	UUID      string `json:"uuid"`
 	Message   *struct {
 		Content json.RawMessage `json:"content"`
 	} `json:"message"`
@@ -124,6 +137,23 @@ func ParseEvents(line []byte) ([]Event, error) {
 		return []Event{Init{SessionID: in.SessionID, Model: in.Model, CWD: in.CWD, Tools: in.Tools}}, nil
 
 	case "assistant", "user":
+		if env.Type == "user" && env.IsReplay && env.Message != nil && len(env.Message.Content) > 0 {
+			if env.Message.Content[0] == '"' {
+				var text string
+				if json.Unmarshal(env.Message.Content, &text) == nil {
+					return []Event{UserEcho{Text: text, UUID: env.UUID}}, nil
+				}
+			} else if env.UUID != "" {
+				// Content in blocks: an echo all the same, known by its uuid.
+				var texts []string
+				for _, b := range contentBlocks(env) {
+					if b.Type == "text" {
+						texts = append(texts, b.Text)
+					}
+				}
+				return []Event{UserEcho{Text: strings.Join(texts, "\n"), UUID: env.UUID}}, nil
+			}
+		}
 		blocks := contentBlocks(env)
 		var evs []Event
 		for _, b := range blocks {

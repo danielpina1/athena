@@ -5,6 +5,7 @@ package node
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -36,6 +37,9 @@ type RuleContext struct {
 	// StateDir is the Athena state directory; reading it is denied, except for
 	// the part of it that is TicketDir.
 	StateDir string
+	// AthenaBin is the athena binary sessions run their hooks with; its credential commands are blocked under its own
+	// name too.
+	AthenaBin string
 	// VenvActive reports that the worker runs inside an active virtualenv, so
 	// `pip install` is routine. Commands that activate or call a venv
 	// themselves are recognised from the command text.
@@ -49,11 +53,27 @@ type RuleContext struct {
 const (
 	ruleInput         = "input"
 	ruleCredential    = "credential-read"
+	ruleCredentialEnv = "credential-env"
 	ruleBlocked       = "blocked-command"
 	ruleWrite         = "write-outside-ticket"
 	ruleSessionConfig = "session-config-write"
 	ruleBashPrefix    = "bash-escalate:"
+	ruleRouterTools   = "router-tools"
 )
+
+// routerToolPrefix names the tools of Athena's MCP server, the only server the router session has.
+const routerToolPrefix = "mcp__athena__"
+
+// RouterRules is the router session's only rule: it may call Athena's router tools (mcp__athena__*) and nothing else.
+// The session is started without built-in tools; this denies anything that slips through anyway, with a reason the
+// model reads.
+func RouterRules(tool string) Decision {
+	if strings.HasPrefix(tool, routerToolPrefix) && len(tool) > len(routerToolPrefix) {
+		return allow()
+	}
+	return deny(ruleRouterTools, fmt.Sprintf("the router has only Athena's tools (%s*); %q is not available to it: "+
+		"route, read and reply with those tools, and leave work to the Tickets' workers", routerToolPrefix, tool))
+}
 
 func allow() Decision { return Decision{Verdict: VerdictAllow} }
 
@@ -289,12 +309,22 @@ func credentialRule(ctx RuleContext, tool string, in map[string]any) (Decision, 
 		}
 	}
 	if tool == "Bash" {
-		if reason := ctx.protectedText(str(in, "command")); reason != "" {
+		cmd := str(in, "command")
+		if reason := ctx.protectedText(cmd); reason != "" {
 			return deny(ruleCredential, reason), true
+		}
+		if m := tokenEnvRe.FindString(cmd); m != "" {
+			return deny(ruleCredentialEnv, "commands may not use "+m+": Athena authenticates git and gh for this ticket's "+
+				"repository; run them plainly"), true
 		}
 	}
 	return Decision{}, false
 }
+
+// tokenEnvRe names the variables that carry or fetch a GitHub or git token, or show one in a trace; a Bash command that
+// names one is denied. None of them is set in a session; naming one is an attempt to supply or reveal a token.
+var tokenEnvRe = regexp.MustCompile(`\b(?:GH_TOKEN|GH_ENTERPRISE_TOKEN|GITHUB_ENTERPRISE_TOKEN|GIT_ASKPASS|SSH_ASKPASS|` +
+	`GIT_TRACE_REDACT|ATHENA_STATE)\b`)
 
 // globStem is the longest leading part of a glob pattern without wildcards.
 func globStem(pat string) string {
@@ -430,52 +460,127 @@ var reservedWords = map[string]bool{
 var shellCmds = map[string]bool{"sh": true, "bash": true, "zsh": true, "dash": true, "ksh": true}
 
 func blockedRule(ctx RuleContext, command string) (Decision, bool) {
-	if len(ctx.Blocked) == 0 {
-		return Decision{}, false
-	}
 	var blocked [][]string
 	for _, b := range ctx.Blocked {
 		if f := strings.Fields(b); len(f) > 0 {
 			blocked = append(blocked, f)
 		}
 	}
-	if hit := findBlocked(command, blocked, 0); hit != "" {
-		return deny(ruleBlocked, "command "+hit+" is blocked for this assignment"), true
+	athena := baseName(ctx.AthenaBin)
+	match := func(words []string) (string, string) {
+		for _, b := range blocked {
+			if hasWordPrefix(words, b) {
+				return strings.Join(b, " "), "command " + strings.Join(b, " ") + " is blocked for this assignment"
+			}
+		}
+		if hit := credentialCommand(words, athena); hit != "" {
+			return hit, "command " + hit + " is blocked: it would show or replace a credential; Athena authenticates git " +
+				"and gh for this ticket's repository, so run them plainly"
+		}
+		return "", ""
+	}
+	if hit, reason := findBlocked(command, match, 0); hit != "" {
+		return deny(ruleBlocked, reason), true
 	}
 	return Decision{}, false
 }
 
-// findBlocked splits command into segments and reports the blocked entry that
-// starts any of them. Splitting ignores quoting on purpose: over-splitting
-// only produces extra segments to check, which errs on the safe side.
-func findBlocked(command string, blocked [][]string, depth int) string {
+// credentialCommand reports the credential command a segment's words run, if any: gh auth, git credential (and
+// git-credential-<helper>), and athena's own git-credential and gh auth, under the name "athena" or the binary's own.
+func credentialCommand(words []string, athena string) string {
+	w0 := words[0]
+	switch {
+	case strings.HasPrefix(w0, "git-credential"):
+		return w0
+	case w0 == "git":
+		if sub := gitSubcommand(words[1:]); strings.HasPrefix(sub, "credential") {
+			return "git " + sub
+		}
+	case w0 == "gh":
+		if ghAuth(words[1:]) {
+			return "gh auth"
+		}
+	case w0 == "athena" || (athena != "" && w0 == athena):
+		switch sub := firstArg(words[1:]); {
+		case sub == "git-credential":
+			return "athena git-credential"
+		case sub == "gh":
+			if i := slices.Index(words[1:], "gh") + 1; ghAuth(words[i+1:]) {
+				return "athena gh auth"
+			}
+		}
+	}
+	return ""
+}
+
+// ghAuth reports whether gh's arguments run gh auth: auth is the first word that is not a flag, or the second when
+// the first may be a flag's value.
+func ghAuth(args []string) bool {
+	firstMayBeValue := false
+	seen := 0
+	for i, a := range args {
+		switch {
+		case a == "--":
+			return false
+		case strings.HasPrefix(a, "-"):
+			continue
+		case seen == 0:
+			if a == "auth" {
+				return true
+			}
+			firstMayBeValue = i > 0 && !strings.Contains(args[i-1], "=")
+		default:
+			return a == "auth" && firstMayBeValue
+		}
+		seen++
+	}
+	return false
+}
+
+// gitSubcommand is the subcommand of git's arguments: the first word that is neither a global option nor its value.
+func gitSubcommand(args []string) string {
+	for i := 0; i < len(args); i++ {
+		switch w := args[i]; {
+		case w == "-C" || w == "-c" || w == "--git-dir" || w == "--work-tree" || w == "--namespace" || w == "--config-env":
+			i++
+		case strings.HasPrefix(w, "-"):
+		default:
+			return w
+		}
+	}
+	return ""
+}
+
+// findBlocked splits command into segments and reports the first segment's
+// hit by match, with its reason. Splitting ignores quoting on purpose:
+// over-splitting only produces extra segments to check, which errs on the
+// safe side.
+func findBlocked(command string, match func(words []string) (string, string), depth int) (string, string) {
 	if depth > 3 {
-		return ""
+		return "", ""
 	}
 	for _, seg := range segmentSplit.Split(command, -1) {
 		words := commandWords(seg)
 		if len(words) == 0 {
 			continue
 		}
-		for _, b := range blocked {
-			if hasWordPrefix(words, b) {
-				return strings.Join(b, " ")
-			}
+		if hit, reason := match(words); hit != "" {
+			return hit, reason
 		}
 		// sh -c '<script>': check the script too.
 		if shellCmds[words[0]] {
 			for i, w := range words[1:] {
 				if w == "-c" || (strings.HasPrefix(w, "-") && strings.HasSuffix(w, "c") && !strings.HasPrefix(w, "--")) {
 					script := strings.Join(words[i+2:], " ")
-					if hit := findBlocked(script, blocked, depth+1); hit != "" {
-						return hit
+					if hit, reason := findBlocked(script, match, depth+1); hit != "" {
+						return hit, reason
 					}
 					break
 				}
 			}
 		}
 	}
-	return ""
+	return "", ""
 }
 
 // commandWords returns the words of one command segment from the command that runs: env assignments, shell

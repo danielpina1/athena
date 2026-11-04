@@ -87,7 +87,7 @@ The reference is TypeScript on DeepSeek Harness (`@deepseek-ai/cordis`, `dsh-ses
 | `src/core/*` (Engine, tickets, stages, intake, assignments, replies, memory, evals) | Ported to Go `internal/core`, same concepts, names, invariants. Single writer of domain state; synchronous commands; one transaction per command; ports enqueue external work that adapters perform after commit (reference `docs/007-architecture.md`). |
 | `src/core/ports.ts` (`Repositories`, `Assessor`, `Executor`, `Outbox`, `SourceScope`) | Same ports as Go interfaces. `Executor` is implemented by the dispatcher (§7). `Assessor` by the router (§6.3). |
 | `src/app/store.ts` (node:sqlite, WAL) | Go store on SQLite (WAL, `synchronous=FULL`), same tables in spirit. No schema migration from the reference is required. |
-| `src/sources/github*` | Ported: GitHub source via the `gh` CLI under the agent account, as in the reference. |
+| `src/sources/github*` | Ported: GitHub source as the GitHub App (§11): REST over `net/http` with installation tokens, polling with conditional requests. A GitHub App cannot read notifications, so the Source polls each installed repository instead of the agent account's notifications. |
 | `src/sources/feishu*` | Not in v1. |
 | `src/executor/dsh.ts` (DshExecutor) | Replaced by the dispatcher + node runtimes (§6, §7). |
 | Main "router" Session (`dsh-superagent-router` preset) | Replaced by the router (§6.3). |
@@ -370,7 +370,7 @@ Measured from plan 1 onward by an in-process metrics core (`internal/metrics`: c
 | Protocol | Protocol Buffers (`buf`, `protoc-gen-go`, `protobuf-es`) |
 | MCP | `github.com/modelcontextprotocol/go-sdk` |
 | Workers | `claude` CLI (stream-json), `codex app-server` |
-| GitHub | `gh` CLI under the agent account (as reference) |
+| GitHub | GitHub App over the REST API (server); workers use `gh` and git through Athena's credential helper with a short-lived, repository-scoped App token (§11) |
 | Local inference | Ollama (default), vLLM (optional) |
 | Network | UniFi WireGuard VPN |
 | Dashboard | React 19, Vite, TypeScript, Tailwind v4, shadcn/ui, PWA + Web Push |

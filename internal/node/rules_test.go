@@ -512,3 +512,81 @@ func TestBashWritesOutsideTicketDir(t *testing.T) {
 		})
 	}
 }
+
+func TestRouterRulesDenyWorkTools(t *testing.T) {
+	for _, tool := range []string{"Bash", "Write", "Read", "WebFetch", "Task", "mcp__other__x", "mcp__athenax__route", ""} {
+		d := RouterRules(tool)
+		if d.Verdict != VerdictDeny || d.Rule != ruleRouterTools || !strings.Contains(d.Reason, "mcp__athena__") {
+			t.Errorf("RouterRules(%q) = %+v, want a deny naming the router's tools", tool, d)
+		}
+	}
+	for _, tool := range []string{"mcp__athena__route", "mcp__athena__eval_decide"} {
+		if d := RouterRules(tool); d.Verdict != VerdictAllow {
+			t.Errorf("RouterRules(%q) = %+v, want allow", tool, d)
+		}
+	}
+}
+
+// Review Focus 3: commands that would show or replace a credential are denied in every session, whatever the
+// configured blocked list, and so is a command that names a token variable.
+func TestBlockedCredentialCommands(t *testing.T) {
+	e := newRuleEnv(t)
+	c := e.ctx
+	c.Blocked = nil
+	c.AthenaBin = "/opt/athena/bin/athena-dev"
+	shim := filepath.Join(c.StateDir, ShimsDir, "gh")
+	for _, cmd := range []string{
+		"gh auth status",
+		"gh auth token",
+		"gh --hostname github.com auth token",
+		"cd x && gh auth login --with-token < t",
+		"/usr/local/bin/gh auth status",
+		"git credential fill",
+		"git -C . credential fill",
+		"printf 'host=github.com\\n' | git -c credential.useHttpPath=true credential fill",
+		"git credential-osxkeychain get",
+		"git-credential-osxkeychain get",
+		"athena git-credential get",
+		"/opt/athena/bin/athena-dev git-credential get",
+		"athena-dev gh auth status",
+		"athena gh auth token",
+		"sh -c 'gh auth token'",
+		shim + " auth status",
+		"echo $GH_TOKEN",
+		"GH_TOKEN=x gh pr list",
+		"env | grep GH_ENTERPRISE_TOKEN",
+		"GIT_ASKPASS=/tmp/a git push",
+		"GIT_TRACE_REDACT=0 GIT_TRACE_CURL=1 git fetch",
+		"cat $ATHENA_STATE/athena.db",
+	} {
+		if d := Evaluate(c, "Bash", in(map[string]any{"command": cmd})); d.Verdict != VerdictDeny {
+			t.Errorf("%q: %+v, want deny", cmd, d)
+		}
+	}
+	for _, cmd := range []string{
+		"gh pr create --fill",
+		"gh pr view 7 --json title",
+		"gh issue comment 3 --body 'see the auth module'",
+		"git push -u origin athena/t-0001",
+		"git commit -m 'credential handling'",
+		"git log --grep auth",
+		"athena-dev gh pr list",
+		"echo $PATH",
+	} {
+		if d := Evaluate(c, "Bash", in(map[string]any{"command": cmd})); d.Verdict == VerdictDeny {
+			t.Errorf("%q: %+v, want it not denied", cmd, d)
+		}
+	}
+	// The state directory, where the shims and the clones live, stays unreadable.
+	for _, cmd := range []string{"cat " + shim, "ls " + filepath.Join(c.StateDir, "repos", "o", "r"), "cd " + c.StateDir + " && ls"} {
+		if d := Evaluate(c, "Bash", in(map[string]any{"command": cmd})); d.Verdict != VerdictDeny || d.Rule != ruleCredential {
+			t.Errorf("%q: %+v, want the state-dir deny", cmd, d)
+		}
+	}
+	if d := Evaluate(c, "Bash", in(map[string]any{"command": "echo $GH_TOKEN"})); d.Rule != ruleCredentialEnv {
+		t.Errorf("token variable deny = %+v, want rule %s", d, ruleCredentialEnv)
+	}
+	if d := Evaluate(c, "Bash", in(map[string]any{"command": "gh auth status"})); !strings.Contains(d.Reason, "gh auth") || d.Rule != ruleBlocked {
+		t.Errorf("deny = %+v, want the blocked-command rule naming gh auth", d)
+	}
+}

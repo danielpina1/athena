@@ -51,6 +51,8 @@ func userErrorf(format string, args ...any) error {
 type TaskOptions struct {
 	Dir   string
 	Model string
+	// Repo is the repository (owner/name) the task works in, through its Source; it excludes Dir.
+	Repo string
 }
 
 // ReportInput is a worker's report on its Ticket. A Question asks a person (an empty one keeps the current question);
@@ -78,29 +80,69 @@ type Engine struct {
 	// reg and cmdHist are set by SetMetrics before the first command; nil without metrics.
 	reg     *metrics.Registry
 	cmdHist map[string]*metrics.Histogram
+	// policy, scope and wake come from Options; each may be nil.
+	policy func() Policy
+	scope  SourceScope
+	wake   func()
+	// relays is Options.Relays.
+	relays bool
 }
 
-// NewEngine returns an Engine. now defaults to time.Now and emit to a no-op. emit, like the Executor, runs after commit
-// while the command still holds the Engine: it must not block or call an Engine command (queries are fine).
+// Options configure an Engine beyond its Repositories and Executor. Every field may be left zero.
+type Options struct {
+	// Now is the clock; it defaults to time.Now.
+	Now func() time.Time
+	// Emit receives the Events after commit; it defaults to a no-op.
+	Emit func(Event)
+	// Policy returns the current Policy. Without one, every Mandate revalidates, as an owner task's always does.
+	Policy func() Policy
+	// Scope tells which Threads the Sources listen to. Without one, every Thread is listened to.
+	Scope SourceScope
+	// Wake is called after a command that enqueued external work committed, such as the effects runner's Wake.
+	Wake func()
+	// Relays makes commands enqueue the main Session's relay and notice effects (see notices.go). Leave it off when no
+	// router runs, or they pile up unread.
+	Relays bool
+}
+
+// NewEngine returns an Engine with the plan 1 options: a clock and an event sink (see Options).
 func NewEngine(repos Repositories, exec Executor, now func() time.Time, emit func(Event)) *Engine {
+	return NewEngineWith(repos, exec, Options{Now: now, Emit: emit})
+}
+
+// NewEngineWith returns an Engine configured by opts. Emit and Wake, like the Executor, run after commit while the
+// command still holds the Engine: they must not block or call an Engine command (queries are fine). Policy and the
+// Scope's Listens run inside a command's transaction and must not call the Engine either.
+func NewEngineWith(repos Repositories, exec Executor, opts Options) *Engine {
+	now, emit := opts.Now, opts.Emit
 	if now == nil {
 		now = time.Now
 	}
 	if emit == nil {
 		emit = func(Event) {}
 	}
-	return &Engine{repos: repos, exec: exec, now: now, emit: emit, waiters: map[string]chan struct{}{}}
+	return &Engine{repos: repos, exec: exec, now: now, emit: emit, waiters: map[string]chan struct{}{},
+		policy: opts.Policy, scope: opts.Scope, wake: opts.Wake, relays: opts.Relays}
 }
 
 // --- Owner tasks ---
 
 // SubmitOwnerTask records the owner's task: a Trigger, a direct accept Decision with an explicit Mandate, and a Ticket
 // whose title is the text's first line, with one pending Assignment and the text as its first Input; then it queues
-// the Assignment's launch.
+// the Assignment's launch. A task on a repository (TaskOptions.Repo, owner/name) works there and has no Channel: its
+// worker reports to the owner, and its replies are refused.
 func (e *Engine) SubmitOwnerTask(text string, opts TaskOptions) (Ticket, error) {
 	title := titleOf(text)
 	if title == "" {
 		return Ticket{}, userErrorf("a task needs text")
+	}
+	if opts.Repo != "" {
+		if !validRepo(opts.Repo) {
+			return Ticket{}, userErrorf("repository %q is not owner/name", opts.Repo)
+		}
+		if opts.Dir != "" {
+			return Ticket{}, userErrorf("a task on a repository runs in its own worktree: it takes no directory")
+		}
 	}
 	var created *Ticket
 	err := e.command(cmdSubmit, func(o *op) error {
@@ -111,6 +153,10 @@ func (e *Engine) SubmitOwnerTask(text string, opts TaskOptions) (Ticket, error) 
 		id := fmt.Sprintf("T-%04d", n)
 		trigger := &Trigger{ID: newID(), Source: ownerSource, Actor: OwnerActor, Human: true, At: o.at, Text: text}
 		mandate := Mandate{Strength: "explicit", PolicyVersion: OwnerPolicyVersion, Actor: OwnerActor, Scope: ownerScope}
+		if opts.Repo != "" {
+			// The owner's word is the whole basis: no Source admitted it, so no Source revalidates it.
+			mandate.Basis = MandateBasis{Via: ViaOwner}
+		}
 		decisionMandate := mandate
 		decision := &Decision{ID: newID(), Kind: "accept", TicketID: id, TriggerIDs: []string{trigger.ID}, At: o.at, Mandate: &decisionMandate}
 		t := &Ticket{
@@ -118,6 +164,7 @@ func (e *Engine) SubmitOwnerTask(text string, opts TaskOptions) (Ticket, error) 
 			CreatedAt: o.at, UpdatedAt: o.at,
 			Origin:    Origin{TriggerID: trigger.ID, TriggerIDs: []string{trigger.ID}},
 			Execution: &Execution{Directory: opts.Dir, Runtime: "claude", Model: opts.Model},
+			Repo:      opts.Repo,
 		}
 		assignment := o.newAssignment(t)
 		input := Input{ID: newID(), Kind: InputTrigger, At: o.at, TriggerID: trigger.ID, Text: text, Human: true}
@@ -185,11 +232,18 @@ func (e *Engine) AssignmentStarted(ticketID, assignmentID, sessionID, model stri
 
 // InputsDelivered is the Executor's fact that Inputs reached the Assignment that runs the open Ticket, which clears a
 // failed delivery. A fact about an Assignment that no longer runs, or about Inputs that no longer wait, changes nothing.
+// With no inputIDs it is the fact that a message that is no Input reached the worker, such as the nudge to report
+// after a turn without one (plan 1 R33): only the Assignment's DeliveredAt moves, so its worker counts as busy.
 func (e *Engine) InputsDelivered(ticketID, assignmentID string, inputIDs []string) error {
 	return e.command(cmdInputsDelivered, func(o *op) error {
 		t, err := o.running(ticketID, assignmentID)
 		if t == nil || err != nil {
 			return err
+		}
+		if len(inputIDs) == 0 {
+			runningAssignment(t).DeliveredAt = o.timestamp()
+			t.UpdatedAt = o.at
+			return o.tx.PutTicket(t)
 		}
 		delivered := map[string]bool{}
 		var waiting []string
@@ -269,6 +323,8 @@ func (e *Engine) TurnEnded(ticketID, assignmentID string) error {
 // FileReport records a worker's report on the open Ticket's current Assignment. Its Question asks a person (a new
 // question replaces the current one, and a ready report clears it). A blocked or failed report holds back automatic
 // Inputs until a person's message arrives; a dropped report ends the Ticket dropped, and a ready one ends it completed.
+// A Ticket that follows Threads ends with them instead (FollowsDone): a ready report ends it only once it is done with
+// them, as the latest close did, and a dropped one after such a close ends it as that close did.
 func (e *Engine) FileReport(ticketID string, r ReportInput) error {
 	switch r.State {
 	case ReportProgress, ReportWaiting, ReportReady, ReportBlocked, ReportFailed, ReportDropped:
@@ -308,6 +364,7 @@ func (e *Engine) FileReport(ticketID string, r ReportInput) error {
 			return userErrorf("an action of ticket %s waits for the owner's approval; report %s after it is answered", ticketID, r.State)
 		}
 		attention := t.Attention
+		var raised *Attention
 		if r.Question != "" && (attention == nil || attention.Question != r.Question) {
 			// A replaced question keeps the time the Ticket began waiting.
 			since := o.at
@@ -315,6 +372,7 @@ func (e *Engine) FileReport(ticketID string, r ReportInput) error {
 				since = attention.At
 			}
 			attention = &Attention{ID: newID(), Question: r.Question, At: since}
+			raised = attention
 			t.Stats.Questions++
 		}
 		if r.State == ReportReady {
@@ -338,13 +396,27 @@ func (e *Engine) FileReport(ticketID string, r ReportInput) error {
 			data["question"] = r.Question
 		}
 		o.event(EventReportFiled, t, a.ID, data)
-		switch r.State {
-		case ReportDropped:
+		if err := o.reportRelay(t, a, raised); err != nil {
+			return err
+		}
+		// A Ticket that follows Threads ends with them: ready ends it only once it is done with them, as they ended, and
+		// dropped after a close it deferred ends it as that close did.
+		done, isDone := t.FollowsDone()
+		switch {
+		case r.State == ReportDropped && isDone:
+			if err := o.end(t, EndByExecutor, done, ""); err != nil {
+				return err
+			}
+		case r.State == ReportDropped:
 			if err := o.end(t, EndByExecutor, OutcomeDropped, ""); err != nil {
 				return err
 			}
-		case ReportReady:
+		case r.State == ReportReady && len(t.Follows) == 0:
 			if err := o.end(t, EndByExecutor, OutcomeCompleted, ""); err != nil {
+				return err
+			}
+		case r.State == ReportReady && isDone:
+			if err := o.end(t, EndByExecutor, done, ""); err != nil {
 				return err
 			}
 		}
@@ -357,7 +429,8 @@ func (e *Engine) FileReport(ticketID string, r ReportInput) error {
 // AddPersonInput gives a Ticket the owner's message: it is recorded as a person's Trigger and reaches the Ticket as a
 // human Input, which answers its question (clearing Attention), releases a blocked or failed report, and goes to the
 // running Assignment (or launches a pending one again). An ended Ticket resumes with a new Assignment, unless a person
-// stopped it.
+// stopped it or its Mandate no longer revalidates; a Ticket whose worker handed off (HandedOff) resumes only while its
+// Mandate revalidates too.
 func (e *Engine) AddPersonInput(ticketID, text string) error {
 	if strings.TrimSpace(text) == "" {
 		return userErrorf("a message needs text")
@@ -369,6 +442,9 @@ func (e *Engine) AddPersonInput(ticketID, text string) error {
 		}
 		if t.Ended != nil && t.Ended.By == EndByHuman {
 			return userErrorf("ticket %s was stopped", ticketID)
+		}
+		if (t.Ended != nil || t.HandedOff()) && !o.revalidates(t) {
+			return userErrorf("the mandate of ticket %s no longer holds; it needs a new accept", ticketID)
 		}
 		trigger := &Trigger{ID: newID(), Source: ownerSource, Actor: OwnerActor, Human: true, At: o.at, Text: text}
 		if err := o.tx.PutTrigger(trigger); err != nil {
@@ -495,6 +571,13 @@ type op struct {
 	tx      Tx
 	at      time.Time
 	effects []effect
+	// policy is the Engine's Policy getter, nil without one.
+	policy func() Policy
+	// enqueued is set once the command enqueued external work; Wake runs after it committed.
+	enqueued bool
+	// relays is the Engine's Options.Relays; origin is who issued the command.
+	relays bool
+	origin CommandOrigin
 	// reg is the Engine's registry; observations wait in metrics until the command committed.
 	reg     *metrics.Registry
 	metrics []func(*metrics.Registry)
@@ -523,7 +606,7 @@ func (e *Engine) run(fn func(o *op) error) error {
 	var o *op
 	err := e.repos.Tx(func(tx Tx) error {
 		// A fresh op per attempt, so nothing collected by a failed attempt leaks.
-		o = &op{tx: tx, at: e.now(), reg: e.reg}
+		o = &op{tx: tx, at: e.now(), reg: e.reg, policy: e.policy, relays: e.relays}
 		return fn(o)
 	})
 	if err != nil {
@@ -555,6 +638,9 @@ func (e *Engine) run(fn func(o *op) error) error {
 			e.exec.Stop(t, a, fx.reason)
 		}
 	}
+	if o.enqueued && e.wake != nil {
+		e.wake()
+	}
 	return nil
 }
 
@@ -576,7 +662,34 @@ func (o *op) stop(t *Ticket, assignmentID, reason string) {
 }
 
 func (o *op) event(typ string, t *Ticket, assignmentID string, data map[string]any) {
-	o.effects = append(o.effects, effect{kind: effectEvent, event: Event{Type: typ, TicketID: t.ID, AssignmentID: assignmentID, At: o.at, Data: data}})
+	o.emitEvent(Event{Type: typ, TicketID: t.ID, AssignmentID: assignmentID, At: o.at, Data: data})
+}
+
+// emitEvent queues an Event that need not concern one Ticket.
+func (o *op) emitEvent(ev Event) {
+	o.effects = append(o.effects, effect{kind: effectEvent, event: ev})
+}
+
+// enqueue records external work for the effects runner in the command's transaction; the Engine's Wake runs once the
+// command committed.
+func (o *op) enqueue(kind, key string, payload []byte) error {
+	if err := o.tx.Enqueue(kind, key, payload); err != nil {
+		return err
+	}
+	o.enqueued = true
+	return nil
+}
+
+// revalidates reports whether a Ticket's Mandate still holds under the current Policy before it resumes (an ended
+// Ticket, or one whose worker handed off). An owner task's Mandate needs no Source, and without a Policy every Mandate
+// holds.
+func (o *op) revalidates(t *Ticket) bool {
+	m := t.Mandate
+	if o.policy == nil || m.PolicyVersion == OwnerPolicyVersion || m.Basis.Via == ViaOwner {
+		return true
+	}
+	p := o.policy()
+	return p == nil || p.Revalidate(m)
 }
 
 // require loads a Ticket, or fails with a UserError when there is none.
@@ -650,7 +763,7 @@ func (o *op) wake(t *Ticket) {
 	}
 	var first *Input
 	for _, id := range t.Undelivered {
-		if in := findInput(t, id); in != nil && in.Kind == InputTrigger && in.Human {
+		if in := findInput(t, id); in != nil && in.Kind == InputTrigger && in.Human && !in.Context {
 			first = in
 			break
 		}
@@ -685,8 +798,20 @@ func (o *op) requeueUntaken(t *Ticket, replaced string) {
 // failed delivery are dropped, and its pending Approvals expire. reason says why in words; one equal to the outcome
 // is not recorded.
 func (o *op) end(t *Ticket, by TicketEndBy, outcome TicketOutcome, reason string) error {
+	return o.endAt(t, by, outcome, reason, o.at)
+}
+
+// endAt is end with the time the ending fact happened, such as a pull request's close, which may be earlier than now;
+// the Ticket's last change and its Assignments' ends are still now. Every end lets go of the person's follow-ups its
+// worker did not read or take up, which go to Eval when no other Ticket decides them (see letGo).
+func (o *op) endAt(t *Ticket, by TicketEndBy, outcome TicketOutcome, reason string, at time.Time) error {
 	if t.Ended != nil {
 		return nil
+	}
+	// What the Ticket lets go of is worked out while it is still live, as its own follow-ups.
+	waiting, left, err := o.unread(t)
+	if err != nil {
+		return err
 	}
 	if err := o.expireTicketApprovals(t); err != nil {
 		return err
@@ -700,7 +825,7 @@ func (o *op) end(t *Ticket, by TicketEndBy, outcome TicketOutcome, reason string
 			stopping = append(stopping, a.ID)
 		}
 	}
-	ended := &Ended{At: o.at, By: by, Outcome: outcome}
+	ended := &Ended{At: at, By: by, Outcome: outcome}
 	if reason != "" && reason != string(outcome) {
 		ended.Reason = reason
 	}
@@ -709,6 +834,9 @@ func (o *op) end(t *Ticket, by TicketEndBy, outcome TicketOutcome, reason string
 	t.UpdatedAt = o.at
 	t.Attention = nil
 	t.Delivery = nil
+	if err := o.letGo(t, waiting, left); err != nil {
+		return err
+	}
 	runtime, model := runtimeModel(t, t.LatestAssignment())
 	if o.reg != nil {
 		o.observe(func(r *metrics.Registry) {
@@ -720,6 +848,9 @@ func (o *op) end(t *Ticket, by TicketEndBy, outcome TicketOutcome, reason string
 		data["reason"] = ended.Reason
 	}
 	o.event(EventTicketEnded, t, "", data)
+	if err := o.endNotice(t); err != nil {
+		return err
+	}
 	stopReason := reason
 	if stopReason == "" {
 		stopReason = string(outcome)
@@ -874,4 +1005,61 @@ func clonePtr[T any](p *T) *T {
 	}
 	v := *p
 	return &v
+}
+
+// Trigger returns the stored Trigger with the given ID.
+func (e *Engine) Trigger(id string) (Trigger, error) {
+	var t *Trigger
+	err := e.repos.Tx(func(tx Tx) error {
+		var err error
+		t, err = tx.GetTrigger(id)
+		return err
+	})
+	if err != nil {
+		return Trigger{}, err
+	}
+	if t == nil {
+		return Trigger{}, userErrorf("trigger %s not found", id)
+	}
+	return *t, nil
+}
+
+// Thread returns the stored Thread with the given key.
+func (e *Engine) Thread(key string) (Thread, error) {
+	var th *Thread
+	err := e.repos.Tx(func(tx Tx) error {
+		var err error
+		th, err = tx.GetThread(key)
+		return err
+	})
+	if err != nil {
+		return Thread{}, err
+	}
+	if th == nil {
+		return Thread{}, userErrorf("thread %s not found", key)
+	}
+	return *th, nil
+}
+
+// Decisions returns the Decisions made on a Thread, or on every Thread when thread is empty, most recent first; limit
+// <= 0 returns all.
+func (e *Engine) Decisions(thread string, limit int) ([]Decision, error) {
+	var list []*Decision
+	err := e.repos.Tx(func(tx Tx) error {
+		var err error
+		if thread == "" {
+			list, err = tx.RecentDecisions(limit)
+		} else {
+			list, err = tx.Decisions(thread, limit)
+		}
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Decision, 0, len(list))
+	for _, d := range list {
+		out = append(out, *d)
+	}
+	return out, nil
 }

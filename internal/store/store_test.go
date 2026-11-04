@@ -113,7 +113,7 @@ func TestReopenPersists(t *testing.T) {
 	}
 	var schema int
 	var ok bool
-	if err := s2.Tx(func(tx *Tx) (err error) { ok, err = tx.KVGet("schema", &schema); return }); err != nil {
+	if err := s2.Tx(func(tx *Tx) (err error) { ok, err = tx.kvGetJSON("schema", &schema); return }); err != nil {
 		t.Fatal(err)
 	}
 	if !ok || schema != len(migrations) {
@@ -184,7 +184,7 @@ func TestTriggerDecisionKV(t *testing.T) {
 		if err := tx.PutDecision(&core.Decision{ID: "d1", Kind: "accept", At: t0}); err != nil {
 			return err
 		}
-		return tx.KVSet("cursor", map[string]int{"n": 3})
+		return tx.kvSetJSON("cursor", map[string]int{"n": 3})
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -192,11 +192,11 @@ func TestTriggerDecisionKV(t *testing.T) {
 	var cur map[string]int
 	var ok, missing bool
 	err = s.Tx(func(tx *Tx) (err error) {
-		if ok, err = tx.KVGet("cursor", &cur); err != nil {
+		if ok, err = tx.kvGetJSON("cursor", &cur); err != nil {
 			return
 		}
 		var x int
-		missing, err = tx.KVGet("nope", &x)
+		missing, err = tx.kvGetJSON("nope", &x)
 		return
 	})
 	if err != nil || !ok || cur["n"] != 3 || missing {
@@ -394,13 +394,13 @@ func TestMigration1To2(t *testing.T) {
 	defer s.Close()
 	var schema int
 	if err := s.Tx(func(tx *Tx) error {
-		_, err := tx.KVGet("schema", &schema)
+		_, err := tx.kvGetJSON("schema", &schema)
 		return err
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if schema != 2 {
-		t.Fatalf("schema = %d after upgrade, want 2", schema)
+	if schema != len(migrations) {
+		t.Fatalf("schema = %d after upgrade, want %d", schema, len(migrations))
 	}
 	if get(t, s, "t1") == nil {
 		t.Fatal("ticket lost in the upgrade")

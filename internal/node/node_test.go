@@ -87,6 +87,12 @@ type harness struct {
 
 func newHarness(t *testing.T, mod func(*Config)) *harness {
 	t.Helper()
+	return newHarnessWith(t, mod, nil)
+}
+
+// newHarnessWith is newHarness with the Engine made by mk (default core.NewEngine).
+func newHarnessWith(t *testing.T, mod func(*Config), mk func(st *store.Store, n *Node, emit func(core.Event)) *core.Engine) *harness {
+	t.Helper()
 	base := t.TempDir()
 	// Unix socket paths are short on macOS; keep it out of the long test temp dir.
 	sockDir, err := os.MkdirTemp("/tmp", "athn")
@@ -117,11 +123,16 @@ func newHarness(t *testing.T, mod func(*Config)) *harness {
 	h.st = st
 	h.n = New(h.cfg, nil)
 	h.n.restartDelay = func(int) time.Duration { return 0 }
-	h.eng = core.NewEngine(st.Repos(), h.n, nil, func(e core.Event) {
+	emit := func(e core.Event) {
 		h.evMu.Lock()
 		h.events = append(h.events, e)
 		h.evMu.Unlock()
-	})
+	}
+	if mk == nil {
+		h.eng = core.NewEngine(st.Repos(), h.n, nil, emit)
+	} else {
+		h.eng = mk(st, h.n, emit)
+	}
 	h.n.SetEngine(h.eng)
 	ctx, cancel := context.WithCancel(context.Background())
 	served := make(chan error, 1)
@@ -1242,6 +1253,18 @@ func (b blockingEngine) WaitApproval(context.Context, string) (core.Approval, er
 	return core.Approval{}, fmt.Errorf("released")
 }
 func (b blockingEngine) ExpireApproval(string) error { b.wait(); return nil }
+func (b blockingEngine) Trigger(string) (core.Trigger, error) {
+	b.wait()
+	return core.Trigger{}, fmt.Errorf("released")
+}
+func (b blockingEngine) Reply(core.ReplyRequest) (string, error) { b.wait(); return "", nil }
+func (b blockingEngine) FollowForContext(string, string) error   { b.wait(); return nil }
+func (b blockingEngine) MarkUnrelated(string, string, string) error {
+	b.wait()
+	return nil
+}
+func (b blockingEngine) Handback(string, string, string) (bool, error) { b.wait(); return false, nil }
+func (b blockingEngine) BindThread(string, string, bool) error         { b.wait(); return nil }
 func (b blockingEngine) RecordUsage(string, string, core.UsageDelta) error {
 	b.wait()
 	return nil
@@ -1336,5 +1359,176 @@ func TestUsageFromCumulativeResults(t *testing.T) {
 	}
 	if s.InputTokens != 30 || s.OutputTokens != 124 {
 		t.Errorf("tokens after resume = %d in, %d out; want 30, 124", s.InputTokens, s.OutputTokens)
+	}
+}
+
+// Inputs that reach a worker on a Source's Thread are cards: who wrote them, when, where, the URL, the trigger_id the
+// worker acknowledges or hands back, and at most 600 characters of text with a pointer to the rest.
+func TestTriggerInputCard(t *testing.T) {
+	at := time.Date(2026, 11, 4, 10, 30, 0, 0, time.UTC)
+	long := strings.Repeat("é", 700)
+	triggers := map[string]core.Trigger{
+		"github:issuecomment:1": {ID: "github:issuecomment:1", Source: "github", Actor: core.ActorRef{Source: "github", ID: "alice"},
+			Human: true, At: at, Kind: core.KindMessage, Threads: []string{"github:o/r#12"}, ReplyTo: "github:issue:9",
+			Meta: map[string]string{"repo": "O/R", "number": "12", "url": "https://github.com/O/R/issues/12#issuecomment-1"}},
+		"github:issuecomment:2": {ID: "github:issuecomment:2", Source: "github", Actor: core.ActorRef{Source: "github", ID: "bob"},
+			Human: true, At: at, Threads: []string{"github:o/r#3"}, Meta: map[string]string{"repo": "o/r", "number": "3"}},
+		"github:checksuite:5": {ID: "github:checksuite:5", Source: "github", Actor: core.ActorRef{Source: "github", ID: "ci"},
+			Bot: true, At: at, Kind: core.KindCI, Threads: []string{"github:o/r@main"}, Meta: map[string]string{"repo": "o/r"}},
+		"owner-1": {ID: "owner-1", Source: "owner", Human: true, At: at, Text: "owner text"},
+	}
+	lookup := func(id string) (core.Trigger, bool) { tr, ok := triggers[id]; return tr, ok }
+	tk := core.Ticket{ID: "T-1", Inputs: []core.Input{
+		{ID: "i1", Kind: core.InputTrigger, TriggerID: "github:issuecomment:1", Text: "please fix the typo", Human: true, Note: "same page as T-0"},
+		{ID: "i2", Kind: core.InputTrigger, TriggerID: "github:issuecomment:2", Text: long, Human: true, Context: true},
+		{ID: "i3", Kind: core.InputTrigger, TriggerID: "github:checksuite:5", Text: "CI check suite failure on main"},
+		{ID: "i4", Kind: core.InputTrigger, TriggerID: "owner-1", Text: "owner text", Human: true},
+		{ID: "i5", Kind: core.InputNote, Text: "T-2 found the root cause"},
+	}}
+	got := renderInputs(tk, []string{"i1", "i2", "i3", "i4", "i5"}, lookup)
+	for _, want := range []string{
+		"[input i1: message from a person]\ntrigger_id: github:issuecomment:1\nfrom: alice\nat: 2026-11-04T10:30:00Z\n" +
+			"thread: O/R#12 (github:o/r#12)\nurl: https://github.com/O/R/issues/12#issuecomment-1\nreplies_to: github:issue:9\n" +
+			"routing note: same page as T-0\nplease fix the typo\n",
+		"[input i2: message from a person]\ntrigger_id: github:issuecomment:2\nfrom: bob\n",
+		"thread: o/r#3 (github:o/r#3)\ncontext: it reached you on a thread you follow for context",
+		strings.Repeat("é", 600) + "…\n[cut: 600 of 700 characters shown; read the rest with gh on o/r#3]",
+		"[input i3: ci]\ntrigger_id: github:checksuite:5\nfrom: ci (bot)\n",
+		"thread: o/r@main (github:o/r@main)\n",
+		"[input i4: message from the owner]\nowner text\n",
+		"[input i5: note]\nNote: T-2 found the root cause\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("rendered inputs lack %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, strings.Repeat("é", 601)) {
+		t.Error("a card carries more than 600 characters of text")
+	}
+	if strings.Index(got, "[input i1") > strings.Index(got, "[input i5") {
+		t.Error("inputs out of order")
+	}
+	// Without a way to read Triggers, a Trigger Input is plain text, and not the owner's.
+	if plain := renderInputs(tk, []string{"i1"}, nil); !strings.HasPrefix(plain, "[input i1: message]\nplease fix the typo") {
+		t.Errorf("plain rendering = %q", plain)
+	}
+}
+
+// R24 M2: only the owner's own Inputs say they are from the owner when an Input is not a card.
+func TestInputLabelFallback(t *testing.T) {
+	triggers := map[string]core.Trigger{
+		"owner-1":  {ID: "owner-1", Source: core.OwnerActor.Source, Human: true},
+		"slack:1":  {ID: "slack:1", Source: "slack", Human: true},
+		"github:1": {ID: "github:1", Source: "github", Human: true, Threads: []string{"github:o/r#1"}},
+	}
+	lookup := func(id string) (core.Trigger, bool) { tr, ok := triggers[id]; return tr, ok }
+	tk := core.Ticket{Inputs: []core.Input{
+		{ID: "a", Kind: core.InputTrigger, TriggerID: "owner-1", Text: "t", Human: true},
+		{ID: "b", Kind: core.InputTrigger, TriggerID: "slack:1", Text: "t", Human: true},
+		{ID: "c", Kind: core.InputTrigger, TriggerID: "missing", Text: "t", Human: true},
+		{ID: "d", Kind: core.InputText, Text: "t", Human: true},
+	}}
+	for id, want := range map[string]string{"a": "message from the owner", "b": "message", "c": "message", "d": "message from the owner"} {
+		got := renderInputs(tk, []string{id}, lookup)
+		if !strings.HasPrefix(got, "[input "+id+": "+want+"]\n") {
+			t.Errorf("input %s: %q, want label %q", id, got, want)
+		}
+	}
+}
+
+// R30: the Inputs of an Assignment's first message are read once the session files a Report after it, even while the
+// turn goes on; the release of unread Inputs when a Ticket ends relies on it.
+func TestFirstMessageInputsReadAfterReport(t *testing.T) {
+	h := newHarness(t, nil)
+	t.Setenv("ATHENA_FAKE_FIXTURE", openTurnFixture(t))
+	tk := h.submit("Open task\nbody-r30", "")
+	tk, a := h.running(tk.ID)
+	h.never("first input read before a report or a turn end", 200*time.Millisecond, func() bool {
+		tk, _ := h.ticket(tk.ID)
+		return tk.Inputs[0].ReadAt != nil
+	})
+	if r := h.report(tk.ID, a.ID, core.ReportProgress, "looking"); !r.OK {
+		t.Fatal(r)
+	}
+	h.eventually("first input read after the report", func() bool {
+		tk, _ := h.ticket(tk.ID)
+		return tk.Inputs[0].ReadAt != nil
+	})
+}
+
+// starts returns how many sessions of the Ticket fakeclaude started, and the arguments of the last one.
+func (h *harness) starts(ticketID string) (int, []string) {
+	n, last := 0, []string(nil)
+	for _, inv := range h.invocations() {
+		if inv.Env["ATHENA_TICKET"] == ticketID {
+			n++
+			last = inv.Args
+		}
+	}
+	return n, last
+}
+
+// I1 (R34): a ready report of a Ticket that waits for its pull request hands the work off: once that turn ends, the
+// session's process ends and its slot is free, so another Ticket starts while the Assignment keeps running with its
+// session. A review comment on the pull request later resumes the same session (--resume) through the normal queue.
+func TestReadyHandoffFreesTheSlotAndAFollowUpResumes(t *testing.T) {
+	hold := filepath.Join(t.TempDir(), "turn-may-end")
+	t.Setenv("ATHENA_FAKE_HOLD_RESULT", hold)
+	h := newHarness(t, func(c *Config) { c.Slots = 1 })
+	a := h.submit("Open a pull request", "")
+	_, aa := h.running(a.ID)
+	pull := "github:o/r#7"
+	if err := h.eng.BindThread(a.ID, pull, true); err != nil {
+		t.Fatal(err)
+	}
+	if r := h.report(a.ID, aa.ID, core.ReportReady, "opened #7"); !r.OK {
+		t.Fatalf("ready report = %+v", r)
+	}
+	b := h.submit("Second task", "")
+	h.never("second ticket started while the first turn runs", 200*time.Millisecond, func() bool {
+		return h.assignmentState(b.ID) != core.AssignmentPending
+	})
+	if err := os.WriteFile(hold, nil, 0o600); err != nil { // the ready turn ends
+		t.Fatal(err)
+	}
+	_, ba := h.running(b.ID)
+	tk, st := h.ticket(a.ID)
+	if tk.Ended != nil || tk.LatestAssignment().ID != aa.ID || tk.LatestAssignment().State != core.AssignmentRunning ||
+		tk.LatestAssignment().SessionID != fixtureSessionID || st != (core.Stage{Stage: "person", Action: "review"}) {
+		t.Fatalf("handed-off ticket: ended %v, assignment %+v, stage %+v; want it open, waiting for review, its "+
+			"assignment running with its session", tk.Ended, tk.LatestAssignment(), st)
+	}
+	if s := h.n.liveSession(a.ID); s != nil {
+		t.Fatal("the handed-off ticket still holds a session")
+	}
+
+	// A person's review comment on the pull request: the first Ticket resumes once the slot is free again.
+	review := core.Trigger{ID: "github:review:1", Source: "github", Kind: core.KindMessage, Human: true,
+		Actor: core.ActorRef{Source: "github", ID: "alice"}, Threads: []string{pull}, At: time.Now(),
+		Text: "please rename the flag (review-c4d1)"}
+	if _, err := h.eng.Receive(review); err != nil {
+		t.Fatal(err)
+	}
+	h.never("the follow-up resumed while the slot is taken", 200*time.Millisecond, func() bool {
+		n, _ := h.starts(a.ID)
+		return n > 1
+	})
+	if r := h.report(b.ID, ba.ID, core.ReportReady, "done"); !r.OK {
+		t.Fatalf("second report = %+v", r)
+	}
+	h.eventually("the first ticket resumed", func() bool { n, _ := h.starts(a.ID); return n == 2 })
+	_, args := h.starts(a.ID)
+	if id, ok := argValue(args, "--resume"); !ok || id != fixtureSessionID {
+		t.Fatalf("resumed with %v, want --resume %s", args, fixtureSessionID)
+	}
+	h.eventually("the review delivered", func() bool {
+		tk, _ := h.ticket(a.ID)
+		return len(tk.Undelivered) == 0 && strings.Contains(h.stdin(), "review-c4d1")
+	})
+	if strings.Count(h.stdin(), resumeNote) != 1 || strings.Contains(h.stdin(), recoveryNote) {
+		t.Fatalf("stdin = %q, want the resume note once and no crash note", h.stdin())
+	}
+	if tk, _ := h.ticket(a.ID); tk.LatestAssignment().ID != aa.ID {
+		t.Fatalf("assignment %s, want the same one resumed", tk.LatestAssignment().ID)
 	}
 }

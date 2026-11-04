@@ -41,6 +41,42 @@ var migrations = []string{
 		doc TEXT NOT NULL
 	);
 	CREATE INDEX approvals_state ON approvals (state);`,
+	// 3
+	`CREATE TABLE threads (
+		key TEXT PRIMARY KEY,
+		active INTEGER NOT NULL,
+		doc TEXT NOT NULL
+	);
+	CREATE INDEX threads_active ON threads (active);
+	ALTER TABLE decisions ADD COLUMN thread TEXT NOT NULL DEFAULT '';
+	ALTER TABLE decisions ADD COLUMN at TEXT NOT NULL DEFAULT '';
+	CREATE INDEX decisions_thread ON decisions (thread, at);
+	CREATE TABLE effects (
+		kind TEXT NOT NULL,
+		key TEXT NOT NULL,
+		payload BLOB NOT NULL,
+		seq INTEGER NOT NULL,
+		due_at TEXT NOT NULL,
+		attempts INTEGER NOT NULL DEFAULT 0,
+		last_error TEXT NOT NULL DEFAULT '',
+		PRIMARY KEY (kind, key)
+	);
+	CREATE INDEX effects_due ON effects (due_at, seq);
+	CREATE TABLE receipts (
+		id TEXT PRIMARY KEY,
+		ticket_id TEXT NOT NULL,
+		conversation TEXT NOT NULL,
+		state TEXT NOT NULL,
+		attempts INTEGER NOT NULL DEFAULT 0,
+		doc TEXT NOT NULL
+	);
+	CREATE INDEX receipts_ticket ON receipts (ticket_id, conversation);
+	CREATE TABLE settings (
+		block TEXT NOT NULL,
+		revision INTEGER NOT NULL,
+		doc TEXT NOT NULL,
+		PRIMARY KEY (block, revision)
+	);`,
 }
 
 const schemaKey = "schema"
@@ -50,6 +86,8 @@ type Store struct {
 	db *sql.DB
 	// txSeconds is the store_tx_seconds histogram; nil (the default) records nothing.
 	txSeconds atomic.Pointer[metrics.Histogram]
+	// clock overrides time.Now for stored times (effects); nil means time.Now.
+	clock atomic.Pointer[func() time.Time]
 }
 
 // SetMetrics makes the Store record the latency of every transaction, from begin to commit or rollback, as
@@ -110,7 +148,7 @@ func (s *Store) migrate() error {
 			return err
 		}
 		if n > 0 {
-			if _, err := tx.KVGet(schemaKey, &current); err != nil {
+			if _, err := tx.kvGetJSON(schemaKey, &current); err != nil {
 				return fmt.Errorf("store: read schema version: %w", err)
 			}
 		}
@@ -121,7 +159,7 @@ func (s *Store) migrate() error {
 			if _, err := tx.sql.Exec(migrations[i]); err != nil {
 				return fmt.Errorf("store: migration %d: %w", i+1, err)
 			}
-			if err := tx.KVSet(schemaKey, i+1); err != nil {
+			if err := tx.kvSetJSON(schemaKey, i+1); err != nil {
 				return err
 			}
 		}
@@ -146,7 +184,7 @@ func (s *Store) Tx(fn func(tx *Tx) error) (err error) {
 			panic(r)
 		}
 	}()
-	if err := fn(&Tx{sql: sqlTx}); err != nil {
+	if err := fn(&Tx{sql: sqlTx, now: s.Now}); err != nil {
 		if rbErr := sqlTx.Rollback(); rbErr != nil {
 			return errors.Join(err, rbErr)
 		}
@@ -161,10 +199,11 @@ func (s *Store) Tx(fn func(tx *Tx) error) (err error) {
 // Tx is the handle for one transaction; it is valid only inside the function passed to Store.Tx.
 type Tx struct {
 	sql *sql.Tx
+	now func() time.Time
 }
 
-// KVGet loads the JSON value stored under key into v. It reports false if key is absent.
-func (tx *Tx) KVGet(key string, v any) (bool, error) {
+// kvGetJSON loads the JSON value stored under key into v. It reports false if key is absent.
+func (tx *Tx) kvGetJSON(key string, v any) (bool, error) {
 	var raw string
 	err := tx.sql.QueryRow(`SELECT value FROM kv WHERE key = ?`, key).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -179,8 +218,8 @@ func (tx *Tx) KVGet(key string, v any) (bool, error) {
 	return true, nil
 }
 
-// KVSet stores v, JSON-encoded, under key.
-func (tx *Tx) KVSet(key string, v any) error {
+// kvSetJSON stores v, JSON-encoded, under key.
+func (tx *Tx) kvSetJSON(key string, v any) error {
 	raw, err := json.Marshal(v)
 	if err != nil {
 		return fmt.Errorf("store: kv encode %q: %w", key, err)

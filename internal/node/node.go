@@ -27,6 +27,9 @@ const (
 	defaultSlots           = 4
 	defaultModel           = "sonnet"
 	defaultApprovalTimeout = 30 * time.Minute
+	// defaultCredentialRetry and maxCredentialRetry bound the pauses of a launch waiting for GitHub credentials.
+	defaultCredentialRetry = 5 * time.Second
+	maxCredentialRetry     = 5 * time.Minute
 	// hookTimeoutMargin is how much longer than an Approval a decision hook may block, so the node, not Claude
 	// Code, decides what an unanswered Approval means.
 	hookTimeoutMargin = 5 * time.Minute
@@ -35,7 +38,10 @@ const (
 	// recoveryNote opens the first message of a session resumed after its process ended without a Stop.
 	recoveryNote   = "Your previous process ended unexpectedly; continue the task."
 	recoveryAdvice = " Check your directory and git history before repeating any outside action."
-	crashSummary   = "session crashed repeatedly"
+	// resumeNote opens the first message of a session resumed after it was paused with nothing to do: a handoff (a
+	// ready report that waits for its pull request), or a turn that ended idle before a node restart.
+	resumeNote   = "Your session was paused while it waited; it resumes for the input that follows."
+	crashSummary = "session crashed repeatedly"
 	// nudgeText is sent, once, when a turn ends without a Report since the worker's last Input; blockedSummary is the
 	// report filed when the next turn ends without one too.
 	nudgeText      = "Your turn ended without a report. Call the report tool now with your status."
@@ -70,6 +76,14 @@ type Config struct {
 	// Metrics receives the node's timings and gauges (session_spawn_seconds, session_init_seconds,
 	// hook_decision_seconds, mcp_tool_seconds, slots_in_use, tool_calls_total); nil records nothing.
 	Metrics *metrics.Registry
+	// Credentials gives GitHub Tickets (those with a Repo) their per-Assignment token and commit identity; without it
+	// such a Ticket fails at launch.
+	Credentials Credentials
+	// CredentialRetry is the first pause before a launch that could not get its GitHub credentials yet tries again
+	// (default 5 s, doubling to 5 min).
+	CredentialRetry time.Duration
+	// Logger receives the node's log lines (default slog.Default()).
+	Logger *slog.Logger
 }
 
 // EngineCallbacks is the part of *core.Engine the node calls: the Executor callbacks, the Ticket query and Approvals.
@@ -84,6 +98,14 @@ type EngineCallbacks interface {
 	RequestApproval(a core.Approval) (core.Approval, error)
 	WaitApproval(ctx context.Context, id string) (core.Approval, error)
 	ExpireApproval(id string) error
+	// Trigger reads a stored Trigger: a Ticket's origin for its execution variables, an Input's for its card.
+	Trigger(id string) (core.Trigger, error)
+	// The worker tools' commands (workertools.go) and the binding of a reported pull request.
+	Reply(r core.ReplyRequest) (string, error)
+	FollowForContext(ticketID, thread string) error
+	MarkUnrelated(ticketID, thread, reason string) error
+	Handback(ticketID, triggerID, reason string) (bool, error)
+	BindThread(ticketID, thread string, own bool) error
 	// RecordUsage adds what the node observed to the Ticket's stats. It takes the Engine's lock: never call it while
 	// holding a node lock that Start, Deliver or Stop also take.
 	RecordUsage(ticketID, assignmentID string, u core.UsageDelta) error
@@ -102,6 +124,7 @@ var _ core.Executor = (*Node)(nil)
 type Node struct {
 	cfg    Config
 	eng    atomic.Pointer[engineRef]
+	router atomic.Pointer[routerRef]
 	ctx    context.Context
 	cancel context.CancelFunc
 	log    *slog.Logger
@@ -119,6 +142,15 @@ type Node struct {
 
 	// restartDelay is the pause before restart n (1-based) of a crashed session.
 	restartDelay func(n int) time.Duration
+
+	// tokens holds each GitHub Assignment's token, in memory only.
+	tokens *tokenStore
+	// afterDrop, when set (tests), runs on a runner right after it dropped its Assignment's token.
+	afterDrop func(s *session)
+	// afterMirrorFetch, when set (tests), runs right after the mirror's fetch from GitHub.
+	afterMirrorFetch func(mirror string)
+	// grants holds the nonces of the node's own git calls on a clone (repos.go): nonce -> nodeGrant.
+	grants sync.Map
 
 	// Metric handles; nil without Config.Metrics.
 	reg        *metrics.Registry
@@ -152,9 +184,14 @@ func New(cfg Config, eng EngineCallbacks) *Node {
 			cfg.AthenaBin = exe
 		}
 	}
+	log := cfg.Logger
+	if log == nil {
+		log = slog.Default()
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	n := &Node{
-		cfg: cfg, ctx: ctx, cancel: cancel, log: slog.Default(),
+		cfg: cfg, ctx: ctx, cancel: cancel, log: log,
+		tokens:       newTokenStore(cfg.Credentials),
 		notify:       make(chan struct{}, 1),
 		done:         make(chan struct{}),
 		live:         map[string]*session{},
@@ -164,8 +201,14 @@ func New(cfg Config, eng EngineCallbacks) *Node {
 		spawnHist:    cfg.Metrics.Histogram("session_spawn_seconds", "runtime", runtimeClaude),
 		initHist:     cfg.Metrics.Histogram("session_init_seconds", "runtime", runtimeClaude),
 	}
+	n.tokens.log = log
 	if eng != nil {
 		n.SetEngine(eng)
+	}
+	if cfg.StateDir != "" && cfg.AthenaBin != "" {
+		if err := writeShims(cfg.StateDir, cfg.AthenaBin); err != nil {
+			log.Error("write the gh shim", "error", err)
+		}
 	}
 	go n.loop()
 	return n
@@ -206,6 +249,7 @@ func (n *Node) Close() error {
 		n.post(message{kind: msgShutdown})
 		<-n.done
 		n.runners.Wait()
+		n.tokens.wait()
 		n.cancel()
 	})
 	return nil
@@ -246,6 +290,8 @@ const (
 	msgStop
 	msgEnded
 	msgShutdown
+	// msgWake only schedules: a launch put off (waiting for credentials) falls due.
+	msgWake
 )
 
 type message struct {
@@ -299,6 +345,8 @@ func (n *Node) loop() {
 				n.onEnded(st, m.s)
 			case msgShutdown:
 				n.onShutdown(st)
+			case msgWake:
+				n.schedule(st)
 			}
 		}
 		if st.shutting && n.liveCount() == 0 {
@@ -324,7 +372,11 @@ func (n *Node) onStart(st *loopState, t core.Ticket, a core.Assignment) {
 			break
 		}
 	}
-	p, err := place(n.cfg.WorkRoot, t)
+	if t.Repo != "" && n.cfg.Credentials == nil {
+		n.goFail(t, a, "ticket works in GitHub repository "+t.Repo+", but this node has no GitHub credentials")
+		return
+	}
+	p, err := n.place(t)
 	if err != nil {
 		n.goFail(t, a, "prepare ticket directory: "+err.Error())
 		return
@@ -370,7 +422,7 @@ func (n *Node) onStop(st *loopState, t core.Ticket, a core.Assignment, reason st
 		n.runners.Add(1)
 		go func() {
 			defer n.runners.Done()
-			if p, err := place(n.cfg.WorkRoot, t); err == nil {
+			if p, err := n.place(t); err == nil {
 				cleanupWorktree(p, t, n.log.With("ticket", t.ID, "assignment", a.ID))
 			}
 		}()
@@ -387,12 +439,25 @@ func (n *Node) onEnded(st *loopState, s *session) {
 	if k := s.place.dirKey; k != "" && st.busy[k] == s.t.ID {
 		delete(st.busy, k)
 	}
-	if !st.shutting && !s.isStopped() && len(s.deliverCh) > 0 {
+	if wait, attempt := s.credentialWait(); wait > 0 && !st.shutting && !s.isStopped() {
+		// The launch waits for GitHub credentials without a slot: it is queued again, due after the pause.
+		if !slices.ContainsFunc(st.queue, func(q *session) bool { return q.t.ID == s.t.ID }) {
+			ns := n.newSession(s.t, s.a, s.place)
+			ns.credAttempt, ns.notBefore = attempt+1, time.Now().Add(wait)
+			st.queue = append(st.queue, ns)
+			time.AfterFunc(wait, func() { n.post(message{kind: msgWake}) })
+		}
+	} else if !st.shutting && !s.isStopped() && len(s.deliverCh) > 0 {
 		// Inputs arrived after the runner stopped listening: launch the Assignment again to take them.
 		a := s.a
 		a.State = core.AssignmentRunning
 		if id := s.currentSessionID(); id != "" {
 			a.SessionID = id
+		}
+		if s.isParked() {
+			// It handed off and its turn ended idle: it resumes as a paused session, not a crashed one.
+			now := time.Now()
+			a.IdleAt, a.DeliveredAt = &now, nil
 		}
 		n.onStart(st, s.t, a)
 	}
@@ -413,15 +478,16 @@ func (n *Node) onShutdown(st *loopState) {
 	}
 }
 
-// schedule launches queued sessions while slots are free, skipping a Ticket whose previous session still ends and a
-// non-git directory another Ticket uses.
+// schedule launches queued sessions while slots are free, skipping a Ticket whose previous session still ends, a
+// non-git directory another Ticket uses and a launch put off until later (waiting for credentials).
 func (n *Node) schedule(st *loopState) {
 	for i := 0; i < len(st.queue); {
 		if n.liveCount() >= n.cfg.Slots {
 			return
 		}
 		s := st.queue[i]
-		if n.liveSession(s.t.ID) != nil || (s.place.dirKey != "" && st.busy[s.place.dirKey] != "") {
+		if n.liveSession(s.t.ID) != nil || (s.place.dirKey != "" && st.busy[s.place.dirKey] != "") ||
+			time.Now().Before(s.notBefore) {
 			i++
 			continue
 		}
@@ -480,11 +546,77 @@ type session struct {
 	deniedUnseen  bool
 	// reports counts the Reports the session filed through the socket.
 	reports int
+	// githubVars are the ATHENA_GITHUB_* execution variables of a GitHub Ticket, set before the session starts.
+	githubVars []string
+	// ended is set once the session's runner is done, before it leaves the registry.
+	ended bool
+	// handoff is set while the session's latest Report is ready and its Ticket stayed open (it waits for its pull
+	// request); parked once its runner ended the process for it, the Assignment running on with its session.
+	handoff bool
+	parked  bool
+	// credWait is set when the launch could not get its GitHub credentials yet: the pause before it is queued again.
+	credWait time.Duration
+
+	// credAttempt numbers the launch attempts of a launch waiting for credentials (1 for the first); notBefore is when
+	// a queued launch put off for them falls due. Both are fixed at creation.
+	credAttempt int
+	notBefore   time.Time
+}
+
+// noteHandoff records the state of the Report the session just filed: ready on a Ticket that stays open hands off.
+func (s *session) noteHandoff(handoff bool) {
+	s.mu.Lock()
+	s.handoff = handoff
+	s.mu.Unlock()
+}
+
+func (s *session) handedOff() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.handoff
+}
+
+func (s *session) markParked() {
+	s.mu.Lock()
+	s.parked = true
+	s.mu.Unlock()
+}
+
+func (s *session) isParked() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.parked
+}
+
+func (s *session) setCredentialWait(d time.Duration) {
+	s.mu.Lock()
+	s.credWait = d
+	s.mu.Unlock()
+}
+
+// credentialWait returns the pause of a launch that waits for credentials (zero: none) and its attempt number.
+func (s *session) credentialWait() (time.Duration, int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.credWait, s.credAttempt
+}
+
+func (s *session) markEnded() {
+	s.mu.Lock()
+	s.ended = true
+	s.mu.Unlock()
+}
+
+// over reports whether the session was stopped or its runner is done.
+func (s *session) over() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.stopped || s.ended
 }
 
 func (n *Node) newSession(t core.Ticket, a core.Assignment, p placement) *session {
 	return &session{
-		t: t, a: a, place: p,
+		t: t, a: a, place: p, credAttempt: 1,
 		name:      filepath.Base(TicketDir(n.cfg.WorkRoot, t)),
 		log:       n.log.With("ticket", t.ID, "assignment", a.ID),
 		deliverCh: make(chan struct{}, 1),
@@ -596,15 +728,24 @@ func (s *session) setSessionID(id string) {
 	s.mu.Unlock()
 }
 
+func (s *session) setGitHubVars(vars []string) {
+	s.mu.Lock()
+	s.githubVars = vars
+	s.mu.Unlock()
+}
+
 // variables returns the execution variables, as NAME=value pairs.
 func (n *Node) variables(s *session) []string {
-	return []string{
+	vars := []string{
 		"ATHENA_TICKET=" + s.t.ID,
 		"ATHENA_NAME=" + s.name,
 		"ATHENA_DIR=" + s.place.workDir,
 		"ATHENA_BLOCKED_COMMANDS=" + strings.Join(n.cfg.Blocked, ","),
 		"ATHENA_SOCKET=" + n.cfg.SocketPath,
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append(vars, s.githubVars...)
 }
 
 // sessionContext is what the SessionStart hook adds to the session: the execution variables and the Mandate.
@@ -644,6 +785,11 @@ type runner struct {
 	// once a turn that ended without a Report since then was nudged.
 	inputReports int
 	nudged       bool
+	// idle is set when a turn ended well and nothing was sent since; park once the runner ends the process because its
+	// worker handed off (parkIfHandedOff). paused is set when the first process resumes a paused session.
+	idle   bool
+	park   bool
+	paused bool
 
 	// usage is what the session did since the last RecordUsage; tools maps the ids of tool calls in flight to their
 	// tool; firstSent and firstOutput time the Ticket's time to first output.
@@ -664,6 +810,16 @@ type unreadInput struct {
 func (n *Node) run(s *session) {
 	defer n.runners.Done()
 	defer n.post(message{kind: msgEnded, s: s})
+	// The token lives as long as the Assignment's runner: a stop, a failure or a crash give-up drops it.
+	// A new session of an Assignment whose earlier session dropped its token may hold one again.
+	n.tokens.revive(s.a.ID)
+	defer func() {
+		s.markEnded()
+		n.tokens.drop(s.a.ID)
+		if n.afterDrop != nil {
+			n.afterDrop(s)
+		}
+	}()
 	r := &runner{n: n, s: s, eng: n.engine(), log: s.log, sent: map[string]bool{}, started: s.a.State == core.AssignmentRunning}
 	r.run()
 	if s.endedTicket() {
@@ -676,16 +832,30 @@ func (r *runner) run() {
 	if s.isStopped() {
 		return
 	}
+	// GitHub credentials that cannot be had yet (GitHub unreachable, the bot not known yet) delay the launch; they are
+	// retried until they come or the session is stopped, never filed as failed: the Ticket shows working/queued meanwhile.
+	// The launch waits without a slot: the runner ends, and the loop queues it again, due after the pause (onEnded).
 	if err := n.prepare(s); err != nil {
-		r.fail("prepare ticket directory: " + err.Error())
+		if !credentialsLater(err) {
+			r.fail("prepare ticket directory: " + redact.String(err.Error()))
+			return
+		}
+		d := n.credentialDelay(s.credAttempt)
+		r.log.Warn("github credentials not available yet; will retry the launch", "attempt", s.credAttempt, "retryIn", d.String(),
+			"error", redact.String(err.Error()))
+		s.setCredentialWait(d)
 		return
 	}
+	s.setGitHubVars(n.githubVariables(s))
 	// A running Assignment with a session resumes it after a crash or a node restart; a new Assignment of a
 	// Ticket (retry, resume) continues the Ticket's last session.
 	resumeID, recovering := s.a.SessionID, s.a.SessionID != ""
 	if resumeID == "" {
 		resumeID = previousSessionID(s.t, s.a.ID)
 	}
+	// A session whose last turn ended idle, with nothing delivered since (a handoff, or an idle Assignment after a node
+	// restart), was paused, not interrupted: it resumes with the resume note instead of the crash note.
+	r.paused = recovering && pausedAt(s.a)
 	if recovering {
 		r.seedUnread()
 	}
@@ -696,6 +866,7 @@ func (r *runner) run() {
 	r.model = model
 	adir := filepath.Join(s.place.workDir, ".athena")
 	env := append([]string{"ATHENA_ASSIGNMENT=" + s.a.ID}, n.variables(s)...)
+	env = append(env, n.githubEnv(s)...)
 	for crashes := 0; ; {
 		spawnStart := time.Now()
 		sess, err := claude.Start(n.ctx, claude.Options{
@@ -720,6 +891,7 @@ func (r *runner) run() {
 		if !crashed {
 			return
 		}
+		r.paused = false
 		r.usage.Crashes++
 		r.flushUsage()
 		crashes++
@@ -759,6 +931,7 @@ loop:
 			r.deliver(sess)
 		case <-s.reportCh:
 			r.markRead(s.reportCount())
+			r.parkIfHandedOff()
 		case <-s.stopCh:
 			crashed = false
 			r.log.Info("session stopped", "reason", s.reason())
@@ -768,11 +941,22 @@ loop:
 			}
 			break loop
 		}
+		if r.park {
+			// The worker handed off and its turn is over: the process ends, the slot is free, the Assignment runs on
+			// with its session, which a later Input resumes.
+			crashed = false
+			r.log.Info("worker handed off; session paused until its next input")
+			_ = sess.Close()
+			for ev := range events {
+				r.account(ev)
+			}
+			break loop
+		}
 	}
 	_ = sess.Close()
 	err := sess.Wait()
 	r.flushUsage()
-	if s.isStopped() {
+	if s.isStopped() || r.park {
 		return false, ""
 	}
 	cause = crashCause(err, sess.Stderr())
@@ -821,7 +1005,9 @@ func (r *runner) sendFirst(sess *claude.Session, recovering bool) {
 	}
 	ids := r.pending(t)
 	var b strings.Builder
-	if recovering {
+	if recovering && r.paused {
+		b.WriteString(resumeNote + "\n")
+	} else if recovering {
 		b.WriteString(recoveryNote + recoveryAdvice + "\n")
 	} else {
 		fmt.Fprintf(&b, "You are the worker of Athena Ticket %s: %s\n\nExecution variables:\n", t.ID, t.Title)
@@ -831,10 +1017,10 @@ func (r *runner) sendFirst(sess *claude.Session, recovering bool) {
 	}
 	// Inputs a crashed process received but never took into a step go again, ahead of what waits.
 	if len(r.unread) > 0 {
-		b.WriteString("\n" + renderInputs(t, r.unreadIDs()))
+		b.WriteString("\n" + renderInputs(t, r.unreadIDs(), r.trigger))
 	}
 	if len(ids) > 0 {
-		b.WriteString("\n" + renderInputs(t, ids))
+		b.WriteString("\n" + renderInputs(t, ids, r.trigger))
 	}
 	if r.firstSent.IsZero() {
 		r.firstSent = time.Now()
@@ -865,7 +1051,7 @@ func (r *runner) deliver(sess *claude.Session) {
 	if len(ids) == 0 {
 		return
 	}
-	if err := sess.Send(renderInputs(t, ids)); err != nil {
+	if err := sess.Send(renderInputs(t, ids, r.trigger)); err != nil {
 		if errors.Is(err, claude.ErrExited) {
 			return // still waiting: the restarted process takes them
 		}
@@ -1029,8 +1215,40 @@ func (r *runner) onEvent(ev claude.Event) {
 		}
 		// The turn that took in everything sent before its end is over.
 		r.markRead(-1)
+		r.idle = true
 		r.turnEnded()
+		r.parkIfHandedOff()
 	}
+}
+
+// parkIfHandedOff ends the process of a worker that handed off (its latest Report is ready and its Ticket waits for
+// its pull request) once its turn is over with nothing left for it: no Input waits and no Approval is pending. It
+// records the turn's end, so a node restart, too, sees the Assignment idle; the Assignment runs on with its session.
+func (r *runner) parkIfHandedOff() {
+	s := r.s
+	if !r.idle || r.park || !r.initSeen || !r.started || !s.handedOff() || s.isStopped() || len(s.deliverCh) > 0 {
+		return
+	}
+	t, _, err := r.eng.Ticket(s.t.ID)
+	if err != nil {
+		r.log.Error("read ticket", "error", err)
+		return
+	}
+	// The Ticket's own state decides: its running Assignment, this one, still stands on a ready Report.
+	if l := t.LatestAssignment(); !t.HandedOff() || l == nil || l.ID != s.a.ID || t.PendingApproval != "" || len(r.pending(t)) > 0 {
+		return
+	}
+	if err := r.eng.TurnEnded(s.t.ID, s.a.ID); err != nil {
+		r.log.Error("record turn end", "error", err)
+		return
+	}
+	s.markParked()
+	r.park = true
+}
+
+// pausedAt reports whether a running Assignment's last turn ended idle with nothing delivered since.
+func pausedAt(a core.Assignment) bool {
+	return a.IdleAt != nil && (a.DeliveredAt == nil || !a.DeliveredAt.After(*a.IdleAt))
 }
 
 // turnFailure is the summary of a failed turn's report: its subtype and its reason, secrets masked.
@@ -1057,6 +1275,7 @@ func turnFailure(e claude.Result) string {
 func (r *runner) inputSent() {
 	r.inputReports = r.s.reportCount()
 	r.nudged = false
+	r.idle = false
 }
 
 // turnEnded checks that a turn that ended well filed a Report since the worker's last Input: the first time it did
@@ -1074,6 +1293,12 @@ func (r *runner) turnEnded() {
 		r.log.Info("turn ended without a report; nudging the worker")
 		if err := r.send(nudgeText); err != nil {
 			r.log.Warn("send nudge", "error", err)
+			return
+		}
+		r.idle = false
+		// The nudge is a delivery of no Input: DeliveredAt moves, so a restart sees the nudged turn as busy (R33).
+		if r.started {
+			r.delivered(nil)
 		}
 		return
 	}
@@ -1156,8 +1381,19 @@ func previousSessionID(t core.Ticket, assignmentID string) string {
 	return ""
 }
 
-// renderInputs renders Inputs for the session, in order.
-func renderInputs(t core.Ticket, ids []string) string {
+// trigger reads an Input's Trigger for its card.
+func (r *runner) trigger(id string) (core.Trigger, bool) {
+	tr, err := r.eng.Trigger(id)
+	if err != nil {
+		r.log.Warn("read trigger", "trigger", id, "error", err)
+		return core.Trigger{}, false
+	}
+	return tr, true
+}
+
+// renderInputs renders Inputs for the session, in order; an Input whose Trigger came from a Source's Thread is a
+// Trigger card (inputCard), trigger reading the Trigger.
+func renderInputs(t core.Ticket, ids []string, trigger func(id string) (core.Trigger, bool)) string {
 	var b strings.Builder
 	for _, id := range ids {
 		var in *core.Input
@@ -1174,10 +1410,19 @@ func renderInputs(t core.Ticket, ids []string) string {
 		case core.InputResumed:
 			fmt.Fprintf(&b, "[input %s: the Ticket was resumed by the message that follows]\n\n", in.ID)
 		case core.InputNote:
-			fmt.Fprintf(&b, "[input %s: note]\n%s\n\n", in.ID, in.Text)
+			fmt.Fprintf(&b, "[input %s: note]\nNote: %s\n\n", in.ID, in.Text)
 		default:
+			var tr core.Trigger
+			found := false
+			if in.TriggerID != "" && trigger != nil {
+				if tr, found = trigger(in.TriggerID); found && len(tr.Threads) > 0 {
+					b.WriteString(inputCard(*in, tr))
+					continue
+				}
+			}
+			// Only the owner's own Inputs say so: a Trigger of the owner Source, or a person Input without a Trigger.
 			from := "message"
-			if in.Human {
+			if in.Human && (in.TriggerID == "" || (found && tr.Source == core.OwnerActor.Source)) {
 				from = "message from the owner"
 			}
 			fmt.Fprintf(&b, "[input %s: %s]\n%s\n\n", in.ID, from, in.Text)
@@ -1241,11 +1486,29 @@ func slug(title string) string {
 }
 
 // placement is where a Ticket runs: its working directory, the git repository its worktree comes from (if any) and
-// the key of a non-git directory only one Ticket may use at a time (if any).
+// the key of a non-git directory only one Ticket may use at a time (if any). For a GitHub Ticket, github is its
+// repository (owner/name) and repo the node's clone of it.
 type placement struct {
 	workDir string
 	repo    string
 	dirKey  string
+	github  string
+}
+
+// place is a Ticket's placement on this node: a GitHub Ticket without a directory of its own works in a worktree of
+// the node's clone of its repository.
+func (n *Node) place(t core.Ticket) (placement, error) {
+	p, err := place(n.cfg.WorkRoot, t)
+	if err != nil {
+		return p, err
+	}
+	if t.Repo != "" && p.repo == "" && p.dirKey == "" {
+		if _, _, err := splitRepo(t.Repo); err != nil {
+			return placement{}, err
+		}
+		p.repo, p.github = CloneDir(n.cfg.StateDir, t.Repo), t.Repo
+	}
+	return p, nil
 }
 
 func place(workRoot string, t core.Ticket) (placement, error) {
@@ -1285,11 +1548,22 @@ func branchName(t core.Ticket) string { return branchPrefix + strings.ToLower(t.
 func (n *Node) prepare(s *session) error {
 	p := s.place
 	switch {
+	case p.github != "":
+		if login, _ := n.cfg.Credentials.Identity(); login == "" {
+			// Without the bot's identity the worker's commits would carry no author: wait for it.
+			return &credentialError{msg: "the GitHub App's bot identity is not known yet"}
+		}
+		if err := os.MkdirAll(filepath.Dir(p.workDir), 0o700); err != nil {
+			return err
+		}
+		if err := n.prepareGitHub(s); err != nil {
+			return err
+		}
 	case p.repo != "":
 		if err := os.MkdirAll(filepath.Dir(p.workDir), 0o700); err != nil {
 			return err
 		}
-		if err := ensureWorktree(p.repo, p.workDir, branchName(s.t)); err != nil {
+		if err := ensureWorktree(p.repo, p.workDir, branchName(s.t), "HEAD", nil); err != nil {
 			return err
 		}
 	case p.dirKey != "":
@@ -1314,9 +1588,10 @@ func (n *Node) prepare(s *session) error {
 	return claude.WriteMCPConfig(filepath.Join(adir, "mcp.json"), n.cfg.AthenaBin, n.cfg.SocketPath, s.t.ID, s.a.ID)
 }
 
-// ensureWorktree creates dir as a worktree of repo on branch, from the repository's HEAD for a new branch; an
+// ensureWorktree creates dir as a worktree of repo on branch, from base for a new branch (without tracking it); an
 // existing dir is reused (a resumed Ticket).
-func ensureWorktree(repo, dir, branch string) error {
+func ensureWorktree(repo, dir, branch, base string, env []string) error {
+	gitOut := func(dir string, args ...string) (string, error) { return gitIn(dir, env, args...) }
 	if st, err := os.Stat(dir); err == nil {
 		if !st.IsDir() {
 			return fmt.Errorf("%s exists and is not a directory", dir)
@@ -1325,7 +1600,7 @@ func ensureWorktree(repo, dir, branch string) error {
 	}
 	// A new Ticket's branch does not exist yet: creating it with the worktree is the one git call the common case needs
 	// (each git process costs ~20 ms, which counts against the dispatch budget).
-	if _, err := gitOut(repo, "worktree", "add", "-b", branch, dir, "HEAD"); err == nil {
+	if _, err := gitOut(repo, "worktree", "add", "--no-track", "-b", branch, dir, base); err == nil {
 		return nil
 	}
 	// The branch exists (a resumed Ticket) or a removed worktree is still registered: prune, then reuse the branch.
@@ -1334,7 +1609,7 @@ func ensureWorktree(repo, dir, branch string) error {
 	if _, berr := gitOut(repo, "rev-parse", "--verify", "--quiet", "refs/heads/"+branch); berr == nil {
 		_, err = gitOut(repo, "worktree", "add", dir, branch)
 	} else {
-		_, err = gitOut(repo, "worktree", "add", "-b", branch, dir, "HEAD")
+		_, err = gitOut(repo, "worktree", "add", "--no-track", "-b", branch, dir, base)
 	}
 	return err
 }
@@ -1349,6 +1624,13 @@ func cleanupWorktree(p placement, t core.Ticket, log *slog.Logger) {
 	if _, err := os.Stat(p.workDir); err != nil {
 		return
 	}
+	var env []string
+	if p.github != "" {
+		// The clone is shared: no fetch or worktree add of another Ticket runs meanwhile, and its config is not trusted.
+		defer lockRepo(p.repo)()
+		env = cloneGitEnv(p.repo, p.github)
+	}
+	gitOut := func(dir string, args ...string) (string, error) { return gitIn(dir, env, args...) }
 	dirty, err := gitOut(p.workDir, "status", "--porcelain")
 	if err != nil {
 		log.Warn("keeping worktree: cannot read its status", "dir", p.workDir, "error", err)
@@ -1377,9 +1659,15 @@ func cleanupWorktree(p placement, t core.Ticket, log *slog.Logger) {
 }
 
 // gitOut runs git in dir and returns its trimmed stdout.
-func gitOut(dir string, args ...string) (string, error) {
+func gitOut(dir string, args ...string) (string, error) { return gitIn(dir, nil, args...) }
+
+// gitIn runs git in dir with env (the node's, if nil) and returns its trimmed stdout.
+func gitIn(dir string, env []string, args ...string) (string, error) {
 	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	if env == nil {
+		env = os.Environ()
+	}
+	cmd.Env = append(env, "GIT_TERMINAL_PROMPT=0")
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()

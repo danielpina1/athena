@@ -188,6 +188,8 @@ func TestCLINoServer(t *testing.T) {
 	for _, args := range [][]string{
 		{"status"}, {"task", "do it"}, {"logs", "T-0001"}, {"reply", "T-0001", "hi"}, {"stop", "T-0001"},
 		{"retry", "T-0001"}, {"approvals"}, {"approve", "abc"}, {"deny", "abc"},
+		{"policy", "show"}, {"triggers"}, {"threads"}, {"decisions"}, {"reevaluate", "x"}, {"dismiss", "x"},
+		{"unsubscribe", "github:o/r#1"},
 	} {
 		code, out, errOut := athena(context.Background(), append(args, "--state-dir", dir)...)
 		if code != 1 || errOut != want || out != "" {
@@ -200,7 +202,8 @@ func TestUsageErrors(t *testing.T) {
 	dir := newStateDir(t)
 	for _, args := range [][]string{
 		{"task"}, {"logs"}, {"reply", "T-1"}, {"stop"}, {"retry"}, {"approve"}, {"deny"}, {"status", "a", "b"},
-		{"status", "--bogus"},
+		{"status", "--bogus"}, {"github"}, {"github", "nope"}, {"policy"}, {"policy", "set"}, {"policy", "show", "x"},
+		{"reevaluate"}, {"dismiss"}, {"unsubscribe"}, {"threads", "x"}, {"task", "x", "--dir", "/tmp", "--repo", "o/r"},
 	} {
 		if code, _, errOut := athena(context.Background(), append(args, "--state-dir", dir)...); code != 2 || errOut == "" {
 			t.Errorf("%v: exit %d, stderr %q; want 2 with usage", args, code, errOut)
@@ -218,7 +221,11 @@ func TestCLICommands(t *testing.T) {
 	runningAssignment(t, dir, "T-0001")
 
 	code, out, _ = athena(ctx, "status", "--state-dir", dir)
-	lines := strings.Split(strings.TrimSpace(out), "\n")
+	health, table, _ := strings.Cut(out, "\n\n")
+	if want := "sources:   none (owner tasks only; see athena github setup)\neffects:   ok\nrouter:    off"; health != want {
+		t.Fatalf("status health = %q, want %q", health, want)
+	}
+	lines := strings.Split(strings.TrimSpace(table), "\n")
 	if code != 0 || len(lines) != 2 || strings.Join(strings.Fields(lines[0]), " ") != "ID STAGE AGE TITLE" {
 		t.Fatalf("status: exit %d\n%s", code, out)
 	}

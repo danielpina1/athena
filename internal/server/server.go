@@ -1,5 +1,6 @@
-// Package server runs `athena server`: the store, the Engine, the local node with its socket, and the control socket
-// the owner's CLI talks to.
+// Package server runs `athena server`: the store, the Policy, the Sources (GitHub, when config.json names an App), the
+// effects runner with the Outbox and the router, the Engine, the local node with its socket, and the control socket the
+// owner's CLI talks to. wiring.go holds the parts between them; config.go the configuration file.
 package server
 
 import (
@@ -10,6 +11,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -17,8 +19,14 @@ import (
 	"time"
 
 	"github.com/danielpina1/athena/internal/core"
+	"github.com/danielpina1/athena/internal/effects"
 	"github.com/danielpina1/athena/internal/metrics"
 	"github.com/danielpina1/athena/internal/node"
+	"github.com/danielpina1/athena/internal/outbox"
+	"github.com/danielpina1/athena/internal/policy"
+	"github.com/danielpina1/athena/internal/router"
+	"github.com/danielpina1/athena/internal/sources"
+	"github.com/danielpina1/athena/internal/sources/github"
 	"github.com/danielpina1/athena/internal/store"
 )
 
@@ -50,10 +58,22 @@ type Config struct {
 	Node node.Config
 	// Stderr receives a copy of the log besides <StateDir>/logs/athena.log (default os.Stderr).
 	Stderr io.Writer
+	// Version is Athena's version, sent to GitHub in the User-Agent (default "dev").
+	Version string
+	// HTTPClient reaches GitHub (default: a client with a 30 s timeout); its transport is wrapped for the metrics.
+	HTTPClient *http.Client
 }
 
-// Run serves until ctx is done, then shuts down: it stops accepting control connections, closes the node (sessions
-// end and resume on the next start), waits for the node socket to close and closes the store.
+// Run serves until ctx is done, then shuts down: it stops accepting control connections, stops the Sources (and
+// waits for their last poll), the Evals' ticker and the router, drains the effects runner (waiting effects resume on the next start), closes the node
+// (sessions end and resume on the next start), waits for the node socket to close and closes the store.
+//
+// Wiring order, so that nothing waits on what is not there yet: store → configuration → GitHub App (checked) → Policy
+// store (the default allows the installation's account) → node (with the App's credentials) → effects runner →
+// Engine (Wake is the runner's, relays whenever the App exists) → GitHub Source (once the check passed) → Outbox
+// (reply) → router (assessment, relay, notice) → node socket → startup recovery (Evals, a pending Policy change,
+// Assignments) → runner, Sources, router, ticker. A check that failed is retried in the background (30 s doubling to
+// 10 min); when it passes the Source starts and the default Policy allows the installation's account.
 func Run(ctx context.Context, cfg Config) (err error) {
 	if cfg.StateDir == "" {
 		return errors.New("server: StateDir is required")
@@ -110,8 +130,39 @@ func Run(ctx context.Context, cfg Config) (err error) {
 		<-resDone
 	}()
 
+	fileCfg, err := LoadConfig(stateDir)
+	if err != nil {
+		return err
+	}
+	version := cfg.Version
+	if version == "" {
+		version = "dev"
+	}
+	sourceReg := sources.NewRegistry()
+	var gh *gitHub
+	var allowed []string
+	if fileCfg.GitHub != nil {
+		gh = setupGitHub(fileCfg.GitHub, version, reg, cfg.HTTPClient, logger)
+		if account, ok := gh.checked(); ok {
+			allowed = []string{account}
+		}
+	}
+	// The router and the relays run whenever the App exists, even before its check passed (see gitHub).
+	routerOn := gh != nil && gh.app != nil
+	// Nobody configured a Policy yet: the default allows the installation's account (nobody without GitHub).
+	pc, err := newPolicyCache(st, allowed, sourceReg, fileCfg.EvalTimeout())
+	if err != nil {
+		return err
+	}
+	if _, ok := gh.checked(); gh != nil && !ok {
+		pc.awaitCheck()
+	}
+
 	ncfg := cfg.Node
 	ncfg.Metrics = reg
+	if gh != nil {
+		ncfg.Credentials = gh.creds
+	}
 	ncfg.StateDir = stateDir
 	ncfg.SocketPath = filepath.Join(stateDir, NodeSocket)
 	if ncfg.WorkRoot == "" {
@@ -143,9 +194,29 @@ func Run(ctx context.Context, cfg Config) (err error) {
 		}
 		logger.Info("event", attrs...)
 	}
-	eng := core.NewEngine(st.Repos(), n, time.Now, emit)
+	fx := effects.New(st, logger.With("component", "effects"))
+	eng := core.NewEngineWith(st.Repos(), n, core.Options{Now: time.Now, Emit: emit, Policy: pc.policy, Scope: sourceReg,
+		Wake: fx.Wake, Relays: routerOn})
 	eng.SetMetrics(reg)
 	n.SetEngine(eng)
+	// registerSource registers the GitHub Source once the App passed its check: here, or later in the background.
+	registerSource := func() {
+		src := github.NewSource(github.SourceConfig{Repos: fileCfg.GitHub.Repos, Interval: fileCfg.GitHub.interval(),
+			ReceiveAll: fileCfg.GitHub.ReceiveAll}, gh.app,
+			intake{Engine: eng, hist: reg.Histogram("trigger_intake_seconds")}, st, logger.With("source", github.SourceName))
+		sourceReg.Register(timedSource{Source: src, hist: reg.Histogram("reply_send_seconds")})
+		gh.attach(src)
+	}
+	if _, ok := gh.checked(); routerOn && ok {
+		registerSource()
+	}
+	fx.Handle(core.EffectReply, outbox.Handler(sourceReg, st), outbox.Options)
+	var host *router.Host
+	if routerOn {
+		host = router.New(router.Config{Bin: ncfg.AthenaBin, StateDir: stateDir, Model: fileCfg.Router.Model,
+			Socket: ncfg.SocketPath, ClaudeBinary: ncfg.ClaudeBinary, KV: st, Policy: pc.settings}, eng, fx, sourceReg, logger)
+		n.SetRouter(host)
+	}
 	expirePendingApprovals(eng, logger)
 
 	nodeCtx, nodeCancel := context.WithCancel(context.Background())
@@ -171,7 +242,60 @@ func Run(ctx context.Context, cfg Config) (err error) {
 		return err
 	}
 
+	// Startup recovery: Evals keep their state (a delivered one its deadline) and an undelivered one its assessment
+	// effect; the runner resumes the waiting effects; interrupted Assignments start again.
+	resumeAssessments(eng, fx, logger)
+	workCtx, workCancel := context.WithCancel(context.Background())
+	evalDone := make(chan struct{})
+	var late sync.WaitGroup
+	stopWork := func() {
+		workCancel()
+		// The Sources stop before the effects drain and the store closes: no Receive after.
+		late.Wait()
+		sourceReg.Wait()
+		if host != nil {
+			host.Stop()
+		}
+		<-evalDone
+		if err := fx.Drain(drainTimeout); err != nil {
+			logger.Warn("effects: drain", "error", err)
+		}
+	}
+	// The runner stops with Drain, which lets running effects finish first; the other parts stop with workCtx.
+	fx.Start(context.Background())
 	recoverAssignments(eng, n, logger)
+	sourceReg.Start(workCtx)
+	if _, ok := gh.checked(); routerOn && !ok {
+		// GitHub was unreachable or refused the check: try again in the background; the Source starts once it passes.
+		late.Add(1)
+		go func() {
+			defer late.Done()
+			gh.retryCheck(workCtx, logger, func(account string) {
+				if err := pc.allow([]string{account}, func(from, to policy.Settings) (map[string]string, error) {
+					return tellEngine(eng, from, to)
+				}); err != nil {
+					logger.Error("policy: allow the installation account", "error", err)
+				}
+				registerSource()
+				sourceReg.Start(workCtx)
+			})
+		}()
+	}
+	if host != nil {
+		if err := host.Start(workCtx); err != nil {
+			logger.Error("router: not started", "error", err)
+		}
+	}
+	go func() {
+		defer close(evalDone)
+		evaluate(workCtx, eng, logger)
+	}()
+	workStopped := false
+	defer func() {
+		if !workStopped {
+			stopWork()
+		}
+	}()
 
 	l, err := net.Listen("unix", ctrlPath)
 	if err != nil {
@@ -183,7 +307,11 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	}
 	logger.Info("athena server started", "stateDir", stateDir, "pid", os.Getpid())
 
-	c := &control{stateDir: stateDir, eng: eng, workRoot: ncfg.WorkRoot, model: ncfg.Model, log: logger, reg: reg}
+	c := &control{stateDir: stateDir, eng: eng, workRoot: ncfg.WorkRoot, model: ncfg.Model, log: logger, reg: reg,
+		st: st, fx: fx, gh: gh, host: host, policy: pc}
+	if err := c.resumePolicyChange(); err != nil {
+		logger.Error("startup: tell the pending policy change", "error", err)
+	}
 	ctrlCtx, ctrlCancel := context.WithCancel(context.Background())
 	defer ctrlCancel()
 	var conns sync.WaitGroup
@@ -220,6 +348,8 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	<-acceptDone
 	ctrlCancel()
 	conns.Wait()
+	workStopped = true
+	stopWork()
 	// The deferred steps close the node, wait for its socket and close the store, in that order.
 	return runErr
 }
@@ -243,9 +373,10 @@ func expirePendingApprovals(eng *core.Engine, log *slog.Logger) {
 
 // recoverAssignments starts again, of every open Ticket, a pending latest Assignment and a running one that was
 // interrupted: mid-work (no turn of its worker ended idle), sent an Input after its turn last ended, or with Inputs
-// still waiting. The node resumes a running one's session with a recovery note and sends it the Inputs that still
-// wait (Ticket.Undelivered). A running Assignment idle since its last turn keeps its Session without a process: the
-// node resumes it, with the recovery note, when its next Input arrives.
+// still waiting, unless it waits for a person after a failed or blocked report. The node resumes a running one's
+// session with a recovery note and sends it the Inputs that still wait (Ticket.Undelivered). A running Assignment idle
+// since its last turn (one whose worker handed off included) keeps its Session without a process: the node resumes
+// it, with the resume note, when its next Input arrives.
 func recoverAssignments(eng *core.Engine, n *node.Node, log *slog.Logger) {
 	tickets, err := eng.Tickets(false)
 	if err != nil {
@@ -267,8 +398,13 @@ func recoverAssignments(eng *core.Engine, n *node.Node, log *slog.Logger) {
 }
 
 // interrupted reports whether a running Assignment was busy when the server stopped: no turn of its worker ended
-// since it started, an Input reached it after its last turn ended, or Inputs wait for it.
+// since it started, an Input (or the nudge to report) reached it after its turn last ended, or Inputs wait for it.
+// A Ticket whose latest Report is failed or blocked, with no person's message since, waits for a person instead: a
+// failed turn may skip the Stop hook, but nothing is to run until someone answers (plan 1 R34).
 func interrupted(t *core.Ticket, a *core.Assignment) bool {
+	if t.WaitsForPerson() {
+		return false
+	}
 	return a.IdleAt == nil || (a.DeliveredAt != nil && a.DeliveredAt.After(*a.IdleAt)) || len(t.Undelivered) > 0
 }
 

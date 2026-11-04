@@ -33,6 +33,33 @@ type Tx interface {
 	PutApproval(a *Approval) error
 	// PendingApprovals returns every Approval still pending, oldest first.
 	PendingApprovals() ([]*Approval, error)
+	// GetTrigger returns the Trigger with the given ID, or nil, nil if there is none.
+	GetTrigger(id string) (*Trigger, error)
+	// GetThread returns the Thread with the given key, or nil, nil if there is none.
+	GetThread(key string) (*Thread, error)
+	// PutThread inserts or replaces a Thread.
+	PutThread(t *Thread) error
+	// ActiveThreads returns every Thread with Triggers queued or an Eval in progress, ordered by key.
+	ActiveThreads() ([]*Thread, error)
+	// GetDecision returns the Decision with the given ID, or nil, nil if there is none.
+	GetDecision(id string) (*Decision, error)
+	// Decisions returns the Decisions made on a Thread, most recent first; limit <= 0 returns all.
+	Decisions(thread string, limit int) ([]*Decision, error)
+	// RecentDecisions returns the Decisions of every Thread, most recent first; limit <= 0 returns all.
+	RecentDecisions(limit int) ([]*Decision, error)
+	// Enqueue records external work for the effects runner in the same transaction. Work is identified by
+	// (kind, key): enqueuing a key still waiting replaces its payload, makes it due now and keeps its place in line.
+	Enqueue(kind, key string, payload []byte) error
+	// KVGet returns the plain string stored under key; the bool is false if there is none.
+	KVGet(key string) (string, bool, error)
+	// KVSet stores a plain string under key.
+	KVSet(key, value string) error
+	// GetReceipt returns the reply receipt with the given ID, or nil, nil if there is none.
+	GetReceipt(id string) (*Receipt, error)
+	// PutReceipt inserts or replaces a reply receipt.
+	PutReceipt(r *Receipt) error
+	// TicketReceipts returns a Ticket's reply receipts, in queue order (Seq).
+	TicketReceipts(ticketID string) ([]*Receipt, error)
 	// NextSeq returns the next value of the named counter: 1 on first use, then one more each call.
 	// It moves only if the transaction commits.
 	NextSeq(name string) (int, error)
@@ -66,6 +93,14 @@ const (
 	EventInputAdded        = "input.added"
 	EventApprovalRequested = "approval.requested"
 	EventApprovalAnswered  = "approval.answered"
+	EventTriggerReceived   = "trigger.received"
+	EventThreadSubscribed  = "thread.subscribed"
+	// EventThreadUnsubscribed is emitted for each Ticket whose Subscription to a Thread was dropped.
+	EventThreadUnsubscribed = "thread.unsubscribed"
+	EventEvalStarted        = "eval.started"
+	EventDecisionRecorded   = "decision.recorded"
+	EventTriggerRequeued    = "trigger.requeued"
+	EventPolicyChanged      = "policy.changed"
 )
 
 // Event is what the Engine reports after a committed change.
@@ -76,4 +111,56 @@ type Event struct {
 	ApprovalID   string
 	At           time.Time
 	Data         map[string]any
+}
+
+// SourceScope tells the core which Threads a Source still listens to. Implementations route by the Source prefix of
+// the Thread key.
+type SourceScope interface {
+	// Listens reports whether the Source of the Thread key currently receives that Thread.
+	Listens(thread string) bool
+}
+
+// Gate is the Policy's judgement of one Trigger on its Thread.
+type Gate struct {
+	// Strength is explicit or inferred when the Trigger is admitted, empty when it is not.
+	Strength string `json:"strength,omitempty"`
+	// Basis records how the Trigger was admitted; it becomes the Mandate's Basis on accept.
+	Basis MandateBasis `json:"basis,omitzero"`
+	// Reason says why the Trigger was not admitted; it is zero when it was.
+	Reason Reason `json:"reason,omitzero"`
+}
+
+// RuleJudgement is an assessor's verdict on one enabled rule: whether the candidate matches it and the evidence.
+type RuleJudgement struct {
+	Name     string `json:"name"`
+	Matches  bool   `json:"matches"`
+	Evidence string `json:"evidence,omitempty"`
+}
+
+// Assessment is what the main Session returns for an inferred candidate: one judgement per enabled rule and its
+// direction.
+type Assessment struct {
+	Rules  []RuleJudgement `json:"rules"`
+	Accept bool            `json:"accept"`
+	Reason string          `json:"reason,omitempty"`
+}
+
+// Policy is a stateless snapshot of the settings that decide who may start work. It never changes after it is built;
+// a settings change produces a new Policy with a new Version.
+type Policy interface {
+	// Version identifies the rules, accept mode and Source parts the Policy was built from.
+	Version() string
+	// EvalTimeout is how long an Eval may run after its candidate reached the main Session.
+	EvalTimeout() time.Duration
+	// Gate judges a Trigger on its Thread, given the Tickets that may subscribe to the Thread.
+	Gate(t Trigger, th Thread, tickets []Ticket) Gate
+	// Revalidate reports whether an existing Mandate still holds before its Ticket resumes.
+	Revalidate(m Mandate) bool
+	// AdmitsInferred reports whether proactive work is accepted now: the accept mode is auto and the named rules,
+	// at least one, are all enabled.
+	AdmitsInferred(rules []string) bool
+	// Assess converts an Assessment of a candidate of the given strength into an Engine outcome: the Decision kind
+	// (accept or ignore), its reasons and whether an ignore records "would accept". An error means the assessment
+	// failed.
+	Assess(a Assessment, strength string) (kind string, reasons []Reason, wouldAccept bool, err error)
 }

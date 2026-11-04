@@ -1,0 +1,48 @@
+{
+  "aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111": {
+    "total_count": 1,
+    "check_suites": [
+      {
+        "id": 401,
+        "node_id": "CS_kwDOAAAAAc8AAAGR",
+        "head_branch": "main",
+        "head_sha": "aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111",
+        "status": "completed",
+        "conclusion": "success",
+        "url": "https://api.github.com/repos/o/r/check-suites/401",
+        "app": {"id": 15368, "slug": "github-actions", "name": "GitHub Actions"},
+        "created_at": "2026-11-03T11:30:00Z",
+        "updated_at": "2026-11-03T11:35:00Z"
+      }
+    ]
+  },
+  "bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222": {
+    "total_count": 2,
+    "check_suites": [
+      {
+        "id": 402,
+        "node_id": "CS_kwDOAAAAAc8AAAGS",
+        "head_branch": "athena/t-0007",
+        "head_sha": "bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222",
+        "status": "completed",
+        "conclusion": "failure",
+        "url": "https://api.github.com/repos/o/r/check-suites/402",
+        "app": {"id": 15368, "slug": "github-actions", "name": "GitHub Actions"},
+        "created_at": "2026-11-03T11:21:00Z",
+        "updated_at": "2026-11-03T11:28:00Z"
+      },
+      {
+        "id": 403,
+        "node_id": "CS_kwDOAAAAAc8AAAGT",
+        "head_branch": "athena/t-0007",
+        "head_sha": "bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222",
+        "status": "queued",
+        "conclusion": null,
+        "url": "https://api.github.com/repos/o/r/check-suites/403",
+        "app": {"id": 9426, "slug": "codecov", "name": "Codecov"},
+        "created_at": "2026-11-03T11:21:00Z",
+        "updated_at": "2026-11-03T11:21:00Z"
+      }
+    ]
+  }
+}

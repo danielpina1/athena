@@ -13,11 +13,16 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/danielpina1/athena/internal/core"
+	"github.com/danielpina1/athena/internal/effects"
 	"github.com/danielpina1/athena/internal/metrics"
 	"github.com/danielpina1/athena/internal/node"
+	"github.com/danielpina1/athena/internal/policy"
+	"github.com/danielpina1/athena/internal/router"
+	"github.com/danielpina1/athena/internal/store"
 )
 
 // The control socket speaks JSON lines: one request line per connection, answered by one response line, except logs,
@@ -36,6 +41,16 @@ const (
 	OpAnswer    = "answer"
 	OpLogs      = "logs"
 	OpMetrics   = "metrics"
+	// OpHealth reports the Sources, the effects runner and the router (athena status).
+	OpHealth      = "health"
+	OpTriggers    = "triggers"
+	OpThreads     = "threads"
+	OpDecisions   = "decisions"
+	OpReevaluate  = "reevaluate"
+	OpDismiss     = "dismiss"
+	OpUnsubscribe = "unsubscribe"
+	OpPolicyShow  = "policy.show"
+	OpPolicySet   = "policy.set"
 )
 
 // Request is one control request; Op says which of its fields count.
@@ -52,6 +67,12 @@ type Request struct {
 	Follow  bool   `json:"follow,omitempty"`
 	// Window is the period of a metrics request: "1h" (the default), "24h" or "start" for since the server started.
 	Window string `json:"window,omitempty"`
+	// Thread is a Thread key: the Thread of triggers, decisions and unsubscribe.
+	Thread string `json:"thread,omitempty"`
+	// Repo is the repository (owner/name) a submitted task works in.
+	Repo string `json:"repo,omitempty"`
+	// Policy is the settings document policy.set saves.
+	Policy json.RawMessage `json:"policy,omitempty"`
 }
 
 // Response answers a request: OK with its Data, or the Error that refused it.
@@ -86,8 +107,10 @@ type TicketDetail struct {
 	// Dir is the directory the Ticket's sessions run in; SourceDir the directory the task named, if any.
 	Dir       string `json:"dir,omitempty"`
 	SourceDir string `json:"sourceDir,omitempty"`
-	Runtime   string `json:"runtime,omitempty"`
-	Model     string `json:"model,omitempty"`
+	// Repo is the GitHub repository (owner/name) the Ticket works in, if any.
+	Repo    string `json:"repo,omitempty"`
+	Runtime string `json:"runtime,omitempty"`
+	Model   string `json:"model,omitempty"`
 	// Question is what the Ticket asks a person, if anything.
 	Question    string            `json:"question,omitempty"`
 	Ended       *core.Ended       `json:"ended,omitempty"`
@@ -126,6 +149,14 @@ type control struct {
 	model    string
 	log      *slog.Logger
 	reg      *metrics.Registry
+	st       *store.Store
+	fx       *effects.Runner
+	// gh is nil without GitHub in the configuration; host is nil without a router.
+	gh     *gitHub
+	host   *router.Host
+	policy *policyCache
+	// onPolicyChange, when set (tests), runs before the Engine hears of a Policy change; an error refuses it.
+	onPolicyChange func(from, to policy.Settings) error
 }
 
 // serveConn answers one connection; ctx ends with the server.
@@ -202,7 +233,18 @@ func (c *control) handle(req Request) (any, error) {
 			}
 			dir = filepath.Clean(dir)
 		}
-		t, err := c.eng.SubmitOwnerTask(req.Text, core.TaskOptions{Dir: dir, Model: req.Model})
+		repo := req.Repo
+		if repo != "" {
+			if c.gh == nil || !c.gh.running() {
+				return nil, userErrorf("github is not running: a task on a repository needs it (see athena status)")
+			}
+			name, ok := c.gh.cfg.repo(repo)
+			if !ok {
+				return nil, userErrorf("repository %s is not configured (configured: %s)", repo, strings.Join(c.gh.cfg.Repos, ", "))
+			}
+			repo = name
+		}
+		t, err := c.eng.SubmitOwnerTask(req.Text, core.TaskOptions{Dir: dir, Model: req.Model, Repo: repo})
 		if err != nil {
 			return nil, err
 		}
@@ -244,6 +286,52 @@ func (c *control) handle(req Request) (any, error) {
 			return nil, err
 		}
 		return c.reg.Snapshot(window), nil
+	case OpHealth:
+		return c.health(), nil
+	case OpTriggers:
+		list, err := c.st.Triggers(canonicalThread(req.Thread), listLimit)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]TriggerView, 0, len(list))
+		for i := range list {
+			out = append(out, triggerView(&list[i]))
+		}
+		return out, nil
+	case OpThreads:
+		list, err := c.st.Threads()
+		if err != nil {
+			return nil, err
+		}
+		out := make([]ThreadView, 0, len(list))
+		for i := range list {
+			out = append(out, threadView(&list[i]))
+		}
+		return out, nil
+	case OpDecisions:
+		list, err := c.eng.Decisions(canonicalThread(req.Thread), listLimit)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]DecisionView, 0, len(list))
+		for i := range list {
+			out = append(out, decisionView(&list[i]))
+		}
+		return out, nil
+	case OpReevaluate:
+		return nil, c.eng.Reevaluate(req.ID)
+	case OpDismiss:
+		return nil, c.eng.Dismiss(req.ID)
+	case OpUnsubscribe:
+		thread := canonicalThread(req.Thread)
+		if _, err := c.eng.Thread(thread); err != nil {
+			return nil, err
+		}
+		return nil, c.eng.Unsubscribe(thread)
+	case OpPolicyShow:
+		return c.policyShow()
+	case OpPolicySet:
+		return c.policySet(req.Policy)
 	default:
 		return nil, userErrorf("unknown op %q", req.Op)
 	}
@@ -275,7 +363,8 @@ func (c *control) detail(id string) (TicketDetail, error) {
 	if err != nil {
 		return TicketDetail{}, err
 	}
-	d := TicketDetail{TicketSummary: summary(&t), Ended: t.Ended, Assignments: t.Assignments, Undelivered: len(t.Undelivered), Stats: t.Stats}
+	d := TicketDetail{TicketSummary: summary(&t), Ended: t.Ended, Assignments: t.Assignments, Undelivered: len(t.Undelivered),
+		Stats: t.Stats, Repo: t.Repo}
 	if d.Assignments == nil {
 		d.Assignments = []core.Assignment{}
 	}

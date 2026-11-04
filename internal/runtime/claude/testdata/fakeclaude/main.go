@@ -19,6 +19,14 @@
 //	                               it missing creates it and exits 3 right after that replay
 //	ATHENA_FAKE_IGNORE_STDIN_CLOSE when set, keep running after stdin reaches EOF
 //	ATHENA_FAKE_NO_READ_STDIN      when set, never read stdin (a hung child)
+//
+// With --replay-user-messages among its arguments it echoes each user line as the real CLI does when it takes the
+// message into a turn ({"type":"user",...,"isReplay":true}, with the line's uuid), before replaying for it.
+//
+//	ATHENA_FAKE_ECHO_BLOCKS        when set, the echo's content is a list of text blocks with the text trimmed (a CLI
+//	                               that reshapes what it echoes), not the string sent
+//	ATHENA_FAKE_NO_ECHO            when set, never echo (a message the CLI never takes into a turn)
+//	ATHENA_FAKE_HOLD_RESULT        path of a file: a fixture's result line waits until the file exists
 package main
 
 import (
@@ -80,6 +88,10 @@ func main() {
 		stdinLog = f
 	}
 
+	replayUser := false
+	for _, a := range os.Args[1:] {
+		replayUser = replayUser || a == "--replay-user-messages"
+	}
 	out := bufio.NewWriter(os.Stdout)
 	replayed := false
 	r := bufio.NewReaderSize(os.Stdin, 1<<20)
@@ -90,6 +102,9 @@ func main() {
 				_, _ = stdinLog.WriteString(strings.TrimRight(line, "\n") + "\n")
 			}
 			if !strings.Contains(line, `"control_request"`) {
+				if replayUser && os.Getenv("ATHENA_FAKE_NO_ECHO") == "" {
+					echo(out, line)
+				}
 				if !replayed {
 					replayed = true
 					replay(out, exitMidTurn)
@@ -137,10 +152,26 @@ func replay(out *bufio.Writer, exitMidTurn bool) {
 	}
 	for i := 0; i < n; i++ {
 		for _, l := range lines {
+			holdResult(out, l)
 			_, _ = out.WriteString(l)
 		}
 	}
 	_ = out.Flush()
+}
+
+// holdResult waits, before a result line, until ATHENA_FAKE_HOLD_RESULT names a file that exists.
+func holdResult(out *bufio.Writer, line string) {
+	p := os.Getenv("ATHENA_FAKE_HOLD_RESULT")
+	if p == "" || !strings.Contains(line, `"type":"result"`) {
+		return
+	}
+	_ = out.Flush()
+	for {
+		if _, err := os.Stat(p); err == nil {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // replayLater replays ATHENA_FAKE_LATER_FIXTURE, then exits 3 once if ATHENA_FAKE_LATER_EXIT_ONCE says so.
@@ -161,4 +192,28 @@ func replayLater(out *bufio.Writer) {
 			os.Exit(3)
 		}
 	}
+}
+
+// echo writes the replay of a user line.
+func echo(out *bufio.Writer, line string) {
+	var in struct {
+		UUID    string `json:"uuid"`
+		Message struct {
+			Content any `json:"content"`
+		} `json:"message"`
+	}
+	if json.Unmarshal([]byte(line), &in) != nil {
+		return
+	}
+	content := in.Message.Content
+	if text, ok := content.(string); ok && os.Getenv("ATHENA_FAKE_ECHO_BLOCKS") != "" {
+		content = []map[string]any{{"type": "text", "text": strings.TrimSpace(text)}}
+	}
+	rec := map[string]any{"type": "user", "isReplay": true, "message": map[string]any{"role": "user", "content": content}}
+	if in.UUID != "" {
+		rec["uuid"] = in.UUID
+	}
+	b, _ := json.Marshal(rec)
+	_, _ = out.Write(append(b, '\n'))
+	_ = out.Flush()
 }

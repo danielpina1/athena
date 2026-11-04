@@ -1,0 +1,531 @@
+package server
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/danielpina1/athena/internal/core"
+	"github.com/danielpina1/athena/internal/effects"
+	"github.com/danielpina1/athena/internal/metrics"
+	"github.com/danielpina1/athena/internal/node"
+	"github.com/danielpina1/athena/internal/policy"
+	"github.com/danielpina1/athena/internal/sources"
+	"github.com/danielpina1/athena/internal/sources/github"
+	"github.com/danielpina1/athena/internal/store"
+)
+
+// The parts `athena server` wires between the store and the node: the GitHub App and Source, the Policy, the node's
+// credentials, the Evals' ticker and the metrics of Trigger intake, replies and GitHub requests.
+//
+// Token scope: a worker of a GitHub Ticket gets no token in its environment. Its git and gh shims ask the node socket
+// for its own Assignment's token, which the node mints through Credentials as a token for the Ticket's repository
+// alone with github.WorkerPermissions(); any process of the owner's user that knows the Ticket and Assignment ids can
+// ask the same (same-user threat model, spec §11).
+
+const (
+	// evaluateEvery is how often the Evals' due work runs while a Thread has Triggers queued or an Eval in progress;
+	// the check itself is one store query, and the work calls no model.
+	defaultEvaluateEvery = 2 * time.Second
+	// checkTimeout bounds the GitHub check at startup.
+	checkTimeout = 30 * time.Second
+	// identityTimeout bounds a bot lookup for a worker's commit identity.
+	identityTimeout = 10 * time.Second
+	// httpTimeout bounds one GitHub request.
+	httpTimeout = 30 * time.Second
+	// drainTimeout is how long running effects get to finish at shutdown.
+	drainTimeout = 5 * time.Second
+)
+
+// evaluateEvery is defaultEvaluateEvery; tests shorten it.
+var evaluateEvery = defaultEvaluateEvery
+
+// checkRetryFirst and checkRetryMax bound the pauses of the background retry of a failed GitHub check (30 s doubling
+// to 10 min); tests shorten them.
+var (
+	checkRetryFirst = 30 * time.Second
+	checkRetryMax   = 10 * time.Minute
+)
+
+// gitHub is the server's GitHub: the App (nil when its key could not be read), the node's credentials, and the Source,
+// which runs once the App passed its check (at startup, or later in the background).
+//
+// The node gets credentials whenever GitHub is configured, so an open GitHub Ticket never fails because GitHub was
+// unreachable at boot: its launch waits for a token and retries (node credentialsLater). The router starts, and the
+// Engine queues relays, whenever the App exists, before its check passed: relays and notices queue durably and reach
+// the router as soon as it runs; candidates only come once the Source runs.
+type gitHub struct {
+	cfg *GitHubConfig
+	app *github.App
+	// creds is an appCredentials, or an unavailableCredentials when the App could not be made.
+	creds node.Credentials
+
+	mu     sync.Mutex
+	source *github.Source
+	// account is the installation account's login, which the default Policy allows; set by a passing check.
+	account string
+	// err says why the Source does not run (the latest check failure); nil once the check passed.
+	err error
+}
+
+// setupGitHub makes the App and checks it once, as `athena github check` does. A failure is kept in err (status shows
+// it); the server runs on, and retryCheck tries again.
+func setupGitHub(cfg *GitHubConfig, version string, reg *metrics.Registry, hc *http.Client, log *slog.Logger) *gitHub {
+	g := &gitHub{cfg: cfg}
+	if hc == nil {
+		hc = &http.Client{Timeout: httpTimeout}
+	}
+	hc = instrument(hc, reg)
+	app, err := github.NewApp(cfg.appConfig(version), hc, nil)
+	if err != nil {
+		g.err = err
+		g.creds = unavailableCredentials{err: err}
+		log.Error("github: the app cannot be used; fix the configuration and restart", "error", err)
+		return g
+	}
+	g.app = app
+	g.creds = &appCredentials{app: app}
+	g.check(log)
+	return g
+}
+
+// check runs the GitHub check once; a pass records the account and seeds the credentials with the bot.
+func (g *gitHub) check(log *slog.Logger) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), checkTimeout)
+	defer cancel()
+	c, err := checkApp(ctx, g.app, g.cfg)
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if err != nil {
+		g.err = err
+		log.Error("github: check failed; the source waits and the check is retried", "error", err)
+		return false
+	}
+	g.err, g.account = nil, c.Account
+	if ac, ok := g.creds.(*appCredentials); ok {
+		ac.seed(c.Bot, c.BotID)
+	}
+	log.Info("github: app checked", "bot", c.Bot, "account", c.Account, "repos", strings.Join(g.cfg.Repos, ","))
+	return true
+}
+
+// checked reports whether the check passed, with the installation account; false without GitHub (g nil).
+func (g *gitHub) checked() (account string, ok bool) {
+	if g == nil {
+		return "", false
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.account, g.app != nil && g.err == nil
+}
+
+// attach records the Source once it is registered.
+func (g *gitHub) attach(src *github.Source) {
+	g.mu.Lock()
+	g.source = src
+	g.mu.Unlock()
+}
+
+// running reports whether the Source is registered.
+func (g *gitHub) running() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.source != nil
+}
+
+// retryCheck retries a failed check every checkRetryFirst doubling to checkRetryMax until it passes, then calls
+// passed, or until ctx is done.
+func (g *gitHub) retryCheck(ctx context.Context, log *slog.Logger, passed func(account string)) {
+	for d := checkRetryFirst; ; d = min(2*d, checkRetryMax) {
+		t := time.NewTimer(d)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return
+		case <-t.C:
+		}
+		if g.check(log) {
+			account, _ := g.checked()
+			passed(account)
+			return
+		}
+	}
+}
+
+// health is the GitHub Source's health: why it does not run, or the Source's own.
+func (g *gitHub) health() error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.err != nil {
+		return g.err
+	}
+	if g.source == nil {
+		return fmt.Errorf("github: not started")
+	}
+	return g.source.Health()
+}
+
+// instrument returns a copy of hc whose transport counts the requests by status (github_requests_total) and keeps
+// the installation's rate-limit remaining (github_rate_remaining).
+func instrument(hc *http.Client, reg *metrics.Registry) *http.Client {
+	c := *hc
+	base := c.Transport
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	c.Transport = &countingTransport{base: base, reg: reg}
+	return &c
+}
+
+type countingTransport struct {
+	base http.RoundTripper
+	reg  *metrics.Registry
+}
+
+func (t *countingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	res, err := t.base.RoundTrip(req)
+	if t.reg == nil {
+		return res, err
+	}
+	status := "error"
+	if err == nil {
+		status = strconv.Itoa(res.StatusCode)
+	}
+	t.reg.Counter("github_requests_total", "status", status).Add(1)
+	// The App's own (JWT) requests have a limit of their own: only installation requests set the gauge.
+	if err == nil && !strings.Contains(req.URL.Path, "/app/installations/") {
+		if v, perr := strconv.ParseInt(res.Header.Get("x-ratelimit-remaining"), 10, 64); perr == nil {
+			t.reg.Gauge("github_rate_remaining").Set(float64(v))
+		}
+	}
+	return res, err
+}
+
+// appCredentials gives the node a GitHub Ticket's credentials through the App: a token for the Ticket's repository
+// with the workers' permissions, and the bot as the commit identity.
+type appCredentials struct {
+	app *github.App
+
+	mu           sync.Mutex
+	login, email string
+}
+
+// Token mints a token for repo alone, with github.WorkerPermissions().
+func (c *appCredentials) Token(ctx context.Context, repo string) (string, time.Time, error) {
+	t, err := c.app.ScopedToken(ctx, repo, github.WorkerPermissions())
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	return t.Value, t.ExpiresAt, nil
+}
+
+var _ node.TokenRevoker = (*appCredentials)(nil)
+
+// Revoke revokes a worker's token the node dropped (node.TokenRevoker).
+func (c *appCredentials) Revoke(ctx context.Context, token string) error {
+	return c.app.RevokeToken(ctx, token)
+}
+
+// seed records the bot the check fetched, so Identity needs no lookup of its own.
+func (c *appCredentials) seed(login string, id int64) {
+	if login == "" {
+		return
+	}
+	c.mu.Lock()
+	c.login, c.email = login, fmt.Sprintf("%d+%s@users.noreply.github.com", id, login)
+	c.mu.Unlock()
+}
+
+// unavailableCredentials stand in when the App could not be made (its key unreadable): every request fails as one
+// that may pass, so the node's GitHub launches wait instead of failing their Tickets, until a restart with a fixed
+// configuration.
+type unavailableCredentials struct{ err error }
+
+func (u unavailableCredentials) Token(context.Context, string) (string, time.Time, error) {
+	return "", time.Time{}, fmt.Errorf("github app unavailable: %v", u.err)
+}
+
+func (unavailableCredentials) Identity() (string, string) { return "", "" }
+
+// Identity is the bot's login and its noreply address, <id>+<login>@users.noreply.github.com; it is looked up once
+// and remembered after the first success (empty until then).
+func (c *appCredentials) Identity() (login, email string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.login != "" {
+		return c.login, c.email
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), identityTimeout)
+	defer cancel()
+	l, id, err := c.app.Bot(ctx)
+	if err != nil || l == "" {
+		return "", ""
+	}
+	c.login, c.email = l, fmt.Sprintf("%d+%s@users.noreply.github.com", id, l)
+	return c.login, c.email
+}
+
+// intake is the GitHub Source's view of the Engine; it times each Receive (trigger_intake_seconds).
+type intake struct {
+	*core.Engine
+	hist *metrics.Histogram
+}
+
+func (i intake) Receive(t core.Trigger) (string, error) {
+	start := time.Now()
+	res, err := i.Engine.Receive(t)
+	i.hist.Observe(time.Since(start))
+	return res, err
+}
+
+var _ github.Intake = intake{}
+
+// timedSource is the GitHub Source as registered: every part of it, its Channel's sends timed (reply_send_seconds).
+type timedSource struct {
+	*github.Source
+	hist *metrics.Histogram
+}
+
+func (s timedSource) Send(ctx context.Context, ch core.ChannelRef, req sources.SendRequest) (sources.SendResult, error) {
+	start := time.Now()
+	res, err := s.Source.Send(ctx, ch, req)
+	s.hist.Observe(time.Since(start))
+	return res, err
+}
+
+var (
+	_ sources.Source        = timedSource{}
+	_ sources.Channel       = timedSource{}
+	_ sources.ThreadContext = timedSource{}
+	_ sources.References    = timedSource{}
+)
+
+// policyCache holds the current Policy settings and the Policy built from them. The Engine reads the Policy inside
+// its transactions, where the settings store cannot be read (transactions do not nest): the cache is filled at
+// startup and replaced by each save, outside any transaction.
+type policyCache struct {
+	st      *store.Store
+	store   *policy.Store
+	scope   core.SourceScope
+	timeout time.Duration
+
+	saveMu sync.Mutex // one save at a time
+	mu     sync.RWMutex
+	cur    policy.Settings
+	rev    int
+	pol    core.Policy
+	// unchecked is set while GitHub is configured and its startup check has not passed: the defaults do not know the
+	// installation's account yet. While nobody saved settings, the Engine then has no Policy (see policy).
+	unchecked bool
+}
+
+func newPolicyCache(st *store.Store, allowed []string, scope core.SourceScope, timeout time.Duration) (*policyCache, error) {
+	c := &policyCache{st: st, store: policy.NewStore(st, policy.Defaults(allowed)), scope: scope, timeout: timeout}
+	s, rev, err := c.store.Current()
+	if err != nil {
+		return nil, err
+	}
+	c.set(s, rev)
+	return c, nil
+}
+
+func (c *policyCache) set(s policy.Settings, rev int) {
+	c.mu.Lock()
+	c.cur, c.rev, c.pol = s, rev, policy.New(s, c.scope, c.timeout)
+	c.mu.Unlock()
+}
+
+// policy is the Engine's Policy getter. While nobody saved settings and the startup check has not passed, the defaults
+// cannot know the installation's account and would allow nobody: there is no Policy then, so the Engine evaluates
+// nothing and decides nothing (R36), and queued Triggers wait for the check instead of being recorded ignored.
+func (c *policyCache) policy() core.Policy {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.rev == 0 && c.unchecked {
+		return nil
+	}
+	return c.pol
+}
+
+// settings is the router's: the current settings.
+func (c *policyCache) settings() (policy.Settings, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.cur, nil
+}
+
+// current returns the settings and their revision.
+func (c *policyCache) current() (policy.Settings, int) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.cur, c.rev
+}
+
+// allow makes the defaults allow the installation account found by a late check: while nobody saved settings, they
+// are the current ones, and the Engine is told of the change.
+func (c *policyCache) allow(allowed []string, tell tellFunc) error {
+	c.saveMu.Lock()
+	defer c.saveMu.Unlock()
+	c.store = policy.NewStore(c.st, policy.Defaults(allowed))
+	s, rev, err := c.store.Current()
+	if err != nil {
+		return err
+	}
+	if rev != 0 {
+		c.mu.Lock()
+		c.unchecked = false
+		c.mu.Unlock()
+		return nil
+	}
+	old, _ := c.current()
+	c.mu.Lock()
+	c.cur, c.rev, c.pol, c.unchecked = s, 0, policy.New(s, c.scope, c.timeout), false
+	c.mu.Unlock()
+	_, err = tell(old, s)
+	return err
+}
+
+// awaitCheck marks the defaults as not knowing the installation's account until allow is called (see policy).
+func (c *policyCache) awaitCheck() {
+	c.mu.Lock()
+	c.unchecked = true
+	c.mu.Unlock()
+}
+
+// policyChangeKey is the kv key of a settings change saved but not yet told to the Engine.
+const policyChangeKey = "policy.changed.pending"
+
+// pendingChange is a settings change from From to To, saved (or about to be) as Revision.
+type pendingChange struct {
+	From     policy.Settings `json:"from"`
+	To       policy.Settings `json:"to"`
+	Revision int             `json:"revision"`
+}
+
+// tellFunc tells the Engine of a settings change and returns the notices it sent.
+type tellFunc func(from, to policy.Settings) (map[string]string, error)
+
+// change saves s as the next revision, makes it current and tells the Engine, all under one lock, so each change is
+// told from the revision it replaced. The change is recorded in kv before the save and cleared once told: a crash or a
+// failed tell leaves it there, and the next change (or the next start, resume) tells it first.
+func (c *policyCache) change(s policy.Settings, origin string, tell tellFunc) (rev int, cur policy.Settings, notices map[string]string, err error) {
+	c.saveMu.Lock()
+	defer c.saveMu.Unlock()
+	if err := c.resumeLocked(tell); err != nil {
+		return 0, cur, nil, fmt.Errorf("policy: tell the previous change: %w", err)
+	}
+	old, base := c.current()
+	if err := c.writePending(&pendingChange{From: old, To: s, Revision: base + 1}); err != nil {
+		return 0, cur, nil, err
+	}
+	if _, err := c.store.Save(s, base, origin); err != nil {
+		if cerr := c.writePending(nil); cerr != nil {
+			err = errors.Join(err, cerr)
+		}
+		return 0, cur, nil, err
+	}
+	cur, rev, err = c.store.Current()
+	if err != nil {
+		return 0, cur, nil, err
+	}
+	c.set(cur, rev)
+	if notices, err = tell(old, cur); err != nil {
+		return rev, cur, nil, err
+	}
+	return rev, cur, notices, c.writePending(nil)
+}
+
+// resume tells the Engine of a change saved but not told (see change).
+func (c *policyCache) resume(tell tellFunc) error {
+	c.saveMu.Lock()
+	defer c.saveMu.Unlock()
+	return c.resumeLocked(tell)
+}
+
+func (c *policyCache) resumeLocked(tell tellFunc) error {
+	raw, ok, err := c.st.KVGet(policyChangeKey)
+	if err != nil || !ok || raw == "" {
+		return err
+	}
+	var p pendingChange
+	if err := json.Unmarshal([]byte(raw), &p); err != nil {
+		return c.writePending(nil) // unreadable: nothing to tell
+	}
+	if _, rev := c.current(); rev < p.Revision {
+		return c.writePending(nil) // the save never happened
+	}
+	if _, err := tell(p.From, p.To); err != nil {
+		return err
+	}
+	return c.writePending(nil)
+}
+
+// writePending records p in kv, or clears the record when p is nil.
+func (c *policyCache) writePending(p *pendingChange) error {
+	if p == nil {
+		return c.st.KVSet(policyChangeKey, "")
+	}
+	raw, err := json.Marshal(p)
+	if err != nil {
+		return err
+	}
+	return c.st.KVSet(policyChangeKey, string(raw))
+}
+
+// evaluate runs the Evals' due work now and then every evaluateEvery, only while a Thread has Triggers queued or an
+// Eval in progress, until ctx is done.
+func evaluate(ctx context.Context, eng *core.Engine, log *slog.Logger) {
+	run := func() {
+		active, err := eng.ActiveThreads()
+		if err != nil {
+			log.Error("evaluate: active threads", "error", err)
+			return
+		}
+		if len(active) == 0 {
+			return
+		}
+		if err := eng.EvaluateDue(); err != nil {
+			log.Error("evaluate: due work", "error", err)
+		}
+	}
+	run()
+	t := time.NewTicker(evaluateEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			run()
+		}
+	}
+}
+
+// resumeAssessments makes sure, before the effects runner starts, that every Eval whose candidate has not reached the
+// router still has its assessment effect (it was queued with the Eval, durably). A delivered Eval keeps its deadline.
+func resumeAssessments(eng *core.Engine, fx *effects.Runner, log *slog.Logger) {
+	rows, err := fx.Pending(core.EffectAssessment)
+	if err != nil {
+		log.Error("startup: list assessment effects", "error", err)
+		return
+	}
+	pending := make(map[string]bool, len(rows))
+	for _, r := range rows {
+		pending[r.Key] = true
+	}
+	resumed, err := eng.ResumeAssessments(pending)
+	if err != nil {
+		log.Error("startup: resume assessments", "error", err)
+		return
+	}
+	for _, id := range resumed {
+		log.Warn("startup: queued the missing assessment of an undelivered eval", "eval", id)
+	}
+}

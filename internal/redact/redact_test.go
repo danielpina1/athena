@@ -46,6 +46,19 @@ func TestString(t *testing.T) {
 		{"query signature", "https://b.s3/o?X-Amz-Signature=deadbeef&x=1", "https://b.s3/o?X-Amz-Signature=***&x=1"},
 		{"query harmless", "https://x/search?q=token", "https://x/search?q=token"},
 
+		// GitHub tokens, wherever they appear.
+		{"installation token", "token ghs_16C7e42F292c6912E7710c838347Ae178B4a failed", "token *** failed"},
+		{"user token", "got ghu_abc123XYZ here", "got *** here"},
+		{"oauth token", "gho_abc123XYZ", "***"},
+		{"personal token", "clone https://github.com/o/r?x=ghp_abc123XYZ_def", "clone https://github.com/o/r?x=***"},
+		{"refresh token", "ghr_abc123", "***"},
+		{"fine-grained token", "use github_pat_11ABCDEFG0abc_DEFxyz999 now", "use *** now"},
+		{"github authorization header", "Authorization: token ghs_abc123", "Authorization: ***"},
+		{"github authorization quoted", `"Authorization: Bearer ghs_abc123"`, `"Authorization: ***"`},
+		{"github token in header map", "map[Accept:[x] Authorization:[Bearer ghs_abc123]]", "map[Accept:[x] Authorization: ***]]"},
+		{"token inside json", `{"token":"ghs_abc123","expires_at":"x"}`, `{"token":"***","expires_at":"x"}`},
+		{"not a token prefix inside a word", "weighs_x ghsx_1 ghs_", "weighs_x ghsx_1 ghs_"},
+
 		{"nothing", "echo hello world", "echo hello world"},
 	} {
 		if got := String(c.in); got != c.want {

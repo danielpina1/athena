@@ -17,6 +17,10 @@ type memRepos struct {
 	triggers  map[string][]byte
 	decisions map[string][]byte
 	approvals map[string][]byte
+	threads   map[string][]byte
+	receipts  map[string][]byte
+	kv        map[string]string
+	effects   map[string]fakeEffect
 	seqs      map[string]int
 	// failWith, when set, makes every Tx roll back with this error after its function ran.
 	failWith error
@@ -25,7 +29,14 @@ type memRepos struct {
 }
 
 func newMemRepos() *memRepos {
-	return &memRepos{tickets: map[string][]byte{}, triggers: map[string][]byte{}, decisions: map[string][]byte{}, approvals: map[string][]byte{}, seqs: map[string]int{}}
+	return &memRepos{tickets: map[string][]byte{}, triggers: map[string][]byte{}, decisions: map[string][]byte{}, approvals: map[string][]byte{}, threads: map[string][]byte{}, receipts: map[string][]byte{}, kv: map[string]string{}, effects: map[string]fakeEffect{}, seqs: map[string]int{}}
+}
+
+// fakeEffect is a queued effect, as Enqueue leaves it.
+type fakeEffect struct {
+	Kind, Key string
+	Payload   []byte
+	Seq       int
 }
 
 func (r *memRepos) Tx(fn func(Tx) error) error {
@@ -36,7 +47,17 @@ func (r *memRepos) Tx(fn func(Tx) error) error {
 		triggers:  cloneMap(r.triggers),
 		decisions: cloneMap(r.decisions),
 		approvals: cloneMap(r.approvals),
+		threads:   cloneMap(r.threads),
+		receipts:  cloneMap(r.receipts),
+		kv:        map[string]string{},
+		effects:   map[string]fakeEffect{},
 		seqs:      map[string]int{},
+	}
+	for k, v := range r.kv {
+		tx.kv[k] = v
+	}
+	for k, v := range r.effects {
+		tx.effects[k] = v
 	}
 	for k, v := range r.seqs {
 		tx.seqs[k] = v
@@ -51,6 +72,7 @@ func (r *memRepos) Tx(fn func(Tx) error) error {
 		return r.failWith
 	}
 	r.tickets, r.triggers, r.decisions, r.approvals, r.seqs = tx.tickets, tx.triggers, tx.decisions, tx.approvals, tx.seqs
+	r.threads, r.kv, r.effects, r.receipts = tx.threads, tx.kv, tx.effects, tx.receipts
 	return nil
 }
 
@@ -87,6 +109,19 @@ func (r *memRepos) trigger(id string) *Trigger {
 	return &t
 }
 
+// thread returns the stored Thread with the given key, or nil.
+func (r *memRepos) thread(key string) *Thread {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	raw, ok := r.threads[key]
+	if !ok {
+		return nil
+	}
+	var t Thread
+	mustUnmarshal(raw, &t)
+	return &t
+}
+
 // approval returns the stored Approval with the given ID, or nil.
 func (r *memRepos) approval(id string) *Approval {
 	r.mu.Lock()
@@ -119,8 +154,127 @@ func (r *memRepos) counts() (tickets, triggers, decisions int) {
 }
 
 type memTx struct {
-	tickets, triggers, decisions, approvals map[string][]byte
-	seqs                                    map[string]int
+	tickets, triggers, decisions, approvals, threads map[string][]byte
+	receipts                                         map[string][]byte
+	kv                                               map[string]string
+	effects                                          map[string]fakeEffect
+	seqs                                             map[string]int
+}
+
+func (tx *memTx) GetTrigger(id string) (*Trigger, error) {
+	raw, ok := tx.triggers[id]
+	if !ok {
+		return nil, nil
+	}
+	var t Trigger
+	mustUnmarshal(raw, &t)
+	return &t, nil
+}
+
+func (tx *memTx) GetThread(key string) (*Thread, error) {
+	raw, ok := tx.threads[key]
+	if !ok {
+		return nil, nil
+	}
+	var t Thread
+	mustUnmarshal(raw, &t)
+	return &t, nil
+}
+
+func (tx *memTx) PutThread(t *Thread) error {
+	raw, err := json.Marshal(t)
+	if err != nil {
+		return err
+	}
+	tx.threads[t.Key] = raw
+	return nil
+}
+
+func (tx *memTx) ActiveThreads() ([]*Thread, error) {
+	var out []*Thread
+	for _, raw := range tx.threads {
+		var t Thread
+		mustUnmarshal(raw, &t)
+		if t.Active() {
+			out = append(out, &t)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+	return out, nil
+}
+
+func (tx *memTx) GetDecision(id string) (*Decision, error) {
+	raw, ok := tx.decisions[id]
+	if !ok {
+		return nil, nil
+	}
+	var d Decision
+	mustUnmarshal(raw, &d)
+	return &d, nil
+}
+
+func (tx *memTx) RecentDecisions(limit int) ([]*Decision, error) {
+	return tx.filterDecisions(nil, limit)
+}
+
+func (tx *memTx) Decisions(thread string, limit int) ([]*Decision, error) {
+	return tx.filterDecisions(&thread, limit)
+}
+
+func (tx *memTx) filterDecisions(thread *string, limit int) ([]*Decision, error) {
+	var out []*Decision
+	for _, raw := range tx.decisions {
+		var d Decision
+		mustUnmarshal(raw, &d)
+		if thread == nil || d.Thread == *thread {
+			out = append(out, &d)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].At.Equal(out[j].At) {
+			return out[i].At.After(out[j].At)
+		}
+		return out[i].ID > out[j].ID
+	})
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+// Enqueue mirrors the store: a waiting (kind, key) takes the new payload and keeps its seq.
+func (tx *memTx) Enqueue(kind, key string, payload []byte) error {
+	id := kind + "\x00" + key
+	e, ok := tx.effects[id]
+	if !ok {
+		seq, _ := tx.NextSeq("effect")
+		e = fakeEffect{Kind: kind, Key: key, Seq: seq}
+	}
+	e.Payload = append([]byte(nil), payload...)
+	tx.effects[id] = e
+	return nil
+}
+
+func (tx *memTx) KVGet(key string) (string, bool, error) {
+	v, ok := tx.kv[key]
+	return v, ok, nil
+}
+
+func (tx *memTx) KVSet(key, value string) error {
+	tx.kv[key] = value
+	return nil
+}
+
+// effectList returns the queued effects in seq order.
+func (r *memRepos) effectList() []fakeEffect {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []fakeEffect
+	for _, e := range r.effects {
+		out = append(out, e)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Seq < out[j].Seq })
+	return out
 }
 
 func (tx *memTx) GetApproval(id string) (*Approval, error) {
@@ -377,11 +531,21 @@ var base = time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC)
 
 func newHarness(t *testing.T) *harness {
 	t.Helper()
+	return newHarnessWith(t, nil)
+}
+
+// newHarnessWith is newHarness with Engine Options beyond the clock and the event log, which configure sets.
+func newHarnessWith(t *testing.T, configure func(*Options)) *harness {
+	t.Helper()
 	repos := newMemRepos()
 	h := &harness{t: t, repos: repos}
 	h.exec = &fakeExec{t: t, repos: repos, strict: true}
 	h.events = &eventLog{t: t, repos: repos, strict: true}
-	h.eng = NewEngine(repos, h.exec, h.now, h.events.emit)
+	opts := Options{Now: h.now, Emit: h.events.emit}
+	if configure != nil {
+		configure(&opts)
+	}
+	h.eng = NewEngineWith(repos, h.exec, opts)
 	return h
 }
 
@@ -478,4 +642,37 @@ func runningOf(t *Ticket) *Assignment {
 		}
 	}
 	return nil
+}
+
+func (tx *memTx) GetReceipt(id string) (*Receipt, error) {
+	raw, ok := tx.receipts[id]
+	if !ok {
+		return nil, nil
+	}
+	var r Receipt
+	mustUnmarshal(raw, &r)
+	return &r, nil
+}
+
+func (tx *memTx) PutReceipt(r *Receipt) error {
+	raw, err := json.Marshal(r)
+	if err != nil {
+		return err
+	}
+	tx.receipts[r.ID] = raw
+	return nil
+}
+
+// TicketReceipts lists a Ticket's receipts in queue order, as the SQLite store does.
+func (tx *memTx) TicketReceipts(ticketID string) ([]*Receipt, error) {
+	var out []*Receipt
+	for _, raw := range tx.receipts {
+		var r Receipt
+		mustUnmarshal(raw, &r)
+		if r.TicketID == ticketID {
+			out = append(out, &r)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Seq < out[j].Seq })
+	return out, nil
 }

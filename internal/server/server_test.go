@@ -28,6 +28,7 @@ const (
 	fixtureSessionID = "27abadfa-c58f-4e97-aaf3-64a8fdaff179"
 	waitTimeout      = 10 * time.Second
 	recoveryText     = "previous process ended unexpectedly"
+	resumeText       = "session was paused while it waited"
 )
 
 var (
@@ -175,9 +176,19 @@ type testServer struct {
 
 func startServer(t *testing.T, stateDir string) *testServer {
 	t.Helper()
+	return startServerWith(t, stateDir, nil)
+}
+
+// startServerWith is startServer with the test configuration changed by mod.
+func startServerWith(t *testing.T, stateDir string, mod func(*Config)) *testServer {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &testServer{t: t, stateDir: stateDir, cancel: cancel, done: make(chan error, 1)}
-	go func() { s.done <- Run(ctx, testConfig(t, stateDir)) }()
+	cfg := testConfig(t, stateDir)
+	if mod != nil {
+		mod(&cfg)
+	}
+	go func() { s.done <- Run(ctx, cfg) }()
 	t.Cleanup(s.stop)
 	eventually(t, "control socket answers", func() bool {
 		select {
@@ -613,11 +624,15 @@ func TestRestartKeepsIdleAssignmentUntilInput(t *testing.T) {
 	if rid, ok := argValue(fake.invocations(t)[1], "--resume"); !ok || rid != fixtureSessionID {
 		t.Fatalf("second start args = %v, want --resume %s", fake.invocations(t)[1], fixtureSessionID)
 	}
-	eventually(t, "reply sent after the recovery note", func() bool {
+	// Its last turn ended idle: it was paused, not interrupted, so the resume note opens the message, not the crash note.
+	eventually(t, "reply sent after the resume note", func() bool {
 		in := fake.stdin(t)
-		i := strings.LastIndex(in, recoveryText)
+		i := strings.LastIndex(in, resumeText)
 		return i >= 0 && strings.Contains(in[i:], "blue-7c6d")
 	})
+	if strings.Contains(fake.stdin(t), recoveryText) {
+		t.Fatalf("stdin = %q: an idle assignment resumed with the crash note", fake.stdin(t))
+	}
 	if got := s.running(id); got.ID != a.ID {
 		t.Fatalf("running assignment = %s, want %s (the same, resumed)", got.ID, a.ID)
 	}
@@ -836,3 +851,56 @@ func newRepo(t *testing.T) string {
 }
 
 func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
+
+// R34: a Ticket whose latest Report is failed (or blocked) waits for a person: a restart does not relaunch it, even
+// though the failed turn may never have run the Stop hook. A person's reply then resumes it.
+func TestFailedTicketNotRelaunchedOnRestart(t *testing.T) {
+	fake := newFakeEnv(t, openTurnFixture(t))
+	dir := newStateDir(t)
+	s := startServer(t, dir)
+	id := s.submit("Fails once\nbody-f00d")
+	a := s.running(id)
+	var resp node.Response
+	nodeCall(t, dir, node.ReportRequest{Op: node.OpReport, Ticket: id, Assignment: a.ID, Status: "failed", Summary: "turn failed (error)"}, &resp)
+	if !resp.OK {
+		t.Fatalf("report = %+v", resp)
+	}
+	s.stop()
+
+	s = startServer(t, dir)
+	time.Sleep(300 * time.Millisecond)
+	if n := len(fake.invocations(t)); n != 1 {
+		t.Fatalf("claude started %d times, want 1 (a failed ticket is not relaunched)", n)
+	}
+	if d := s.detail(id); d.Stage != "person/failed" {
+		t.Fatalf("stage = %q, want person/failed", d.Stage)
+	}
+	s.ok(Request{Op: OpReply, ID: id, Text: "try again-5e5e"}, nil)
+	eventually(t, "the reply resumed the session", func() bool { return len(fake.invocations(t)) == 2 })
+}
+
+// R33: the nudge to report, sent after a turn that ended without a Report, is a delivery: the Assignment's
+// DeliveredAt moves, so a restart right after it sees the nudged turn as interrupted.
+func TestNudgeMovesDeliveredAt(t *testing.T) {
+	fake := newFakeEnv(t, claudeFixture(t, "simple-turn.jsonl")) // its turn ends without a report
+	dir := newStateDir(t)
+	s := startServer(t, dir)
+	id := s.submit("Forgets to report")
+	eventually(t, "the nudge sent", func() bool { return strings.Contains(fake.stdin(t), "ended without a report") })
+	eventually(t, "DeliveredAt moved by the nudge", func() bool {
+		d := s.detail(id)
+		a := d.Assignments[len(d.Assignments)-1]
+		return a.DeliveredAt != nil && a.StartedAt != nil && a.DeliveredAt.After(*a.StartedAt) && deliveredAfterInput(t, dir, id)
+	})
+}
+
+// deliveredAfterInput reports whether the running Assignment's DeliveredAt is later than its first Input's delivery.
+func deliveredAfterInput(t *testing.T, dir, id string) bool {
+	var ok bool
+	offline(t, dir, func(e *core.Engine) {
+		tk, _, _ := e.Ticket(id)
+		a := tk.LatestAssignment()
+		ok = a.DeliveredAt != nil && len(tk.Inputs) == 1 && tk.Inputs[0].DeliveredAt != nil && a.DeliveredAt.After(*tk.Inputs[0].DeliveredAt)
+	})
+	return ok
+}

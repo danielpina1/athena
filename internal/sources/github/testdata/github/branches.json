@@ -1,0 +1,10 @@
+{
+  "main": {
+    "name": "main",
+    "commit": {
+      "sha": "aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111",
+      "url": "https://api.github.com/repos/o/r/commits/aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111"
+    },
+    "protected": true
+  }
+}

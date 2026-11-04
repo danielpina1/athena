@@ -70,16 +70,6 @@ func (tx *Tx) OpenTickets() ([]*core.Ticket, error) {
 	return out, nil
 }
 
-// PutTrigger inserts or replaces a Trigger.
-func (tx *Tx) PutTrigger(t *core.Trigger) error {
-	return tx.putDoc("triggers", t.ID, t)
-}
-
-// PutDecision inserts or replaces a Decision.
-func (tx *Tx) PutDecision(d *core.Decision) error {
-	return tx.putDoc("decisions", d.ID, d)
-}
-
 // GetApproval returns the Approval with the given ID, or nil, nil if there is none.
 func (tx *Tx) GetApproval(id string) (*core.Approval, error) {
 	var doc string
@@ -160,6 +150,23 @@ func decodeTicket(doc string) (*core.Ticket, error) {
 		return nil, fmt.Errorf("store: decode ticket: %w", err)
 	}
 	return &t, nil
+}
+
+// getDoc loads the JSON document with the given id from one of the (id, doc) tables into v; table is a constant. It
+// reports false if there is no such row.
+func (tx *Tx) getDoc(table, id string, v any) (bool, error) {
+	var doc string
+	err := tx.sql.QueryRow(`SELECT doc FROM `+table+` WHERE id = ?`, id).Scan(&doc)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("store: get %s %q: %w", table, id, err)
+	}
+	if err := json.Unmarshal([]byte(doc), v); err != nil {
+		return false, fmt.Errorf("store: decode %s %q: %w", table, id, err)
+	}
+	return true, nil
 }
 
 func decodeApproval(doc string) (*core.Approval, error) {

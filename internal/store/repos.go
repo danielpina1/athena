@@ -26,11 +26,11 @@ func (r repos) Tx(fn func(core.Tx) error) error {
 func (tx *Tx) NextSeq(name string) (int, error) {
 	key := seqKeyPrefix + name
 	n := 0
-	if _, err := tx.KVGet(key, &n); err != nil {
+	if _, err := tx.kvGetJSON(key, &n); err != nil {
 		return 0, err
 	}
 	n++
-	if err := tx.KVSet(key, n); err != nil {
+	if err := tx.kvSetJSON(key, n); err != nil {
 		return 0, err
 	}
 	return n, nil

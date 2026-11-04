@@ -52,6 +52,12 @@ type Options struct {
 	// TranscriptPath, when set, is the file every stdout line is appended to instead of <Dir>/.athena/transcript.jsonl.
 	// Its directory is created 0700 and the file 0600.
 	TranscriptPath string
+	// Tools, when set, is passed as --tools: the built-in tools the session has. A pointer to "" disables every
+	// built-in tool (`--tools ""`, checked against Claude Code 2.1.280: its init lists no tools, MCP tools stay).
+	Tools *string
+	// ReplayUserMessages passes --replay-user-messages: each user message comes back as a UserEcho once a turn takes
+	// it in.
+	ReplayUserMessages bool
 }
 
 // buildArgs returns the argument list for o.
@@ -64,6 +70,12 @@ func buildArgs(o Options) []string {
 	args := []string{"-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"}
 	if o.Model != "" {
 		args = append(args, "--model", o.Model)
+	}
+	if o.Tools != nil {
+		args = append(args, "--tools", *o.Tools)
+	}
+	if o.ReplayUserMessages {
+		args = append(args, "--replay-user-messages")
 	}
 	// Always passed: with --setting-sources "" the --settings file is the only
 	// source of hooks, so a session without it would run without Athena's hooks.
@@ -361,11 +373,19 @@ func (s *Session) Events() <-chan Event { return s.events }
 // Send writes one user message to the session. A message sent while a turn is
 // running is folded into that turn. After the process has exited it returns an
 // error.
-func (s *Session) Send(text string) error {
-	line, err := json.Marshal(map[string]any{
+func (s *Session) Send(text string) error { return s.SendMessage(text, "") }
+
+// SendMessage is Send with the message's uuid (left out when empty): with --replay-user-messages, the echo of the
+// message carries it back (UserEcho.UUID), so the message is known by it whatever the CLI does to its text.
+func (s *Session) SendMessage(text, uuid string) error {
+	msg := map[string]any{
 		"type":    "user",
 		"message": map[string]any{"role": "user", "content": text},
-	})
+	}
+	if uuid != "" {
+		msg["uuid"] = uuid
+	}
+	line, err := json.Marshal(msg)
 	if err != nil {
 		return err
 	}
