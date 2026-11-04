@@ -13,6 +13,7 @@ import { RelativeTime } from "@/ui/athena/RelativeTime";
 import { Button } from "@/ui/primitives/button";
 import { Select } from "@/ui/primitives/select";
 import type { FilterParams } from "../tickets/Filters";
+import type { RoutingKey } from "./Routing";
 import { canDismiss } from "./outcome";
 import { useShown } from "./shared";
 import { useCommand } from "./useCommand";
@@ -99,11 +100,14 @@ function Row({ decision: d }: { decision: DecisionView }) {
   );
 }
 
-export function Decisions({ params, rows, total }: { params: FilterParams; rows: DecisionView[]; total: number }) {
+export function Decisions({ params, rows, total }: { params: FilterParams<RoutingKey>; rows: DecisionView[]; total: number }) {
   const { shown, more } = useShown([params.sp.toString()]);
   const list = useMemo(() => rows.slice(0, shown), [rows, shown]);
   return (
     <div>
+      <p className="max-w-prose px-4 pt-4 text-muted">
+        When a GitHub message wasn&apos;t clearly addressed to Athena, what it decided to do and why.
+      </p>
       <div className="p-4">
         <Select aria-label="Decision" value={params.get("decision")} onChange={(e) => params.set("decision", e.target.value)}>
           <option value="">All Decisions</option>
@@ -116,7 +120,7 @@ export function Decisions({ params, rows, total }: { params: FilterParams; rows:
       </div>
       {total === 0 ? (
         <div className="px-4">
-          <EmptyState title="No Decisions yet." description="What Athena decides about incoming messages appears here." />
+          <EmptyState title="No Decisions yet." description="Nothing has been decided yet. Each time Athena weighs a GitHub message, its decision and reasons show up here." />
         </div>
       ) : rows.length === 0 ? (
         <div className="px-4">

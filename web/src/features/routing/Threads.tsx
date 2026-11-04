@@ -2,7 +2,7 @@
 import { useEffect, useMemo, useRef } from "react";
 import { Link } from "react-router";
 import type { ThreadView } from "@/gen/athena/v1/state_pb";
-import { ticketRoute } from "@/app/search";
+import { threadMatcher, ticketRoute } from "@/app/search";
 import { unsubscribe } from "@/lib/commands/actions";
 import type { AthenaData } from "@/lib/store/state";
 import { EmptyState } from "@/ui/athena/EmptyState";
@@ -12,6 +12,7 @@ import { Confirm } from "@/ui/athena/Confirm";
 import { Button } from "@/ui/primitives/button";
 import { Select } from "@/ui/primitives/select";
 import type { FilterParams } from "../tickets/Filters";
+import type { RoutingKey } from "./Routing";
 import { parseTicketChip } from "./outcome";
 import { RoutingSearch, useShown } from "./shared";
 import { useCommand } from "./useCommand";
@@ -28,13 +29,14 @@ export type ThreadFilter = { state?: string; q?: string };
 /** The Threads the filter keeps: an Eval in progress first, then the most queued, then by key. */
 export function selectThreads(threads: AthenaData["threads"], f: ThreadFilter): ThreadView[] {
   const q = f.q?.trim().toLowerCase();
+  const onKey = threadMatcher(f.q ?? "");
   return [...threads.values()]
     .filter((t) => {
       if (f.state === "evaluating" && !t.eval) return false;
       if (f.state === "queued" && t.queued === 0) return false;
       if (f.state === "open" && t.closed) return false;
       if (f.state === "closed" && !t.closed) return false;
-      return !q || t.key.toLowerCase().includes(q) || t.tickets.some((x) => x.toLowerCase().includes(q));
+      return !q || onKey(t.key) || t.tickets.some((x) => x.toLowerCase().includes(q));
     })
     .sort((a, b) => Number(!!b.eval) - Number(!!a.eval) || b.queued - a.queued || a.key.localeCompare(b.key));
 }
@@ -68,6 +70,7 @@ function Row({ thread, selected }: { thread: ThreadView; selected: boolean }) {
   useEffect(() => {
     if (selected) el.current?.scrollIntoView?.({ block: "nearest" });
   }, [selected]);
+  const key = useRef<HTMLSpanElement>(null);
   const n = thread.tickets.length;
   return (
     <li
@@ -80,7 +83,7 @@ function Row({ thread, selected }: { thread: ThreadView; selected: boolean }) {
       )}
     >
       <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
-        <Mono tone="default" className="min-w-0 font-semibold break-all">
+        <Mono ref={key} tabIndex={-1} data-thread-key tone="default" className="min-w-0 font-semibold break-all outline-offset-2">
           {thread.key}
         </Mono>
         {thread.eval && (
@@ -104,7 +107,12 @@ function Row({ thread, selected }: { thread: ThreadView; selected: boolean }) {
             disabled={busy}
             label="Unsubscribe"
             confirmLabel={`Unsubscribe ${n === 1 ? "this Ticket" : `these ${n} Tickets`}`}
-            onConfirm={() => void run(() => unsubscribe(thread.key))}
+            onConfirm={() =>
+              // The chip row goes away with the Tickets, and the focused button with it: focus the key instead.
+              void run(() => unsubscribe(thread.key)).then((ok) => {
+                if (ok) key.current?.focus();
+              })
+            }
           />
         </div>
       )}
@@ -112,12 +120,15 @@ function Row({ thread, selected }: { thread: ThreadView; selected: boolean }) {
   );
 }
 
-export function Threads({ params, rows, total, selected }: { params: FilterParams; rows: ThreadView[]; total: number; selected?: string }) {
+export function Threads({ params, rows, total, selected }: { params: FilterParams<RoutingKey>; rows: ThreadView[]; total: number; selected?: string }) {
   const { shown, more } = useShown([params.sp.toString()]);
   const filtered = params.get("state") !== "" || params.get("hq") !== "";
   const list = useMemo(() => rows.slice(0, shown), [rows, shown]);
   return (
     <div>
+      <p className="max-w-prose px-4 pt-4 text-muted">
+        The GitHub issues and pull requests Athena follows, and which Tickets they wake when someone writes there.
+      </p>
       <div className="grid gap-2 p-4 sm:grid-cols-2">
         <Select aria-label="Thread state" value={params.get("state")} onChange={(e) => params.set("state", e.target.value)}>
           <option value="">All Threads</option>
@@ -131,7 +142,7 @@ export function Threads({ params, rows, total, selected }: { params: FilterParam
       </div>
       {total === 0 ? (
         <div className="px-4">
-          <EmptyState title="No Threads yet." description="Conversations on GitHub that Athena follows appear here." />
+          <EmptyState title="No Threads yet." description="No GitHub issue or pull request is followed yet. Each one Athena starts following shows up here." />
         </div>
       ) : rows.length === 0 ? (
         <div className="px-4">

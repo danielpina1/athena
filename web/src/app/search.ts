@@ -26,10 +26,19 @@ export function normalizeThread(text: string): string {
   return t.replace(/^[a-z][a-z0-9_-]*:(?!\/\/)/i, "").toLowerCase();
 }
 
-function threadMatches(key: string, query: string): boolean {
-  const k = normalizeThread(key);
-  // A reference ends the key: "#12" must not find "#123".
-  return HASH_REF.test(query) ? k.endsWith(query) : k.includes(query);
+/**
+ * A predicate for Thread keys that match q: a GitHub URL, `owner/name#n`, `name#n` or `#n` find that reference (and
+ * only it: `#12` never finds `#123`, `acme/api#12` never finds `bigacme/api#12`); any other text matches anywhere in
+ * the key. Use it for every Thread search so the palette and the list boxes agree.
+ */
+export function threadMatcher(q: string): (key: string) => boolean {
+  const want = normalizeThread(q);
+  if (!HASH_REF.test(want)) return (key) => normalizeThread(key).includes(want);
+  return (key) => {
+    const k = normalizeThread(key);
+    // A reference ends the key and, unless it is a bare "#n", starts at the owner or repository name.
+    return want.startsWith("#") ? k.endsWith(want) : k === want || k.endsWith(`/${want}`);
+  };
 }
 
 export const ticketRoute = (id: string) => `/tickets/${encodeURIComponent(id)}`;
@@ -61,10 +70,10 @@ export function search(state: Pick<AthenaData, "tickets" | "triggers" | "threads
     }
   }
   n = 0;
-  const wanted = normalizeThread(q);
+  const matches = threadMatcher(q);
   for (const th of state.threads.values()) {
     if (n >= MAX_HITS) break;
-    if (threadMatches(th.key, wanted)) {
+    if (matches(th.key)) {
       hits.push({ kind: "thread", id: th.key, key: th.key, to: threadRoute(th.key) });
       n++;
     }

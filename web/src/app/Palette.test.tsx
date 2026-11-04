@@ -108,7 +108,7 @@ test("results by title, Trigger text or GitHub URL never say nothing matches", a
   expect(screen.queryAllByRole("option")).toEqual([]);
 });
 
-test("palette opens a Trigger and a Thread in Routing", async () => {
+test("palette opens a Thread in Routing", async () => {
   const user = userEvent.setup();
   renderAt("/");
   await user.keyboard("{Meta>}k{/Meta}");
@@ -142,4 +142,14 @@ test("/ focuses the Tickets search box", async () => {
   renderAt("/tickets");
   await user.keyboard("/");
   expect(document.activeElement).toBe(screen.getByRole("searchbox", { name: "Search Tickets" }));
+});
+
+test("palette opens a Trigger in Routing", async () => {
+  const user = userEvent.setup();
+  renderAt("/");
+  await user.keyboard("{Meta>}k{/Meta}");
+  await user.type(await screen.findByRole("combobox"), "flaky login");
+  await user.click(await screen.findByRole("option", { name: /please look at the flaky login/ }));
+  expect(where()).toBe("/routing?tab=triggers&trigger=TR-1");
+  expect(document.querySelector('[data-trigger-row="TR-1"]')?.getAttribute("aria-current")).toBe("true");
 });

@@ -1,7 +1,7 @@
 // Routing, end to end. The shared server has no GitHub, but earlier specs' Tickets leave Triggers behind, so these
 // tests do not assume the lists are empty: each tab's count must equal the rows it lists (or show its empty state at
-// zero), the filters live in the URL, and `/` goes to the tab's own search box. The screenshots hide the list and the
-// counts, which depend on what ran before. This spec creates no Tickets (R37).
+// zero), the filters live in the URL, and `/` goes to the tab's own search box. The screenshots mask the counts and the
+// rows, which depend on what ran before. This spec creates no Tickets (R37).
 import type { Page } from "@playwright/test";
 import { expect, expectAccessible, signedInPage, test } from "./harness";
 
@@ -28,12 +28,38 @@ test("each tab's count equals the rows it lists, or it shows its empty state", a
   }
 });
 
-test("a filter that matches nothing says so, light and dark", async ({ page }) => {
+test("the empty state and a filter that matches nothing, light and dark", async ({ page }) => {
   await page.clock.setFixedTime(new Date("2026-11-04T10:00:00"));
   await page.emulateMedia({ colorScheme: "light", reducedMotion: "reduce" });
   await signedInPage(page);
+  // Only the counts and the rows are volatile (earlier specs' Tickets leave Triggers and Decisions behind).
+  const unstable = [
+    page.locator("aside .font-mono"),
+    page.getByRole("region", { name: "Today" }),
+    tabs(page).locator(".font-mono"),
+    page.locator("[data-trigger-row], [data-thread-row], [data-decision-row]"),
+  ];
+  const shot = async (name: string) => {
+    await page.evaluate(() => document.fonts.ready);
+    await expect(page).toHaveScreenshot(name, { mask: unstable });
+  };
+
+  // Without GitHub there is no Thread: that tab is empty on every run and says what will appear there.
+  await page.goto("/routing?tab=threads");
+  await expect(page.getByRole("heading", { name: "No Threads yet." })).toBeVisible();
+  await expect(page.getByText("No GitHub issue or pull request is followed yet.")).toBeVisible();
+  await expectAccessible(page);
+  await shot("empty-light.png");
+  await page.emulateMedia({ colorScheme: "dark", reducedMotion: "reduce" });
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await expectAccessible(page);
+  await shot("empty-dark.png");
+  await page.emulateMedia({ colorScheme: "light", reducedMotion: "reduce" });
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+
+  // A filter nothing satisfies. "No Triggers yet." on a server that received none, so only a server that has some
+  // shows the filtered state.
   await page.goto("/routing?tq=nothing-has-this-text");
-  // Nothing has this text: "No Triggers yet." on a server that received none, else "No Triggers match these filters."
   await expect(page.getByRole("heading", { name: /^No Triggers (yet|match these filters)\.$/ })).toBeVisible();
   await expect(tabs(page).getByRole("tab", { name: /Triggers/ })).toHaveText("Triggers 0");
 
@@ -43,29 +69,10 @@ test("a filter that matches nothing says so, light and dark", async ({ page }) =
   await expect(box).toBeFocused();
   await expect(box).toHaveValue("nothing-has-this-text");
   await page.getByRole("heading", { name: "Routing", level: 1 }).click();
-
   await expectAccessible(page);
-  const unstable = [page.locator("aside .font-mono"), page.getByRole("region", { name: "Today" })];
-  // What the lists hold depends on the specs that ran before: hide them, and give the panel a fixed height.
-  await page.evaluate(() => {
-    for (const el of document.querySelectorAll<HTMLElement>('[role="tablist"], [role="tabpanel"]')) el.style.visibility = "hidden";
-    document.querySelector<HTMLElement>('[role="tabpanel"]')!.style.height = "320px";
-  });
-  await page.evaluate(() => document.fonts.ready);
-  await expect(page).toHaveScreenshot("no-match-light.png", { mask: unstable });
-  await page.emulateMedia({ colorScheme: "dark", reducedMotion: "reduce" });
-  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
-  await expectAccessible(page);
-  await expect(page).toHaveScreenshot("no-match-dark.png", { mask: unstable });
-  await page.evaluate(() => {
-    for (const el of document.querySelectorAll<HTMLElement>('[role="tablist"], [role="tabpanel"]')) el.style.visibility = "";
-  });
-
-  // The filter is in the URL; Clear filters (shown once the server has Triggers) takes it out again.
-  await expect(page).toHaveURL(/tq=nothing-has-this-text/);
-  const clear = page.getByRole("button", { name: "Clear filters" });
-  if (await clear.count()) {
-    await clear.click();
+  if (await page.getByRole("button", { name: "Clear filters" }).count()) {
+    await shot("filtered-light.png");
+    await page.getByRole("button", { name: "Clear filters" }).click();
     await expect(page).toHaveURL(/\/routing$/);
     await expect(box).toHaveValue("");
   }

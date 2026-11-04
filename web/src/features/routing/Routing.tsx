@@ -7,7 +7,7 @@ import { Mono } from "@/ui/athena/Mono";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/ui/primitives/tabs";
 import { useFilterParams } from "../tickets/Filters";
 import { Decisions, selectDecisions } from "./Decisions";
-import { canReevaluate } from "./outcome";
+import { canReevaluate, indexDecisions } from "./outcome";
 import { selectThreads, Threads } from "./Threads";
 import { selectTriggers, Triggers } from "./Triggers";
 
@@ -16,9 +16,10 @@ type Tab = (typeof TABS)[number];
 
 /** Every parameter a tab's filters use: all three tabs' counts follow their own filters, so all stay in the URL. */
 const FILTER_KEYS = ["outcome", "tq", "state", "hq", "decision"] as const;
+export type RoutingKey = (typeof FILTER_KEYS)[number] | "tab";
 
 export function Routing() {
-  const params = useFilterParams(FILTER_KEYS);
+  const params = useFilterParams<RoutingKey>(FILTER_KEYS);
   const { sp, set } = params;
   const tab: Tab = TABS.find((t) => t === sp.get("tab")) ?? "triggers";
 
@@ -31,6 +32,8 @@ export function Routing() {
     [triggers, sp],
   );
   const threadRows = useMemo(() => selectThreads(threads, { state: sp.get("state") ?? "", q: sp.get("hq") ?? "" }), [threads, sp]);
+  // Looked up per row by canReevaluate: indexed once per change of the Decisions.
+  const judged = useMemo(() => indexDecisions(decisions.values()), [decisions]);
   const decisionRows = useMemo(() => selectDecisions(decisions, { decision: sp.get("decision") ?? "" }), [decisions, sp]);
 
   return (
@@ -57,7 +60,7 @@ export function Routing() {
             rows={triggerRows}
             total={triggers.size}
             selected={sp.get("trigger") ?? undefined}
-            again={(t) => canReevaluate(t, { threads, decisions })}
+            again={(t) => canReevaluate(t, { threads, judged })}
           />
         </TabsContent>
         <TabsContent value="threads" className="pt-0">

@@ -77,7 +77,7 @@ export function TicketList({ selectedId }: { selectedId?: string }) {
   };
   useShortcut("j", () => move(1));
   useShortcut("k", () => move(-1));
-  useShortcut("/", () => search.current?.focus());
+  // "/" is Shell's: it focuses the box marked data-list-search (Filters), or opens the palette.
   // ⏎ opens the row in focus: a focused link does that itself.
 
   const total = tickets.size;

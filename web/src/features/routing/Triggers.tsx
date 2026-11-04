@@ -1,11 +1,12 @@
 // The Triggers tab: every incoming message, newest first, with what became of it. Evaluate again sends a Trigger back
 // to Eval when nothing judged it (see canReevaluate).
 import { timestampMs } from "@bufbuild/protobuf/wkt";
-import { Fragment, useEffect, useMemo, useRef } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router";
 import type { TriggerView } from "@/gen/athena/v1/state_pb";
-import { threadRoute, ticketRoute } from "@/app/search";
+import { threadMatcher, threadRoute, ticketRoute } from "@/app/search";
 import { reevaluate } from "@/lib/commands/actions";
+import { toast } from "@/ui/primitives/toast";
 import type { AthenaData } from "@/lib/store/state";
 import { EmptyState } from "@/ui/athena/EmptyState";
 import { Mono } from "@/ui/athena/Mono";
@@ -16,6 +17,7 @@ import { Select } from "@/ui/primitives/select";
 import { filteredText, type OutcomePart, parseOutcome } from "./outcome";
 import { RoutingSearch, useShown } from "./shared";
 import type { FilterParams } from "../tickets/Filters";
+import type { RoutingKey } from "./Routing";
 import { useCommand } from "./useCommand";
 
 export const TRIGGER_OUTCOMES = [
@@ -31,6 +33,7 @@ export type TriggerFilter = { outcome?: string; q?: string };
 /** The Triggers the filter keeps, newest first. */
 export function selectTriggers(triggers: AthenaData["triggers"], f: TriggerFilter): TriggerView[] {
   const q = f.q?.trim().toLowerCase();
+  const onThread = threadMatcher(f.q ?? "");
   const ms = (t: TriggerView) => (t.at ? timestampMs(t.at) : 0);
   return [...triggers.values()]
     .filter((t) => {
@@ -39,7 +42,8 @@ export function selectTriggers(triggers: AthenaData["triggers"], f: TriggerFilte
         if (f.outcome === "none" ? kinds.size > 0 : !kinds.has(f.outcome as OutcomePart["kind"])) return false;
       }
       if (!q) return true;
-      return [t.text, t.id, t.source, t.actor, t.thread].some((v) => v.toLowerCase().includes(q));
+      // The Thread is matched as search() matches it: a GitHub URL or #12 finds that reference.
+      return [t.text, t.id, t.source, t.actor].some((v) => v.toLowerCase().includes(q)) || onThread(t.thread);
     })
     .sort((a, b) => ms(b) - ms(a));
 }
@@ -55,9 +59,17 @@ function TicketLinks({ ids }: { ids: string[] }) {
   ));
 }
 
-function Outcome({ outcome }: { outcome: string }) {
-  const parts = parseOutcome(outcome);
-  if (parts.length === 0) return <span className="text-muted">No outcome yet</span>;
+function Outcome({ outcome, owner }: { outcome: string; owner: boolean }) {
+  const all = parseOutcome(outcome);
+  // A Ticket a Trigger was attached to also reached it (Engine.Attach sets both): say "Attached" only.
+  const attached = new Set(all.flatMap((p) => (p.kind === "attached" ? p.tickets : [])));
+  const parts = all.flatMap((p): OutcomePart[] => {
+    if (p.kind !== "reached") return [p];
+    const tickets = p.tickets.filter((id) => !attached.has(id));
+    return tickets.length > 0 ? [{ kind: "reached", tickets }] : [];
+  });
+  // The owner's own message is never routed: before the server recorded where it went, it has no outcome at all.
+  if (parts.length === 0) return <span className="text-muted">{owner ? "Sent by you" : "No outcome yet"}</span>;
   return (
     <>
       {parts.map((p, i) => (
@@ -65,7 +77,7 @@ function Outcome({ outcome }: { outcome: string }) {
           {p.kind === "filtered" && filteredText(p.code)}
           {p.kind === "reached" && (
             <>
-              Reached <TicketLinks ids={p.tickets} />
+              {owner ? "Sent to" : "Reached"} <TicketLinks ids={p.tickets} />
             </>
           )}
           {p.kind === "attached" && (
@@ -87,6 +99,7 @@ function Outcome({ outcome }: { outcome: string }) {
 
 function Row({ trigger, selected, again }: { trigger: TriggerView; selected: boolean; again: boolean }) {
   const { busy, run } = useCommand("Could not evaluate again");
+  const [sent, setSent] = useState(false);
   const el = useRef<HTMLLIElement>(null);
   useEffect(() => {
     if (selected) el.current?.scrollIntoView?.({ block: "nearest" });
@@ -119,16 +132,27 @@ function Row({ trigger, selected, again }: { trigger: TriggerView; selected: boo
           {trigger.thread}
         </Link>
       )}
-      <p dir="auto" className="min-w-0 truncate">
+      <p dir="auto" title={trigger.text} className="min-w-0 break-words">
         {trigger.text}
       </p>
       <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-sm">
-        <Outcome outcome={trigger.outcome} />
-        {again && (
-          <Button size="sm" disabled={busy} onClick={() => void run(() => reevaluate(trigger.id))}>
+        <Outcome outcome={trigger.outcome} owner={trigger.source === "owner"} />
+        {again && !sent && (
+          <Button
+            size="sm"
+            disabled={busy}
+            onClick={() =>
+              void run(() => reevaluate(trigger.id)).then((ok) => {
+                if (!ok) return;
+                setSent(true);
+                toast({ title: "Queued for a fresh Eval" });
+              })
+            }
+          >
             Evaluate again
           </Button>
         )}
+        {again && sent && <span className="text-muted">Queued for a fresh Eval</span>}
       </div>
     </li>
   );
@@ -141,7 +165,7 @@ export function Triggers({
   selected,
   again,
 }: {
-  params: FilterParams;
+  params: FilterParams<RoutingKey>;
   rows: TriggerView[];
   total: number;
   selected?: string;
@@ -153,6 +177,10 @@ export function Triggers({
   const list = useMemo(() => rows.slice(0, shown), [rows, shown]);
   return (
     <div>
+      <p className="max-w-prose px-4 pt-4 text-muted">
+        Every message that reached Athena, from you or from GitHub, and what became of it: a new Ticket, added to one, or
+        set aside and why.
+      </p>
       <div className="grid gap-2 p-4 sm:grid-cols-2">
         <Select aria-label="Outcome" value={params.get("outcome")} onChange={(e) => params.set("outcome", e.target.value)}>
           <option value="">All outcomes</option>
@@ -166,7 +194,7 @@ export function Triggers({
       </div>
       {total === 0 ? (
         <div className="px-4">
-          <EmptyState title="No Triggers yet." description="Messages Athena receives, from GitHub for example, appear here." />
+          <EmptyState title="No Triggers yet." description="Nothing has arrived yet. Messages you send and GitHub mentions of the App show up here." />
         </div>
       ) : rows.length === 0 ? (
         <div className="px-4">

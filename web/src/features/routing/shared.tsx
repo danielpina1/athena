@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Input } from "@/ui/primitives/input";
 import type { FilterParams } from "../tickets/Filters";
+import type { RoutingKey } from "./Routing";
 
 /** Lists render at most this many rows, then "Show more". */
 export const PAGE = 200;
@@ -20,15 +21,15 @@ export function RoutingSearch({
   label,
   placeholder,
 }: {
-  params: FilterParams;
-  param: string;
+  params: FilterParams<RoutingKey>;
+  param: RoutingKey;
   label: string;
   placeholder: string;
 }) {
   return <Box key={params.external} params={params} param={param} label={label} placeholder={placeholder} />;
 }
 
-function Box({ params, param, label, placeholder }: { params: FilterParams; param: string; label: string; placeholder: string }) {
+function Box({ params, param, label, placeholder }: { params: FilterParams<RoutingKey>; param: RoutingKey; label: string; placeholder: string }) {
   const [text, setText] = useState(() => params.get(param));
   return (
     <Input

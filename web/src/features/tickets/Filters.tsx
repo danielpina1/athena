@@ -57,13 +57,13 @@ export function hasFilters(sp: URLSearchParams): boolean {
   return KEYS.some((k) => sp.get(k));
 }
 
-export type FilterParams = {
+export type FilterParams<K extends string = (typeof KEYS)[number]> = {
   sp: URLSearchParams;
   /** Bumps when the URL changed from outside (back/forward, a link): local copies of it re-seed. */
   external: number;
-  set(key: string, value: string): void;
+  set(key: K, value: string): void;
   /** Removes the filters' parameters (the hook's own keys, or `keys`). */
-  clear(keys?: readonly string[]): void;
+  clear(keys?: readonly K[]): void;
   /** A parameter as last written or read: newer than `sp` while a write is still in its transition. */
   get(key: string): string;
   /** The search text (`q`) as last written or read. */
@@ -76,7 +76,8 @@ export type FilterParams = {
  * two changes before a commit both survive. A change that is not one of our own writes re-reads the URL. `own` names
  * the parameters clear() removes (the Routing page passes its three tabs' filters).
  */
-export function useFilterParams(own: readonly string[] = KEYS): FilterParams {
+export function useFilterParams<K extends string = (typeof KEYS)[number]>(own?: readonly K[]): FilterParams<K> {
+  const ownKeys: readonly string[] = own ?? KEYS;
   const [sp, setSp] = useSearchParams();
   const routerKey = sp.toString();
   const latest = useRef(new URLSearchParams(routerKey));
@@ -113,9 +114,9 @@ export function useFilterParams(own: readonly string[] = KEYS): FilterParams {
     },
     get: (key) => latest.current.get(key) ?? "",
     query: () => latest.current.get("q") ?? "",
-    clear(keys = own) {
+    clear(keys) {
       const next = new URLSearchParams(latest.current);
-      for (const k of keys) next.delete(k);
+      for (const k of keys ?? ownKeys) next.delete(k);
       write(next);
       setExternal((n) => n + 1); // the search box shows the cleared text
     },

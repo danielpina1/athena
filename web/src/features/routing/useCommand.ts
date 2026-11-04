@@ -10,13 +10,15 @@ import { toast } from "@/ui/primitives/toast";
 export function useCommand(failed: string) {
   const [busy, setBusy] = useState(false);
   const running = useRef(false);
-  const run = async (send: () => Promise<CommandResult>) => {
-    if (running.current) return;
+  /** Resolves true when the command succeeded. */
+  const run = async (send: () => Promise<CommandResult>): Promise<boolean> => {
+    if (running.current) return false;
     running.current = true;
     setBusy(true);
     try {
       const r = await send();
       if (!r.ok) toast({ title: failed, description: errorMessage(r.code), tone: "danger" });
+      return r.ok;
     } finally {
       running.current = false;
       setBusy(false);
