@@ -117,7 +117,7 @@ func runDiffGit(ctx context.Context, dir string, env []string, limit int, args .
 //   - GIT_NO_REPLACE_OBJECTS and an empty graft file, so refs/replace/* and info/grafts cannot change what the owner
 //     reads in the diff or where its base is.
 func diffEnv() []string {
-	env := withGitConfig(nodeGitBaseEnv(), append(slices.Clone(noHooks), [][2]string{{"protocol.allow", "never"}, {"credential.helper", ""}}...))
+	env := withGitConfig(nodeGitBaseEnv(), append(slices.Clone(noHooks), [][2]string{{"protocol.allow", "never"}, {"credential.helper", ""}, {"advice.graftFileDeprecated", "false"}}...))
 	return append(env, "GIT_NO_LAZY_FETCH=1", "GIT_NO_REPLACE_OBJECTS=1", "GIT_GRAFT_FILE="+os.DevNull)
 }
 
@@ -347,11 +347,13 @@ func (n *Node) TicketFiles(ticketID string) ([]FileEntry, bool, error) {
 	defer root.Close()
 	deadline := time.Now().Add(walkTimeout)
 	files := []FileEntry{}
+	capped := false
 	finish := func(truncated bool) ([]FileEntry, bool, error) {
 		sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
 		return files, truncated, nil
 	}
 	queue := []string{"."}
+	queued := 1 // directories queued so far, visited or not
 	for dirs := 0; len(queue) > 0; dirs++ {
 		if dirs == maxWalkDirs || time.Now().After(deadline) {
 			return finish(true)
@@ -373,6 +375,11 @@ func (n *Node) TicketFiles(ticketID string) ([]FileEntry, bool, error) {
 				}
 				switch {
 				case e.IsDir():
+					if queued == maxWalkDirs {
+						capped = true // this directory is never visited
+						continue
+					}
+					queued++
 					queue = append(queue, rel)
 				case e.Type().IsRegular() && !multiLinked(info):
 					if len(files) == maxFileEntries {
@@ -392,7 +399,7 @@ func (n *Node) TicketFiles(ticketID string) ([]FileEntry, bool, error) {
 		}
 		d.Close()
 	}
-	return finish(false)
+	return finish(capped)
 }
 
 // OpenTicketFile opens a regular file of a Ticket placed without a repository, by its relative path. Nothing outside

@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -323,6 +324,47 @@ func TestTicketDiffIgnoresReplaceRefsAndGrafts(t *testing.T) {
 	}
 }
 
+func TestTicketDiffNeverLazyFetches(t *testing.T) {
+	n, wt := diffNode(t)
+	repo := filepath.Dir(git(t, wt, "rev-parse", "--path-format=absolute", "--git-common-dir"))
+	// A bare repository holds a blob the Ticket's repository lacks; the repository names it as a promisor remote and
+	// allows file transport at its own scope, which overrides any command-scope protocol.allow=never.
+	bare := t.TempDir()
+	git(t, bare, "init", "-q", "--bare")
+	git(t, bare, "config", "uploadpack.allowAnySHA1InWant", "true")
+	cmd := exec.Command("git", "-C", bare, "hash-object", "-w", "--stdin")
+	cmd.Stdin = strings.NewReader("only in the promisor\n")
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	blob := strings.TrimSpace(string(out))
+	git(t, repo, "config", "remote.p.url", bare)
+	git(t, repo, "config", "remote.p.promisor", "true")
+	git(t, repo, "config", "protocol.file.allow", "always")
+
+	// A commit on the Ticket's branch whose tree names the missing blob.
+	mk := exec.Command("git", "-C", repo, "mktree", "--missing")
+	mk.Stdin = strings.NewReader("100644 blob " + blob + "\tf\n")
+	tree, err := mk.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	commit := git(t, repo, "commit-tree", strings.TrimSpace(string(tree)), "-p", git(t, repo, "rev-parse", "athena/t-0001"), "-m", "lazy")
+	git(t, repo, "update-ref", "refs/heads/athena/t-0001", commit)
+
+	_, derr := n.TicketDiff(context.Background(), "T-0001")
+	// Look without fetching ourselves.
+	t.Setenv("GIT_NO_LAZY_FETCH", "1")
+	present := exec.Command("git", "-C", repo, "cat-file", "-e", blob).Run() == nil
+	if present {
+		t.Fatal("the diff fetched the blob from the repository's promisor remote")
+	}
+	if derr == nil {
+		t.Fatal("the diff of a missing object succeeded")
+	}
+}
+
 func TestTicketDiffStatCutDropsUncountedFiles(t *testing.T) {
 	raw := ":100644 100644 a b M\x00one\x00:100644 100644 a b M\x00two\x003\t1\tone\x004\t"
 	files := parseDiffStat([]byte(raw), true)
@@ -348,5 +390,16 @@ func TestOpenTicketFileRefusesHardLinks(t *testing.T) {
 	files, _, _ := n.TicketFiles("T-0002")
 	if len(files) != 1 || files[0].Path != "plain" {
 		t.Fatalf("files = %+v", files)
+	}
+}
+
+func TestTicketFilesDirectoryQueueCapped(t *testing.T) {
+	n, dir := filesNode(t)
+	for i := range maxWalkDirs + 50 {
+		writeFile(t, filepath.Join(dir, "d"+strings.Repeat("0", 4-len(strconv.Itoa(i)))+strconv.Itoa(i), "f"), "")
+	}
+	files, truncated, err := n.TicketFiles("T-0002")
+	if err != nil || !truncated || len(files) >= maxWalkDirs+50 {
+		t.Fatalf("err=%v truncated=%v files=%d", err, truncated, len(files))
 	}
 }

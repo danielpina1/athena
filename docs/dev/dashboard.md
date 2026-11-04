@@ -204,8 +204,8 @@ is the reference client.
     at most 1000 regular files in at most 2000 directories (and 10 s of walking), breadth-first, sorted by path;
     `truncated` says a cap was hit. `.athena/` (any letter case), symlinks and hard-linked files are left out.
   - `/api/tickets/{id}/files/{path...}`: the file as an attachment (`Content-Type: application/octet-stream`,
-    `X-Content-Type-Options: nosniff`). Paths outside the Ticket's directory, under `.athena/` (any letter case), through a symlink or hard-linked
-    files are 404.
+    `X-Content-Type-Options: nosniff`). Paths outside the Ticket's directory, under `.athena/` (any letter case), through a symlink, or to a
+    hard-linked file are 404.
 - **Close codes.** The server closes a connection with one of these:
 
   | Code | Meaning | Client action |
