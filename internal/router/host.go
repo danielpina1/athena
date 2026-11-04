@@ -60,6 +60,18 @@ var effectBackoff = effects.Backoff{First: 2 * time.Second, Max: 60 * time.Secon
 
 var errNotRunning = errors.New("router: the router session is not running")
 
+// stoppingPause is how long a message whose effect runs while the Host stops is put off: the next server's Host sends
+// it; the attempt is no failure (Minor 7: the Host stops before the effects drain).
+const stoppingPause = 5 * time.Second
+
+// notRunning is the error of a message that finds no session: put off while the Host stops, else errNotRunning.
+func (h *Host) notRunning() error {
+	if h.isStopped() {
+		return effects.Later(stoppingPause)
+	}
+	return errNotRunning
+}
+
 // KV is where the router keeps its session id; *store.Store is one.
 type KV interface {
 	KVGet(key string) (string, bool, error)
@@ -393,7 +405,7 @@ func (h *Host) session(ctx context.Context) (*claude.Session, error) {
 			return sess, nil
 		}
 		if stopped {
-			return nil, errNotRunning
+			return nil, h.notRunning()
 		}
 		select {
 		case <-up:
@@ -433,7 +445,7 @@ func (h *Host) deliver(ctx context.Context, text string) error {
 	sess := h.sess
 	h.mu.Unlock()
 	if sess == nil {
-		return errNotRunning
+		return h.notRunning()
 	}
 	held, err := h.fx.Pending(core.EffectNotice)
 	if err != nil {
@@ -459,6 +471,9 @@ func (h *Host) deliver(ctx context.Context, text string) error {
 	}
 	if err := sess.SendMessage(msg, id); err != nil {
 		h.unsent(id)
+		if h.isStopped() {
+			return h.notRunning()
+		}
 		return fmt.Errorf("router: send: %w", err)
 	}
 	for _, n := range held {

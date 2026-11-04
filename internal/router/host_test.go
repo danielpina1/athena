@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -671,5 +672,25 @@ func TestRecoveryResendNoDuplicate(t *testing.T) {
 	msgs := e.messages()
 	if count(msgs, `"second"`) != 1 || count(msgs, `"first"`) != 2 || !strings.HasPrefix(msgs[1], recoveryNote) {
 		t.Fatalf("messages = %q, want the resend first and each relay once more at most", msgs)
+	}
+}
+
+// Minor 7: a message whose effect runs while the server stops (the Host stopped before the effects drained) is put
+// off, not counted as a failed attempt, so repeated restarts never push the router's kinds into health.
+func TestStoppedHostPutsMessagesOff(t *testing.T) {
+	e := newEnv(t)
+	tk := e.accept("github:issuecomment:1", "github:o/r#1")
+	e.start()
+	e.eventually("the session", func() bool { return e.host.Health() == nil })
+	e.host.Stop()
+	if err := e.host.deliver(context.Background(), "late"); !errors.Is(err, effects.ErrLater) {
+		t.Fatalf("deliver after Stop = %v, want effects.Later", err)
+	}
+	e.must(e.eng.FileReport(tk.ID, core.ReportInput{State: core.ReportBlocked, Summary: "stuck at shutdown"}))
+	time.Sleep(300 * time.Millisecond)
+	rows, err := e.fx.Pending(core.EffectRelay)
+	e.must(err)
+	if len(rows) != 1 || rows[0].Attempts != 0 {
+		t.Fatalf("relay rows = %+v, want one kept with no failed attempt", rows)
 	}
 }
