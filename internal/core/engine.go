@@ -764,10 +764,16 @@ func (o *op) end(t *Ticket, by TicketEndBy, outcome TicketOutcome, reason string
 }
 
 // endAt is end with the time the ending fact happened, such as a pull request's close, which may be earlier than now;
-// the Ticket's last change and its Assignments' ends are still now.
+// the Ticket's last change and its Assignments' ends are still now. Every end lets go of the person's follow-ups its
+// worker did not read or take up, which go to Eval when no other Ticket decides them (see letGo).
 func (o *op) endAt(t *Ticket, by TicketEndBy, outcome TicketOutcome, reason string, at time.Time) error {
 	if t.Ended != nil {
 		return nil
+	}
+	// What the Ticket lets go of is worked out while it is still live, as its own follow-ups.
+	waiting, left, err := o.unread(t)
+	if err != nil {
+		return err
 	}
 	if err := o.expireTicketApprovals(t); err != nil {
 		return err
@@ -790,6 +796,9 @@ func (o *op) endAt(t *Ticket, by TicketEndBy, outcome TicketOutcome, reason stri
 	t.UpdatedAt = o.at
 	t.Attention = nil
 	t.Delivery = nil
+	if err := o.letGo(t, waiting, left); err != nil {
+		return err
+	}
 	runtime, model := runtimeModel(t, t.LatestAssignment())
 	if o.reg != nil {
 		o.observe(func(r *metrics.Registry) {

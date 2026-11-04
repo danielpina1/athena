@@ -274,7 +274,7 @@ func (e *Engine) ThreadClosed(thread string, outcome TicketOutcome, at time.Time
 // unfinished reports whether a Ticket's work has not finished at a close at `at`: its worker took up, by acknowledging
 // or answering it, a person's follow-up the Ticket owns and has not reported other than progress, or ended a turn,
 // since its Session took that message into a step; or work resumed after the close (its Assignment was created after
-// it) has no ready report, or Inputs wait or arrived after that report.
+// it) has no ready report, or Inputs other than notes wait or arrived after that report.
 func (o *op) unfinished(t *Ticket, at time.Time) (bool, error) {
 	until := readUntil(t, false)
 	lookup := func(id string) (*Ticket, error) {
@@ -315,7 +315,9 @@ func (o *op) unfinished(t *Ticket, at time.Time) (bool, error) {
 		return true, nil
 	}
 	for _, in := range t.Inputs {
-		if in.At.After(r.At) {
+		// A note, such as a Policy change's notice, asks for no work (the reference leaves out its policy-changed
+		// Input; notes from the main Session ask for nothing either).
+		if in.Kind != InputNote && in.At.After(r.At) {
 			return true, nil
 		}
 	}

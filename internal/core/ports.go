@@ -87,6 +87,10 @@ const (
 	EventApprovalAnswered  = "approval.answered"
 	EventTriggerReceived   = "trigger.received"
 	EventThreadSubscribed  = "thread.subscribed"
+	EventEvalStarted       = "eval.started"
+	EventDecisionRecorded  = "decision.recorded"
+	EventTriggerRequeued   = "trigger.requeued"
+	EventPolicyChanged     = "policy.changed"
 )
 
 // Event is what the Engine reports after a committed change.

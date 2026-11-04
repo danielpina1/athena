@@ -70,6 +70,8 @@ type Input struct {
 	At        time.Time `json:"at"`
 	TriggerID string    `json:"triggerId,omitempty"`
 	Text      string    `json:"text,omitempty"`
+	// Note is the main Session's routing note on a Trigger it attached to the Ticket.
+	Note string `json:"note,omitempty"`
 	// Human is set when a person wrote the Trigger.
 	Human bool `json:"human,omitempty"`
 	// Context is set when the Trigger reached the Ticket only on Threads it follows for context: the Ticket reads it

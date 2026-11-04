@@ -353,7 +353,8 @@ func TestContextSubscriptionNeitherOwnsNorResumes(t *testing.T) {
 	h.receive(late)
 	eq(t, "still ended", h.ticket(a).Ended != nil, true)
 	eq(t, "no input", len(inputsOf(h.ticket(a), late.ID)), 0)
-	eq(t, "late queued", h.queued(other), []string{tr.ID, late.ID})
+	// The ready end released c:2, the follow-up its worker never read, to Eval (Task 5's release on end).
+	eq(t, "late queued", h.queued(other), []string{tr.ID, both.ID, late.ID})
 }
 
 // Review Focus 2: another bot's message, or CI, reaches the subscribed Tickets as context and still goes to Eval.
