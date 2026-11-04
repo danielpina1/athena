@@ -6,6 +6,7 @@ afterEach(async () => {
   cleanup();
   // Imported late, so a test's mock of the commands is already in place when the module loads.
   (await import("@/lib/commands/useWatch")).__resetWatchesForTest();
+  (await import("@/lib/stream/useSessionStream")).__resetStreamsForTest();
 });
 
 // jsdom has <dialog> but not its methods: enough of showModal/close for components that use them.

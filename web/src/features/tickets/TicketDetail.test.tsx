@@ -231,10 +231,12 @@ test("the Changes tab loads the diff lazily", async () => {
   expect(fetchMock).toHaveBeenCalledWith("/api/tickets/T-1/diff", expect.anything());
 });
 
-test("the Session tab holds a place for the live session", async () => {
+test("the Session tab shows the live session and its composer", async () => {
   renderDetail("/tickets/T-1?tab=session");
   load({ tickets: [working] });
   expect(await screen.findByRole("heading", { name: "Session", level: 2 })).toBeTruthy();
+  expect(screen.getByRole("log", { name: "Session output" })).toBeTruthy();
+  expect(screen.getByRole("textbox", { name: "Reply to the session" })).toBeTruthy();
 });
 
 test("an unknown Ticket is not found, a loading store is a skeleton", async () => {
@@ -259,12 +261,22 @@ test("lost live details are said, and can resume", async () => {
   expect(screen.queryByText("Live details stopped for this Ticket.")).toBeNull();
 });
 
-test("reply from the header", async () => {
+test("reply from the header focuses the composer", async () => {
   const user = userEvent.setup();
   load({ tickets: [working] });
   renderDetail();
+  expect(screen.queryByRole("textbox", { name: "Reply to the session" })).toBeNull();
   await user.click(screen.getByRole("button", { name: "Reply" }));
-  await user.type(screen.getByRole("textbox", { name: "Your reply" }), "Use SQLite{Enter}");
+  const box = await screen.findByRole("textbox", { name: "Reply to the session" });
+  expect(screen.getByRole("tab", { name: "Session" }).getAttribute("aria-selected")).toBe("true");
+  await waitFor(() => expect(document.activeElement).toBe(box));
+  await user.keyboard("Use SQLite{Enter}");
   expect(reply).toHaveBeenCalledWith("T-1", "Use SQLite");
-  expect(await screen.findByText("Reply sent")).toBeTruthy();
+  await waitFor(() => expect((box as HTMLTextAreaElement).value).toBe(""));
+
+  // r does the same from anywhere outside a field.
+  await user.click(screen.getByRole("tab", { name: "Timeline" }));
+  expect(screen.queryByRole("textbox", { name: "Reply to the session" })).toBeNull();
+  await user.keyboard("r");
+  await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "Reply to the session" })));
 });

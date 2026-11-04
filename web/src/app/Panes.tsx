@@ -11,16 +11,21 @@ const LayoutContext = createContext<Layout>("phone");
 export const LayoutProvider = LayoutContext.Provider;
 export const useLayout = () => useContext(LayoutContext);
 
-/** Whether the viewport is desktop-wide, following resizes. */
-export function useIsDesktop(): boolean {
+/** Whether the media query matches, following resizes. */
+export function useMediaQuery(query: string): boolean {
   return useSyncExternalStore(
     (cb) => {
-      const mq = typeof window.matchMedia === "function" ? window.matchMedia(DESKTOP_QUERY) : undefined;
+      const mq = typeof window.matchMedia === "function" ? window.matchMedia(query) : undefined;
       mq?.addEventListener("change", cb);
       return () => mq?.removeEventListener("change", cb);
     },
-    () => (typeof window.matchMedia === "function" ? window.matchMedia(DESKTOP_QUERY).matches : false),
+    () => (typeof window.matchMedia === "function" ? window.matchMedia(query).matches : false),
   );
+}
+
+/** Whether the viewport is desktop-wide, following resizes. */
+export function useIsDesktop(): boolean {
+  return useMediaQuery(DESKTOP_QUERY);
 }
 
 export function Panes({ list, detail, showDetail = false }: { list?: ReactNode; detail: ReactNode; showDetail?: boolean }) {

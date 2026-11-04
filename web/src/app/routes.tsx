@@ -2,8 +2,9 @@
 // the task that builds each replaces it: New (13), Routing (14), Graph (15),
 // Nodes and Settings (17). /design and /enroll render outside the session gate (App.tsx).
 //
-// Query contracts the palette already uses: /tickets/:id?tab=session opens a Ticket's live session (Task 12), and
-// /routing?tab=triggers&trigger=<id> and /routing?tab=threads&thread=<key> open one record (Task 14).
+// Query contracts the palette already uses: /tickets/:id?tab=session opens a Ticket's live session, and
+// /routing?tab=triggers&trigger=<id> and /routing?tab=threads&thread=<key> open one record (Task 14). On the Ticket
+// views ?pin=T-1,T-2 pins sessions under the panes (1440 px and up).
 import {
   InboxIcon,
   ListIcon,
@@ -16,8 +17,9 @@ import {
 } from "lucide-react";
 import { lazy, type ReactNode, Suspense } from "react";
 import { Link, matchPath, Route, Routes, useParams } from "react-router";
-import { Panes } from "@/app/Panes";
+import { Panes, useLayout } from "@/app/Panes";
 import { NeedsYou } from "@/features/needs-you/NeedsYou";
+import { PinnedSessions } from "@/features/session/PinnedSessions";
 import { TicketDetail } from "@/features/tickets/TicketDetail";
 import { TicketList } from "@/features/tickets/TicketList";
 import { selectCounts } from "@/lib/store/selectors";
@@ -78,14 +80,23 @@ function NeedsYouView() {
   return <Panes detail={<NeedsYou />} />;
 }
 
+/** The Ticket panes; on the desktop the pinned sessions (1440 px and up) sit under them. */
 function TicketsView() {
   const { id } = useParams();
-  return (
+  const layout = useLayout();
+  const panes = (
     <Panes
       list={<TicketList selectedId={id} />}
       detail={id ? <TicketDetail key={id} id={id} /> : <NothingSelected what="Ticket" />}
       showDetail={id !== undefined}
     />
+  );
+  if (layout === "phone") return panes;
+  return (
+    <div className="flex min-w-0 flex-1 flex-col">
+      <div className="flex min-h-0 flex-1">{panes}</div>
+      <PinnedSessions />
+    </div>
   );
 }
 

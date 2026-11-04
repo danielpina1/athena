@@ -9,10 +9,12 @@
 //   - expectAccessible(page): axe on the current screen; any serious or critical violation fails.
 //   - session.requestApproval(ticket, tool, input) and session.report(ticket, state, text, question?): act as the
 //     Ticket's worker session through sessionctl (internal/testutil/sessionctl), on the real hook and MCP paths.
+//   - laterFixture(ticket, lines) and stdinLog(ticket): what the Ticket's fakeclaude prints after each later message
+//     (a reply), and what it has read on stdin.
 //
-// Every Ticket's session runs fakeclaude replaying ATHENA_FAKE_FIXTURE (global-setup.ts): a turn that never ends.
+// Every Ticket's session runs fakeclaude replaying the default fixture (global-setup.ts): a turn that never ends.
 import { execFile, spawn, type ChildProcess } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import AxeBuilder from "@axe-core/playwright";
@@ -42,6 +44,20 @@ export async function enrollLink(): Promise<string> {
   const link = ENROLL_LINK.exec(await athena("web", "enroll"))?.[0];
   if (!link) throw new Error("athena web enroll printed no link");
   return link;
+}
+
+/**
+ * Gives the Ticket's fakeclaude stream-json lines to print after each message it reads after the first (a reply from
+ * the dashboard, say). Write it before that message is sent.
+ */
+export function laterFixture(ticket: string, lines: object[]): void {
+  writeFileSync(join(env("ATHENA_E2E_STATE"), `later-${ticket}.jsonl`), lines.map((l) => JSON.stringify(l) + "\n").join(""));
+}
+
+/** Every line the Ticket's fakeclaude has read on stdin so far ("" before the session started). */
+export function stdinLog(ticket: string): string {
+  const file = join(env("ATHENA_E2E_STATE"), `stdin-${ticket}.log`);
+  return existsSync(file) ? readFileSync(file, "utf8") : "";
 }
 
 /** Fails on any serious or critical axe violation on the current screen. */

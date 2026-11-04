@@ -31,15 +31,26 @@ export function readFilters(sp: URLSearchParams): TicketFilter {
   };
 }
 
-/** The query string carrying only the filters ("" when there are none): a row's link keeps them, never the tab. */
+/** The pinned sessions' parameter (?pin=T-1,T-2, features/session/PinnedSessions): rows keep it like the filters. */
+export const PIN_PARAM = "pin";
+
+/** sp as a query string ("" when empty), with commas left readable (?pin=T-1,T-2): they need no escaping there. */
+export function searchOf(sp: URLSearchParams): string {
+  const s = sp.toString().replace(/%2C/gi, ",");
+  return s ? `?${s}` : "";
+}
+
+/**
+ * The query string carrying only the filters and the pins ("" when there are none): a row's link keeps them, never
+ * the tab.
+ */
 export function filterSearch(sp: URLSearchParams): string {
   const out = new URLSearchParams();
-  for (const k of KEYS) {
+  for (const k of [...KEYS, PIN_PARAM]) {
     const v = sp.get(k);
     if (v) out.set(k, v);
   }
-  const s = out.toString();
-  return s ? `?${s}` : "";
+  return searchOf(out);
 }
 
 export function hasFilters(sp: URLSearchParams): boolean {

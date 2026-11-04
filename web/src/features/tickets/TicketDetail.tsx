@@ -1,15 +1,19 @@
 // One Ticket: its header with the actions, what it waits on (the Needs you cards, inline), its facts and its tabs:
-// Session (Task 12), Timeline, and Changes (a Ticket with a branch) or Files (one without a repository). The Ticket's
-// detail Deltas come from useWatch for as long as the page is open.
+// Session (the live session and its composer), Timeline, and Changes (a Ticket with a branch) or Files (one without a
+// repository). The Ticket's detail Deltas come from useWatch for as long as the page is open. The header's Reply (and
+// r) opens the Session tab and puts the cursor in the composer; replying is the composer's.
 import { ArrowLeftIcon } from "lucide-react";
-import { lazy, Suspense, useRef, useState, type KeyboardEvent } from "react";
+import { lazy, Suspense, useCallback, useState } from "react";
 import { Link, useLocation, useSearchParams } from "react-router";
 import type { ApprovalView, TicketSummary } from "@/gen/athena/v1/state_pb";
 import { AnswerCard } from "@/features/needs-you/AnswerCard";
 import { ApprovalCard } from "@/features/needs-you/ApprovalCard";
 import { stopTicket } from "@/features/needs-you/stopTicket";
 import { useShortcut } from "@/app/shortcuts";
-import { errorMessage, interrupt, reply, retry } from "@/lib/commands/actions";
+import { Composer, interruptSession } from "@/features/session/Composer";
+import { PinToggle } from "@/features/session/PinnedSessions";
+import { SessionView } from "@/features/session/SessionView";
+import { errorMessage, retry } from "@/lib/commands/actions";
 import { useWatch } from "@/lib/commands/useWatch";
 import { useAthena } from "@/lib/store/state";
 import { stripAnsi } from "@/lib/text/ansi";
@@ -19,7 +23,6 @@ import { StageBadge } from "@/ui/athena/StageBadge";
 import { Button } from "@/ui/primitives/button";
 import { Skeleton } from "@/ui/primitives/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/ui/primitives/tabs";
-import { Textarea } from "@/ui/primitives/textarea";
 import { toast } from "@/ui/primitives/toast";
 import { ListSkeleton } from "./ArtifactFailure";
 import { Facts } from "./Facts";
@@ -46,55 +49,8 @@ function useApprovalOf(ticket: TicketSummary | undefined): ApprovalView | undefi
   });
 }
 
-function Reply({ ticketId, onSent, onCancel }: { ticketId: string; onSent(): void; onCancel(): void }) {
-  const [text, setText] = useState("");
-  const [sending, setSending] = useState(false);
-  const busy = useRef(false);
-  const send = async () => {
-    const t = text.trim();
-    if (!t || busy.current) return;
-    busy.current = true;
-    setSending(true);
-    const r = await reply(ticketId, t).finally(() => {
-      busy.current = false;
-    });
-    setSending(false);
-    if (r.ok) onSent();
-    else toast({ title: "Reply not sent", description: errorMessage(r.code), tone: "danger" });
-  };
-  const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key !== "Enter" || e.shiftKey || e.metaKey || e.ctrlKey || e.nativeEvent.isComposing) return;
-    e.preventDefault();
-    if (!e.repeat) void send();
-  };
-  return (
-    <div className="grid gap-2">
-      <Textarea
-        aria-label="Your reply"
-        autoFocus
-        rows={2}
-        value={text}
-        disabled={sending}
-        onChange={(e) => setText(e.target.value)}
-        onKeyDown={onKeyDown}
-        placeholder="Enter sends, Shift+Enter adds a line"
-      />
-      <div className="grid grid-cols-2 gap-3">
-        <Button onClick={onCancel} disabled={sending}>
-          Cancel
-        </Button>
-        <Button variant="primary" onClick={() => void send()} disabled={sending || text.trim() === ""}>
-          Send reply
-        </Button>
-      </div>
-    </div>
-  );
-}
-
-function Header({ ticket, back }: { ticket: TicketSummary; back: string }) {
+function Header({ ticket, back, onReply }: { ticket: TicketSummary; back: string; onReply(): void }) {
   const stopping = useAthena((s) => s.stopping.has(ticket.id));
-  // The reply box is closed, open (a fresh one each time Reply is pressed), or done.
-  const [replyBox, setReply] = useState<"closed" | "open" | "sent">("closed");
   const ended = ticket.stage === "ended";
   const working = ticket.stage === "working";
 
@@ -103,11 +59,10 @@ function Header({ ticket, back }: { ticket: TicketSummary; back: string }) {
     if (r.ok) toast({ title: done });
     else toast({ title: failed, description: errorMessage(r.code), tone: "danger" });
   };
-  const doInterrupt = () => void run("Interrupted", "Not interrupted", interrupt(ticket.id));
+  const doInterrupt = () => void interruptSession(ticket.id);
 
-  const openReply = () => setReply("open");
   // r replies, ⌘⏎ interrupts; a Needs you card in focus keeps its own r.
-  useShortcut("r", openReply, {
+  useShortcut("r", onReply, {
     when: () => !ended && !document.activeElement?.closest("[data-needs-you-card]"),
   });
   useShortcut("mod+Enter", doInterrupt, { when: () => working });
@@ -132,7 +87,7 @@ function Header({ ticket, back }: { ticket: TicketSummary; back: string }) {
       </div>
       <div className="flex flex-wrap gap-2">
         {!ended && (
-          <Button onClick={openReply} aria-keyshortcuts="r">
+          <Button onClick={onReply} aria-keyshortcuts="r">
             Reply
           </Button>
         )}
@@ -152,13 +107,8 @@ function Header({ ticket, back }: { ticket: TicketSummary; back: string }) {
             Interrupt
           </Button>
         )}
+        <PinToggle ticketId={ticket.id} />
       </div>
-      {replyBox === "open" && <Reply ticketId={ticket.id} onSent={() => setReply("sent")} onCancel={() => setReply("closed")} />}
-      {replyBox === "sent" && (
-        <p role="status" className="border-t border-line pt-3 font-semibold">
-          Reply sent
-        </p>
-      )}
     </header>
   );
 }
@@ -178,7 +128,15 @@ function DetailSkeleton() {
   );
 }
 
-function TicketTabs({ ticket }: { ticket: TicketSummary }) {
+function TicketTabs({
+  ticket,
+  focusComposer,
+  onComposerFocused,
+}: {
+  ticket: TicketSummary;
+  focusComposer: boolean;
+  onComposerFocused(): void;
+}) {
   const [params, setParams] = useSearchParams();
   const { hash } = useLocation();
   const detail = useAthena((s) => s.details.get(ticket.id));
@@ -207,10 +165,9 @@ function TicketTabs({ ticket }: { ticket: TicketSummary }) {
         {third === "changes" && <TabsTrigger value="changes">Changes</TabsTrigger>}
         {third === "files" && <TabsTrigger value="files">Files</TabsTrigger>}
       </TabsList>
-      <TabsContent value="session" className="grid min-w-0 gap-1">
-        {/* Task 12 puts the live session here. */}
-        <h2 className="text-lg font-semibold">Session</h2>
-        <p className="text-muted">The live session appears here.</p>
+      <TabsContent value="session" className="grid min-w-0 gap-3">
+        <SessionView ticketId={ticket.id} />
+        <Composer ticket={ticket} focus={focusComposer} onFocused={onComposerFocused} />
       </TabsContent>
       <TabsContent value="timeline" className="min-w-0">
         {detail ? (
@@ -237,7 +194,9 @@ function TicketTabs({ ticket }: { ticket: TicketSummary }) {
 
 export function TicketDetail({ id }: { id: string }) {
   const { lost, resume } = useWatch(id);
-  const [params] = useSearchParams();
+  const [params, setParams] = useSearchParams();
+  const [focusComposer, setFocusComposer] = useState(false);
+  const onComposerFocused = useCallback(() => setFocusComposer(false), []);
   const summary = useAthena((s) => s.tickets.get(id) ?? s.details.get(id)?.summary);
   const detail = useAthena((s) => s.details.get(id));
   const loaded = useAthena((s) => s.epoch !== "");
@@ -259,9 +218,21 @@ export function TicketDetail({ id }: { id: string }) {
     );
   }
 
+  const reply = () => {
+    setParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        next.set("tab", "session");
+        return next;
+      },
+      { replace: true },
+    );
+    setFocusComposer(true);
+  };
+
   return (
     <article data-testid="ticket-detail" className={COLUMN}>
-      <Header ticket={summary} back={back} />
+      <Header ticket={summary} back={back} onReply={reply} />
       {lost && (
         <div role="status" className="flex flex-wrap items-center gap-3 rounded-xs border border-line px-3 py-2 text-sm">
           <span className="min-w-0 flex-1">Live details stopped for this Ticket.</span>
@@ -277,7 +248,7 @@ export function TicketDetail({ id }: { id: string }) {
         <AnswerCard key={summary.attentionQuestion} ticket={summary} header={false} />
       )}
       <Facts ticket={summary} threads={detail?.threads ?? []} />
-      <TicketTabs ticket={summary} />
+      <TicketTabs ticket={summary} focusComposer={focusComposer} onComposerFocused={onComposerFocused} />
     </article>
   );
 }

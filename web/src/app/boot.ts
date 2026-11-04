@@ -7,6 +7,7 @@ import { getSession, bindSession, signOut as endSession } from "@/lib/auth/sessi
 import { setOutbox } from "@/lib/commands/actions";
 import { connectOutbox, linkSender, Outbox } from "@/lib/commands/outbox";
 import { LinkClient } from "@/lib/link/client";
+import { connectStreams } from "@/lib/stream/useSessionStream";
 import { connectStore, useAthena } from "@/lib/store/state";
 import { toast } from "@/ui/primitives/toast";
 
@@ -203,6 +204,7 @@ export function boot(): Runtime {
     const scheme = location.protocol === "https:" ? "wss" : "ws";
     runtime = createRuntime({ url: `${scheme}://${location.host}/ws`, clientId: deviceClientId() });
     setOutbox(runtime.outbox);
+    connectStreams(runtime.client);
   }
   return runtime;
 }

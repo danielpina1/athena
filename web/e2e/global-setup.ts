@@ -1,9 +1,11 @@
 // Builds the dashboard and the binaries (into bin/e2e, never bin/athena), then runs one `athena server` for every spec: a temp state dir (under /tmp,
 // so the Unix socket paths stay short) whose config.json turns the dashboard on at http://localhost:<free port> with
 // TLS off and no GitHub source, and fakeclaude as the runtime (`athena server --claude`). fakeclaude replays
-// ATHENA_FAKE_FIXTURE, a turn that never ends, so every Ticket's session stays live, and logs each session's
-// environment to <state>/env-<ticket>.log (ATHENA_FAKE_ENV_LOG) for sessionctl. The harness reads the location from
-// ATHENA_E2E_* variables. Set ATHENA_E2E_KEEP=1 to keep the state dir (with server.log) afterwards.
+// <state>/fixture-<ticket>.jsonl, or fixture-default.jsonl (a turn that never ends, so every Ticket's session stays
+// live) when a spec wrote none; after each later message it replays <state>/later-<ticket>.jsonl if a spec wrote one
+// (R37: each spec gives its own Tickets their fixtures, see harness.ts). It logs each session's environment to
+// <state>/env-<ticket>.log (ATHENA_FAKE_ENV_LOG) for sessionctl and its stdin to <state>/stdin-<ticket>.log. The
+// harness reads the location from ATHENA_E2E_* variables. Set ATHENA_E2E_KEEP=1 to keep the state dir (with server.log) afterwards.
 import { execFileSync, spawn } from "node:child_process";
 import { closeSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
@@ -53,12 +55,17 @@ export default async function globalSetup() {
   );
   // A turn that never ends: the init line of a captured one, and no result.
   const captured = readFileSync(join(ROOT, "internal/runtime/claude/testdata/claude/simple-turn.jsonl"), "utf8");
-  const fixture = join(state, "open-turn.jsonl");
-  writeFileSync(fixture, captured.split("\n")[0] + "\n");
+  writeFileSync(join(state, "fixture-default.jsonl"), captured.split("\n")[0] + "\n");
 
   const log = openSync(join(state, "server.log"), "a");
   const server = spawn(join(BIN, "athena"), ["server", "--state-dir", state, "--claude", join(BIN, "fakeclaude")], {
-    env: { ...process.env, ATHENA_FAKE_FIXTURE: fixture, ATHENA_FAKE_ENV_LOG: join(state, "env-{ticket}.log") },
+    env: {
+      ...process.env,
+      ATHENA_FAKE_FIXTURE: join(state, "fixture-{ticket}.jsonl"),
+      ATHENA_FAKE_LATER_FIXTURE: join(state, "later-{ticket}.jsonl"),
+      ATHENA_FAKE_STDIN_LOG: join(state, "stdin-{ticket}.log"),
+      ATHENA_FAKE_ENV_LOG: join(state, "env-{ticket}.log"),
+    },
     stdio: ["ignore", log, log],
   });
   const exited = new Promise<void>((resolve) => server.once("exit", () => resolve()));
