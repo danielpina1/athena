@@ -114,7 +114,11 @@ func mountArtifacts(mux *http.ServeMux, auth *Auth, a Artifacts, log *slog.Logge
 		h := w.Header()
 		h.Set("Content-Type", "application/octet-stream")
 		h.Set("X-Content-Type-Options", "nosniff")
-		h.Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": path.Base(r.PathValue("path"))}))
+		disposition := mime.FormatMediaType("attachment", map[string]string{"filename": path.Base(r.PathValue("path"))})
+		if disposition == "" {
+			disposition = "attachment" // a name that cannot be quoted
+		}
+		h.Set("Content-Disposition", disposition)
 		http.ServeContent(w, r, "", st.ModTime(), f)
 	}))
 }

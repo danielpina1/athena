@@ -76,7 +76,7 @@ func TestWorkerSettingsCarrySandbox(t *testing.T) {
 		}
 	}
 	for _, p := range []string{
-		filepath.Join(common, "config"), filepath.Join(common, "hooks"),
+		filepath.Join(common, "config"), filepath.Join(common, "config.worktree"), filepath.Join(common, "hooks"),
 		filepath.Join(common, "worktrees", filepath.Base(dir), "config.worktree"),
 		filepath.Join(dir, ".athena", "settings.json"), filepath.Join(dir, ".athena", "mcp.json"), filepath.Join(dir, ".athena", ".gitignore"),
 	} {

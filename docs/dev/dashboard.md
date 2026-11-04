@@ -198,12 +198,14 @@ is the reference client.
   - `/api/tickets/{id}/diff` (a Ticket in a git repository): `{"base","branch","files":[{"path","oldPath"?,"status",
     "added","deleted","binary"}],"patch","truncated"}`. `branch` is `athena/<lowercased id>`; `base` is the
     merge-base with `origin/HEAD`, else with the repository's `HEAD`. `status` is `A`, `M`, `D`, `R`, `C` or `T`.
-    `patch` is cut at 2 MiB (`truncated`).
+    `patch` is cut at 2 MiB. `truncated` is set when the patch was cut, and also when the file list was (git's
+    file-list output passed 4 MiB: the files listed carry real counts, the rest are missing).
   - `/api/tickets/{id}/files` (a Ticket without a repository): `{"files":[{"path","size","modTime"}],"truncated"}`,
-    at most 1000 regular files, breadth-first, sorted by path; `.athena/` and symlinks are left out.
+    at most 1000 regular files in at most 2000 directories (and 10 s of walking), breadth-first, sorted by path;
+    `truncated` says a cap was hit. `.athena/` (any letter case), symlinks and hard-linked files are left out.
   - `/api/tickets/{id}/files/{path...}`: the file as an attachment (`Content-Type: application/octet-stream`,
-    `X-Content-Type-Options: nosniff`). Paths outside the Ticket's directory, under `.athena/` or through a symlink
-    are 404.
+    `X-Content-Type-Options: nosniff`). Paths outside the Ticket's directory, under `.athena/` (any letter case), through a symlink or hard-linked
+    files are 404.
 - **Close codes.** The server closes a connection with one of these:
 
   | Code | Meaning | Client action |

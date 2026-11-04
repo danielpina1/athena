@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -153,15 +154,18 @@ func TestTicketDiffNoShellNoCredentialsEnv(t *testing.T) {
 				t.Errorf("git inherited %s", name)
 			}
 		}
-		if !slices.Contains(c.env, "GIT_TERMINAL_PROMPT=0") {
-			t.Errorf("env lacks GIT_TERMINAL_PROMPT=0: %v", c.env)
+		for _, kv := range []string{"GIT_TERMINAL_PROMPT=0", "GIT_NO_LAZY_FETCH=1", "GIT_NO_REPLACE_OBJECTS=1", "GIT_GRAFT_FILE=" + os.DevNull,
+			"GIT_CONFIG_KEY_2=protocol.allow", "GIT_CONFIG_VALUE_2=never"} {
+			if !slices.Contains(c.env, kv) {
+				t.Errorf("env lacks %s: %v", kv, c.env)
+			}
 		}
 		if slices.Contains(c.args, "-c") || c.args[0] == "sh" || c.args[0] == "-c" {
 			t.Errorf("argv looks like a shell: %v", c.args)
 		}
 		if c.args[0] == "diff" {
 			diffs++
-			for _, flag := range []string{"--no-ext-diff", "--no-color", "--find-renames"} {
+			for _, flag := range []string{"--no-ext-diff", "--no-textconv", "--no-color", "--find-renames"} {
 				if !slices.Contains(c.args, flag) {
 					t.Errorf("diff lacks %s: %v", flag, c.args)
 				}
@@ -271,7 +275,7 @@ func TestOpenTicketFileRefusesEscape(t *testing.T) {
 		t.Fatalf("content %q", b)
 	}
 	f.Close()
-	for _, rel := range []string{"../x", "/etc/passwd", ".athena/socket", "./.athena/socket", "a/../.athena/socket", "", ".", "..", "esc", "viaathena/socket", "missing", "ok.txt/x"} {
+	for _, rel := range []string{"../x", "/etc/passwd", ".athena/socket", ".ATHENA/socket", ".Athena/socket", "./.athena/socket", "a/../.athena/socket", "", ".", "..", "esc", "viaathena/socket", "missing", "ok.txt/x"} {
 		if f, err := n.OpenTicketFile("T-0002", rel); !errors.Is(err, ErrNotFound) {
 			if f != nil {
 				f.Close()
@@ -281,5 +285,68 @@ func TestOpenTicketFileRefusesEscape(t *testing.T) {
 	}
 	if _, err := n.OpenTicketFile("T-9999", "ok.txt"); !errors.Is(err, ErrNoWorkspace) {
 		t.Fatalf("unknown Ticket: %v", err)
+	}
+}
+
+func TestTicketDiffIgnoresReplaceRefsAndGrafts(t *testing.T) {
+	n, wt := diffNode(t)
+	repo := filepath.Dir(git(t, wt, "rev-parse", "--path-format=absolute", "--git-common-dir"))
+	baseSHA := git(t, repo, "rev-parse", "HEAD")
+	writeFile(t, filepath.Join(wt, "f"), "real\n")
+	git(t, wt, "add", "-A")
+	git(t, wt, "commit", "-q", "-m", "one")
+	first := git(t, wt, "rev-parse", "HEAD")
+	writeFile(t, filepath.Join(wt, "g"), "more\n")
+	git(t, wt, "add", "-A")
+	git(t, wt, "commit", "-q", "-m", "two")
+
+	// A worker plants a replacement for the blob the owner would read, and a graft that cuts the branch off its base.
+	realBlob := git(t, wt, "rev-parse", "HEAD:f")
+	cmd := exec.Command("git", "-C", wt, "hash-object", "-w", "--stdin")
+	cmd.Stdin = strings.NewReader("fake\n")
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	git(t, wt, "replace", realBlob, strings.TrimSpace(string(out)))
+	writeFile(t, filepath.Join(repo, ".git", "info", "grafts"), first+"\n")
+
+	d, err := n.TicketDiff(context.Background(), "T-0001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Base != baseSHA {
+		t.Fatalf("base = %s, want %s (a graft moved it)", d.Base, baseSHA)
+	}
+	if !strings.Contains(d.Patch, "+real") || strings.Contains(d.Patch, "fake") {
+		t.Fatalf("patch shows the replacement: %q", d.Patch)
+	}
+}
+
+func TestTicketDiffStatCutDropsUncountedFiles(t *testing.T) {
+	raw := ":100644 100644 a b M\x00one\x00:100644 100644 a b M\x00two\x003\t1\tone\x004\t"
+	files := parseDiffStat([]byte(raw), true)
+	if len(files) != 1 || files[0].Path != "one" || files[0].Added != 3 || files[0].Deleted != 1 {
+		t.Fatalf("files = %+v", files)
+	}
+}
+
+func TestOpenTicketFileRefusesHardLinks(t *testing.T) {
+	n, dir := filesNode(t)
+	outside := filepath.Join(t.TempDir(), "o")
+	writeFile(t, outside, "o")
+	if err := os.Link(outside, filepath.Join(dir, "hard")); err != nil {
+		t.Skip(err)
+	}
+	writeFile(t, filepath.Join(dir, "plain"), "p")
+	if f, err := n.OpenTicketFile("T-0002", "hard"); !errors.Is(err, ErrNotFound) {
+		if f != nil {
+			f.Close()
+		}
+		t.Fatalf("hard link opened: %v", err)
+	}
+	files, _, _ := n.TicketFiles("T-0002")
+	if len(files) != 1 || files[0].Path != "plain" {
+		t.Fatalf("files = %+v", files)
 	}
 }
