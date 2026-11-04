@@ -11,6 +11,7 @@ import { timeOf, TicketHeader, useCardShortcut, useFocusWithin } from "./TicketH
 /** A question the session is waiting on, with the composer that answers it: Enter sends, Shift+Enter adds a line. */
 export function AnswerCard({ ticket }: { ticket: TicketSummary }) {
   const [text, setText] = useState("");
+  const busy = useRef(false);
   const [sending, setSending] = useState(false);
   const [sent, setSent] = useState(false);
   const box = useRef<HTMLTextAreaElement>(null);
@@ -20,9 +21,13 @@ export function AnswerCard({ ticket }: { ticket: TicketSummary }) {
 
   const send = async () => {
     const answer = text.trim();
-    if (!answer || sending) return;
+    // Two Enters before a re-render must not send twice.
+    if (!answer || busy.current) return;
+    busy.current = true;
     setSending(true);
-    const r = await reply(ticket.id, answer);
+    const r = await reply(ticket.id, answer).finally(() => {
+      busy.current = false;
+    });
     setSending(false);
     if (r.ok) {
       setText("");
@@ -35,6 +40,7 @@ export function AnswerCard({ ticket }: { ticket: TicketSummary }) {
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key !== "Enter" || e.shiftKey || e.nativeEvent.isComposing) return;
     e.preventDefault();
+    if (e.repeat) return;
     void send();
   };
 

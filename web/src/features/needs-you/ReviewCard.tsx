@@ -7,8 +7,19 @@ import { useAthena } from "@/lib/store/state";
 import { stopTicket } from "./stopTicket";
 import { timeOf, TicketHeader } from "./TicketHeader";
 
+/** The pull request link, only when it is an https GitHub address; anything else (javascript:, another host) is not linked. */
+export function safePrUrl(url: string): string | undefined {
+  try {
+    const u = new URL(url);
+    return u.protocol === "https:" && u.hostname === "github.com" ? u.href : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Finished work waiting for the owner's eyes: the pull request, or the local diff when there is none. */
 export function ReviewCard({ ticket }: { ticket: TicketSummary }) {
+  const prUrl = safePrUrl(ticket.prUrl);
   const stopping = useAthena((s) => s.stopping.has(ticket.id));
   return (
     <Card
@@ -29,8 +40,8 @@ export function ReviewCard({ ticket }: { ticket: TicketSummary }) {
           onConfirm={() => void stopTicket(ticket.id)}
         />
         <Button variant="accent" asChild>
-          {ticket.prUrl ? (
-            <a href={ticket.prUrl} target="_blank" rel="noopener">
+          {prUrl ? (
+            <a href={prUrl} target="_blank" rel="noopener">
               Open pull request
             </a>
           ) : (

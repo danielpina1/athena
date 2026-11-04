@@ -9,10 +9,11 @@ import { useAthena } from "@/lib/store/state";
 import { stopTicket } from "./stopTicket";
 import { timeOf, TicketHeader } from "./TicketHeader";
 
-const REASON: Record<string, string> = {
-  delivery: "The work is done but could not be delivered.",
-  blocked: "The session cannot go on without a change.",
-  failed: "The session failed before it finished.",
+// No cause is claimed: the summary does not carry one.
+const STOCK: Record<string, string> = {
+  delivery: "Delivery failed. Open the Ticket to see what happened.",
+  blocked: "Blocked. Open the Ticket to see why.",
+  failed: "Failed. Open the Ticket to see what happened.",
 };
 
 /** A Ticket that is stuck (delivery failed, blocked or failed): the reason, Retry when it can be retried, and Stop. */
@@ -35,7 +36,14 @@ export function StalledCard({ ticket }: { ticket: TicketSummary }) {
       className="grid gap-3"
     >
       <TicketHeader ticket={ticket} since={timeOf(ticket.updatedAt)} stopping={stopping} />
-      <Truncate text={ticket.attentionQuestion || REASON[ticket.action] || "It needs a look."} lines={4} />
+      {ticket.attentionQuestion ? (
+        <div className="grid gap-1">
+          <p className="font-mono text-xs text-muted">Last message</p>
+          <Truncate text={ticket.attentionQuestion} lines={4} />
+        </div>
+      ) : (
+        <p>{STOCK[ticket.action] ?? "Open the Ticket to see what happened."}</p>
+      )}
       <div className={ticket.canRetry ? "grid grid-cols-2 gap-3" : "grid gap-3"}>
         <Confirm
           label="Stop"

@@ -97,7 +97,7 @@ export function NeedsYou() {
         <>
           <ul ref={list} className="grid gap-3">
             {items.slice(0, shown).map((item) => (
-              <li key={item.ticket.id + ":" + item.kind} className="min-w-0">
+              <li key={item.approval ? `approval:${item.approval.id}` : `${item.kind}:${item.ticket.id}`} className="min-w-0">
                 <ItemCard item={item} />
               </li>
             ))}

@@ -1,6 +1,6 @@
 import { create, type MessageInitShape } from "@bufbuild/protobuf";
 import { timestampFromMs } from "@bufbuild/protobuf/wkt";
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
@@ -338,4 +338,87 @@ test("empty state copy", () => {
   expect(screen.getByText("Nothing needs you.")).toBeTruthy();
   expect(screen.getByText("Today: 1 working, 1 ended, 1 merged.")).toBeTruthy();
   expect(screen.getByText("0 need you · mac-studio · 1 of 4 running")).toBeTruthy();
+});
+
+test("a pr_url that is not an https GitHub address is not linked", () => {
+  load({
+    tickets: [
+      { id: "T-10", title: "Script url", stage: "person", action: "review", prUrl: "javascript:alert(1)", updatedAt: at(0) },
+      { id: "T-11", title: "Other host", stage: "person", action: "review", prUrl: "https://evil.example/acme/api/pull/7", updatedAt: at(1) },
+      { id: "T-12", title: "Plain http", stage: "person", action: "review", prUrl: "http://github.com/acme/api/pull/7", updatedAt: at(2) },
+    ],
+  });
+  renderPage();
+  for (const [title, id] of [["Script url", "T-10"], ["Other host", "T-11"], ["Plain http", "T-12"]]) {
+    const card = screen.getByRole("group", { name: title });
+    expect(within(card).queryByRole("link", { name: /pull request/i })).toBeNull();
+    expect(within(card).getByRole("link", { name: /changes/i }).getAttribute("href")).toBe(`/tickets/${id}#diff`);
+  }
+});
+
+test("two Enters before a re-render send one answer", async () => {
+  load({ tickets: [answerTicket] });
+  reply.mockImplementation(() => new Promise(() => {}));
+  renderPage();
+  const box = screen.getByRole("textbox", { name: "Your answer" });
+  const user = userEvent.setup();
+  await user.type(box, "SQLite");
+  act(() => {
+    fireEvent.keyDown(box, { key: "Enter" });
+    fireEvent.keyDown(box, { key: "Enter" });
+  });
+  expect(reply).toHaveBeenCalledTimes(1);
+});
+
+test("a held Enter does not send", async () => {
+  load({ tickets: [answerTicket] });
+  renderPage();
+  const box = screen.getByRole("textbox", { name: "Your answer" });
+  await userEvent.setup().type(box, "SQLite");
+  fireEvent.keyDown(box, { key: "Enter", repeat: true });
+  expect(reply).not.toHaveBeenCalled();
+});
+
+test("an answering approval and a new pending one on the same Ticket both render", async () => {
+  const user = userEvent.setup();
+  const err = vi.spyOn(console, "error").mockImplementation(() => {});
+  load({ tickets: [approvalTicket], approvals: [approval] });
+  answerWith();
+  renderPage();
+  await user.click(screen.getByRole("button", { name: "Approve" }));
+  act(() => {
+    useAthena.getState().applyDelta(
+      create(DeltaSchema, {
+        seq: 2n,
+        change: { case: "approval", value: { ...approval, id: "A-2", summary: "Run make deploy again", createdAt: at(9000) } },
+      }),
+    );
+    useAthena.getState().applyDelta(
+      create(DeltaSchema, {
+        seq: 3n,
+        change: { case: "ticket", value: { ...approvalTicket, pendingApprovalId: "A-2" } },
+      }),
+    );
+  });
+  expect(screen.getAllByRole("group")).toHaveLength(2);
+  expect(screen.getByText("Approved")).toBeTruthy();
+  expect(screen.getByText("Run make deploy again")).toBeTruthy();
+  expect(err.mock.calls.filter((c) => String(c[0]).includes("same key"))).toEqual([]);
+  err.mockRestore();
+});
+
+test("a stalled card labels the last message and claims no cause otherwise", () => {
+  load({
+    tickets: [
+      { id: "T-13", title: "Has text", stage: "person", action: "failed", attentionQuestion: "tests are red", updatedAt: at(0) },
+      { id: "T-14", title: "No text", stage: "person", action: "delivery", updatedAt: at(1) },
+    ],
+  });
+  renderPage();
+  const withText = screen.getByRole("group", { name: "Has text" });
+  expect(within(withText).getByText("Last message")).toBeTruthy();
+  expect(within(withText).getByText("tests are red")).toBeTruthy();
+  const bare = screen.getByRole("group", { name: "No text" });
+  expect(within(bare).queryByText("Last message")).toBeNull();
+  expect(within(bare).getByText("Delivery failed. Open the Ticket to see what happened.")).toBeTruthy();
 });
