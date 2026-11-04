@@ -239,7 +239,15 @@ Large artifacts between nodes go directly node-to-node (git, or `blob` stream re
 
 ## 9. Local model inference
 
-- **Engine: vLLM everywhere.** On a Mac (Apple silicon, the primary target) the node runs **vLLM with the `vllm-metal` plugin** (vllm-project's Apple silicon backend: MLX compute, paged attention, continuous batching, concurrent serving). On Linux with NVIDIA GPUs it runs stock vLLM (CUDA). Both expose the same OpenAI-compatible API, so the node, the proxy and the dashboard treat them as one backend. Ollama is not used. The builder verifies vllm-metal's current release on the installed macOS before building (it is young; pin a version).
+- **Pluggable inference backend** (owner, 2026-11-04: "take into account the modularity in the backend we use for inference"). Nothing outside one node package knows which engine runs. Each engine is an adapter behind one Go interface, `inference.Backend`:
+  - `Detect(ctx) (Info, error)`: is the engine installed or running here; version; platform facts.
+  - `Start(ctx, ModelSpec) error` / `Stop(ctx) error`: for engines the node manages (a `launchd` agent on macOS, a user service on Linux); a no-op for an engine the owner runs.
+  - `Endpoint() string`: the localhost base URL of its OpenAI-compatible API, the one wire format every backend must speak (chat completions; `responses` when the engine has it).
+  - `Models(ctx) ([]Model, error)`, `Health(ctx) error`, `Telemetry(ctx) (Usage, error)` (GPU load, memory, loaded models).
+  - `Capabilities() Caps`: native Anthropic Messages, tool calling, prefix caching, continuous batching, max context.
+  
+  Everything else is built on those: the authenticated proxy (§9 below) forwards to `Endpoint()`, translates Anthropic Messages ↔ chat completions only when `Caps` says the engine lacks them, and the dashboard shows `Info`/`Telemetry` without engine-specific code. A node's config names its backend (`inference.backend`, default `auto`, which picks by platform), so adding an engine — mlx-lm, llama.cpp, Ollama or a future one — is one new adapter with its contract tests, and switching is a config change. Contract tests run every adapter against the same suite (detect, serve a request, stream, tool call when supported, health, telemetry), with a fake engine for CI.
+- **Engine: vLLM everywhere** (the default adapters). On a Mac (Apple silicon, the primary target) the node runs **vLLM with the `vllm-metal` plugin** (vllm-project's Apple silicon backend: MLX compute, paged attention, continuous batching, concurrent serving). On Linux with NVIDIA GPUs it runs stock vLLM (CUDA). Both expose the same OpenAI-compatible API, so the node, the proxy and the dashboard treat them as one backend. Ollama is not used. The builder verifies vllm-metal's current release on the installed macOS before building (it is young; pin a version).
 - **macOS tuning** (the owner asked for the most optimized setup):
   - **Models in MLX format** (`mlx-community` 4-bit or 8-bit quantizations), sized to leave headroom in unified memory; the node refuses a model that would not fit with the session load it expects.
   - **Resident and warm**: the model loads at node start and stays loaded (no idle unload); a warm-up request runs before the node advertises it.
