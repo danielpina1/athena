@@ -20,6 +20,7 @@ import (
 	"github.com/danielpina1/athena/internal/effects"
 	"github.com/danielpina1/athena/internal/metrics"
 	"github.com/danielpina1/athena/internal/node"
+	"github.com/danielpina1/athena/internal/policy"
 	"github.com/danielpina1/athena/internal/router"
 	"github.com/danielpina1/athena/internal/store"
 )
@@ -154,6 +155,8 @@ type control struct {
 	gh     *gitHub
 	host   *router.Host
 	policy *policyCache
+	// onPolicyChange, when set (tests), runs before the Engine hears of a Policy change; an error refuses it.
+	onPolicyChange func(from, to policy.Settings) error
 }
 
 // serveConn answers one connection; ctx ends with the server.
@@ -232,7 +235,7 @@ func (c *control) handle(req Request) (any, error) {
 		}
 		repo := req.Repo
 		if repo != "" {
-			if c.gh == nil || c.gh.err != nil {
+			if c.gh == nil || !c.gh.running() {
 				return nil, userErrorf("github is not running: a task on a repository needs it (see athena status)")
 			}
 			name, ok := c.gh.cfg.repo(repo)

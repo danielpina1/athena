@@ -27,6 +27,9 @@ const (
 	defaultSlots           = 4
 	defaultModel           = "sonnet"
 	defaultApprovalTimeout = 30 * time.Minute
+	// defaultCredentialRetry and maxCredentialRetry bound the pauses of a launch waiting for GitHub credentials.
+	defaultCredentialRetry = 5 * time.Second
+	maxCredentialRetry     = 5 * time.Minute
 	// hookTimeoutMargin is how much longer than an Approval a decision hook may block, so the node, not Claude
 	// Code, decides what an unanswered Approval means.
 	hookTimeoutMargin = 5 * time.Minute
@@ -73,6 +76,9 @@ type Config struct {
 	// Credentials gives GitHub Tickets (those with a Repo) their per-Assignment token and commit identity; without it
 	// such a Ticket fails at launch.
 	Credentials Credentials
+	// CredentialRetry is the first pause before a launch that could not get its GitHub credentials yet tries again
+	// (default 5 s, doubling to 5 min).
+	CredentialRetry time.Duration
 	// Logger receives the node's log lines (default slog.Default()).
 	Logger *slog.Logger
 }
@@ -749,9 +755,23 @@ func (r *runner) run() {
 	if s.isStopped() {
 		return
 	}
-	if err := n.prepare(s); err != nil {
-		r.fail("prepare ticket directory: " + redact.String(err.Error()))
-		return
+	// GitHub credentials that cannot be had yet (GitHub unreachable, the bot not known yet) delay the launch; they are
+	// retried until they come or the session is stopped, never filed as failed: the Ticket shows working/queued meanwhile.
+	for attempt := 1; ; attempt++ {
+		err := n.prepare(s)
+		if err == nil {
+			break
+		}
+		if !credentialsLater(err) {
+			r.fail("prepare ticket directory: " + redact.String(err.Error()))
+			return
+		}
+		d := n.credentialDelay(attempt)
+		r.log.Warn("github credentials not available yet; will retry the launch", "attempt", attempt, "retryIn", d.String(),
+			"error", redact.String(err.Error()))
+		if !r.sleep(d) {
+			return
+		}
 	}
 	s.setGitHubVars(n.githubVariables(s))
 	// A running Assignment with a session resumes it after a crash or a node restart; a new Assignment of a
@@ -1404,6 +1424,10 @@ func (n *Node) prepare(s *session) error {
 	p := s.place
 	switch {
 	case p.github != "":
+		if login, _ := n.cfg.Credentials.Identity(); login == "" {
+			// Without the bot's identity the worker's commits would carry no author: wait for it.
+			return &credentialError{msg: "the GitHub App's bot identity is not known yet"}
+		}
 		if err := os.MkdirAll(filepath.Dir(p.workDir), 0o700); err != nil {
 			return err
 		}

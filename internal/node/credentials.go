@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/danielpina1/athena/internal/redact"
+	"github.com/danielpina1/athena/internal/sources/github"
 )
 
 // GitHub credentials of worker sessions: the server mints a short-lived installation token per Assignment, scoped to
@@ -34,6 +35,34 @@ const (
 	// tokenFetchTimeout bounds one request for a token.
 	tokenFetchTimeout = 30 * time.Second
 )
+
+// credentialError is a failure to get a GitHub Ticket's credentials from the port. permanent is set for a refusal the
+// same request will not get past (github.ErrPermanent or ErrGone, such as a repository of another owner); anything
+// else (a network failure, a 5xx, a rate limit, the bot not known yet) may pass, and a launch waits for it.
+type credentialError struct {
+	msg       string
+	permanent bool
+}
+
+func (e *credentialError) Error() string { return e.msg }
+
+// credentialsLater reports whether err is a credentials failure that may pass.
+func credentialsLater(err error) bool {
+	var ce *credentialError
+	return errors.As(err, &ce) && !ce.permanent
+}
+
+// credentialDelay is the pause before launch attempt n+1: CredentialRetry doubling, at most maxCredentialRetry.
+func (n *Node) credentialDelay(attempt int) time.Duration {
+	d := n.cfg.CredentialRetry
+	if d <= 0 {
+		d = defaultCredentialRetry
+	}
+	for i := 1; i < attempt && d < maxCredentialRetry; i++ {
+		d *= 2
+	}
+	return min(d, maxCredentialRetry)
+}
 
 // secret is a string that prints masked, so a token that slips into a log line or an error shows as ***.
 type secret string
@@ -97,7 +126,9 @@ func (ts *tokenStore) token(ctx context.Context, assignmentID, repo string) (str
 	defer cancel()
 	v, exp, err := ts.creds.Token(fctx, repo)
 	if err != nil {
-		return "", fmt.Errorf("github token for %s: %s", repo, redact.String(err.Error()))
+		// Only the message crosses (masked): the class says whether a launch waits for it or fails.
+		return "", &credentialError{msg: fmt.Sprintf("github token for %s: %s", repo, redact.String(err.Error())),
+			permanent: errors.Is(err, github.ErrPermanent) || errors.Is(err, github.ErrGone)}
 	}
 	if v == "" {
 		return "", fmt.Errorf("github token for %s: empty token", repo)

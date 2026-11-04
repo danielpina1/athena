@@ -248,6 +248,7 @@ func checkKeyFile(path string) error {
 // the installation reaches.
 type GitHubCheck struct {
 	Bot     string   `json:"bot"`
+	BotID   int64    `json:"botId"`
 	Account string   `json:"account"`
 	Repos   []string `json:"repos"`
 }
@@ -275,7 +276,7 @@ func checkApp(ctx context.Context, app *github.App, g *GitHubConfig) (GitHubChec
 	if _, err := app.InstallationToken(ctx); err != nil {
 		return GitHubCheck{}, fmt.Errorf("github: mint an installation token: %w", err)
 	}
-	bot, _, err := app.Bot(ctx)
+	bot, botID, err := app.Bot(ctx)
 	if err != nil {
 		return GitHubCheck{}, fmt.Errorf("github: read the App's bot account: %w", err)
 	}
@@ -287,7 +288,7 @@ func checkApp(ctx context.Context, app *github.App, g *GitHubConfig) (GitHubChec
 	if err != nil {
 		return GitHubCheck{}, fmt.Errorf("github: list the installation's repositories: %w", err)
 	}
-	out := GitHubCheck{Bot: bot, Account: account}
+	out := GitHubCheck{Bot: bot, BotID: botID, Account: account}
 	for _, r := range repos {
 		out.Repos = append(out.Repos, r.FullName)
 	}

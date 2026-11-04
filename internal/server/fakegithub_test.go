@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -26,6 +27,9 @@ import (
 type fakeGitHub struct {
 	t   *testing.T
 	srv *httptest.Server
+
+	// down makes every request answer 503, as GitHub unreachable at boot.
+	down atomic.Bool
 
 	mu       sync.Mutex
 	issues   []map[string]any // the issues list: issues and pull requests
@@ -154,7 +158,15 @@ func newFakeGitHub(t *testing.T) *fakeGitHub {
 		t.Errorf("fake github: unexpected %s %s", r.Method, r.URL.Path)
 		g.notFound(w, r)
 	})
-	g.srv = httptest.NewServer(mux)
+	g.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if g.down.Load() {
+			g.record(r)
+			w.WriteHeader(http.StatusServiceUnavailable)
+			io.WriteString(w, `{"message":"unavailable"}`)
+			return
+		}
+		mux.ServeHTTP(w, r)
+	}))
 	t.Cleanup(g.srv.Close)
 	return g
 }

@@ -19,6 +19,7 @@ import (
 
 	"github.com/danielpina1/athena/internal/core"
 	"github.com/danielpina1/athena/internal/policy"
+	"github.com/danielpina1/athena/internal/sources/github"
 	"github.com/danielpina1/athena/internal/store"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -28,12 +29,16 @@ const (
 	botEmail = "4242+athena-app[bot]@users.noreply.github.com"
 )
 
-// fakeCreds is the server's Credentials port: a fixed token per repository, counting its requests.
+// fakeCreds is the server's Credentials port: a fixed token per repository, counting its requests. fail makes that
+// many requests fail with failErr first; noIdentity hides the bot while set.
 type fakeCreds struct {
-	life  time.Duration
-	calls atomic.Int32
-	mu    sync.Mutex
-	repos []string
+	life       time.Duration
+	calls      atomic.Int32
+	fail       atomic.Int32
+	failErr    error
+	noIdentity atomic.Bool
+	mu         sync.Mutex
+	repos      []string
 }
 
 func (f *fakeCreds) Token(_ context.Context, repo string) (string, time.Time, error) {
@@ -41,6 +46,9 @@ func (f *fakeCreds) Token(_ context.Context, repo string) (string, time.Time, er
 	f.mu.Lock()
 	f.repos = append(f.repos, repo)
 	f.mu.Unlock()
+	if f.fail.Add(-1) >= 0 {
+		return "", time.Time{}, f.failErr
+	}
 	life := f.life
 	if life == 0 {
 		life = time.Hour
@@ -48,7 +56,12 @@ func (f *fakeCreds) Token(_ context.Context, repo string) (string, time.Time, er
 	return fmt.Sprintf("%s%d", fakeToken, n), time.Now().Add(life), nil
 }
 
-func (f *fakeCreds) Identity() (string, string) { return botLogin, botEmail }
+func (f *fakeCreds) Identity() (string, string) {
+	if f.noIdentity.Load() {
+		return "", ""
+	}
+	return botLogin, botEmail
+}
 
 // listenAll is a SourceScope that listens to every Thread.
 type listenAll struct{}
@@ -741,5 +754,65 @@ func TestCloneHelperRefusesOtherHost(t *testing.T) {
 	}
 	if out := fill("protocol=https\nhost=github.com\npath=o/r.git\n\n"); !strings.Contains(out, "password=LEAKED") {
 		t.Errorf("the node's helper is not asked for github.com, so the test proves nothing:\n%s", out)
+	}
+}
+
+// acceptOnly receives and accepts alice's request on repo#n without waiting for the Assignment to run.
+func (h *ghHarness) acceptOnly(id, repo string, n int) string {
+	h.t.Helper()
+	thread := fmt.Sprintf("github:%s#%d", repo, n)
+	tr := core.Trigger{ID: id, Source: "github", Kind: core.KindMessage, Actor: core.ActorRef{Source: "github", ID: "alice"},
+		Human: true, Addressed: core.AddressedMention, Scope: "comments", Threads: []string{thread}, At: time.Now(),
+		Text: "@athena fix it", Meta: map[string]string{"repo": repo, "number": fmt.Sprint(n), "kind": "issue"}}
+	if _, err := h.eng.Receive(tr); err != nil {
+		h.t.Fatal(err)
+	}
+	if err := h.eng.EvaluateDue(); err != nil {
+		h.t.Fatal(err)
+	}
+	r, err := h.eng.Decide(core.DecisionInput{TriggerID: id, Kind: core.DecisionAccept, Title: "Fix " + id})
+	if err != nil || r.Ticket == nil {
+		h.t.Fatalf("accept: %+v %v", r, err)
+	}
+	return r.Ticket.ID
+}
+
+// Fix round 1 (Task 12): GitHub credentials that cannot be had yet (a network failure minting the token, the bot not
+// known yet) delay the launch and are retried; they never file a failed report. A permanent refusal does fail it.
+func TestGitHubLaunchRetriesTransientCredentials(t *testing.T) {
+	creds := &fakeCreds{failErr: fmt.Errorf("mint: %w", github.ErrTransient)}
+	creds.fail.Store(2)
+	creds.noIdentity.Store(true)
+	h := newGHHarness(t, creds, func(c *Config) { c.CredentialRetry = 20 * time.Millisecond })
+	id := h.acceptOnly("github:issuecomment:1", "o/r", 12)
+	time.Sleep(150 * time.Millisecond)
+	if tk, _ := h.ticket(id); tk.LatestAssignment().Report != nil || len(h.invocations()) != 0 {
+		t.Fatalf("launch without an identity: report %+v, %d starts; want it waiting", tk.LatestAssignment().Report, len(h.invocations()))
+	}
+	creds.noIdentity.Store(false)
+	h.running(id)
+	if tk, _ := h.ticket(id); tk.LatestAssignment().Report != nil {
+		t.Fatalf("report = %+v, want none", tk.LatestAssignment().Report)
+	}
+	if n := creds.calls.Load(); n != 3 {
+		t.Fatalf("token asked %d times, want 3 (two transient failures, then the token)", n)
+	}
+	if !strings.Contains(h.logs.String(), "retry") {
+		t.Errorf("no retry logged:\n%s", h.logs.String())
+	}
+}
+
+func TestGitHubLaunchFailsOnPermanentCredentialError(t *testing.T) {
+	creds := &fakeCreds{failErr: fmt.Errorf("owner is not the installation's: %w", github.ErrPermanent)}
+	creds.fail.Store(1)
+	h := newGHHarness(t, creds, func(c *Config) { c.CredentialRetry = 20 * time.Millisecond })
+	id := h.acceptOnly("github:issuecomment:1", "o/r", 12)
+	h.eventually("failed report", func() bool {
+		tk, _ := h.ticket(id)
+		rep := tk.LatestAssignment().Report
+		return rep != nil && rep.State == core.ReportFailed && strings.Contains(rep.Summary, "not the installation")
+	})
+	if n := creds.calls.Load(); n != 1 {
+		t.Fatalf("token asked %d times, want 1", n)
 	}
 }

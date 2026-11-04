@@ -2,6 +2,7 @@ package sources
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -53,4 +54,31 @@ func TestRegistryRoutesByPrefix(t *testing.T) {
 		}
 	}()
 	reg.Register(&fakeSource{deaf: map[string]bool{}})
+}
+
+// slowSource keeps working a while after its context ends, as a poll finishing its last Receive would.
+type slowSource struct{ done atomic.Bool }
+
+func (s *slowSource) Name() string               { return "slow" }
+func (s *slowSource) Listens(thread string) bool { return true }
+func (s *slowSource) Health() error              { return nil }
+func (s *slowSource) Run(ctx context.Context) error {
+	<-ctx.Done()
+	time.Sleep(100 * time.Millisecond)
+	s.done.Store(true)
+	return nil
+}
+
+// Wait returns only once every started Source's Run returned, so the server closes the store after the last Receive.
+func TestRegistryWaitAwaitsSources(t *testing.T) {
+	reg := NewRegistry()
+	src := &slowSource{}
+	reg.Register(src)
+	reg.Wait() // nothing started: returns at once
+	ctx, cancel := context.WithCancel(context.Background())
+	reg.Start(ctx)
+	cancel()
+	reg.Wait()
+	eq(t, "run returned before Wait", src.done.Load(), true)
+	eq(t, "not running", reg.Running("slow"), false)
 }

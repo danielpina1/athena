@@ -64,14 +64,16 @@ type Config struct {
 	HTTPClient *http.Client
 }
 
-// Run serves until ctx is done, then shuts down: it stops accepting control connections, stops the Sources, the
-// Evals' ticker and the router, drains the effects runner (waiting effects resume on the next start), closes the node
+// Run serves until ctx is done, then shuts down: it stops accepting control connections, stops the Sources (and
+// waits for their last poll), the Evals' ticker and the router, drains the effects runner (waiting effects resume on the next start), closes the node
 // (sessions end and resume on the next start), waits for the node socket to close and closes the store.
 //
 // Wiring order, so that nothing waits on what is not there yet: store → configuration → GitHub App (checked) → Policy
 // store (the default allows the installation's account) → node (with the App's credentials) → effects runner →
-// Engine (Wake is the runner's, relays only with a router) → GitHub Source → Outbox (reply) → router (assessment,
-// relay, notice) → node socket → startup recovery → runner, Sources, router, ticker.
+// Engine (Wake is the runner's, relays whenever the App exists) → GitHub Source (once the check passed) → Outbox
+// (reply) → router (assessment, relay, notice) → node socket → startup recovery (Evals, a pending Policy change,
+// Assignments) → runner, Sources, router, ticker. A check that failed is retried in the background (30 s doubling to
+// 10 min); when it passes the Source starts and the default Policy allows the installation's account.
 func Run(ctx context.Context, cfg Config) (err error) {
 	if cfg.StateDir == "" {
 		return errors.New("server: StateDir is required")
@@ -141,20 +143,21 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	var allowed []string
 	if fileCfg.GitHub != nil {
 		gh = setupGitHub(fileCfg.GitHub, version, reg, cfg.HTTPClient, logger)
-		if gh.err == nil {
-			allowed = []string{gh.account}
+		if account, ok := gh.checked(); ok {
+			allowed = []string{account}
 		}
 	}
-	routerOn := gh != nil && gh.err == nil
+	// The router and the relays run whenever the App exists, even before its check passed (see gitHub).
+	routerOn := gh != nil && gh.app != nil
 	// Nobody configured a Policy yet: the default allows the installation's account (nobody without GitHub).
-	pc, err := newPolicyCache(policy.NewStore(st, policy.Defaults(allowed)), sourceReg, fileCfg.EvalTimeout())
+	pc, err := newPolicyCache(st, allowed, sourceReg, fileCfg.EvalTimeout())
 	if err != nil {
 		return err
 	}
 
 	ncfg := cfg.Node
 	ncfg.Metrics = reg
-	if routerOn {
+	if gh != nil {
 		ncfg.Credentials = gh.creds
 	}
 	ncfg.StateDir = stateDir
@@ -193,11 +196,15 @@ func Run(ctx context.Context, cfg Config) (err error) {
 		Wake: fx.Wake, Relays: routerOn})
 	eng.SetMetrics(reg)
 	n.SetEngine(eng)
-	if routerOn {
+	// registerSource registers the GitHub Source once the App passed its check: here, or later in the background.
+	registerSource := func() {
 		src := github.NewSource(github.SourceConfig{Repos: fileCfg.GitHub.Repos, Interval: fileCfg.GitHub.interval()}, gh.app,
 			intake{Engine: eng, hist: reg.Histogram("trigger_intake_seconds")}, st, logger.With("source", github.SourceName))
-		gh.source = src
 		sourceReg.Register(timedSource{Source: src, hist: reg.Histogram("reply_send_seconds")})
+		gh.attach(src)
+	}
+	if _, ok := gh.checked(); routerOn && ok {
+		registerSource()
 	}
 	fx.Handle(core.EffectReply, outbox.Handler(sourceReg, st), outbox.Options)
 	var host *router.Host
@@ -236,8 +243,12 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	resumeAssessments(eng, fx, logger)
 	workCtx, workCancel := context.WithCancel(context.Background())
 	evalDone := make(chan struct{})
+	var late sync.WaitGroup
 	stopWork := func() {
 		workCancel()
+		// The Sources stop before the effects drain and the store closes: no Receive after.
+		late.Wait()
+		sourceReg.Wait()
 		if host != nil {
 			host.Stop()
 		}
@@ -250,6 +261,22 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	fx.Start(context.Background())
 	recoverAssignments(eng, n, logger)
 	sourceReg.Start(workCtx)
+	if _, ok := gh.checked(); routerOn && !ok {
+		// GitHub was unreachable or refused the check: try again in the background; the Source starts once it passes.
+		late.Add(1)
+		go func() {
+			defer late.Done()
+			gh.retryCheck(workCtx, logger, func(account string) {
+				if err := pc.allow([]string{account}, func(from, to policy.Settings) (map[string]string, error) {
+					return tellEngine(eng, from, to)
+				}); err != nil {
+					logger.Error("policy: allow the installation account", "error", err)
+				}
+				registerSource()
+				sourceReg.Start(workCtx)
+			})
+		}()
+	}
 	if host != nil {
 		if err := host.Start(workCtx); err != nil {
 			logger.Error("router: not started", "error", err)
@@ -278,6 +305,9 @@ func Run(ctx context.Context, cfg Config) (err error) {
 
 	c := &control{stateDir: stateDir, eng: eng, workRoot: ncfg.WorkRoot, model: ncfg.Model, log: logger, reg: reg,
 		st: st, fx: fx, gh: gh, host: host, policy: pc}
+	if err := c.resumePolicyChange(); err != nil {
+		logger.Error("startup: tell the pending policy change", "error", err)
+	}
 	ctrlCtx, ctrlCancel := context.WithCancel(context.Background())
 	defer ctrlCancel()
 	var conns sync.WaitGroup

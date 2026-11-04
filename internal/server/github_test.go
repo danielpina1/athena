@@ -219,7 +219,8 @@ func TestServerGitHubFlowWithFakes(t *testing.T) {
 	}
 }
 
-// A configured App that fails its check leaves the server running without GitHub; status says why.
+// A configured App that fails its check leaves the server running without the GitHub Source (the router runs, so
+// relays queue); status says why.
 func TestServerRunsWhenGitHubCheckFails(t *testing.T) {
 	newFakeEnv(t, openTurnFixture(t))
 	g := newFakeGitHub(t)
@@ -228,7 +229,7 @@ func TestServerRunsWhenGitHubCheckFails(t *testing.T) {
 	g.configure(t, dir, 600)
 	s := startServer(t, dir)
 	h := s.health()
-	if len(h.Sources) != 1 || !strings.Contains(h.Sources[0].Error, "does not reach o/r") || h.Router.State != "off" {
+	if len(h.Sources) != 1 || !strings.Contains(h.Sources[0].Error, "does not reach o/r") || h.Router.State == "off" {
 		t.Fatalf("health = %+v", h)
 	}
 	id := s.submit("Owner work still runs")
@@ -540,5 +541,93 @@ func TestPolicySetNotifiesAffectedTicket(t *testing.T) {
 	hist, err := policy.NewStore(st, policy.Defaults(nil)).History(0)
 	if err != nil || len(hist) != 2 || hist[0].Origin != policy.OriginCLI || hist[0].Revision != 2 {
 		t.Errorf("history = %+v %v", hist, err)
+	}
+}
+
+// fastCheckRetry shortens the background retry of a failed GitHub check for one test.
+func fastCheckRetry(t *testing.T) {
+	first, max := checkRetryFirst, checkRetryMax
+	checkRetryFirst, checkRetryMax = 100*time.Millisecond, 200*time.Millisecond
+	t.Cleanup(func() { checkRetryFirst, checkRetryMax = first, max })
+}
+
+func workerStarts(t *testing.T, f fakeEnv, ticket string) int {
+	n := 0
+	for _, env := range f.invocationEnvs(t) {
+		if env["ATHENA_TICKET"] == ticket {
+			n++
+		}
+	}
+	return n
+}
+
+// Fix round 1: GitHub unreachable at boot (the startup check fails) does not fail the open GitHub Tickets. The node
+// has the App's credentials all the same; a launch that cannot get them waits and retries, and the check is retried
+// in the background: once it passes, the Source starts and the Ticket runs again.
+func TestGitHubTicketSurvivesFailingCheck(t *testing.T) {
+	fake := newFakeEnv(t, openTurnFixture(t))
+	fastCheckRetry(t)
+	g := newFakeGitHub(t)
+	dir := newStateDir(t)
+	g.configure(t, dir, 600)
+	if err := os.MkdirAll(node.TicketDir(filepath.Join(dir, "work"), core.Ticket{ID: "T-0001", Title: "Bump the deps"}), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fastNode := func(c *Config) { c.Node.CredentialRetry = 50 * time.Millisecond }
+	s := startServerWith(t, dir, fastNode)
+	var sub struct {
+		ID string `json:"id"`
+	}
+	s.ok(Request{Op: OpSubmit, Text: "Bump the deps", Repo: fakeRepo}, &sub)
+	s.running(sub.ID) // mid-work when the server stops: interrupted
+	s.stop()
+
+	g.down.Store(true)
+	s = startServerWith(t, dir, fastNode)
+	if h := s.health(); len(h.Sources) != 1 || h.Sources[0].Error == "" {
+		t.Fatalf("health with github down = %+v", h)
+	}
+	time.Sleep(500 * time.Millisecond)
+	d := s.detail(sub.ID)
+	if r := d.Assignments[len(d.Assignments)-1].Report; r != nil || strings.HasPrefix(d.Stage, "person") || d.Ended != nil {
+		t.Fatalf("with github down: stage %s, report %+v; want the ticket waiting, not failed", d.Stage, r)
+	}
+	if n := workerStarts(t, fake, sub.ID); n != 1 {
+		t.Fatalf("worker started %d times while github is down, want 1 (the first run only)", n)
+	}
+
+	g.down.Store(false)
+	eventually(t, "the check passed late and the source runs", func() bool {
+		h := s.health()
+		return len(h.Sources) == 1 && h.Sources[0].Error == ""
+	})
+	eventually(t, "the ticket's worker started again", func() bool { return workerStarts(t, fake, sub.ID) == 2 })
+	s.running(sub.ID)
+	if d := s.detail(sub.ID); d.Assignments[len(d.Assignments)-1].Report != nil {
+		t.Fatalf("report = %+v, want none", d.Assignments[len(d.Assignments)-1].Report)
+	}
+}
+
+// R30 M4: the bot the startup check fetched seeds the credentials: Identity needs no lookup of its own.
+func TestCredentialsSeededByCheck(t *testing.T) {
+	g := newFakeGitHub(t)
+	cfg := &GitHubConfig{AppID: 1, Slug: "athena-bot", KeyFile: appKey(t), InstallationID: 777, Repos: []string{fakeRepo}, APIURL: g.srv.URL}
+	gh := setupGitHub(cfg, "test", nil, nil, discardLogger())
+	if gh.err != nil {
+		t.Fatal(gh.err)
+	}
+	g.down.Store(true) // any lookup now would fail
+	login, email := gh.creds.Identity()
+	if login != fakeBot || email != fmt.Sprintf("%d+%s@users.noreply.github.com", fakeBotID, fakeBot) {
+		t.Fatalf("identity = %q %q, want the bot the check fetched", login, email)
+	}
+	n := 0
+	for _, r := range g.requestLog() {
+		if r == "GET /users/athena-bot[bot]" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("bot looked up %d times, want once (by the check)", n)
 	}
 }

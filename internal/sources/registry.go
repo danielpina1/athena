@@ -89,6 +89,8 @@ type Registry struct {
 	mu      sync.Mutex
 	sources map[string]Source
 	running map[string]bool
+	// runs counts the Run goroutines Start began that have not returned (Wait).
+	runs sync.WaitGroup
 }
 
 var _ core.SourceScope = (*Registry)(nil)
@@ -139,7 +141,9 @@ func (r *Registry) Start(ctx context.Context) {
 			continue
 		}
 		r.running[name] = true
+		r.runs.Add(1)
 		go func() {
+			defer r.runs.Done()
 			_ = s.Run(ctx) // a Source reports its own failures through Health
 			r.mu.Lock()
 			r.running[name] = false
@@ -147,6 +151,10 @@ func (r *Registry) Start(ctx context.Context) {
 		}()
 	}
 }
+
+// Wait blocks until the Run of every Source Start began has returned (end their context first). The server calls it
+// before it drains the effects and closes the store, so no Source writes after.
+func (r *Registry) Wait() { r.runs.Wait() }
 
 // Running reports whether the named Source is registered and its Run has not returned.
 func (r *Registry) Running(name string) bool {

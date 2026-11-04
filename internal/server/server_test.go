@@ -175,9 +175,19 @@ type testServer struct {
 
 func startServer(t *testing.T, stateDir string) *testServer {
 	t.Helper()
+	return startServerWith(t, stateDir, nil)
+}
+
+// startServerWith is startServer with the test configuration changed by mod.
+func startServerWith(t *testing.T, stateDir string, mod func(*Config)) *testServer {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &testServer{t: t, stateDir: stateDir, cancel: cancel, done: make(chan error, 1)}
-	go func() { s.done <- Run(ctx, testConfig(t, stateDir)) }()
+	cfg := testConfig(t, stateDir)
+	if mod != nil {
+		mod(&cfg)
+	}
+	go func() { s.done <- Run(ctx, cfg) }()
 	t.Cleanup(s.stop)
 	eventually(t, "control socket answers", func() bool {
 		select {

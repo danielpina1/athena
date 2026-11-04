@@ -234,6 +234,32 @@ func (c *control) policyShow() (PolicyView, error) {
 	return PolicyView{Revision: rev, Version: policy.Version(s), Settings: s}, nil
 }
 
+const staleSettings = "the settings changed meanwhile; show them and try again"
+
+// resumePolicyChange tells the Engine of a change saved but not told before (a failed tell or a crash), at startup.
+func (c *control) resumePolicyChange() error { return c.policy.resume(c.tell) }
+
+// tell tells the Engine of a settings change (tellEngine), after the test hook.
+func (c *control) tell(from, to policy.Settings) (map[string]string, error) {
+	if c.onPolicyChange != nil {
+		if err := c.onPolicyChange(from, to); err != nil {
+			return nil, err
+		}
+	}
+	return tellEngine(c.eng, from, to)
+}
+
+// tellEngine tells the Engine of a settings change: each open Ticket it bears on gets its notice, and the Evals in
+// progress start again under the new version.
+func tellEngine(eng *core.Engine, from, to policy.Settings) (map[string]string, error) {
+	tickets, err := eng.Tickets(false)
+	if err != nil {
+		return nil, err
+	}
+	notices := policy.Effects(tickets, from, to)
+	return notices, eng.PolicyChanged(policy.Version(to), notices)
+}
+
 // PolicySetResult is a saved revision and the open Tickets the change was told to.
 type PolicySetResult struct {
 	Revision int      `json:"revision"`
@@ -241,8 +267,8 @@ type PolicySetResult struct {
 	Notified []string `json:"notified"`
 }
 
-// policySet validates and saves a settings document as a cli revision, then tells the Engine: each open Ticket the
-// change bears on gets its notice, and the Evals in progress start again under the new version.
+// policySet validates and saves a settings document as a cli revision, then tells the Engine (tell), atomically with
+// the save and retried if the tell fails (policyCache.change).
 func (c *control) policySet(raw json.RawMessage) (PolicySetResult, error) {
 	if len(bytes.TrimSpace(raw)) == 0 {
 		return PolicySetResult{}, userErrorf("policy set needs a settings document")
@@ -256,23 +282,14 @@ func (c *control) policySet(raw json.RawMessage) (PolicySetResult, error) {
 	if err := policy.Validate(s); err != nil {
 		return PolicySetResult{}, userErrorf("%v", err)
 	}
-	old, rev, err := c.policy.save(s, policy.OriginCLI)
+	rev, cur, notices, err := c.policy.change(s, policy.OriginCLI, c.tell)
 	if errors.Is(err, policy.ErrStaleRevision) {
-		return PolicySetResult{}, userErrorf("the settings changed meanwhile; show them and try again")
+		return PolicySetResult{}, userErrorf(staleSettings)
 	}
 	if err != nil {
 		return PolicySetResult{}, err
 	}
-	cur, _ := c.policy.current()
-	tickets, err := c.eng.Tickets(false)
-	if err != nil {
-		return PolicySetResult{}, err
-	}
-	notices := policy.Effects(tickets, old, cur)
 	version := policy.Version(cur)
-	if err := c.eng.PolicyChanged(version, notices); err != nil {
-		return PolicySetResult{}, err
-	}
 	out := PolicySetResult{Revision: rev, Version: version, Notified: []string{}}
 	for id := range notices {
 		out.Notified = append(out.Notified, id)
