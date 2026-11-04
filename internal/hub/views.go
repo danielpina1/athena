@@ -102,7 +102,7 @@ func approvalView(a *core.Approval) *athenav1.ApprovalView {
 
 func triggerView(t *core.Trigger) *athenav1.TriggerView {
 	v := &athenav1.TriggerView{Id: t.ID, At: ts(t.At), Source: t.Source, Actor: t.Actor.ID, Kind: t.Kind,
-		Addressed: t.Addressed, Text: clip(oneLine(t.Text), previewRunes)}
+		Addressed: t.Addressed, Text: clip(oneLine(redact.String(t.Text)), previewRunes)}
 	if len(t.Threads) > 0 {
 		v.Thread = t.Threads[0]
 	}
@@ -168,7 +168,7 @@ func decisionView(d *core.Decision) *athenav1.DecisionView {
 		if len(r.Values) > 0 {
 			rv.Values = make(map[string]string, len(r.Values))
 			for k, val := range r.Values {
-				rv.Values[k] = clip(val, reasonRunes)
+				rv.Values[k] = clip(redact.String(val), reasonRunes)
 			}
 		}
 		v.Reasons = append(v.Reasons, rv)

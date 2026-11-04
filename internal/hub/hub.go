@@ -70,7 +70,8 @@ type Source interface {
 	// Decisions returns the Decisions of a Thread, or of every Thread when thread is empty, newest first.
 	Decisions(thread string, limit int) ([]core.Decision, error)
 	Decision(id string) (core.Decision, error)
-	// Health probes every component; it is called every 15 s and on Snapshot, and must be cheap.
+	// Health probes every component. The hub calls it every 15 s on a goroutine of its own, once in Start, and in
+	// Snapshot only before Start; it must not call back into the hub.
 	Health() []HealthItem
 	// Policy returns the current Policy revision (0 while nobody saved settings), its version and canonical JSON.
 	Policy() (revision int, version string, settingsJSON string, err error)
@@ -107,6 +108,7 @@ type Hub struct {
 	health      *athenav1.Health
 	healthSince map[string]healthState
 	node        *athenav1.NodeStatus
+	closed      bool // the hub has stopped: Subscribe returns closed feeds
 }
 
 type healthState struct {
@@ -165,9 +167,9 @@ func (h *Hub) Start(ctx context.Context) {
 }
 
 func (h *Hub) run(ctx context.Context) {
-	tick := time.NewTicker(h.healthTick)
-	defer tick.Stop()
 	defer h.closeAll()
+	probed := make(chan *athenav1.Health, 1)
+	go h.probeEvery(ctx, probed)
 	for {
 		// An overflow comes first: what is queued is older than the loss and is dropped with it.
 		h.recover()
@@ -179,8 +181,26 @@ func (h *Hub) run(ctx context.Context) {
 		case <-h.wake:
 		case <-h.nodeWake:
 			h.publishNode()
+		case next := <-probed:
+			h.publishHealth(next)
+		}
+	}
+}
+
+// probeEvery probes health on its own goroutine, so a slow probe never delays the commits' deltas; the loop publishes
+// the result. A result the loop has not taken yet is skipped, not queued.
+func (h *Hub) probeEvery(ctx context.Context, out chan<- *athenav1.Health) {
+	tick := time.NewTicker(h.healthTick)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
 		case <-tick.C:
-			h.publishHealth()
+			select {
+			case out <- h.probeHealth():
+			default:
+			}
 		}
 	}
 }
@@ -210,6 +230,7 @@ func (h *Hub) recover() {
 func (h *Hub) closeAll() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	h.closed = true
 	for s := range h.subs {
 		h.dropLocked(s, false)
 	}
@@ -220,8 +241,8 @@ func (h *Hub) apply(c store.Changes) {
 	for _, id := range c.Tickets {
 		t, st, err := h.src.Ticket(id)
 		if err != nil {
-			h.log.Warn("hub: read ticket", "id", id, "error", err)
-			continue
+			h.lost("read ticket", "id", id, "error", err)
+			return
 		}
 		h.publish(&athenav1.Delta{Change: &athenav1.Delta_Ticket{Ticket: ticketSummary(&t, st)}})
 		if h.watched(id) {
@@ -231,42 +252,50 @@ func (h *Hub) apply(c store.Changes) {
 	for _, id := range c.Approvals {
 		a, err := h.src.Approval(id)
 		if err != nil {
-			h.log.Warn("hub: read approval", "id", id, "error", err)
-			continue
+			h.lost("read approval", "id", id, "error", err)
+			return
 		}
 		h.publish(&athenav1.Delta{Change: &athenav1.Delta_Approval{Approval: approvalView(&a)}})
 	}
 	for _, id := range c.Triggers {
 		t, err := h.src.Trigger(id)
 		if err != nil {
-			h.log.Warn("hub: read trigger", "id", id, "error", err)
-			continue
+			h.lost("read trigger", "id", id, "error", err)
+			return
 		}
 		h.publish(&athenav1.Delta{Change: &athenav1.Delta_Trigger{Trigger: triggerView(&t)}})
 	}
 	for _, key := range c.Threads {
 		th, err := h.src.Thread(key)
 		if err != nil {
-			h.log.Warn("hub: read thread", "key", key, "error", err)
-			continue
+			h.lost("read thread", "key", key, "error", err)
+			return
 		}
 		h.publish(&athenav1.Delta{Change: &athenav1.Delta_Thread{Thread: threadView(&th)}})
 	}
 	for _, id := range c.Decisions {
 		d, err := h.src.Decision(id)
 		if err != nil {
-			h.log.Warn("hub: read decision", "id", id, "error", err)
-			continue
+			h.lost("read decision", "id", id, "error", err)
+			return
 		}
 		h.publish(&athenav1.Delta{Change: &athenav1.Delta_Decision{Decision: decisionView(&d)}})
 	}
 	if c.Policy {
 		if p, err := h.policyView(); err != nil {
-			h.log.Warn("hub: read policy", "error", err)
+			h.lost("read policy", "error", err)
+			return
 		} else {
 			h.publish(&athenav1.Delta{Change: &athenav1.Delta_Policy{Policy: p}})
 		}
 	}
+}
+
+// lost handles a commit whose state the hub could not read: it cannot publish what changed, so it resyncs everyone
+// (see OnCommit) rather than leave clients with stale state.
+func (h *Hub) lost(what string, args ...any) {
+	h.log.Warn("hub: "+what+": resyncing subscribers", args...)
+	h.overflowed.Store(true)
 }
 
 func (h *Hub) policyView() (*athenav1.PolicyView, error) {
@@ -315,8 +344,7 @@ func (h *Hub) probeHealth() *athenav1.Health {
 	return out
 }
 
-func (h *Hub) publishHealth() {
-	next := h.probeHealth()
+func (h *Hub) publishHealth(next *athenav1.Health) {
 	h.mu.Lock()
 	same := h.health != nil && proto.Equal(h.health, next)
 	h.health = next
@@ -435,7 +463,9 @@ func (s *Sub) Unwatch(ticketID string) {
 // after it and snapshotNeeded is false. Otherwise (a cursor outside the ring, ahead of it, or of another epoch)
 // snapshotNeeded is true and the feed carries only what is published from now on: the caller takes a Snapshot, sends
 // it, and then forwards the feed's deltas with seq above the snapshot's cursor, dropping the rest. Deltas are full
-// states of one record, so one the snapshot already includes is harmless.
+// states of one record, so applying one the snapshot already includes is idempotent; one above the cursor can carry
+// older state than the snapshot read (the hub reads each record when it publishes), which is transient: a newer
+// delta for that record follows and corrects it.
 func (h *Hub) Subscribe(cursor uint64, epoch string) (sub *Sub, snapshotNeeded bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -451,6 +481,10 @@ func (h *Hub) Subscribe(cursor uint64, epoch string) (sub *Sub, snapshotNeeded b
 	sub = &Sub{h: h, ch: make(chan *athenav1.Delta, subBuffer+len(replay)), watching: map[string]bool{}}
 	for _, d := range replay {
 		sub.ch <- d
+	}
+	if h.closed {
+		close(sub.ch)
+		return sub, true
 	}
 	h.subs[sub] = struct{}{}
 	return sub, snapshotNeeded

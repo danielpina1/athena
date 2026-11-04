@@ -539,6 +539,18 @@ func TestApprovalInputRedacted(t *testing.T) {
 	}
 }
 
+func TestTriggerAndReasonRedacted(t *testing.T) {
+	tok := "ghs_16C7e42F292c6912E7710c838347Ae178B4a"
+	tr := core.Trigger{ID: "R-1", Text: "use " + tok}
+	if v := triggerView(&tr); strings.Contains(v.Text, "ghs_") {
+		t.Errorf("trigger text = %q", v.Text)
+	}
+	d := core.Decision{Reasons: []core.Reason{{Code: "x", Values: map[string]string{"text": tok}}}}
+	if v := decisionView(&d); strings.Contains(v.Reasons[0].Values["text"], "ghs_") {
+		t.Errorf("reason value = %q", v.Reasons[0].Values["text"])
+	}
+}
+
 func TestCommitOverflowResyncsEverySubscriber(t *testing.T) {
 	f := newFake()
 	f.put(ticket("T-1"))
@@ -584,21 +596,23 @@ func TestHealthPublishedOnlyOnChange(t *testing.T) {
 	f.setHealth(HealthItem{Name: "github", OK: true})
 	h := New(f, quiet())
 	h.healthTick = time.Hour
-	h.Start(context.Background())
 	t0 := epoch0
 	h.now = func() time.Time { return t0 }
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	h.Start(ctx)
 	sub, _ := h.Subscribe(0, h.Epoch())
-	h.publishHealth()
+	h.publishHealth(h.probeHealth())
 	none(t, sub)
 	f.setHealth(HealthItem{Name: "github", OK: false, Message: "rate limited"})
 	t0 = epoch0.Add(time.Minute)
-	h.publishHealth()
+	h.publishHealth(h.probeHealth())
 	d := next(t, sub)
 	it := d.GetHealth().GetItems()[0]
 	if it.Ok || it.Message != "rate limited" || !it.Since.AsTime().Equal(t0) {
 		t.Errorf("health delta = %v", d)
 	}
-	h.publishHealth()
+	h.publishHealth(h.probeHealth())
 	none(t, sub)
 	snap, _ := h.Snapshot()
 	if snap.Health.Items[0].Ok {
@@ -632,5 +646,96 @@ func TestSnapshotCursorAndEpochIsolation(t *testing.T) {
 	s, err := h.Snapshot()
 	if err != nil || s.Cursor != 1 {
 		t.Fatalf("snapshot cursor = %d, %v", s.Cursor, err)
+	}
+	if _, need := h.Subscribe(s.Cursor, h.Epoch()); need {
+		t.Error("the snapshot's cursor in this epoch must resume")
+	}
+	if _, need := h.Subscribe(s.Cursor, "another-epoch"); !need {
+		t.Error("the snapshot's cursor in another epoch must not resume")
+	}
+}
+
+// TestSnapshotHandoff: a client that needs a snapshot subscribes first, takes the snapshot, then forwards the feed's
+// deltas above the snapshot's cursor: in order, with no gap, while commits keep arriving.
+func TestSnapshotHandoff(t *testing.T) {
+	f := newFake()
+	h := start(t, f)
+	commit := func(n int) {
+		id := fmt.Sprintf("T-%d", n)
+		f.put(ticket(id))
+		h.OnCommit(store.Changes{Tickets: []string{id}})
+		waitSeq(t, h, uint64(n))
+	}
+	commit(1)
+	sub, need := h.Subscribe(0, "stale-epoch")
+	if !need {
+		t.Fatal("a stale epoch needs a snapshot")
+	}
+	defer sub.Close()
+	commit(2)
+	snap, err := h.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	commit(3)
+	commit(4)
+	var seqs []uint64
+	for i := 0; i < 3; i++ { // seq 2, 3, 4 reached the feed
+		if d := next(t, sub); d.Seq > snap.Cursor {
+			seqs = append(seqs, d.Seq)
+		}
+	}
+	for i, q := range seqs {
+		if q != snap.Cursor+1+uint64(i) {
+			t.Fatalf("forwarded seqs %v after cursor %d: gap or disorder", seqs, snap.Cursor)
+		}
+	}
+	if len(seqs) == 0 || seqs[len(seqs)-1] != 4 {
+		t.Errorf("forwarded %v, want up to 4", seqs)
+	}
+}
+
+func TestSourceReadErrorResyncs(t *testing.T) {
+	f := newFake()
+	h := start(t, f)
+	sub, _ := h.Subscribe(0, h.Epoch())
+	// T-gone is not in the Source: its read fails after the commit.
+	h.OnCommit(store.Changes{Tickets: []string{"T-gone"}})
+	select {
+	case _, ok := <-sub.C():
+		if ok {
+			t.Fatal("got a delta, want a close")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("subscriber not resynced after a failed read")
+	}
+	if !sub.Resync() {
+		t.Error("closed without resync")
+	}
+	if _, need := h.Subscribe(0, h.Epoch()); !need {
+		t.Error("cursor 0 must not resume across a lost commit")
+	}
+}
+
+func TestSubscribeAfterShutdownIsClosed(t *testing.T) {
+	h := New(newFake(), quiet())
+	ctx, cancel := context.WithCancel(context.Background())
+	h.Start(ctx)
+	cancel()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		sub, _ := h.Subscribe(0, h.Epoch())
+		select {
+		case _, ok := <-sub.C():
+			if ok {
+				t.Fatal("got a delta")
+			}
+			return
+		case <-time.After(20 * time.Millisecond):
+			sub.Close()
+			if time.Now().After(deadline) {
+				t.Fatal("Subscribe after shutdown returned an open feed")
+			}
+		}
 	}
 }
