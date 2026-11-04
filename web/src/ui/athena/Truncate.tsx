@@ -14,9 +14,15 @@ const CLAMP = {
   6: "line-clamp-6",
 } as const;
 
-export type TruncateProps = { text: string; lines?: keyof typeof CLAMP; className?: string };
+export type TruncateProps = {
+  text: string;
+  lines?: keyof typeof CLAMP;
+  className?: string;
+  /** Keeps the text's own line breaks (a report, a tool result) instead of running them together. */
+  breaks?: boolean;
+};
 
-export function Truncate({ text, lines = 2, className }: TruncateProps) {
+export function Truncate({ text, lines = 2, className, breaks = false }: TruncateProps) {
   const ref = useRef<HTMLParagraphElement>(null);
   const [clamped, setClamped] = useState(false);
 
@@ -33,7 +39,7 @@ export function Truncate({ text, lines = 2, className }: TruncateProps) {
 
   return (
     <div className={cn("min-w-0 max-w-full", className)}>
-      <p ref={ref} dir="auto" className={cn(CLAMP[lines], "break-words wrap-anywhere")}>
+      <p ref={ref} dir="auto" className={cn(CLAMP[lines], "break-words wrap-anywhere", breaks && "whitespace-pre-line")}>
         {text}
       </p>
       {clamped && (

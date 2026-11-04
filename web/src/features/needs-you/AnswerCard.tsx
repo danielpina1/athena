@@ -9,7 +9,14 @@ import { errorMessage, reply } from "@/lib/commands/actions";
 import { timeOf, TicketHeader, useCardShortcut, useFocusWithin } from "./TicketHeader";
 
 /** A question the session is waiting on, with the composer that answers it: Enter sends, Shift+Enter adds a line. */
-export function AnswerCard({ ticket }: { ticket: TicketSummary }) {
+export function AnswerCard({
+  ticket,
+  header = true,
+}: {
+  ticket: TicketSummary;
+  /** False where the Ticket's own header is already above the card (its detail). */
+  header?: boolean;
+}) {
   const [text, setText] = useState("");
   const busy = useRef(false);
   const [sending, setSending] = useState(false);
@@ -54,7 +61,7 @@ export function AnswerCard({ ticket }: { ticket: TicketSummary }) {
       data-needs-you-card={ticket.id}
       className="grid gap-3"
     >
-      <TicketHeader ticket={ticket} since={timeOf(ticket.updatedAt)} />
+      {header && <TicketHeader ticket={ticket} since={timeOf(ticket.updatedAt)} />}
       <Truncate text={ticket.attentionQuestion || "The session is waiting for your answer."} lines={6} />
       {sent ? (
         <p role="status" className="border-t border-line pt-3 font-semibold">

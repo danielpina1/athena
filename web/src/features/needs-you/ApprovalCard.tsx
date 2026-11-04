@@ -16,7 +16,16 @@ import { timeOf, TicketHeader, useCardShortcut, useFocusWithin } from "./TicketH
  * A tool call the rules sent to the owner. The owner's tap shows "Approved" or "Denied" at once (the store's
  * `answering`), the card leaves when the server's Delta lands, and a failed command puts the live card back.
  */
-export function ApprovalCard({ ticket, approval }: { ticket: TicketSummary; approval: ApprovalView }) {
+export function ApprovalCard({
+  ticket,
+  approval,
+  header = true,
+}: {
+  ticket: TicketSummary;
+  approval: ApprovalView;
+  /** False where the Ticket's own header is already above the card (its detail). */
+  header?: boolean;
+}) {
   const answer = useAthena((s) => selectAnswering(s, approval.id));
   const [note, setNote] = useState("");
   const busy = useRef(false);
@@ -50,7 +59,7 @@ export function ApprovalCard({ ticket, approval }: { ticket: TicketSummary; appr
       data-needs-you-card={ticket.id}
       className="grid gap-3"
     >
-      <TicketHeader ticket={ticket} since={timeOf(approval.createdAt)} answered={answer !== undefined} />
+      {header && <TicketHeader ticket={ticket} since={timeOf(approval.createdAt)} answered={answer !== undefined} />}
       <div className="grid gap-1">
         <p className="flex min-w-0 flex-wrap items-baseline gap-x-2 text-body">
           <Mono tone="default" className="font-semibold">

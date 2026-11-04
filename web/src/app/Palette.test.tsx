@@ -7,6 +7,8 @@ import { SnapshotSchema } from "@/gen/athena/v1/state_pb";
 import { threadQuery } from "@/app/Palette";
 import { Shell } from "@/app/Shell";
 import { fakeLink, stubWidth, Where } from "@/app/testkit";
+import { setOutbox } from "@/lib/commands/actions";
+import type { Outbox } from "@/lib/commands/outbox";
 import { useAthena } from "@/lib/store/state";
 
 function load(init: MessageInitShape<typeof SnapshotSchema>) {
@@ -26,6 +28,11 @@ function renderAt(path: string) {
 const where = () => screen.getByTestId("where").textContent;
 
 beforeEach(() => {
+  // Opening a Ticket from the palette shows its detail, which watches the Ticket.
+  setOutbox({
+    submit: () => Promise.resolve({ ok: true, code: "" }),
+    onWatchLost: () => () => {},
+  } as unknown as Outbox);
   useAthena.getState().reset();
   load({
     tickets: [

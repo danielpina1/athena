@@ -90,6 +90,14 @@ export function unwatch(ticketId: string) {
   return submit({ case: "unwatchTicket", value: { ticketId } });
 }
 
+/**
+ * Calls cb with the Ticket's id when a watch the outbox re-sent after a reconnect is refused (the Ticket is gone, or
+ * too many are watched). Returns the unsubscribe. useWatch is the one caller.
+ */
+export function onWatchLost(cb: (ticketId: string) => void): () => void {
+  return current?.onWatchLost(cb) ?? (() => {});
+}
+
 /** sub is PushSubscription.toJSON(). */
 export function pushSubscribe(sub: PushSubscriptionJSON) {
   return submit({

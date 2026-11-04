@@ -1,5 +1,5 @@
 // The signed-in app's routes and its navigation. The views here are placeholders (a heading and one sentence) until
-// the task that builds each replaces it: Tickets (11), New (13), Routing (14), Graph (15),
+// the task that builds each replaces it: New (13), Routing (14), Graph (15),
 // Nodes and Settings (17). /design and /enroll render outside the session gate (App.tsx).
 //
 // Query contracts the palette already uses: /tickets/:id?tab=session opens a Ticket's live session (Task 12), and
@@ -18,6 +18,8 @@ import { lazy, type ReactNode, Suspense } from "react";
 import { Link, matchPath, Route, Routes, useParams } from "react-router";
 import { Panes } from "@/app/Panes";
 import { NeedsYou } from "@/features/needs-you/NeedsYou";
+import { TicketDetail } from "@/features/tickets/TicketDetail";
+import { TicketList } from "@/features/tickets/TicketList";
 import { selectCounts } from "@/lib/store/selectors";
 import { useAthena } from "@/lib/store/state";
 import { EmptyState } from "@/ui/athena/EmptyState";
@@ -80,14 +82,8 @@ function TicketsView() {
   const { id } = useParams();
   return (
     <Panes
-      list={<Placeholder title="Tickets" text="Every Ticket, open and ended, most recently changed first." />}
-      detail={
-        id ? (
-          <Placeholder title={`Ticket ${id}`} text="Its timeline, live session and changes." />
-        ) : (
-          <NothingSelected what="Ticket" />
-        )
-      }
+      list={<TicketList selectedId={id} />}
+      detail={id ? <TicketDetail key={id} id={id} /> : <NothingSelected what="Ticket" />}
       showDetail={id !== undefined}
     />
   );
