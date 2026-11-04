@@ -41,6 +41,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return node.RunHook(args[1], stdin, stdout, stderr, os.Getenv("ATHENA_SOCKET"))
 	case "mcp":
 		return runMCP(args[1:], stderr)
+	case "git-credential":
+		return node.RunGitCredential(args[1:], stdin, stdout, stderr, os.Environ())
+	case "gh":
+		return node.RunGh(args[1:], stdin, stdout, stderr, os.Environ())
 	case "server", "task", "status", "logs", "reply", "stop", "retry",
 		"approvals", "approve", "deny", "metrics":
 		return cli.Run(context.Background(), cmd, args[1:], stdout, stderr)

@@ -10,12 +10,14 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 	"unicode/utf8"
 
 	"github.com/danielpina1/athena/internal/core"
 	"github.com/danielpina1/athena/internal/redact"
+	"github.com/danielpina1/athena/internal/sources/github"
 )
 
 const (
@@ -29,7 +31,8 @@ const (
 
 // Serve serves the node's Unix socket (mode 0600) until ctx is done: one JSON request line and one response line per
 // connection. Ops: hook (the hook rules, Approvals for escalations, Stop as the end of a turn, SessionStart context),
-// report (a worker's Report) and ping. Every op names its Ticket and Assignment, and one that does not match a live
+// report (a worker's Report), worker (a worker's other tools), credential (a session's GitHub token, for its credential
+// helper and gh wrapper), router (the router's tools) and ping. Every op names its Ticket and Assignment, and one that does not match a live
 // session is refused: a hook is denied (a Stop is still allowed), a report fails.
 func (n *Node) Serve(ctx context.Context) error {
 	path := n.cfg.SocketPath
@@ -131,6 +134,20 @@ func (n *Node) handleConn(ctx context.Context, conn net.Conn) {
 			} else {
 				resp = n.handleRouter(ctx, req)
 			}
+		case OpWorker:
+			var req WorkerRequest
+			if err := json.Unmarshal(line, &req); err != nil {
+				resp = WorkerResponse{Error: "malformed worker request"}
+			} else {
+				resp = n.handleWorker(req)
+			}
+		case OpCredential:
+			var req CredentialRequest
+			if err := json.Unmarshal(line, &req); err != nil {
+				resp = CredentialResponse{Error: "malformed credential request"}
+			} else {
+				resp = n.handleCredential(ctx, req)
+			}
 		case OpPing:
 			resp = Response{OK: true}
 		default:
@@ -211,7 +228,8 @@ func (n *Node) recordUsage(s *session, u core.UsageDelta) {
 
 func (n *Node) ruleContext(s *session) RuleContext {
 	home, _ := os.UserHomeDir()
-	return RuleContext{TicketDir: s.place.workDir, Blocked: n.cfg.Blocked, Home: home, StateDir: n.cfg.StateDir, VenvActive: false}
+	return RuleContext{TicketDir: s.place.workDir, Blocked: n.cfg.Blocked, Home: home, StateDir: n.cfg.StateDir,
+		AthenaBin: n.cfg.AthenaBin, VenvActive: false}
 }
 
 // decide applies the hook rules to one tool call; an escalation becomes an Approval the call waits for.
@@ -331,6 +349,22 @@ func (n *Node) handleReport(req ReportRequest) Response {
 		s.log.Warn("report refused", "state", req.Status, "error", "tool call failed in the same step")
 		return Response{Error: "a tool call of yours failed in the step that filed this report, so you cannot have seen its result; " +
 			"read the result, then report again"}
+	}
+	if req.Pull < 0 {
+		return Response{Error: "pull must be a pull request number"}
+	}
+	if req.Pull > 0 {
+		if s.t.Repo == "" {
+			return Response{Error: "ticket " + s.t.ID + " works in no GitHub repository; omit pull"}
+		}
+		// Bound before the report is filed: a ready report of a Ticket that follows no pull request ends it at once,
+		// while one with its own open pull request waits for review.
+		thread := github.ThreadKey(s.t.Repo, req.Pull)
+		if err := n.engine().BindThread(req.Ticket, thread, true); err != nil {
+			s.log.Warn("pull request not bound", "thread", thread, "error", err)
+			return Response{Error: "binding pull request #" + strconv.Itoa(req.Pull) + ": " + err.Error()}
+		}
+		s.log.Info("pull request bound", "thread", thread)
 	}
 	err := n.engine().FileReport(req.Ticket, core.ReportInput{
 		AssignmentID: req.Assignment, State: core.ReportState(req.Status), Summary: req.Summary, Question: req.Question,

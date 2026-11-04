@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -148,5 +149,18 @@ func TestMCPRunsRouterServer(t *testing.T) {
 		if code := run(args, &out, &errb); code != 2 {
 			t.Errorf("%v: exit code = %d, want 2", args, code)
 		}
+	}
+}
+
+func TestCredentialCommandsWired(t *testing.T) {
+	stdin = strings.NewReader("protocol=https\nhost=github.com\n\n")
+	t.Cleanup(func() { stdin = os.Stdin })
+	var out, errb bytes.Buffer
+	if code := run([]string{"git-credential", "store"}, &out, &errb); code != 0 || out.Len() != 0 {
+		t.Fatalf("git-credential store: exit %d, stdout %q", code, out.String())
+	}
+	out.Reset()
+	if code := run([]string{"gh", "auth", "token"}, &out, &errb); code != 1 || !strings.Contains(errb.String(), "gh auth is not available") {
+		t.Fatalf("gh auth token: exit %d, stderr %q", code, errb.String())
 	}
 }

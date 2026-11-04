@@ -2,6 +2,7 @@ package node
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 
@@ -48,8 +49,8 @@ func TestReportToolEndsTicket(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) != 1 || tools.Tools[0].Name != "report" {
-		t.Fatalf("tools = %+v, want just report", tools.Tools)
+	if len(tools.Tools) != len(WorkerTools()) || !slices.ContainsFunc(tools.Tools, func(tl *mcp.Tool) bool { return tl.Name == "report" }) {
+		t.Fatalf("tools = %+v, want %v", tools.Tools, WorkerTools())
 	}
 
 	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "report", Arguments: map[string]any{"status": "progress", "summary": "half way", "question": "which color?"}})

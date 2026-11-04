@@ -55,6 +55,8 @@ type ReportRequest struct {
 	Status     string `json:"status"`
 	Summary    string `json:"summary"`
 	Question   string `json:"question,omitempty"`
+	// Pull is the number of the Ticket's pull request in its repository, bound to the Ticket as its own Thread.
+	Pull int `json:"pull,omitempty"`
 }
 
 // PingRequest asks the node whether it answers.

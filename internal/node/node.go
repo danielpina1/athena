@@ -70,6 +70,11 @@ type Config struct {
 	// Metrics receives the node's timings and gauges (session_spawn_seconds, session_init_seconds,
 	// hook_decision_seconds, mcp_tool_seconds, slots_in_use, tool_calls_total); nil records nothing.
 	Metrics *metrics.Registry
+	// Credentials gives GitHub Tickets (those with a Repo) their per-Assignment token and commit identity; without it
+	// such a Ticket fails at launch.
+	Credentials Credentials
+	// Logger receives the node's log lines (default slog.Default()).
+	Logger *slog.Logger
 }
 
 // EngineCallbacks is the part of *core.Engine the node calls: the Executor callbacks, the Ticket query and Approvals.
@@ -84,6 +89,14 @@ type EngineCallbacks interface {
 	RequestApproval(a core.Approval) (core.Approval, error)
 	WaitApproval(ctx context.Context, id string) (core.Approval, error)
 	ExpireApproval(id string) error
+	// Trigger reads a stored Trigger: a Ticket's origin for its execution variables, an Input's for its card.
+	Trigger(id string) (core.Trigger, error)
+	// The worker tools' commands (workertools.go) and the binding of a reported pull request.
+	Reply(r core.ReplyRequest) (string, error)
+	FollowForContext(ticketID, thread string) error
+	MarkUnrelated(ticketID, thread, reason string) error
+	Handback(ticketID, triggerID, reason string) (bool, error)
+	BindThread(ticketID, thread string, own bool) error
 	// RecordUsage adds what the node observed to the Ticket's stats. It takes the Engine's lock: never call it while
 	// holding a node lock that Start, Deliver or Stop also take.
 	RecordUsage(ticketID, assignmentID string, u core.UsageDelta) error
@@ -121,6 +134,9 @@ type Node struct {
 	// restartDelay is the pause before restart n (1-based) of a crashed session.
 	restartDelay func(n int) time.Duration
 
+	// tokens holds each GitHub Assignment's token, in memory only.
+	tokens *tokenStore
+
 	// Metric handles; nil without Config.Metrics.
 	reg        *metrics.Registry
 	slotsGauge *metrics.Gauge
@@ -153,9 +169,14 @@ func New(cfg Config, eng EngineCallbacks) *Node {
 			cfg.AthenaBin = exe
 		}
 	}
+	log := cfg.Logger
+	if log == nil {
+		log = slog.Default()
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	n := &Node{
-		cfg: cfg, ctx: ctx, cancel: cancel, log: slog.Default(),
+		cfg: cfg, ctx: ctx, cancel: cancel, log: log,
+		tokens:       newTokenStore(cfg.Credentials),
 		notify:       make(chan struct{}, 1),
 		done:         make(chan struct{}),
 		live:         map[string]*session{},
@@ -167,6 +188,11 @@ func New(cfg Config, eng EngineCallbacks) *Node {
 	}
 	if eng != nil {
 		n.SetEngine(eng)
+	}
+	if cfg.StateDir != "" && cfg.AthenaBin != "" {
+		if err := writeShims(cfg.StateDir, cfg.AthenaBin); err != nil {
+			log.Error("write the gh shim", "error", err)
+		}
 	}
 	go n.loop()
 	return n
@@ -325,7 +351,11 @@ func (n *Node) onStart(st *loopState, t core.Ticket, a core.Assignment) {
 			break
 		}
 	}
-	p, err := place(n.cfg.WorkRoot, t)
+	if t.Repo != "" && n.cfg.Credentials == nil {
+		n.goFail(t, a, "ticket works in GitHub repository "+t.Repo+", but this node has no GitHub credentials")
+		return
+	}
+	p, err := n.place(t)
 	if err != nil {
 		n.goFail(t, a, "prepare ticket directory: "+err.Error())
 		return
@@ -371,7 +401,7 @@ func (n *Node) onStop(st *loopState, t core.Ticket, a core.Assignment, reason st
 		n.runners.Add(1)
 		go func() {
 			defer n.runners.Done()
-			if p, err := place(n.cfg.WorkRoot, t); err == nil {
+			if p, err := n.place(t); err == nil {
 				cleanupWorktree(p, t, n.log.With("ticket", t.ID, "assignment", a.ID))
 			}
 		}()
@@ -481,6 +511,8 @@ type session struct {
 	deniedUnseen  bool
 	// reports counts the Reports the session filed through the socket.
 	reports int
+	// githubVars are the ATHENA_GITHUB_* execution variables of a GitHub Ticket, set before the session starts.
+	githubVars []string
 }
 
 func (n *Node) newSession(t core.Ticket, a core.Assignment, p placement) *session {
@@ -597,15 +629,24 @@ func (s *session) setSessionID(id string) {
 	s.mu.Unlock()
 }
 
+func (s *session) setGitHubVars(vars []string) {
+	s.mu.Lock()
+	s.githubVars = vars
+	s.mu.Unlock()
+}
+
 // variables returns the execution variables, as NAME=value pairs.
 func (n *Node) variables(s *session) []string {
-	return []string{
+	vars := []string{
 		"ATHENA_TICKET=" + s.t.ID,
 		"ATHENA_NAME=" + s.name,
 		"ATHENA_DIR=" + s.place.workDir,
 		"ATHENA_BLOCKED_COMMANDS=" + strings.Join(n.cfg.Blocked, ","),
 		"ATHENA_SOCKET=" + n.cfg.SocketPath,
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append(vars, s.githubVars...)
 }
 
 // sessionContext is what the SessionStart hook adds to the session: the execution variables and the Mandate.
@@ -665,6 +706,8 @@ type unreadInput struct {
 func (n *Node) run(s *session) {
 	defer n.runners.Done()
 	defer n.post(message{kind: msgEnded, s: s})
+	// The token lives as long as the Assignment's runner: a stop, a failure or a crash give-up drops it.
+	defer n.tokens.drop(s.a.ID)
 	r := &runner{n: n, s: s, eng: n.engine(), log: s.log, sent: map[string]bool{}, started: s.a.State == core.AssignmentRunning}
 	r.run()
 	if s.endedTicket() {
@@ -678,9 +721,10 @@ func (r *runner) run() {
 		return
 	}
 	if err := n.prepare(s); err != nil {
-		r.fail("prepare ticket directory: " + err.Error())
+		r.fail("prepare ticket directory: " + redact.String(err.Error()))
 		return
 	}
+	s.setGitHubVars(n.githubVariables(s))
 	// A running Assignment with a session resumes it after a crash or a node restart; a new Assignment of a
 	// Ticket (retry, resume) continues the Ticket's last session.
 	resumeID, recovering := s.a.SessionID, s.a.SessionID != ""
@@ -697,6 +741,7 @@ func (r *runner) run() {
 	r.model = model
 	adir := filepath.Join(s.place.workDir, ".athena")
 	env := append([]string{"ATHENA_ASSIGNMENT=" + s.a.ID}, n.variables(s)...)
+	env = append(env, n.githubEnv(s)...)
 	for crashes := 0; ; {
 		spawnStart := time.Now()
 		sess, err := claude.Start(n.ctx, claude.Options{
@@ -832,10 +877,10 @@ func (r *runner) sendFirst(sess *claude.Session, recovering bool) {
 	}
 	// Inputs a crashed process received but never took into a step go again, ahead of what waits.
 	if len(r.unread) > 0 {
-		b.WriteString("\n" + renderInputs(t, r.unreadIDs()))
+		b.WriteString("\n" + renderInputs(t, r.unreadIDs(), r.trigger))
 	}
 	if len(ids) > 0 {
-		b.WriteString("\n" + renderInputs(t, ids))
+		b.WriteString("\n" + renderInputs(t, ids, r.trigger))
 	}
 	if r.firstSent.IsZero() {
 		r.firstSent = time.Now()
@@ -866,7 +911,7 @@ func (r *runner) deliver(sess *claude.Session) {
 	if len(ids) == 0 {
 		return
 	}
-	if err := sess.Send(renderInputs(t, ids)); err != nil {
+	if err := sess.Send(renderInputs(t, ids, r.trigger)); err != nil {
 		if errors.Is(err, claude.ErrExited) {
 			return // still waiting: the restarted process takes them
 		}
@@ -1157,8 +1202,19 @@ func previousSessionID(t core.Ticket, assignmentID string) string {
 	return ""
 }
 
-// renderInputs renders Inputs for the session, in order.
-func renderInputs(t core.Ticket, ids []string) string {
+// trigger reads an Input's Trigger for its card.
+func (r *runner) trigger(id string) (core.Trigger, bool) {
+	tr, err := r.eng.Trigger(id)
+	if err != nil {
+		r.log.Warn("read trigger", "trigger", id, "error", err)
+		return core.Trigger{}, false
+	}
+	return tr, true
+}
+
+// renderInputs renders Inputs for the session, in order; an Input whose Trigger came from a Source's Thread is a
+// Trigger card (inputCard), trigger reading the Trigger.
+func renderInputs(t core.Ticket, ids []string, trigger func(id string) (core.Trigger, bool)) string {
 	var b strings.Builder
 	for _, id := range ids {
 		var in *core.Input
@@ -1175,8 +1231,14 @@ func renderInputs(t core.Ticket, ids []string) string {
 		case core.InputResumed:
 			fmt.Fprintf(&b, "[input %s: the Ticket was resumed by the message that follows]\n\n", in.ID)
 		case core.InputNote:
-			fmt.Fprintf(&b, "[input %s: note]\n%s\n\n", in.ID, in.Text)
+			fmt.Fprintf(&b, "[input %s: note]\nNote: %s\n\n", in.ID, in.Text)
 		default:
+			if in.TriggerID != "" && trigger != nil {
+				if tr, ok := trigger(in.TriggerID); ok && len(tr.Threads) > 0 {
+					b.WriteString(inputCard(*in, tr))
+					continue
+				}
+			}
 			from := "message"
 			if in.Human {
 				from = "message from the owner"
@@ -1242,11 +1304,29 @@ func slug(title string) string {
 }
 
 // placement is where a Ticket runs: its working directory, the git repository its worktree comes from (if any) and
-// the key of a non-git directory only one Ticket may use at a time (if any).
+// the key of a non-git directory only one Ticket may use at a time (if any). For a GitHub Ticket, github is its
+// repository (owner/name) and repo the node's clone of it.
 type placement struct {
 	workDir string
 	repo    string
 	dirKey  string
+	github  string
+}
+
+// place is a Ticket's placement on this node: a GitHub Ticket without a directory of its own works in a worktree of
+// the node's clone of its repository.
+func (n *Node) place(t core.Ticket) (placement, error) {
+	p, err := place(n.cfg.WorkRoot, t)
+	if err != nil {
+		return p, err
+	}
+	if t.Repo != "" && p.repo == "" && p.dirKey == "" {
+		if _, _, err := splitRepo(t.Repo); err != nil {
+			return placement{}, err
+		}
+		p.repo, p.github = CloneDir(n.cfg.StateDir, t.Repo), t.Repo
+	}
+	return p, nil
 }
 
 func place(workRoot string, t core.Ticket) (placement, error) {
@@ -1286,11 +1366,18 @@ func branchName(t core.Ticket) string { return branchPrefix + strings.ToLower(t.
 func (n *Node) prepare(s *session) error {
 	p := s.place
 	switch {
+	case p.github != "":
+		if err := os.MkdirAll(filepath.Dir(p.workDir), 0o700); err != nil {
+			return err
+		}
+		if err := n.prepareGitHub(s); err != nil {
+			return err
+		}
 	case p.repo != "":
 		if err := os.MkdirAll(filepath.Dir(p.workDir), 0o700); err != nil {
 			return err
 		}
-		if err := ensureWorktree(p.repo, p.workDir, branchName(s.t)); err != nil {
+		if err := ensureWorktree(p.repo, p.workDir, branchName(s.t), "HEAD"); err != nil {
 			return err
 		}
 	case p.dirKey != "":
@@ -1315,9 +1402,9 @@ func (n *Node) prepare(s *session) error {
 	return claude.WriteMCPConfig(filepath.Join(adir, "mcp.json"), n.cfg.AthenaBin, n.cfg.SocketPath, s.t.ID, s.a.ID)
 }
 
-// ensureWorktree creates dir as a worktree of repo on branch, from the repository's HEAD for a new branch; an
+// ensureWorktree creates dir as a worktree of repo on branch, from base for a new branch (without tracking it); an
 // existing dir is reused (a resumed Ticket).
-func ensureWorktree(repo, dir, branch string) error {
+func ensureWorktree(repo, dir, branch, base string) error {
 	if st, err := os.Stat(dir); err == nil {
 		if !st.IsDir() {
 			return fmt.Errorf("%s exists and is not a directory", dir)
@@ -1326,7 +1413,7 @@ func ensureWorktree(repo, dir, branch string) error {
 	}
 	// A new Ticket's branch does not exist yet: creating it with the worktree is the one git call the common case needs
 	// (each git process costs ~20 ms, which counts against the dispatch budget).
-	if _, err := gitOut(repo, "worktree", "add", "-b", branch, dir, "HEAD"); err == nil {
+	if _, err := gitOut(repo, "worktree", "add", "--no-track", "-b", branch, dir, base); err == nil {
 		return nil
 	}
 	// The branch exists (a resumed Ticket) or a removed worktree is still registered: prune, then reuse the branch.
@@ -1335,7 +1422,7 @@ func ensureWorktree(repo, dir, branch string) error {
 	if _, berr := gitOut(repo, "rev-parse", "--verify", "--quiet", "refs/heads/"+branch); berr == nil {
 		_, err = gitOut(repo, "worktree", "add", dir, branch)
 	} else {
-		_, err = gitOut(repo, "worktree", "add", "-b", branch, dir, "HEAD")
+		_, err = gitOut(repo, "worktree", "add", "--no-track", "-b", branch, dir, base)
 	}
 	return err
 }
@@ -1349,6 +1436,10 @@ func cleanupWorktree(p placement, t core.Ticket, log *slog.Logger) {
 	}
 	if _, err := os.Stat(p.workDir); err != nil {
 		return
+	}
+	if p.github != "" {
+		// The clone is shared: no fetch or worktree add of another Ticket runs meanwhile.
+		defer lockRepo(p.repo)()
 	}
 	dirty, err := gitOut(p.workDir, "status", "--porcelain")
 	if err != nil {

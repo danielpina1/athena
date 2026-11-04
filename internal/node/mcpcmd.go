@@ -14,6 +14,7 @@ type reportArgs struct {
 	Status   string `json:"status"`
 	Summary  string `json:"summary"`
 	Question string `json:"question,omitempty"`
+	Pull     int    `json:"pull,omitempty"`
 }
 
 var reportStates = []any{
@@ -26,10 +27,13 @@ const reportDescription = "File a Report on your Ticket. progress: an internal u
 	"ready: the work is done and verified; this ends the Ticket. " +
 	"blocked: a person must act before work can go on. failed: the work cannot be done. " +
 	"dropped: nothing is left to do and nobody needs to act; this closes the Ticket. " +
-	"Put a question for a person in question, not only in summary."
+	"Put a question for a person in question, not only in summary. " +
+	"pull: the number of the pull request you opened or adopted for this ticket in its repository; Athena then follows it, " +
+	"and the ticket ends when it is merged or closed. Omit it when there is none; never use a placeholder."
 
-// RunMCP implements `athena mcp --ticket <id>`: a stdio MCP server for one session, exposing the report tool, which
-// forwards to the node socket. The session's Assignment comes from ATHENA_ASSIGNMENT, set by the node.
+// RunMCP implements `athena mcp --ticket <id>`: a stdio MCP server for one session, exposing the report tool and the
+// worker tools (workertools.go), which forward to the node socket. The session's Assignment comes from
+// ATHENA_ASSIGNMENT, set by the node.
 func RunMCP(ticketID, socket string) error {
 	if ticketID == "" {
 		return errors.New("athena mcp: --ticket is required")
@@ -49,6 +53,7 @@ func newMCPServer(ticketID, assignmentID, socket string) *mcp.Server {
 			"status":   map[string]any{"type": "string", "enum": reportStates, "description": "The Report's state."},
 			"summary":  map[string]any{"type": "string", "description": "What happened: changes, checks actually run, risks, where the result is."},
 			"question": map[string]any{"type": "string", "description": "One concrete question for a person, if one must decide."},
+			"pull":     map[string]any{"type": "integer", "minimum": 1, "description": "Your ticket's pull request number, once it exists."},
 		},
 		"required":             []any{"status", "summary"},
 		"additionalProperties": false,
@@ -58,7 +63,7 @@ func newMCPServer(ticketID, assignmentID, socket string) *mcp.Server {
 			var resp Response
 			err := callNode(socket, ReportRequest{
 				Op: OpReport, Ticket: ticketID, Assignment: assignmentID,
-				Status: in.Status, Summary: in.Summary, Question: in.Question,
+				Status: in.Status, Summary: in.Summary, Question: in.Question, Pull: in.Pull,
 			}, &resp)
 			switch {
 			case err != nil:
@@ -68,6 +73,7 @@ func newMCPServer(ticketID, assignmentID, socket string) *mcp.Server {
 			}
 			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "Report filed (" + in.Status + ")."}}}, nil, nil
 		})
+	addWorkerTools(s, ticketID, assignmentID, socket)
 	return s
 }
 

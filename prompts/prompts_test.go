@@ -29,3 +29,19 @@ func TestRouterPrompt(t *testing.T) {
 		t.Error("router prompt does not forbid polling")
 	}
 }
+
+func TestWorkerPrompt(t *testing.T) {
+	for _, banned := range []string{"orchestrator_", "Feishu", "feishu", "DSH_", "lark-cli", "reply_to_trigger_id", "pr_number"} {
+		if strings.Contains(Worker, banned) {
+			t.Errorf("worker prompt mentions %q", banned)
+		}
+	}
+	for _, want := range []string{"`report`", "`ack`", "`reply`", "`follow_thread`", "`mark_unrelated`", "`handback`", "`pull`",
+		"athena/<ticket id>", "git push -u origin", "gh pr create", "ATHENA_GITHUB_REPOSITORY", "ATHENA_GITHUB_ACCOUNT",
+		"ATHENA_GITHUB_COMMIT_EMAIL", "ATHENA_GITHUB_NUMBER", "ATHENA_GITHUB_PR_HEAD", "trigger_id", "600 characters",
+		"Discover how the repository builds"} {
+		if !strings.Contains(Worker, want) {
+			t.Errorf("worker prompt lacks %q", want)
+		}
+	}
+}
