@@ -671,7 +671,7 @@ func (w *webEndpoint) start(d *Dispatcher, n *node.Node, fx *effects.Runner, ver
 			notifier.Run(ctx, nil)
 		}()
 	}
-	w.srv = web.NewServer(web.ServerConfig{Auth: auth, Dashboard: w.dash, VAPID: w.vapid, CA: w.tls.CA(), TLS: w.tls.Config(), UI: ui.FS(), Log: w.log})
+	w.srv = web.NewServer(web.ServerConfig{Auth: auth, Dashboard: w.dash, VAPID: w.vapid, CA: w.tls.CA(), TLS: w.tls.Config(), UI: ui.FS(), Artifacts: n, Log: w.log})
 	w.wg.Add(1)
 	go func() {
 		defer w.wg.Done()

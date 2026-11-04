@@ -192,6 +192,18 @@ is the reference client.
 - **Auth is HTTP.** `POST /auth/register/begin|finish`, `/auth/login/begin|finish`, `/auth/reauth/begin|finish`,
   `/auth/logout` and `GET /auth/session` take and return the WebAuthn JSON (base64url fields); every POST and the
   upgrade must carry `Origin` equal to the configured origin, or get 403.
+- **Ticket diffs and files are HTTP.** Three `GET` routes need a session (else 401 `{"code":"unauthenticated"}`) and
+  answer with `Cache-Control: no-store`. A Ticket that is unknown, not placed, or of the other kind, and a file that
+  is not there or may not be read, give 404 `{"code":"not_found"}`; any other failure gives 500 `{"code":"internal"}`.
+  - `/api/tickets/{id}/diff` (a Ticket in a git repository): `{"base","branch","files":[{"path","oldPath"?,"status",
+    "added","deleted","binary"}],"patch","truncated"}`. `branch` is `athena/<lowercased id>`; `base` is the
+    merge-base with `origin/HEAD`, else with the repository's `HEAD`. `status` is `A`, `M`, `D`, `R`, `C` or `T`.
+    `patch` is cut at 2 MiB (`truncated`).
+  - `/api/tickets/{id}/files` (a Ticket without a repository): `{"files":[{"path","size","modTime"}],"truncated"}`,
+    at most 1000 regular files, breadth-first, sorted by path; `.athena/` and symlinks are left out.
+  - `/api/tickets/{id}/files/{path...}`: the file as an attachment (`Content-Type: application/octet-stream`,
+    `X-Content-Type-Options: nosniff`). Paths outside the Ticket's directory, under `.athena/` or through a symlink
+    are 404.
 - **Close codes.** The server closes a connection with one of these:
 
   | Code | Meaning | Client action |

@@ -47,6 +47,8 @@ type ServerConfig struct {
 	// loopback only, and leaves Strict-Transport-Security out.
 	TLS *tls.Config
 	Log *slog.Logger
+	// Artifacts serves /api/tickets/{id}/diff and /files; nil leaves the routes out (they answer 404).
+	Artifacts Artifacts
 	// UI is the built dashboard (ui.FS()); tests inject a fstest.MapFS. Without an index.html in it every page is the
 	// "not built" fallback.
 	UI fs.FS
@@ -62,6 +64,7 @@ type Server struct {
 // NewServer builds the routes:
 //
 //	GET /ws                   the dashboard connection (Dashboard.ServeConn)
+//	GET /api/tickets/{id}/diff, /files, /files/{path...}   a Ticket's diff and files (mountArtifacts)
 //	/auth/*                   the login (Auth.Mount)
 //	GET /push/key             the VAPID public key
 //	GET /ca.pem, /ca.mobileconfig   the CA and its Apple profile (mode ca only)
@@ -80,6 +83,9 @@ func NewServer(cfg ServerConfig) *Server {
 	})
 	mux.HandleFunc("GET /ws", cfg.Dashboard.ServeConn)
 	cfg.Auth.Mount(mux)
+	if cfg.Artifacts != nil {
+		mountArtifacts(mux, cfg.Auth, cfg.Artifacts, log)
+	}
 	if cfg.VAPID != nil {
 		mux.Handle("GET /push/key", cfg.VAPID.Handler())
 	}
