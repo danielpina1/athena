@@ -50,3 +50,7 @@ bench:
 # Record the current numbers as the baseline (commit bench/baseline.json); do it only when a slower result is intended.
 bench-baseline:
 	ATHENA_BENCH=1 ATHENA_BENCH_UPDATE=1 go test -count=1 -v -run TestBudgets ./bench/...
+
+# Watch Athena's own development live: the roadmap and every plan being built task by task (Ctrl-C to quit).
+plans:
+	go run ./tools/planwatch
