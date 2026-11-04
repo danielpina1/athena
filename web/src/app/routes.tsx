@@ -19,6 +19,7 @@ import { lazy, type ReactNode, Suspense } from "react";
 import { Link, matchPath, Route, Routes, useParams } from "react-router";
 import { Panes, useLayout } from "@/app/Panes";
 import { NeedsYou } from "@/features/needs-you/NeedsYou";
+import { NewTask } from "@/features/new-task/NewTask";
 import { PinnedSessions } from "@/features/session/PinnedSessions";
 import { TicketDetail } from "@/features/tickets/TicketDetail";
 import { TicketList } from "@/features/tickets/TicketList";
@@ -101,7 +102,7 @@ function TicketsView() {
 }
 
 function NewView() {
-  return <Panes detail={<Placeholder title="New task" text="Describe the work and Athena opens a Ticket for it." />} />;
+  return <Panes detail={<NewTask />} />;
 }
 
 const GraphView = lazy(() => import("@/app/routes/graph"));
