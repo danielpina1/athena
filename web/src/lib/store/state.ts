@@ -167,7 +167,10 @@ export function connectStore(client: LinkClient, store: typeof useAthena = useAt
     client.setResume(s.epoch, s.cursor);
   };
   resume();
-  const off = client.onFrame((f) => {
+  // Any change to the store, a reset at sign-out included, moves the resume point: a reset store resumes from
+  // nothing and gets a Snapshot, never Deltas onto an empty state.
+  const offStore = store.subscribe(resume);
+  const offFrame = client.onFrame((f) => {
     switch (f.body.case) {
       case "welcome":
         welcomeEpoch = f.body.value.epoch;
@@ -188,10 +191,10 @@ export function connectStore(client: LinkClient, store: typeof useAthena = useAt
         }
         break;
       }
-      default:
-        return;
     }
-    resume();
   });
-  return off;
+  return () => {
+    offFrame();
+    offStore();
+  };
 }

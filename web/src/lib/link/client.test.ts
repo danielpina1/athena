@@ -347,6 +347,17 @@ describe("LinkClient", () => {
     }
   });
 
+  test("4001 after a stable connection still waits the longest backoff", () => {
+    client.start();
+    server.welcome();
+    vi.advanceTimersByTime(10000);
+    server.socket.serverClose(4001, "protocol violation");
+    vi.advanceTimersByTime(14999);
+    expect(server.sockets).toHaveLength(1);
+    vi.advanceTimersByTime(1);
+    expect(server.sockets).toHaveLength(2);
+  });
+
   test("sends no stream credit on (re)connect; grants carry what the view passes", () => {
     client.start();
     let s = server.welcome();
@@ -403,6 +414,93 @@ describe("LinkClient", () => {
     s.push({ channel: Channel.EVENTS, body: { case: "delta", value: { seq: 6n, change: { case: "ticket", value: { id: "T-1" } } } } });
     expect(useAthena.getState().cursor).toBe(6n);
     expect(s.sent("resync")).toEqual([]);
+    off();
+  });
+
+  test("a throwing subscriber is reported and the link still opens", () => {
+    const errors: unknown[] = [];
+    client = new LinkClient({ url: "wss://athena.test/ws", clientId: "dev-1", WebSocketImpl: server.WebSocket, reportError: (e) => errors.push(e) });
+    const seen: string[] = [];
+    client.onFrame(() => {
+      throw new Error("frame subscriber");
+    });
+    client.onFrame((f) => seen.push(f.body.case ?? ""));
+    client.onStatus(() => {
+      throw new Error("status subscriber");
+    });
+    client.start();
+    server.welcome();
+    expect(client.status).toBe("open");
+    expect(seen).toEqual(["welcome"]);
+    expect(errors.map((e) => (e as Error).message)).toEqual(["status subscriber", "frame subscriber", "status subscriber"]);
+  });
+
+  test("a durable seq is not spent when the write fails", () => {
+    client.start();
+    const s = server.welcome();
+    const send = vi.spyOn(s, "send").mockImplementationOnce(() => {
+      throw new Error("socket gone");
+    });
+    expect(client.send(Channel.CONTROL, true, { case: "command", value: { id: "a" } })).toBe(false);
+    send.mockRestore();
+    expect(client.send(Channel.CONTROL, true, { case: "command", value: { id: "b" } })).toBe(true);
+    expect(s.received.at(-1)?.seq).toBe(1n);
+    expect(s.violations).toEqual([]);
+  });
+
+  test("a store reset resumes from nothing", () => {
+    const off = connectStore(client);
+    client.start();
+    const s = server.welcome("e1", true);
+    s.push({ channel: Channel.EVENTS, body: { case: "snapshot", value: { cursor: 7n } } });
+    useAthena.getState().reset(); // sign-out
+    s.serverClose(1006);
+    vi.advanceTimersByTime(500);
+    server.socket.accept();
+    expect(server.socket.sent("hello")[0]).toMatchObject({ epoch: "", cursor: 0n });
+    off();
+  });
+
+  test("a resume without a Snapshot applies the missed Deltas in order", () => {
+    const off = connectStore(client);
+    client.start();
+    let s = server.welcome("e1", true);
+    s.push({ channel: Channel.EVENTS, body: { case: "snapshot", value: { cursor: 5n, tickets: [{ id: "T-1", title: "kept" }] } } });
+    s.serverClose(1001);
+    vi.advanceTimersByTime(500);
+    s = server.welcome("e1", false);
+    expect(s.sent("hello")[0]).toMatchObject({ epoch: "e1", cursor: 5n });
+    s.push({ channel: Channel.EVENTS, body: { case: "delta", value: { seq: 6n, change: { case: "ticket", value: { id: "T-2", title: "a" } } } } });
+    s.push({ channel: Channel.EVENTS, body: { case: "delta", value: { seq: 7n, change: { case: "ticket", value: { id: "T-2", title: "b" } } } } });
+    s.push({ channel: Channel.EVENTS, body: { case: "delta", value: { seq: 8n, change: { case: "ticket", value: { id: "T-3" } } } } });
+    const st = useAthena.getState();
+    expect(st.epoch).toBe("e1");
+    expect(st.cursor).toBe(8n);
+    expect(st.tickets.get("T-1")?.title).toBe("kept");
+    expect(st.tickets.get("T-2")?.title).toBe("b");
+    expect(st.tickets.has("T-3")).toBe(true);
+    expect(s.sent("resync")).toEqual([]);
+    off();
+  });
+
+  test("a Snapshot the server sends unasked replaces the state", () => {
+    const off = connectStore(client);
+    client.start();
+    const s = server.welcome("e1", true);
+    s.push({ channel: Channel.EVENTS, body: { case: "snapshot", value: { cursor: 5n, tickets: [{ id: "T-1" }] } } });
+    s.push({ channel: Channel.EVENTS, body: { case: "delta", value: { seq: 6n, change: { case: "ticket", value: { id: "T-2" } } } } });
+    // The hub dropped this connection's feed for falling behind: a fresh Snapshot, no Welcome, no Resync asked.
+    s.push({ channel: Channel.EVENTS, body: { case: "snapshot", value: { cursor: 40n, tickets: [{ id: "T-9" }] } } });
+    expect(useAthena.getState().epoch).toBe("e1");
+    expect(useAthena.getState().cursor).toBe(40n);
+    expect([...useAthena.getState().tickets.keys()]).toEqual(["T-9"]);
+    s.push({ channel: Channel.EVENTS, body: { case: "delta", value: { seq: 41n, change: { case: "ticket", value: { id: "T-10" } } } } });
+    expect(useAthena.getState().cursor).toBe(41n);
+    expect(s.sent("resync")).toEqual([]);
+    s.serverClose(1001);
+    vi.advanceTimersByTime(500);
+    server.socket.accept();
+    expect(server.socket.sent("hello")[0]).toMatchObject({ epoch: "e1", cursor: 41n });
     off();
   });
 

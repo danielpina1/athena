@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, test } from "vitest";
 import { DeltaSchema, SnapshotSchema, type Delta } from "@/gen/athena/v1/state_pb";
 import type { MessageInitShape } from "@bufbuild/protobuf";
 import { useAthena } from "./state";
+import { selectCounts, selectNeedsYou, selectTickets } from "./selectors";
 
 const snap = (init: MessageInitShape<typeof SnapshotSchema>) => create(SnapshotSchema, init);
 const delta = (init: MessageInitShape<typeof DeltaSchema>) => create(DeltaSchema, init);
@@ -138,15 +139,27 @@ describe("useAthena", () => {
       delta({ seq: BigInt(i + 1), change: { case: "ticket", value: { ...t, stage: i % 2 ? "idle" : "person", action: "answer" } } }),
     );
     // Warm up the JIT on a copy so the timed run measures steady state, then reset to the same starting point.
-    for (const d of deltas) st().applyDelta(d);
+    for (const d of deltas) {
+      st().applyDelta(d);
+      selectCounts(st(), Date.now());
+    }
     st().applySnapshot(snap({ cursor: 0n, tickets }), "e1");
+    // Per Delta: apply it, then derive what a screen shows from it (the Needs you list, the counts, a Tickets list).
+    const now = Date.now();
     const start = performance.now();
-    for (const d of deltas) expect(st().applyDelta(d)).toBe("ok");
+    for (const d of deltas) {
+      expect(st().applyDelta(d)).toBe("ok");
+      const s = st();
+      selectNeedsYou(s);
+      selectCounts(s, now);
+      selectTickets(s, { stage: "open" });
+    }
     const mean = (performance.now() - start) / deltas.length;
     // The budget is 16 ms to apply and render a Delta; a shared CI runner gets four times that.
     const budget = 16 * (process.env.CI ? 4 : 1);
     expect(mean).toBeLessThan(budget);
     expect(st().tickets.size).toBe(500);
     expect(st().cursor).toBe(500n);
+    expect(selectNeedsYou(st())).toHaveLength(250);
   });
 });

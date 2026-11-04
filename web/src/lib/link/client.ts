@@ -16,6 +16,8 @@ export type LinkClientOptions = {
   clientId: string;
   WebSocketImpl?: typeof WebSocket;
   now?: () => number;
+  /** Hears an error a subscriber threw; console.error by default. */
+  reportError?: (e: unknown) => void;
 };
 
 export const SUBPROTOCOL = "athena.v1";
@@ -51,6 +53,7 @@ export class LinkClient {
   private readonly clientId: string;
   private readonly WS: typeof WebSocket;
   private readonly now: () => number;
+  private readonly reportError: (e: unknown) => void;
 
   private _status: LinkStatus = "offline";
   private running = false;
@@ -81,6 +84,7 @@ export class LinkClient {
     this.clientId = opts.clientId;
     this.WS = opts.WebSocketImpl ?? WebSocket;
     this.now = opts.now ?? (() => Date.now());
+    this.reportError = opts.reportError ?? ((e) => console.error("link: a subscriber threw", e));
   }
 
   get status(): LinkStatus {
@@ -124,8 +128,12 @@ export class LinkClient {
   send(channel: Channel, durable: boolean, body: FrameBody): boolean {
     if (this._status !== "open" || !this.ws) return false;
     const f = create(FrameSchema, { channel, body });
-    if (durable) f.seq = ++this.sendSeq;
-    return this.write(this.ws, f);
+    if (!durable) return this.write(this.ws, f);
+    // The seq is spent only once the frame is written: a seq skipped is a gap, which the server closes with 4001.
+    f.seq = this.sendSeq + 1n;
+    if (!this.write(this.ws, f)) return false;
+    this.sendSeq = f.seq;
+    return true;
   }
 
   /** The epoch of the last Welcome whose state was applied, and the highest Delta seq applied: the next Hello's. */
@@ -270,8 +278,7 @@ export class LinkClient {
       return;
     }
     // A protocol close means this client broke a rule: retrying fast would only repeat it.
-    if (code === CLOSE_PROTOCOL) this.attempt = Math.max(this.attempt, MAX_BACKOFF_ATTEMPT);
-    this.retry(false);
+    this.retry(false, code === CLOSE_PROTOCOL ? MAX_BACKOFF_ATTEMPT : 0);
   }
 
   /** We end the connection (dead, or the server broke a rule) and reconnect. */
@@ -294,13 +301,15 @@ export class LinkClient {
     return ws;
   }
 
-  private retry(immediately: boolean): void {
+  /** Reconnects, now or after the backoff; floor is the least attempt to back off from. */
+  private retry(immediately: boolean, floor = 0): void {
     if (!this.running) {
       this.setStatus("offline");
       return;
     }
     if (this.openedAt && this.now() - this.openedAt >= STABLE_AFTER_MS) this.attempt = 0;
     this.openedAt = 0;
+    this.attempt = Math.max(this.attempt, floor);
     if (immediately) {
       this.connect();
       return;
@@ -352,11 +361,20 @@ export class LinkClient {
   private setStatus(s: LinkStatus): void {
     if (s === this._status) return;
     this._status = s;
-    for (const cb of [...this.statusCbs]) cb(s);
+    for (const cb of [...this.statusCbs]) this.call(cb, s);
   }
 
   private emitFrame(f: Frame): void {
-    for (const cb of [...this.frameCbs]) cb(f);
+    for (const cb of [...this.frameCbs]) this.call(cb, f);
+  }
+
+  /** Runs one subscriber: a throw is reported and never stops the link or the other subscribers. */
+  private call<T>(cb: (v: T) => void, v: T): void {
+    try {
+      cb(v);
+    } catch (e) {
+      this.reportError(e);
+    }
   }
 }
 
