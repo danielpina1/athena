@@ -702,3 +702,22 @@ func TestReceiveCommandMetric(t *testing.T) {
 	eq(t, "receive", got[cmdReceive], int64(1))
 	eq(t, "thread_closed", got[cmdThreadClosed], int64(1))
 }
+
+func TestFollowedThreadsOfOpenTickets(t *testing.T) {
+	h := newIntake(t)
+	a := h.sourceTicket(issue)
+	b := h.accepted()
+	h.must(h.eng.BindThread(a, pull1, true))
+	h.must(h.eng.BindThread(a, pull2, true))
+	h.must(h.eng.BindThread(b, pull2, false))
+	h.must(h.eng.BindThread(b, "feishu:oc_1:m1", false))
+	h.closePull(pull1, OutcomeMerged)
+	got, err := h.eng.FollowedThreads("github")
+	h.must(err)
+	eq(t, "followed", got, []string{pull2}) // pull1 closed; one entry per Thread; other Sources left out
+	h.must(h.eng.StopTicket(a, ""))
+	h.must(h.eng.StopTicket(b, ""))
+	got, err = h.eng.FollowedThreads("github")
+	h.must(err)
+	eq(t, "ended tickets follow nothing", len(got), 0)
+}

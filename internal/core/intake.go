@@ -451,3 +451,22 @@ func cloneTrigger(t Trigger) Trigger {
 	}
 	return c
 }
+
+// FollowedThreads returns, sorted and once each, the Threads of a Source that open Tickets follow and that have not
+// closed for them: the pull requests whose reviews and CI the Source reads.
+func (e *Engine) FollowedThreads(source string) ([]string, error) {
+	open, err := e.Tickets(false)
+	if err != nil {
+		return nil, err
+	}
+	prefix := source + ":"
+	seen := map[string]bool{}
+	for _, t := range open {
+		for _, f := range t.Follows {
+			if f.Closed == nil && strings.HasPrefix(f.Thread, prefix) {
+				seen[f.Thread] = true
+			}
+		}
+	}
+	return slices.Sorted(maps.Keys(seen)), nil
+}

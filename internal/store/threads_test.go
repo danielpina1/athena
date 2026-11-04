@@ -289,3 +289,26 @@ func TestMigration3FromV2(t *testing.T) {
 		return tx.Enqueue("reply", "k", []byte("x"))
 	})
 }
+
+func TestStoreKVOutsideTx(t *testing.T) {
+	s, _ := openTemp(t)
+	if _, ok, err := s.KVGet("github.cursor.o/r.issues"); err != nil || ok {
+		t.Fatalf("KVGet of a missing key = %v, %v", ok, err)
+	}
+	if err := s.KVSet("github.cursor.o/r.issues", "2026-11-03T11:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.KVSet("github.cursor.o/r.issues", "2026-11-03T11:30:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	v, ok, err := s.KVGet("github.cursor.o/r.issues")
+	if err != nil || !ok || v != "2026-11-03T11:30:00Z" {
+		t.Fatalf("KVGet = %q, %v, %v", v, ok, err)
+	}
+	// The same table the Tx helpers use.
+	var inTxValue string
+	inTx(t, s, func(tx core.Tx) (err error) { inTxValue, _, err = tx.KVGet("github.cursor.o/r.issues"); return err })
+	if inTxValue != v {
+		t.Fatalf("Tx KVGet = %q", inTxValue)
+	}
+}

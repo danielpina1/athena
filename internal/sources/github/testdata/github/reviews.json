@@ -1,0 +1,27 @@
+{
+  "2": [
+    {
+      "id": 301,
+      "node_id": "PRR_kwDOAAAAAc4AAAEt",
+      "user": {"login": "carol", "id": 13, "type": "User"},
+      "body": "",
+      "state": "APPROVED",
+      "html_url": "https://github.com/o/r/pull/2#pullrequestreview-301",
+      "pull_request_url": "https://api.github.com/repos/o/r/pulls/2",
+      "submitted_at": "2026-11-03T11:45:00Z",
+      "commit_id": "bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222",
+      "author_association": "MEMBER"
+    },
+    {
+      "id": 302,
+      "node_id": "PRR_kwDOAAAAAc4AAAEu",
+      "user": {"login": "alice", "id": 11, "type": "User"},
+      "body": "draft notes",
+      "state": "PENDING",
+      "html_url": "https://github.com/o/r/pull/2#pullrequestreview-302",
+      "pull_request_url": "https://api.github.com/repos/o/r/pulls/2",
+      "commit_id": "bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222",
+      "author_association": "MEMBER"
+    }
+  ]
+}

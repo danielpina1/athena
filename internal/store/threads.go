@@ -167,3 +167,19 @@ func (tx *Tx) KVSet(key, value string) error {
 	}
 	return nil
 }
+
+// KVGet reads a plain string outside any transaction (in a transaction of its own), for Sources' cursors; the bool
+// is false if there is none.
+func (s *Store) KVGet(key string) (value string, ok bool, err error) {
+	err = s.Tx(func(tx *Tx) error {
+		var e error
+		value, ok, e = tx.KVGet(key)
+		return e
+	})
+	return value, ok, err
+}
+
+// KVSet stores a plain string outside any transaction (in a transaction of its own).
+func (s *Store) KVSet(key, value string) error {
+	return s.Tx(func(tx *Tx) error { return tx.KVSet(key, value) })
+}
