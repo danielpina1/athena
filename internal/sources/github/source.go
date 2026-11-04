@@ -43,6 +43,9 @@ const (
 	// dropAfter is how long reads of an item or Thread may keep failing before it is dropped: skipped, so it no
 	// longer fails the poll or holds back its endpoint (reference 003 "Source failure").
 	dropAfter = 24 * time.Hour
+	// staleAfter is the age at which a first-failure time is forgotten: reads that failed for that long without
+	// succeeding start over, as if they had just begun to fail.
+	staleAfter = 2 * dropAfter
 )
 
 // The kv keys of a repository: github.cursor.<repo>.<endpoint>, with the canonical (lower-case) repo.
@@ -89,6 +92,8 @@ type Intake interface {
 type KV interface {
 	KVGet(key string) (string, bool, error)
 	KVSet(key, value string) error
+	// KVList returns the entries whose key starts with prefix.
+	KVList(prefix string) (map[string]string, error)
 }
 
 // ThreadKey is the canonical Thread key of an issue or pull request: github:<owner>/<name>#<n>, lower-case repo.
@@ -127,6 +132,8 @@ type Source struct {
 	blockedUntil time.Time         // no request before this: a rate limit's reset
 
 	mu        sync.Mutex
+	chLogin   string // the App's bot login and id as the Channel learned them
+	chID      int64
 	failed    int               // polls failed in a row
 	lastErr   string            // the latest poll error, redacted
 	malformed int               // list items skipped as malformed
@@ -211,8 +218,12 @@ func (s *Source) Dropped() map[string]string {
 	return maps.Clone(s.dropped)
 }
 
-// Run polls every repository at once and then every Interval until ctx is done, and returns nil then.
+// Run polls every repository at once and then every Interval until ctx is done, and returns nil then. It first
+// rebuilds Dropped from the Threads remembered as gone, so the list survives a restart.
 func (s *Source) Run(ctx context.Context) error {
+	if err := s.loadGone(); err != nil {
+		s.log.Warn("github gone threads not loaded", "error", redact.String(err.Error()))
+	}
 	interval := s.cfg.Interval
 	if interval <= 0 {
 		interval = DefaultInterval
@@ -227,6 +238,24 @@ func (s *Source) Run(ctx context.Context) error {
 		case <-t.C:
 		}
 	}
+}
+
+// loadGone puts the Threads remembered as gone (github.state.<thread> = gone) back into Dropped.
+func (s *Source) loadGone() error {
+	states, err := s.kv.KVList("github.state.")
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key, state := range states {
+		if thread := strings.TrimPrefix(key, "github.state."); state == stateGone {
+			if _, ok := s.dropped[thread]; !ok {
+				s.dropped[thread] = "gone"
+			}
+		}
+	}
+	return nil
 }
 
 // poll polls every repository once and records the outcome for Health; a poll the context stopped is not counted.
@@ -608,9 +637,10 @@ func readError(err error) bool {
 }
 
 // threadRead settles the outcome of reading a Thread's data. A success clears its first-failure time. A read GitHub
-// answers as gone records the Thread closed and gone, and drops it. Another read error keeps the Thread's first
-// failure (github.failing.<thread>) and stands until reads have failed for dropAfter; then the Thread is dropped:
-// the caller skips it, so it no longer fails the poll or holds back its endpoint. Other errors stand.
+// answers as gone records the Thread as gone and drops it (the Engine is not told: a deleted Thread is not a close).
+// Another read error keeps the Thread's first failure (github.failing.<thread>) and stands until reads have failed
+// for dropAfter; then the Thread is dropped: the caller skips it, so it no longer fails the poll or holds back its
+// endpoint. A first failure older than staleAfter starts over (reset to now). Other errors stand.
 func (s *Source) threadRead(thread string, err error) (drop bool, _ error) {
 	if err == nil {
 		return false, s.readOK(thread)
@@ -633,7 +663,14 @@ func (s *Source) threadRead(thread string, err error) (drop bool, _ error) {
 		}
 		return false, err
 	}
-	if s.now().Sub(first) < dropAfter {
+	age := s.now().Sub(first)
+	if age >= staleAfter {
+		if kerr := s.kv.KVSet(key, s.now().UTC().Format(time.RFC3339)); kerr != nil {
+			return false, errors.Join(err, kerr)
+		}
+		return false, err
+	}
+	if age < dropAfter {
 		return false, err
 	}
 	why := "reads failing since " + v + ": " + redact.String(err.Error())
@@ -647,8 +684,19 @@ func (s *Source) threadRead(thread string, err error) (drop bool, _ error) {
 // readOK clears a Thread's failure once a read of it succeeds.
 func (s *Source) readOK(thread string) error {
 	s.mu.Lock()
+	_, was := s.dropped[thread]
 	delete(s.dropped, thread)
 	s.mu.Unlock()
+	if was {
+		// A Thread remembered as gone that reads again is not gone: it is open until its items say otherwise.
+		if st, _, err := s.kv.KVGet(stateKey(thread)); err != nil {
+			return err
+		} else if st == stateGone {
+			if err := s.kv.KVSet(stateKey(thread), stateOpen); err != nil {
+				return err
+			}
+		}
+	}
 	key := failingKey(thread)
 	v, ok, err := s.kv.KVGet(key)
 	if err != nil || !ok || v == "" {
@@ -657,7 +705,8 @@ func (s *Source) readOK(thread string) error {
 	return s.kv.KVSet(key, "")
 }
 
-// gone records a deleted Thread: closed for the Tickets that follow it, and never read again.
+// gone records a deleted Thread: dropped, remembered as gone (it survives a restart) and never read again. The
+// Engine is not told it closed.
 func (s *Source) gone(thread string, cause error) error {
 	s.mu.Lock()
 	s.dropped[thread] = "gone: " + redact.String(cause.Error())
@@ -666,9 +715,6 @@ func (s *Source) gone(thread string, cause error) error {
 		return err
 	}
 	s.log.Info("github thread gone", "thread", thread)
-	if err := s.in.ThreadClosed(thread, core.OutcomeClosed, s.now().UTC()); err != nil {
-		return fmt.Errorf("close %s: %w", thread, err)
-	}
 	return s.kv.KVSet(stateKey(thread), stateGone)
 }
 

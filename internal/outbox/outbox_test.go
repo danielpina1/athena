@@ -30,6 +30,13 @@ type fakeSource struct {
 	gone  map[string]bool
 	sent  []string // texts, in send order
 	tries int
+	calls []sendCall // every Send, in order
+}
+
+// sendCall is what the Outbox passed to one Send.
+type sendCall struct {
+	ID      string
+	Attempt int
 }
 
 func newFakeSource() *fakeSource {
@@ -48,10 +55,11 @@ func (s *fakeSource) Link(ch core.ChannelRef) string {
 	return "https://github.com/" + ch.Thread
 }
 
-func (s *fakeSource) Send(_ context.Context, ch core.ChannelRef, text string) (sources.SendResult, error) {
+func (s *fakeSource) Send(_ context.Context, ch core.ChannelRef, receiptID string, attempt int, text string) (sources.SendResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.tries++
+	s.calls = append(s.calls, sendCall{receiptID, attempt})
 	if s.fails[text] > 0 {
 		s.fails[text]--
 		return "", errors.New("502 bad gateway")
@@ -165,6 +173,8 @@ func TestOutboxOrderPerConversation(t *testing.T) {
 	eq(t, "result never tried", f.src.tries, 2)
 	must(t, "ack goes out", f.run("ack"))
 	must(t, "then the result", f.run("result"))
+	// The Channel gets the receipt's id and the failed attempts so far, to keep a retry from duplicating the message.
+	eq(t, "id and attempt reach the Channel", f.src.calls, []sendCall{{"ack", 0}, {"ack", 1}, {"ack", 2}, {"result", 0}})
 	eq(t, "in order", f.src.sentTexts(), []string{"On it.", "Done."})
 	ack := f.receipt("ack")
 	eq(t, "ack sent", ack.State, core.ReceiptSent)

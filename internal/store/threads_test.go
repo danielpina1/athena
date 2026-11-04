@@ -312,3 +312,27 @@ func TestStoreKVOutsideTx(t *testing.T) {
 		t.Fatalf("Tx KVGet = %q", inTxValue)
 	}
 }
+
+func TestStoreKVList(t *testing.T) {
+	s, _ := openTemp(t)
+	for k, v := range map[string]string{"github.state.github:o/r#1": "gone", "github.state.github:o/r#2": "open",
+		"github.statement": "no", "github.cursor.o/r.issues": "x", "github.state.100%_é": "y"} {
+		if err := s.KVSet(k, v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := s.KVList("github.state.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{"github.state.github:o/r#1": "gone", "github.state.github:o/r#2": "open", "github.state.100%_é": "y"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("KVList = %v, want %v", got, want)
+	}
+	if got, err := s.KVList("nothing."); err != nil || len(got) != 0 {
+		t.Fatalf("KVList of an unused prefix = %v, %v", got, err)
+	}
+	if got, err := s.KVList("github.state.100%_"); err != nil || len(got) != 1 {
+		t.Fatalf("a prefix with wildcards matches literally: %v, %v", got, err)
+	}
+}

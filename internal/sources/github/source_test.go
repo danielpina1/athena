@@ -395,6 +395,18 @@ func (k *memKV) KVSet(key, value string) error {
 	return nil
 }
 
+func (k *memKV) KVList(prefix string) (map[string]string, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	out := map[string]string{}
+	for key, v := range k.m {
+		if strings.HasPrefix(key, prefix) {
+			out[key] = v
+		}
+	}
+	return out, nil
+}
+
 func (k *memKV) get(key string) string {
 	k.mu.Lock()
 	defer k.mu.Unlock()
@@ -1093,8 +1105,12 @@ func TestGoneThreadStopsFailing(t *testing.T) {
 	h.in.followed = []string{"github:o/r#9"}
 	h.gh.failNext("issue", http.StatusGone, http.StatusGone, http.StatusGone)
 	h.mustPoll()
-	if got := closesOf(h.in, "github:o/r#9"); len(got) != 1 || got[0].Outcome != core.OutcomeClosed {
+	// R19: the Thread is dropped and remembered as gone; the Engine is not told it closed.
+	if got := closesOf(h.in, "github:o/r#9"); len(got) != 0 {
 		t.Fatalf("closes = %+v", got)
+	}
+	if got := h.kv.get("github.state.github:o/r#9"); got != "gone" {
+		t.Fatalf("state = %q", got)
 	}
 	if _, ok := h.src.Dropped()["github:o/r#9"]; !ok {
 		t.Fatalf("dropped = %v", h.src.Dropped())
@@ -1106,11 +1122,62 @@ func TestGoneThreadStopsFailing(t *testing.T) {
 			n++
 		}
 	}
-	if n != 1 || len(closesOf(h.in, "github:o/r#9")) != 1 {
+	if n != 1 || len(closesOf(h.in, "github:o/r#9")) != 0 {
 		t.Fatalf("a gone Thread was read %d times", n)
 	}
 	if err := h.src.Health(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Dropped survives a restart: it is rebuilt from the Threads remembered as gone.
+func TestDroppedSurvivesRestart(t *testing.T) {
+	h := newSourceHarness(t, SourceConfig{})
+	h.in.followed = []string{"github:o/r#9"}
+	h.gh.failNext("issue", http.StatusGone)
+	h.mustPoll()
+	h.kv.KVSet("github.state.github:o/r#7", "closed") // other states are not gone
+	s := h.newSource(SourceConfig{})
+	if len(s.Dropped()) != 0 {
+		t.Fatalf("a new Source starts with %v", s.Dropped())
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := s.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got := s.Dropped()
+	if len(got) != 1 || !strings.HasPrefix(got["github:o/r#9"], "gone") {
+		t.Fatalf("dropped after restart = %v", got)
+	}
+	// A successful read of the Thread brings it back: no longer dropped, here or after another restart.
+	if err := s.readOK("github:o/r#9"); err != nil {
+		t.Fatal(err)
+	}
+	if len(s.Dropped()) != 0 || h.kv.get("github.state.github:o/r#9") == "gone" {
+		t.Fatalf("dropped = %v, state = %q", s.Dropped(), h.kv.get("github.state.github:o/r#9"))
+	}
+}
+
+// R19: reads that have failed for more than two days are a fresh start, not a reason to stay dropped.
+func TestStaleFailureStartsFresh(t *testing.T) {
+	h := newSourceHarness(t, SourceConfig{})
+	h.gh.edit(func() { delete(h.gh.pulls, "3") }) // /pulls/3 answers 404
+	h.kv.KVSet("github.failing.github:o/r#3", h.gh.clk.now().Add(-49*time.Hour).UTC().Format(time.RFC3339))
+	if err := h.poll(); err == nil {
+		t.Fatal("poll succeeded")
+	}
+	if len(h.src.Dropped()) != 0 {
+		t.Fatalf("dropped = %v", h.src.Dropped())
+	}
+	if got := h.kv.get("github.failing.github:o/r#3"); got != h.gh.clk.now().UTC().Format(time.RFC3339) {
+		t.Fatalf("first failure = %q, want now", got)
+	}
+	// Between one and two days it is dropped, as before.
+	h.kv.KVSet("github.failing.github:o/r#3", h.gh.clk.now().Add(-25*time.Hour).UTC().Format(time.RFC3339))
+	h.mustPoll()
+	if _, ok := h.src.Dropped()["github:o/r#3"]; !ok {
+		t.Fatalf("dropped = %v", h.src.Dropped())
 	}
 }
 

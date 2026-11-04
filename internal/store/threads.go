@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"unicode/utf8"
 
 	"github.com/danielpina1/athena/internal/core"
 )
@@ -168,6 +169,27 @@ func (tx *Tx) KVSet(key, value string) error {
 	return nil
 }
 
+// KVList returns the plain strings stored under keys that start with prefix, by key.
+func (tx *Tx) KVList(prefix string) (map[string]string, error) {
+	rows, err := tx.sql.Query(`SELECT key, value FROM kv WHERE substr(key, 1, ?) = ?`, utf8.RuneCountInString(prefix), prefix)
+	if err != nil {
+		return nil, fmt.Errorf("store: kv list %q: %w", prefix, err)
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var k, v string
+		if err := rows.Scan(&k, &v); err != nil {
+			return nil, fmt.Errorf("store: kv list %q: %w", prefix, err)
+		}
+		out[k] = v
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: kv list %q: %w", prefix, err)
+	}
+	return out, nil
+}
+
 // KVGet reads a plain string outside any transaction (in a transaction of its own), for Sources' cursors; the bool
 // is false if there is none.
 func (s *Store) KVGet(key string) (value string, ok bool, err error) {
@@ -177,6 +199,16 @@ func (s *Store) KVGet(key string) (value string, ok bool, err error) {
 		return e
 	})
 	return value, ok, err
+}
+
+// KVList lists the keys that start with prefix, outside any transaction (in a transaction of its own).
+func (s *Store) KVList(prefix string) (out map[string]string, err error) {
+	err = s.Tx(func(tx *Tx) error {
+		var e error
+		out, e = tx.KVList(prefix)
+		return e
+	})
+	return out, err
 }
 
 // KVSet stores a plain string outside any transaction (in a transaction of its own).

@@ -83,7 +83,7 @@ func Handler(reg *sources.Registry, st *store.Store) effects.Handler {
 		if !ok {
 			return settle(st, id, core.ReceiptDropped, core.DropNoChannel)
 		}
-		res, err := ch.Send(ctx, r.Channel, r.Text)
+		res, err := ch.Send(ctx, r.Channel, r.ID, r.Attempts, r.Text)
 		if err != nil {
 			if ctx.Err() == nil {
 				if ferr := failed(st, id, err); ferr != nil {

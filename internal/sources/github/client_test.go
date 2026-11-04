@@ -223,6 +223,13 @@ func TestErrorClasses(t *testing.T) {
 		{"POST", 422, `{"message":"Conversation is locked"}`, ErrGone},
 		{"PATCH", 422, `{"message":"Issue was LOCKED"}`, ErrGone},
 		{"POST", 422, `{"message":"Validation Failed"}`, ErrPermanent},
+		// A locked target, however GitHub words it: in an errors[] message, or as a 403 to a non-collaborator.
+		{"POST", 422, `{"message":"Validation Failed","errors":[{"resource":"IssueComment","code":"custom","message":"Conversation is locked"}]}`, ErrGone},
+		{"POST", 422, `{"message":"Validation Failed","errors":["Issue is locked"]}`, ErrGone},
+		{"POST", 403, `{"message":"Unable to create comment because issue is locked."}`, ErrGone},
+		{"POST", 422, `{"message":"Validation Failed","errors":[{"resource":"IssueComment","code":"invalid","field":"body"}]}`, ErrPermanent},
+		{"POST", 422, `{"message":"Validation Failed","errors":[{"message":"body is unlocked-looking but fine"}]}`, ErrPermanent},
+		{"POST", 403, `{"message":"Resource not accessible by integration"}`, ErrPermanent},
 		{"GET", 400, "", ErrPermanent},
 		{"GET", 401, "", ErrPermanent},
 		{"GET", 403, `{"message":"forbidden"}`, ErrPermanent},
@@ -458,6 +465,31 @@ func TestNewClientAPIURL(t *testing.T) {
 	for _, good := range []string{"", "https://api.github.com", "https://ghe.example.com/api/v3/", "http://127.0.0.1:8080", "http://localhost:80", "http://[::1]:9", "http://LOCALHOST"} {
 		if _, err := NewClient(nil, good, tok, "v"); err != nil {
 			t.Errorf("APIURL %q: %v", good, err)
+		}
+	}
+}
+
+func TestLockedErrorsAreMarked(t *testing.T) {
+	for _, c := range []struct {
+		status int
+		body   string
+		locked bool
+	}{
+		{403, `{"message":"Unable to create comment because issue is locked."}`, true},
+		{422, `{"message":"Validation Failed","errors":[{"message":"Conversation is locked"}]}`, true},
+		{404, `{"message":"Not Found"}`, false},
+		{422, `{"message":"Validation Failed"}`, false},
+	} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(c.status)
+			fmt.Fprint(w, c.body)
+		}))
+		cl := newTestClient(srv.Client(), srv.URL, staticToken("t"), "v")
+		err := cl.Post(context.Background(), "/p", map[string]string{}, nil)
+		srv.Close()
+		var ae *APIError
+		if !errors.As(err, &ae) || ae.Locked != c.locked {
+			t.Errorf("%d %s: APIError = %+v, want Locked %v", c.status, c.body, ae, c.locked)
 		}
 	}
 }

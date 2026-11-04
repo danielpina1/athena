@@ -44,7 +44,8 @@ var (
 	// ErrTransient is a failure worth retrying: 5xx, 408, a network error or timeout, and a 404 on a read (a repository
 	// the App lost access to reads as a 404, so a 404 is retried rather than dropped).
 	ErrTransient = errors.New("github: transient error")
-	// ErrGone is a target that no longer accepts the request: 410, a 404 on a write, or a 422 about a locked target.
+	// ErrGone is a target that no longer accepts the request: 410, a 404 on a write, or a locked target (a 422, or a
+	// 403 to a non-collaborator, whose message or errors[] say so; the APIError has Locked set).
 	ErrGone = errors.New("github: gone")
 	// ErrPermanent is any other failure the same request will not get past.
 	ErrPermanent = errors.New("github: permanent error")
@@ -69,7 +70,9 @@ type APIError struct {
 	Path    string
 	Status  int
 	Message string
-	class   error
+	// Locked is set when the target is locked (a 403 or 422 that says so): nothing can be posted to it.
+	Locked bool
+	class  error
 }
 
 func (e *APIError) Error() string {
@@ -396,10 +399,15 @@ func (c *Client) record(h http.Header) {
 func (c *Client) fail(method, path string, r *response) error {
 	msg := apiMessage(r.body)
 	e := &APIError{Method: method, Path: path, Status: r.status, Message: truncate(redact.String(msg), maxErrorRunes)}
+	locked := lockedBody(r.body, msg)
 	switch s := r.status; {
 	case s == http.StatusForbidden || s == http.StatusTooManyRequests:
 		if reset, ok := c.rateLimitReset(r, msg); ok {
 			return rateLimited{ErrRateLimited{Reset: reset}, e}
+		}
+		if s == http.StatusForbidden && locked {
+			e.class, e.Locked = ErrGone, true
+			break
 		}
 		e.class = ErrPermanent
 	case s >= 500 || s == http.StatusRequestTimeout:
@@ -408,8 +416,8 @@ func (c *Client) fail(method, path string, r *response) error {
 		e.class = ErrTransient
 	case s == http.StatusNotFound || s == http.StatusGone:
 		e.class = ErrGone
-	case s == http.StatusUnprocessableEntity && strings.Contains(strings.ToLower(msg), "locked"):
-		e.class = ErrGone
+	case s == http.StatusUnprocessableEntity && locked:
+		e.class, e.Locked = ErrGone, true
 	default:
 		e.class = ErrPermanent
 	}
@@ -453,6 +461,38 @@ func apiMessage(body []byte) string {
 		return v.Message
 	}
 	return strings.TrimSpace(string(body))
+}
+
+var lockedWord = regexp.MustCompile(`(?i)\blocked\b`)
+
+// lockedBody reports whether an error body says the target is locked: in its top-level message (msg) or in any
+// errors[] entry, whether that is a string or an object with a message.
+func lockedBody(body []byte, msg string) bool {
+	if lockedWord.MatchString(msg) {
+		return true
+	}
+	var v struct {
+		Errors []json.RawMessage `json:"errors"`
+	}
+	if json.Unmarshal(body, &v) != nil {
+		return false
+	}
+	for _, raw := range v.Errors {
+		var text string
+		if json.Unmarshal(raw, &text) != nil {
+			var o struct {
+				Message string `json:"message"`
+			}
+			if json.Unmarshal(raw, &o) != nil {
+				continue
+			}
+			text = o.Message
+		}
+		if lockedWord.MatchString(text) {
+			return true
+		}
+	}
+	return false
 }
 
 // truncate cuts s to n runes, adding an ellipsis when it cut.

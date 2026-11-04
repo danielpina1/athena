@@ -34,9 +34,11 @@ const (
 )
 
 // Channel is the optional part of a Source that writes to its conversations. Send returns an error for a failure that
-// may pass, Gone for one that never will.
+// may pass, Gone for one that never will. A send may fail after the remote service received it, so a retry must not
+// duplicate the message: receiptID is the message's stable ID, to make the send idempotent, and attempt counts the
+// failed sends before this one (zero for the first).
 type Channel interface {
-	Send(ctx context.Context, ch core.ChannelRef, text string) (SendResult, error)
+	Send(ctx context.Context, ch core.ChannelRef, receiptID string, attempt int, text string) (SendResult, error)
 	// Link is the URL a person opens to see the Channel.
 	Link(ch core.ChannelRef) string
 }
