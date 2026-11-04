@@ -61,18 +61,22 @@ export type FilterParams = {
   sp: URLSearchParams;
   /** Bumps when the URL changed from outside (back/forward, a link): local copies of it re-seed. */
   external: number;
-  set(key: (typeof KEYS)[number], value: string): void;
-  clear(): void;
-  /** The search text as last written or read: newer than `sp` while a write is still in its transition. */
+  set(key: string, value: string): void;
+  /** Removes the filters' parameters (the hook's own keys, or `keys`). */
+  clear(keys?: readonly string[]): void;
+  /** A parameter as last written or read: newer than `sp` while a write is still in its transition. */
+  get(key: string): string;
+  /** The search text (`q`) as last written or read. */
   query(): string;
 };
 
 /**
  * The filters' parameters. react-router applies a URL change in a transition, so the `sp` of one render can be older
  * than a write already made: each write is built from the latest params written (a ref), never from the render's, so
- * two changes before a commit both survive. A change that is not one of our own writes re-reads the URL.
+ * two changes before a commit both survive. A change that is not one of our own writes re-reads the URL. `own` names
+ * the parameters clear() removes (the Routing page passes its three tabs' filters).
  */
-export function useFilterParams(): FilterParams {
+export function useFilterParams(own: readonly string[] = KEYS): FilterParams {
   const [sp, setSp] = useSearchParams();
   const routerKey = sp.toString();
   const latest = useRef(new URLSearchParams(routerKey));
@@ -107,10 +111,11 @@ export function useFilterParams(): FilterParams {
       else next.delete(key);
       write(next);
     },
+    get: (key) => latest.current.get(key) ?? "",
     query: () => latest.current.get("q") ?? "",
-    clear() {
+    clear(keys = own) {
       const next = new URLSearchParams(latest.current);
-      for (const k of KEYS) next.delete(k);
+      for (const k of keys) next.delete(k);
       write(next);
       setExternal((n) => n + 1); // the search box shows the cleared text
     },
@@ -124,6 +129,7 @@ function SearchBox({ params, inputRef }: { params: FilterParams; inputRef?: Reac
     <Input
       ref={inputRef}
       type="search"
+      data-list-search
       aria-label="Search Tickets"
       placeholder="Search by title or id"
       autoComplete="off"

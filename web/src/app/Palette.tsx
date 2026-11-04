@@ -18,8 +18,9 @@ import {
 import { type KeyboardEvent, useMemo, useState } from "react";
 import { useMatch, useNavigate } from "react-router";
 import type { CommandResult } from "@/gen/athena/v1/commands_pb";
-import type { TicketSummary, ThreadView, TriggerView } from "@/gen/athena/v1/state_pb";
+import type { TicketSummary } from "@/gen/athena/v1/state_pb";
 import { NAV } from "@/app/routes";
+import { search, type SearchHit } from "@/app/search";
 import { errorMessage, interrupt, reply, retry, stop } from "@/lib/commands/actions";
 import { useAthena } from "@/lib/store/state";
 import { Mono } from "@/ui/athena/Mono";
@@ -34,44 +35,24 @@ import {
 import { toast } from "@/ui/primitives/toast";
 import { useTheme } from "@/ui/theme";
 
-/** At most this many search results per kind. */
-const MAX_RESULTS = 20;
+type Results = {
+  tickets: Extract<SearchHit, { kind: "ticket" }>[];
+  triggers: Extract<SearchHit, { kind: "trigger" }>[];
+  threads: Extract<SearchHit, { kind: "thread" }>[];
+};
 
-/**
- * What a Thread search looks for: a GitHub issue or pull request URL becomes its Thread key
- * (github:owner/name#n); anything else is matched as typed, ignoring case.
- */
-export function threadQuery(q: string): string {
-  const t = q.trim();
-  const m = /^(?:https?:\/\/)?(?:www\.)?github\.com\/([^/\s]+)\/([^/\s]+)\/(?:pull|issues)\/(\d+)/i.exec(t);
-  return m ? `github:${m[1].toLowerCase()}/${m[2].toLowerCase()}#${m[3]}` : t.toLowerCase();
-}
-
-function firstMatches<T>(values: Iterable<T>, keep: (v: T) => boolean): T[] {
-  const out: T[] = [];
-  for (const v of values) {
-    if (out.length >= MAX_RESULTS) break;
-    if (keep(v)) out.push(v);
-  }
-  return out;
-}
-
-type Results = { tickets: TicketSummary[]; triggers: TriggerView[]; threads: ThreadView[] };
-
-function useResults(search: string): Results {
+function useResults(q: string): Results {
   const tickets = useAthena((s) => s.tickets);
   const triggers = useAthena((s) => s.triggers);
   const threads = useAthena((s) => s.threads);
   return useMemo(() => {
-    const q = search.trim().toLowerCase();
-    if (!q) return { tickets: [], triggers: [], threads: [] };
-    const key = threadQuery(search);
+    const hits = search({ tickets, triggers, threads }, q);
     return {
-      tickets: firstMatches(tickets.values(), (t) => t.id.toLowerCase().includes(q) || t.title.toLowerCase().includes(q)),
-      triggers: q.length < 2 ? [] : firstMatches(triggers.values(), (t) => t.text.toLowerCase().includes(q)),
-      threads: firstMatches(threads.values(), (t) => t.key.toLowerCase().includes(key)),
+      tickets: hits.filter((h) => h.kind === "ticket"),
+      triggers: hits.filter((h) => h.kind === "trigger"),
+      threads: hits.filter((h) => h.kind === "thread"),
     };
-  }, [search, tickets, triggers, threads]);
+  }, [q, tickets, triggers, threads]);
 }
 
 type Step = { kind: "root" } | { kind: "reply"; id: string } | { kind: "stop"; id: string };
@@ -102,13 +83,13 @@ export function Palette({ open, onOpenChange }: { open: boolean; onOpenChange: (
   const ticket = useAthena((s) => (selectedId ? s.tickets.get(selectedId) : undefined));
   const { resolved, setTheme } = useTheme();
   const [step, setStep] = useState<Step>(ROOT);
-  const [search, setSearch] = useState("");
-  const results = useResults(step.kind === "root" ? search : "");
+  const [text, setText] = useState("");
+  const results = useResults(step.kind === "root" ? text : "");
 
   const setOpen = (next: boolean) => {
     if (!next) {
       setStep(ROOT);
-      setSearch("");
+      setText("");
     }
     onOpenChange(next);
   };
@@ -118,11 +99,11 @@ export function Palette({ open, onOpenChange }: { open: boolean; onOpenChange: (
   };
   const toStep = (next: Step) => {
     setStep(next);
-    setSearch("");
+    setText("");
   };
   // Backspace in an empty field leaves a step.
   const onKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
-    if (step.kind !== "root" && e.key === "Backspace" && search === "") {
+    if (step.kind !== "root" && e.key === "Backspace" && text === "") {
       e.preventDefault();
       toStep(ROOT);
     }
@@ -157,7 +138,7 @@ export function Palette({ open, onOpenChange }: { open: boolean; onOpenChange: (
 
   // Everything is filtered here, not by cmdk: its fuzzy filter would hide (and not count) a result found another way,
   // a GitHub URL for a Thread key say, and show "Nothing matches." beside it.
-  const q = step.kind === "root" ? search : "";
+  const q = step.kind === "root" ? text : "";
   const ticketActions = keep(q, ticket ? ticketActionsFor(ticket) : []);
   const goTo = keep(
     q,
@@ -195,15 +176,15 @@ export function Palette({ open, onOpenChange }: { open: boolean; onOpenChange: (
       onOpenChange={setOpen}
       commandProps={{ shouldFilter: false, loop: true, label: "Command palette" }}
     >
-      <CommandInput value={search} onValueChange={setSearch} placeholder={placeholder} onKeyDown={onKeyDown} />
+      <CommandInput value={text} onValueChange={setText} placeholder={placeholder} onKeyDown={onKeyDown} />
       <CommandList>
         {step.kind === "reply" && (
           <CommandGroup heading={`Reply to ${step.id}`}>
             <CommandItem
               value="send"
-              disabled={search.trim() === ""}
+              disabled={text.trim() === ""}
               onSelect={() => {
-                void report("Reply sent", "Reply not sent", reply(step.id, search.trim()));
+                void report("Reply sent", "Reply not sent", reply(step.id, text.trim()));
                 setOpen(false);
               }}
             >
@@ -246,7 +227,7 @@ export function Palette({ open, onOpenChange }: { open: boolean; onOpenChange: (
             {results.tickets.length > 0 && (
               <CommandGroup heading="Tickets">
                 {results.tickets.map((t) => (
-                  <CommandItem key={t.id} value={`ticket ${t.id}`} onSelect={() => go(`/tickets/${t.id}`)}>
+                  <CommandItem key={t.id} value={`ticket ${t.id}`} onSelect={() => go(t.to)}>
                     <TicketIcon aria-hidden />
                     <Mono className="shrink-0 text-current">{t.id}</Mono>
                     <span className="min-w-0 truncate">{t.title}</span>
@@ -260,7 +241,7 @@ export function Palette({ open, onOpenChange }: { open: boolean; onOpenChange: (
                   <CommandItem
                     key={t.id}
                     value={`trigger ${t.id}`}
-                    onSelect={() => go(`/routing?${new URLSearchParams({ tab: "triggers", trigger: t.id })}`)}
+                    onSelect={() => go(t.to)}
                   >
                     <ZapIcon aria-hidden />
                     <span className="min-w-0 truncate">{t.text}</span>
@@ -274,7 +255,7 @@ export function Palette({ open, onOpenChange }: { open: boolean; onOpenChange: (
                   <CommandItem
                     key={t.key}
                     value={`thread ${t.key}`}
-                    onSelect={() => go(`/routing?${new URLSearchParams({ tab: "threads", thread: t.key })}`)}
+                    onSelect={() => go(t.to)}
                   >
                     <HashIcon aria-hidden />
                     <Mono className="min-w-0 truncate text-current">{t.key}</Mono>

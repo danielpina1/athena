@@ -4,7 +4,6 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router";
 import { beforeEach, expect, test } from "vitest";
 import { SnapshotSchema } from "@/gen/athena/v1/state_pb";
-import { threadQuery } from "@/app/Palette";
 import { Shell } from "@/app/Shell";
 import { fakeLink, stubWidth, Where } from "@/app/testkit";
 import { setOutbox } from "@/lib/commands/actions";
@@ -109,8 +108,38 @@ test("results by title, Trigger text or GitHub URL never say nothing matches", a
   expect(screen.queryAllByRole("option")).toEqual([]);
 });
 
-test("thread queries", () => {
-  expect(threadQuery("https://github.com/Owner/Name/pull/7")).toBe("github:owner/name#7");
-  expect(threadQuery("github.com/owner/name/issues/8")).toBe("github:owner/name#8");
-  expect(threadQuery("#12")).toBe("#12");
+test("palette opens a Trigger and a Thread in Routing", async () => {
+  const user = userEvent.setup();
+  renderAt("/");
+  await user.keyboard("{Meta>}k{/Meta}");
+  const input = await screen.findByRole("combobox");
+  await user.type(input, "#12");
+  await user.click(await screen.findByRole("option", { name: /github:o\/r#12/ }));
+  expect(where()).toBe("/routing?tab=threads&thread=github%3Ao%2Fr%2312");
+  expect(screen.getByRole("heading", { name: "Routing" })).toBeTruthy();
+});
+
+test("/ opens the palette where the page has no search box", async () => {
+  const user = userEvent.setup();
+  renderAt("/");
+  await user.keyboard("/");
+  expect(await screen.findByRole("combobox")).toBeTruthy();
+});
+
+test("/ focuses the list's search box where there is one", async () => {
+  const user = userEvent.setup();
+  renderAt("/routing");
+  await user.keyboard("/");
+  expect(document.activeElement).toBe(screen.getByRole("searchbox", { name: "Search Triggers" }));
+  expect(screen.queryByRole("dialog")).toBeNull();
+  // Typing a slash into the box does not reopen anything.
+  await user.keyboard("a/");
+  expect(screen.queryByRole("dialog")).toBeNull();
+});
+
+test("/ focuses the Tickets search box", async () => {
+  const user = userEvent.setup();
+  renderAt("/tickets");
+  await user.keyboard("/");
+  expect(document.activeElement).toBe(screen.getByRole("searchbox", { name: "Search Tickets" }));
 });

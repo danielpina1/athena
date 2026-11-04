@@ -106,7 +106,7 @@ export function TicketList({ selectedId }: { selectedId?: string }) {
         <div className="px-4">
           <EmptyState
             title="No Tickets match these filters."
-            action={hasFilters(sp) ? <Button onClick={clear}>Clear filters</Button> : undefined}
+            action={hasFilters(sp) ? <Button onClick={() => clear()}>Clear filters</Button> : undefined}
           />
         </div>
       ) : (

@@ -1,6 +1,6 @@
 // The signed-in app's routes and its navigation. The views here are placeholders (a heading and one sentence) until
-// the task that builds each replaces it: New (13), Routing (14), Graph (15),
-// Nodes and Settings (17). /design and /enroll render outside the session gate (App.tsx).
+// the task that builds each replaces it: Graph (15), Nodes and Settings (17).
+// /design and /enroll render outside the session gate (App.tsx).
 //
 // Query contracts the palette already uses: /tickets/:id?tab=session opens a Ticket's live session, and
 // /routing?tab=triggers&trigger=<id> and /routing?tab=threads&thread=<key> open one record (Task 14). On the Ticket
@@ -20,6 +20,7 @@ import { Link, matchPath, Route, Routes, useParams } from "react-router";
 import { Panes, useLayout } from "@/app/Panes";
 import { NeedsYou } from "@/features/needs-you/NeedsYou";
 import { NewTask } from "@/features/new-task/NewTask";
+import { Routing } from "@/features/routing/Routing";
 import { PinnedSessions } from "@/features/session/PinnedSessions";
 import { TicketDetail } from "@/features/tickets/TicketDetail";
 import { TicketList } from "@/features/tickets/TicketList";
@@ -108,12 +109,7 @@ function NewView() {
 const GraphView = lazy(() => import("@/app/routes/graph"));
 
 function RoutingView() {
-  return (
-    <Panes
-      list={<Placeholder title="Routing" text="Triggers, Threads and Decisions: how incoming work was routed." />}
-      detail={<NothingSelected what="record" />}
-    />
-  );
+  return <Panes detail={<Routing />} />;
 }
 
 function NodesView() {

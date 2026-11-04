@@ -53,6 +53,14 @@ export function Shell({ link }: { link: LinkSource }) {
 
   useShortcut("mod+k", () => setPalette(true));
   useShortcut("?", () => setHelp(true));
+  // "/" searches: it focuses the page's own list search where there is one (Tickets, Routing), else opens the palette.
+  // The page's search box is found in the DOM rather than registered: a parent's shortcut registers after its
+  // children's and would win over theirs.
+  useShortcut("/", () => {
+    const box = document.querySelector<HTMLInputElement>("input[data-list-search]");
+    if (box) box.focus();
+    else setPalette(true);
+  });
   useShortcut("g n", () => navigate("/"));
   useShortcut("g t", () => navigate("/tickets"));
   useShortcut("g g", () => navigate("/graph"));
