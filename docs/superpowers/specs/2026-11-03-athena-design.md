@@ -74,7 +74,7 @@ These were decided in conversation and are not open:
 - **Go** for the backend.
 - **UniFi VPN** (WireGuard) for inter-device networking.
 - Local model inference on one of the nodes.
-- **vLLM** (not Ollama) serves local models on GPU nodes (owner, 2026-11-04).
+- **vLLM** (not Ollama) serves local models (owner, 2026-11-04), and **macOS on Apple silicon is the primary local-inference target, tuned for the best performance possible** (owner, 2026-11-04). Linux/NVIDIA uses the same vLLM API.
 - Code lives in `danielpina1/athena`.
 
 Everything else in this document is the designer's call unless marked otherwise; §15 lists the main ones.
@@ -239,11 +239,21 @@ Large artifacts between nodes go directly node-to-node (git, or `blob` stream re
 
 ## 9. Local model inference
 
-- GPU nodes run **vLLM** (owner's choice, 2026-11-04; Linux with NVIDIA GPUs, its supported platform). Ollama is not used. The node program detects a running vLLM server (its OpenAI-compatible API), lists its served models and the GPUs' VRAM, and advertises them. A machine without an NVIDIA GPU (e.g. a Mac) serves no local models in v1.
+- **Engine: vLLM everywhere.** On a Mac (Apple silicon, the primary target) the node runs **vLLM with the `vllm-metal` plugin** (vllm-project's Apple silicon backend: MLX compute, paged attention, continuous batching, concurrent serving). On Linux with NVIDIA GPUs it runs stock vLLM (CUDA). Both expose the same OpenAI-compatible API, so the node, the proxy and the dashboard treat them as one backend. Ollama is not used. The builder verifies vllm-metal's current release on the installed macOS before building (it is young; pin a version).
+- **macOS tuning** (the owner asked for the most optimized setup):
+  - **Models in MLX format** (`mlx-community` 4-bit or 8-bit quantizations), sized to leave headroom in unified memory; the node refuses a model that would not fit with the session load it expects.
+  - **Resident and warm**: the model loads at node start and stays loaded (no idle unload); a warm-up request runs before the node advertises it.
+  - **Prefix caching on**, so the router's and chores' fixed system prompts are computed once and reused across requests (matches §12's prompt-cache reuse).
+  - **Concurrency through continuous batching**: the router, chores and any local-model sessions share one engine instead of queueing whole requests.
+  - **GPU memory ceiling**: `athena node` setup documents raising macOS's GPU wired-memory limit (`sysctl iogpu.wired_limit_mb`) for large models. It is an owner action needing `sudo`; Athena never changes system settings itself.
+  - **No sleep while serving**: the node holds a power assertion while requests are in flight, and only then.
+  - **Telemetry without root**: GPU utilization from IOKit's accelerator statistics, unified memory pressure from the VM stats, the chip and GPU core count from `sysctl`/`system_profiler`; no `powermetrics`.
+  - **Service**: vLLM runs as a `launchd` user agent the node manages (start, health check, restart with backoff), bound to localhost.
+- The node program detects the running engine, lists its served models, memory and GPU facts, and advertises them. A machine with neither Apple silicon nor an NVIDIA GPU serves no local models.
 - The inference server binds to localhost only. Other nodes reach it **through the GPU node's Athena program** (authenticated proxy on the link), never directly.
 - Uses:
   1. **Codex on a local model**: Codex custom provider (`[model_providers.athena_local]`, a non-reserved id, `base_url` pointing at the node's local proxy). The builder verifies the wire API (`responses` vs `chat`) for the installed Codex version.
-  2. **Claude Code on a local model**: via `ANTHROPIC_BASE_URL` pointing at the node's proxy, which speaks the Anthropic Messages API. The builder verifies whether the installed vLLM serves `/v1/messages` itself; if not, the node's proxy translates Messages ↔ chat completions. **Experimental**: keep behind a feature flag until verified with tool use and streaming.
+  2. **Claude Code on a local model**: via `ANTHROPIC_BASE_URL` pointing at the node's proxy, which speaks the Anthropic Messages API. The builder verifies whether the installed vLLM (with vllm-metal on macOS) serves `/v1/messages` itself; if not, the node's proxy translates Messages ↔ chat completions, streaming and tool use included. **Experimental**: keep behind a feature flag until verified with tool use and streaming.
   3. **Router and chores on a local model** (classification, summaries, log digestion) — the main cost saving.
   4. `local_model` MCP tool for any session on any node.
 - Dashboard: "Local · <model> on <node>" is a choice when starting a Ticket; node card shows GPU load and loaded models.
@@ -372,7 +382,7 @@ Measured from plan 1 onward by an in-process metrics core (`internal/metrics`: c
 | MCP | `github.com/modelcontextprotocol/go-sdk` |
 | Workers | `claude` CLI (stream-json), `codex app-server` |
 | GitHub | GitHub App over the REST API (server); workers use `gh` and git through Athena's credential helper with a short-lived, repository-scoped App token (§11) |
-| Local inference | vLLM on NVIDIA GPU nodes (owner) |
+| Local inference | vLLM: `vllm-metal` (MLX) on Apple silicon Macs, the primary target; CUDA on Linux/NVIDIA (owner) |
 | Network | UniFi WireGuard VPN |
 | Dashboard | React 19, Vite, TypeScript, Tailwind v4, shadcn/ui, PWA + Web Push |
 | Tests | Go `testing` (+ race detector), Vitest for the dashboard, Playwright for key dashboard flows on mobile + desktop viewports |
@@ -423,14 +433,14 @@ The owner has not answered these yet. The design adopts the defaults below (desi
 2. **No-repo "ops" Tickets**: run in a scratch directory. Host-level actions (restart services, edit system configs, install software) are possible only through Approvals under rule 1; there is no blanket host Mandate. Only owner-originated (dashboard) Tickets may request host actions.
 3. **Claude/Codex accounts**: both subscriptions and API keys are supported (whatever each node's `claude`/`codex` login uses). The dispatcher enforces a configurable **per-account concurrency limit** across all nodes, in addition to per-node slots, so shared subscription rate limits aren't exceeded; rate-limit errors back off and requeue rather than fail.
 4. **TLS**: both paths are built. Setup asks: with a domain, ACME DNS-01 (via `go-acme/lego`, which supports most DNS providers) for a private hostname resolving to the control server's VPN address; without one, Athena's CA plus a one-tap install profile (iOS `.mobileconfig`, macOS/Linux instructions). The dashboard warns that iOS home-screen push needs a trusted certificate.
-5. **Machines**: setup asks which machine is the control server. Design assumes it may sleep: nodes keep working and buffer (§8.2), dashboards show "control server unreachable" and reconnect automatically, and Sources catch up on wake. Recommended: an always-on desktop. Local inference uses vLLM on Linux/NVIDIA nodes (owner, §3).
+5. **Machines**: setup asks which machine is the control server. Design assumes it may sleep: nodes keep working and buffer (§8.2), dashboards show "control server unreachable" and reconnect automatically, and Sources catch up on wake. Recommended: an always-on desktop. Local inference uses vLLM, with vllm-metal on Apple silicon Macs as the primary target and CUDA on Linux/NVIDIA (owner, §3).
 6. **VPN**: confirmed Ubiquiti **UniFi** (WireGuard VPN server / Teleport).
 
 ### 16.2 For the builder to verify
 
 - Exact `claude` stream-json input/output schema, resume and interrupt semantics, and hook payloads for the installed version.
 - `codex app-server` methods for start/resume/input/interrupt, and how its approval requests interact with Codex `PermissionRequest` hooks; hook trust requirements when hooks come from `CODEX_HOME`.
-- Codex custom-provider wire API (`responses` vs `chat`) against vLLM; Claude Code ↔ vLLM (Messages API or proxy translation) stability with tool use.
+- vllm-metal's current release on the installed macOS: model coverage, tool calling, prefix caching and concurrent serving; codex custom-provider wire API (`responses` vs `chat`) against vLLM; Claude Code ↔ vLLM (Messages API or proxy translation) stability with tool use.
 - Web Push on iOS PWA under the chosen certificate approach.
 
 ## 17. Left to the builder
