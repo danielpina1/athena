@@ -237,6 +237,18 @@ Agent messages are routed through the control server (single place for authoriza
 
 Large artifacts between nodes go directly node-to-node (git, or `blob` stream relayed by the control server only if a direct connection is unavailable).
 
+### 8.5 Splitting work: up front and mid-work (owner, 2026-11-04)
+
+The owner asked for both ways of splitting a task, built "as modular and efficient as possible".
+
+- **Mid-work split**: the lead session calls `hand_off` (§8.4) for a separable piece it discovers while working. Children are child Tickets whose Mandate is bounded by the parent's, each in its own worktree branched from the parent's branch; the lead `wait_for`s them and merges their branches back.
+- **Up-front split (plan first)**: before any work starts, a **planning step** turns one request into a **breakdown**: sub-tasks, each with a title, the instructions, the files or areas it expects to touch, dependencies between sub-tasks (a DAG), and an optional runtime/node/model hint. The original Ticket becomes the **lead** (it owns the branch, merges, and delivers the result); each sub-task becomes a child Ticket started when its dependencies are done.
+  - **When**: the owner ticks "Plan first" in New task, a Policy rule asks for it (e.g. for requests the router classifies as large), or the router proposes it. Small requests never pay for a planning step.
+  - **Approval**: the breakdown is shown as a draft (list and graph); the owner edits, approves or rejects it. A Policy setting may auto-approve breakdowns up to N sub-tasks with no new Mandate scope. Children never get more authority than the lead.
+  - **Efficiency**: planning runs on a cheap or local model with a short, fixed prompt (prompt cache reused); fan-out is capped (default 5 sub-tasks, configurable) and children count against the WIP brake (§18.1) and slots like any Ticket; sub-tasks whose expected files overlap are flagged in the draft (and as overlap warnings in the graph) so the owner can merge them before they run.
+  - **Failure**: a failed child raises an Attention on the lead; the owner can retry it, drop it, or let the lead continue without it.
+- **Modularity**: both modes produce the same thing — child Tickets with dependency edges — through one Engine command (`SpawnChildren(lead, []ChildSpec)`), so the dashboard, graph, dispatcher and merge logic do not care which mode created them. The planner is an interface (`planner.Strategy`: `Plan(ctx, Request) (Breakdown, error)`) with one default implementation (an LLM planning session); other strategies (e.g. a template per repository, or one sub-task per failing CI job) plug in without touching the rest.
+
 ## 9. Local model inference
 
 - **Pluggable inference backend** (owner, 2026-11-04: "take into account the modularity in the backend we use for inference"). Nothing outside one node package knows which engine runs. Each engine is an adapter behind one Go interface, `inference.Backend`:
