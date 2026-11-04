@@ -237,6 +237,9 @@ func TestPasskeysAndSessions(t *testing.T) {
 	if err != nil || !ok || !ws.SeenAt.Equal(t0.Add(time.Minute)) || !ws.ReauthAt.Equal(t0.Add(2*time.Minute)) || ws.PasskeyID != "p2" {
 		t.Fatalf("WebSession = %+v %v %v", ws, ok, err)
 	}
+	if list, err := s.WebSessionsOf("p1"); err != nil || len(list) != 1 || string(list[0].Hash) != "h1" || list[0].PasskeyID != "p1" {
+		t.Fatalf("WebSessionsOf = %+v %v", list, err)
+	}
 	// Revoking a passkey ends its sessions and no others.
 	if err := s.DeletePasskey("p1"); err != nil {
 		t.Fatal(err)

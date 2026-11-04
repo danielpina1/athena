@@ -196,6 +196,34 @@ func (s *Store) WebSession(hash []byte) (WebSession, bool, error) {
 	return w, true, nil
 }
 
+// WebSessionsOf returns the web sessions the Passkey opened, oldest first.
+func (s *Store) WebSessionsOf(passkeyID string) ([]WebSession, error) {
+	rows, err := s.db.Query(`SELECT hash, created_at, seen_at, reauth_at FROM web_sessions WHERE passkey_id = ? ORDER BY created_at, hash`, passkeyID)
+	if err != nil {
+		return nil, fmt.Errorf("store: web sessions of passkey: %w", err)
+	}
+	defer rows.Close()
+	var out []WebSession
+	for rows.Next() {
+		w := WebSession{PasskeyID: passkeyID}
+		var created, seen, reauth string
+		if err := rows.Scan(&w.Hash, &created, &seen, &reauth); err != nil {
+			return nil, fmt.Errorf("store: web sessions of passkey: %w", err)
+		}
+		if w.CreatedAt, err = parseTime(created); err != nil {
+			return nil, err
+		}
+		if w.SeenAt, err = parseTime(seen); err != nil {
+			return nil, err
+		}
+		if w.ReauthAt, err = parseTime(reauth); err != nil {
+			return nil, err
+		}
+		out = append(out, w)
+	}
+	return out, rows.Err()
+}
+
 // TouchWebSession sets when a web session was last seen and last reauthenticated.
 func (s *Store) TouchWebSession(hash []byte, seenAt, reauthAt time.Time) error {
 	_, err := s.db.Exec(`UPDATE web_sessions SET seen_at = ?, reauth_at = ? WHERE hash = ?`, formatTime(seenAt), formatTime(reauthAt), hash)

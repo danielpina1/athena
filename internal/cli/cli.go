@@ -1,7 +1,7 @@
 // Package cli implements the owner's commands: `athena server`, `athena github setup|check` (which read and write the
 // configuration and talk to GitHub directly), and the commands that talk to the server over the control socket (task,
 // status, logs, reply, stop, retry, approvals, approve, deny, metrics, policy, triggers, threads, decisions,
-// reevaluate, dismiss, unsubscribe).
+// reevaluate, dismiss, unsubscribe), and `athena web enroll|passkeys|revoke`, which work on the store directly.
 package cli
 
 import (
@@ -52,6 +52,7 @@ var usage = map[string]string{
 	"approve":     "athena approve <id> [--note N]",
 	"deny":        "athena deny <id> [--note N]",
 	"metrics":     "athena metrics [--window 1h|24h|start]",
+	"web":         "athena web enroll [--ttl D] | athena web passkeys | athena web revoke <id>",
 }
 
 // Run runs one command and returns its exit code: 0 on success, 1 when it failed, 2 on a usage error.
@@ -85,6 +86,8 @@ func Run(ctx context.Context, cmd string, args []string, stdout, stderr io.Write
 		return c.metrics(args)
 	case "github":
 		return c.github(ctx, args)
+	case "web":
+		return c.web(args)
 	case "policy":
 		return c.policy(args)
 	case "triggers":
