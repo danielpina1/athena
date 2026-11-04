@@ -364,6 +364,16 @@ func TestDirectAcceptOfInferredRefused(t *testing.T) {
 	if r.Refused == "" {
 		t.Fatalf("direct accept of inferred: %+v", r)
 	}
+	// Even with an Assessment that accepts it in auto mode, a direct accept of an inferred Trigger is refused.
+	match := &Assessment{Accept: true, Rules: []RuleJudgement{{Name: "deps", Matches: true, Evidence: "bump"}}}
+	r = h.decide(DecisionInput{TriggerID: "b:2", Kind: "accept", Title: "Do it", Assessment: match})
+	if !strings.HasPrefix(r.Refused, CodeNotExplicit) || r.Ticket != nil {
+		t.Fatalf("direct accept of inferred with an assessment: %+v", r)
+	}
+	tickets, _, decisions := h.repos.counts()
+	eq(t, "no ticket", tickets, 0)
+	eq(t, "still no decision", decisions, 0)
+	eq(t, "still queued", h.queued(other), []string{"b:2"})
 	// One the gate does not admit at all.
 	h.receive(h.message("c:1", pull1))
 	r = h.decide(DecisionInput{TriggerID: "c:1", Kind: "accept", Title: "Do it"})
@@ -714,5 +724,25 @@ func TestPolicyNoteDoesNotDeferClose(t *testing.T) {
 	h.must(h.eng.ThreadClosed(pull1, OutcomeMerged, closedAt))
 	if e := h.ticket(a).Ended; e == nil || e.Outcome != OutcomeMerged {
 		t.Fatalf("ended = %+v", e)
+	}
+
+	// Nor while the note still waits undelivered.
+	b := h.acceptRequest("c:2", other)
+	h.must(h.eng.BindThread(b, pull2, true))
+	h.must(h.eng.FileReport(b, ReportInput{State: ReportFailed, Summary: "tests fail"}))
+	closedAt = h.now().Add(5 * time.Second)
+	h.tick(10)
+	h.must(h.eng.RetryTicket(b))
+	h.settle(true)
+	h.tick(1)
+	h.must(h.eng.FileReport(b, ReportInput{State: ReportReady, Summary: "fixed"}))
+	h.tick(1)
+	h.must(h.eng.PolicyChanged("v3", map[string]string{b: "Rule deps no longer applies."}))
+	if len(h.ticket(b).Undelivered) != 1 {
+		t.Fatalf("note not waiting: %v", h.ticket(b).Undelivered)
+	}
+	h.must(h.eng.ThreadClosed(pull2, OutcomeMerged, closedAt))
+	if e := h.ticket(b).Ended; e == nil || e.Outcome != OutcomeMerged {
+		t.Fatalf("undelivered note: ended = %+v", e)
 	}
 }

@@ -479,6 +479,12 @@ func (o *op) decide(d DecisionInput, p Policy, res *DecisionResult) error {
 			res.Refused = fmt.Sprintf("%s: %s", CodeNotAdmissible, g.Reason.Code)
 			return nil
 		}
+		// Direct accept refuses a Trigger the gate did not admit as explicit, whatever an Assessment says: an
+		// inferred candidate is accepted only through its Eval.
+		if d.Kind == DecisionAccept && g.Strength != StrengthExplicit {
+			res.Refused = CodeNotExplicit + ": a direct accept needs a Trigger the gate admits as explicit"
+			return nil
+		}
 		// A gate-only Eval, decided at once beside any Eval its Thread has in progress.
 		ev = &Evaluation{ID: newID(), Thread: th.Key, Primary: tr.ID, TriggerIDs: []string{tr.ID}, Strength: g.Strength,
 			Basis: g.Basis, PolicyVersion: p.Version(), StartedAt: o.at}

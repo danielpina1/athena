@@ -311,8 +311,13 @@ func (o *op) unfinished(t *Ticket, at time.Time) (bool, error) {
 		return false, nil
 	}
 	r := latest.Report
-	if r == nil || r.State != ReportReady || len(t.Undelivered) > 0 {
+	if r == nil || r.State != ReportReady {
 		return true, nil
+	}
+	for _, id := range t.Undelivered {
+		if in := findInput(t, id); in == nil || in.Kind != InputNote {
+			return true, nil
+		}
 	}
 	for _, in := range t.Inputs {
 		// A note, such as a Policy change's notice, asks for no work (the reference leaves out its policy-changed
