@@ -12,7 +12,7 @@
     "closed_at": null,
     "merged_at": null,
     "draft": false,
-    "head": {"label": "o:athena/t-0007", "ref": "athena/t-0007", "sha": "bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222"},
+    "head": {"label": "o:athena/t-0007", "ref": "athena/t-0007", "sha": "bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222", "repo": {"id": 1296269, "full_name": "o/r"}},
     "base": {"label": "o:main", "ref": "main", "sha": "aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111"}
   },
   "3": {
@@ -28,7 +28,7 @@
     "closed_at": "2026-11-03T11:40:00Z",
     "merged_at": "2026-11-03T11:40:00Z",
     "draft": false,
-    "head": {"label": "bob:fix-typo", "ref": "fix-typo", "sha": "cccc3333cccc3333cccc3333cccc3333cccc3333"},
+    "head": {"label": "bob:fix-typo", "ref": "fix-typo", "sha": "cccc3333cccc3333cccc3333cccc3333cccc3333", "repo": {"id": 5551212, "full_name": "bob/r"}},
     "base": {"label": "o:main", "ref": "main", "sha": "aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111"}
   }
 }

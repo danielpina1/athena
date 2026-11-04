@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -52,12 +53,15 @@ type fakeGitHub struct {
 	fail           map[string][]int // route → statuses to answer, in order
 	requests       []request
 	notModified    int
+	// after, when set, runs under the lock after each response, as GitHub changing between two requests.
+	after func(route string, q url.Values)
 }
 
 type request struct {
 	route  string
 	status int
 	at     time.Time
+	query  url.Values
 }
 
 func loadFixture(t *testing.T, name string, v any) {
@@ -142,7 +146,12 @@ func (g *fakeGitHub) serve(w http.ResponseWriter, r *http.Request, route string,
 
 func (g *fakeGitHub) respond(w http.ResponseWriter, r *http.Request, route string, v any, link string) {
 	status := http.StatusOK
-	defer func() { g.requests = append(g.requests, request{route: route, status: status, at: g.clk.now()}) }()
+	defer func() {
+		g.requests = append(g.requests, request{route: route, status: status, at: g.clk.now(), query: r.URL.Query()})
+		if g.after != nil {
+			g.after(route, r.URL.Query())
+		}
+	}()
 	if q := g.fail[route]; len(q) > 0 {
 		status, g.fail[route] = q[0], q[1:]
 		switch status {
@@ -539,10 +548,10 @@ func TestOtherBotMarkedBot(t *testing.T) {
 
 func TestRestartBetweenFetchAndCursorNoDuplicateTicket(t *testing.T) {
 	h := newSourceHarness(t, SourceConfig{})
-	// The process dies after Receive and before the cursors are written: no write of a read position lands (the CI
-	// floor is not one: it is set once and never moves).
+	// The process dies after Receive and before the cursors are written: no write of a read position lands (the
+	// floors are not ones: each is set once and never moves).
 	h.kv.failSet = func(key string) bool {
-		return strings.HasPrefix(key, "github.cursor.") && !strings.HasSuffix(key, ".ci")
+		return strings.HasPrefix(key, "github.cursor.") && !strings.HasSuffix(key, ".ci") && !strings.HasSuffix(key, ".issuesfloor")
 	}
 	if err := h.poll(); err == nil {
 		t.Fatal("a poll whose cursors were not saved succeeded")
@@ -912,7 +921,7 @@ func TestNotModifiedAfterFailedItemIsReadAgain(t *testing.T) {
 
 func TestPagesBeyondTheFirst(t *testing.T) {
 	h := newSourceHarness(t, SourceConfig{})
-	h.src.perPage = 1
+	h.src.perPage = 2
 	h.mustPoll()
 	for _, id := range []string{"github:issuecomment:101", "github:issuecomment:103", "github:issuecomment:104",
 		"github:issue:9001", "github:issue:9003", "github:reviewcomment:201", "github:reviewcomment:202"} {
@@ -983,5 +992,247 @@ func TestRunPollsUntilCancelled(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Run did not return")
+	}
+}
+
+// commentsQueries returns the since of each comments request, in order.
+func (g *fakeGitHub) sinces(route string) []string {
+	var out []string
+	for _, r := range g.routes() {
+		if r.route == route {
+			out = append(out, r.query.Get("since")+"|"+r.query.Get("page"))
+		}
+	}
+	return out
+}
+
+func TestCommentsOnPullCarryHead(t *testing.T) {
+	h := newSourceHarness(t, SourceConfig{})
+	h.mustPoll()
+	for _, id := range []string{"github:issuecomment:103", "github:reviewcomment:201", "github:reviewcomment:202"} {
+		if got := h.in.trigger(t, id).Meta["head"]; got != "athena/t-0007" {
+			t.Errorf("%s head = %q", id, got)
+		}
+	}
+	if _, ok := h.in.trigger(t, "github:issuecomment:104").Meta["head"]; ok {
+		t.Error("a comment on an issue has a head")
+	}
+}
+
+func TestNewIssueAfterFailedNeighbourStillDelivered(t *testing.T) {
+	h := newSourceHarness(t, SourceConfig{})
+	// #1 was created at 11:10 and last updated at 11:16; #5, an old issue, was updated at 11:13, between the two.
+	h.gh.edit(func() {
+		h.gh.issues = append(h.gh.issues, map[string]any{
+			"id": 9005, "number": 5, "title": "Older", "state": "open", "html_url": "https://github.com/o/r/issues/5",
+			"user":       map[string]any{"login": "dave", "id": 14, "type": "User"},
+			"created_at": "2026-09-01T09:00:00Z", "updated_at": "2026-11-03T11:13:00Z",
+		})
+	})
+	failed := false
+	h.in.receiveErr = func(tr core.Trigger) error {
+		if tr.ID == "github:issue:9001" && !failed {
+			failed = true
+			return errors.New("database is locked")
+		}
+		return nil
+	}
+	if err := h.poll(); err == nil {
+		t.Fatal("poll succeeded")
+	}
+	if c := h.kv.get("github.cursor.o/r.issues"); c != "2026-11-03T11:13:00Z" {
+		t.Fatalf("issues cursor = %q", c)
+	}
+	h.mustPoll()
+	h.mustPoll()
+	if h.in.storeCount["github:issue:9001"] != 1 {
+		t.Fatalf("the opening Trigger of #1 stored %d times", h.in.storeCount["github:issue:9001"])
+	}
+	if f := h.kv.get("github.cursor.o/r.issuesfloor"); f != "2026-11-03T11:00:00Z" {
+		t.Fatalf("issues floor = %q", f)
+	}
+}
+
+func TestThreadKeysCanonical(t *testing.T) {
+	if ThreadKey("Owner/Repo", 5) != "github:owner/repo#5" || BranchThreadKey("Owner/Repo", "Main") != "github:owner/repo@Main" {
+		t.Fatalf("ThreadKey = %q, BranchThreadKey = %q", ThreadKey("Owner/Repo", 5), BranchThreadKey("Owner/Repo", "Main"))
+	}
+	h := newSourceHarness(t, SourceConfig{Repos: []string{"O/R"}})
+	h.in.followed = []string{"github:O/R#2"}
+	h.mustPoll()
+	for id, thread := range map[string]string{
+		"github:issue:9001": "github:o/r#1", "github:issuecomment:103": "github:o/r#2", "github:reviewcomment:201": "github:o/r#2",
+		"github:review:301": "github:o/r#2", "github:checksuite:402:failure": "github:o/r#2", "github:checksuite:401:success": "github:o/r@main",
+	} {
+		tr := h.in.trigger(t, id)
+		if tr.Threads[0] != thread || tr.Meta["repo"] != "o/r" {
+			t.Errorf("%s: thread %q, repo %q", id, tr.Threads[0], tr.Meta["repo"])
+		}
+		for _, c := range tr.Channels {
+			if c.Thread != thread {
+				t.Errorf("%s: channel thread %q", id, c.Thread)
+			}
+		}
+	}
+	if len(h.in.binds) != 1 || h.in.binds[0].Thread != "github:o/r#2" {
+		t.Fatalf("binds = %+v", h.in.binds)
+	}
+	if got := closesOf(h.in, "github:o/r#3"); len(got) != 1 {
+		t.Fatalf("closes = %+v", h.in.closes)
+	}
+	if h.kv.get("github.cursor.o/r.comments") == "" || h.kv.get("github.state.github:o/r#3") != "merged" {
+		t.Fatalf("kv = %v", h.kv.m)
+	}
+	if !h.src.Listens("github:o/r#2") || !h.src.Listens("github:O/R#2") {
+		t.Fatal("Listens")
+	}
+}
+
+func TestGoneThreadStopsFailing(t *testing.T) {
+	h := newSourceHarness(t, SourceConfig{})
+	h.in.followed = []string{"github:o/r#9"}
+	h.gh.failNext("issue", http.StatusGone, http.StatusGone, http.StatusGone)
+	h.mustPoll()
+	if got := closesOf(h.in, "github:o/r#9"); len(got) != 1 || got[0].Outcome != core.OutcomeClosed {
+		t.Fatalf("closes = %+v", got)
+	}
+	if _, ok := h.src.Dropped()["github:o/r#9"]; !ok {
+		t.Fatalf("dropped = %v", h.src.Dropped())
+	}
+	h.mustPoll()
+	n := 0
+	for _, r := range h.gh.routes() {
+		if r.route == "issue" {
+			n++
+		}
+	}
+	if n != 1 || len(closesOf(h.in, "github:o/r#9")) != 1 {
+		t.Fatalf("a gone Thread was read %d times", n)
+	}
+	if err := h.src.Health(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLongFailingItemDropped(t *testing.T) {
+	h := newSourceHarness(t, SourceConfig{})
+	var pull3 map[string]any
+	h.gh.edit(func() {
+		pull3 = h.gh.pulls["3"]
+		delete(h.gh.pulls, "3")                              // /pulls/3 answers 404
+		h.gh.issue(1)["updated_at"] = "2026-11-03T11:50:00Z" // after #3 (11:40)
+	})
+	for i := 0; i < 2; i++ { // the first failure, and an hour later
+		if err := h.poll(); err == nil {
+			t.Fatalf("poll %d succeeded", i)
+		}
+		h.gh.clk.add(time.Hour)
+	}
+	if c := h.kv.get("github.cursor.o/r.issues"); c != "2026-11-03T11:30:00Z" {
+		t.Fatalf("issues cursor = %q", c)
+	}
+	h.gh.clk.add(23 * time.Hour)
+	h.mustPoll()
+	if c := h.kv.get("github.cursor.o/r.issues"); c != "2026-11-03T11:50:00Z" {
+		t.Fatalf("the failing item still blocks its endpoint: cursor = %q", c)
+	}
+	if _, ok := h.src.Dropped()["github:o/r#3"]; !ok || len(h.src.Dropped()) != 1 {
+		t.Fatalf("dropped = %v", h.src.Dropped())
+	}
+	// It reads again later: the failure is cleared.
+	h.gh.edit(func() {
+		h.gh.pulls["3"] = pull3
+		h.gh.issue(3)["updated_at"] = "2026-11-03T11:55:00Z"
+	})
+	h.mustPoll()
+	if len(h.src.Dropped()) != 0 || h.kv.get("github.failing.github:o/r#3") != "" {
+		t.Fatalf("dropped = %v, failing = %q", h.src.Dropped(), h.kv.get("github.failing.github:o/r#3"))
+	}
+}
+
+func TestForkPRNotBound(t *testing.T) {
+	h := newSourceHarness(t, SourceConfig{})
+	h.gh.edit(func() {
+		h.gh.pulls["2"]["head"].(map[string]any)["repo"] = map[string]any{"full_name": "mallory/r"}
+		h.gh.pulls["2"]["head"].(map[string]any)["ref"] = "athena/T-0007"
+	})
+	h.mustPoll()
+	if len(h.in.binds) != 0 {
+		t.Fatalf("a fork's pull request was bound: %+v", h.in.binds)
+	}
+	h2 := newSourceHarness(t, SourceConfig{})
+	h2.gh.edit(func() { h2.gh.pulls["2"]["head"].(map[string]any)["repo"] = map[string]any{"full_name": "O/R"} })
+	h2.mustPoll()
+	if len(h2.in.binds) != 1 {
+		t.Fatalf("binds = %+v", h2.in.binds)
+	}
+}
+
+func TestKeysetPagingDeliversItemUpdatedBetweenPages(t *testing.T) {
+	h := newSourceHarness(t, SourceConfig{})
+	h.src.perPage = 2
+	first := true
+	h.gh.after = func(route string, q url.Values) {
+		if route == "comments" && first {
+			// 101 is edited after the first page: it moves to the end of the list.
+			first = false
+			for _, c := range h.gh.comments {
+				if c["id"] == float64(101) {
+					c["updated_at"] = "2026-11-03T11:30:00Z"
+				}
+			}
+		}
+	}
+	h.mustPoll()
+	for _, id := range []string{"github:issuecomment:101", "github:issuecomment:103", "github:issuecomment:104"} {
+		if h.in.storeCount[id] != 1 {
+			t.Errorf("%s stored %d times", id, h.in.storeCount[id])
+		}
+	}
+	if h.in.receives["github:issuecomment:104"] < 2 {
+		t.Fatal("no overlap between pages")
+	}
+	if c := h.kv.get("github.cursor.o/r.comments"); c != "2026-11-03T11:30:00Z" {
+		t.Fatalf("cursor = %q", c)
+	}
+}
+
+func TestKeysetPagingSameUpdatedAtAndCap(t *testing.T) {
+	h := newSourceHarness(t, SourceConfig{})
+	h.src.perPage = 2
+	h.gh.edit(func() {
+		for _, c := range h.gh.comments {
+			c["updated_at"] = "2026-11-03T11:12:00Z"
+		}
+	})
+	h.mustPoll()
+	for _, id := range []string{"github:issuecomment:101", "github:issuecomment:103", "github:issuecomment:104"} {
+		if h.in.storeCount[id] != 1 {
+			t.Errorf("%s stored %d times", id, h.in.storeCount[id])
+		}
+	}
+	// The rounds of one endpoint are capped; the rest comes next poll. (With one item a page, the overlap takes a
+	// round and an item sharing the new since another: three rounds move one item on.)
+	h2 := newSourceHarness(t, SourceConfig{})
+	h2.src.perPage, h2.src.maxRounds = 1, 3
+	h2.mustPoll()
+	if h2.in.has("github:issuecomment:103") {
+		t.Fatal("the cap did not stop the endpoint")
+	}
+	for i := 0; i < 10 && !h2.in.has("github:issuecomment:103"); i++ {
+		h2.mustPoll()
+	}
+	if !h2.in.has("github:issuecomment:103") {
+		t.Fatal("later polls did not go on")
+	}
+}
+
+func TestPollOverlapsCursor(t *testing.T) {
+	h := newSourceHarness(t, SourceConfig{})
+	h.mustPoll()
+	h.mustPoll()
+	got := h.gh.sinces("comments")
+	if want := []string{"2026-11-03T11:00:00Z|", "2026-11-03T11:21:00Z|"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("comments since = %v", got)
 	}
 }

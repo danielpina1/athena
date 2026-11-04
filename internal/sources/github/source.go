@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/url"
 	"regexp"
 	"strconv"
@@ -31,32 +32,42 @@ const (
 	DefaultInterval = 30 * time.Second
 	// firstLookback is how far back a repository is read the first time, when it has no cursor.
 	firstLookback = time.Hour
-	// pageSize is the per_page of every list request; a full first page means there are more.
+	// overlap is how far before its cursor an endpoint is read again, for items GitHub shows late.
+	overlap = time.Minute
+	// pageSize is the per_page of every list request; a full page means there are more.
 	pageSize = 100
+	// defaultMaxRounds caps the pages one endpoint reads in one poll; the next poll goes on from the cursor.
+	defaultMaxRounds = 10
 	// unhealthyAfter is how many polls in a row must fail before Health reports an error.
 	unhealthyAfter = 3
+	// dropAfter is how long reads of an item or Thread may keep failing before it is dropped: skipped, so it no
+	// longer fails the poll or holds back its endpoint (reference 003 "Source failure").
+	dropAfter = 24 * time.Hour
 )
 
-// The cursor endpoints of a repository: github.cursor.<repo>.<endpoint>.
+// The kv keys of a repository: github.cursor.<repo>.<endpoint>, with the canonical (lower-case) repo.
 const (
 	endpointIssues         = "issues"
 	endpointComments       = "comments"
 	endpointReviewComments = "reviewcomments"
-	// endpointCI is no moving cursor: it is the floor set the first time the repository is polled, before which a
-	// check suite is history rather than a Trigger.
-	endpointCI = "ci"
+	// floorIssues and floorCI are not moving cursors: each is set once, an hour before the repository's first poll.
+	// An issue or pull request created since floorIssues is new (its opening post is a Trigger); a check suite
+	// updated before floorCI is history.
+	floorIssues = "issuesfloor"
+	floorCI     = "ci"
 )
 
-// States remembered per Thread (github.state.<thread>) so a close or a reopen is acted on once.
+// States remembered per Thread (github.state.<thread>) so a close, a reopen or a deletion is acted on once.
 const (
 	stateOpen   = "open"
 	stateClosed = "closed"
 	stateMerged = "merged"
+	stateGone   = "gone"
 )
 
 // SourceConfig configures the GitHub Source.
 type SourceConfig struct {
-	// Repos are the repositories (owner/name) the Source polls and listens to.
+	// Repos are the repositories (owner/name) the Source polls and listens to, compared case-insensitively.
 	Repos []string
 	// Interval is the time between polls; DefaultInterval when zero.
 	Interval time.Duration
@@ -74,13 +85,24 @@ type Intake interface {
 	FollowedThreads(source string) ([]string, error)
 }
 
-// KV holds the Source's cursors and the remembered Thread states.
+// KV holds the Source's cursors, floors, remembered Thread states and first-failure times.
 type KV interface {
 	KVGet(key string) (string, bool, error)
 	KVSet(key, value string) error
 }
 
-// Source is the GitHub polling Source. Run polls; Name, Listens and Health are safe for concurrent use.
+// ThreadKey is the canonical Thread key of an issue or pull request: github:<owner>/<name>#<n>, lower-case repo.
+func ThreadKey(repo string, n int) string {
+	return SourceName + ":" + strings.ToLower(repo) + "#" + strconv.Itoa(n)
+}
+
+// BranchThreadKey is the canonical Thread key of a branch's CI: github:<owner>/<name>@<branch>, lower-case repo.
+func BranchThreadKey(repo, branch string) string {
+	return SourceName + ":" + strings.ToLower(repo) + "@" + branch
+}
+
+// Source is the GitHub polling Source. Run polls; Name, Listens, Health, Malformed and Dropped are safe for concurrent
+// use.
 type Source struct {
 	cfg   SourceConfig
 	app   *App
@@ -88,25 +110,38 @@ type Source struct {
 	kv    KV
 	log   *slog.Logger
 	slug  string
-	repos map[string]bool // lower-cased owner/name
+	repos map[string]bool // canonical owner/name
 
-	now     func() time.Time
-	wait    func(ctx context.Context, d time.Duration) error
-	perPage int
-	mention *regexp.Regexp
+	now       func() time.Time
+	wait      func(ctx context.Context, d time.Duration) error
+	perPage   int
+	maxRounds int
+	mention   *regexp.Regexp
 
 	// Poll state, used only by the polling goroutine.
 	login        string            // the App's bot login, learned on the first poll
 	botID        int64             // and its user id
-	done         map[string]string // read key → the path whose items were all processed (a 304 on it is nothing new)
+	done         map[string]string // read key → the first path whose items were all processed (a 304 on it is nothing new)
 	isPull       map[string]bool   // Thread → whether it is a pull request (it never changes)
+	pulls        map[string]ghPull // Thread → its pull request, read once per poll
 	blockedUntil time.Time         // no request before this: a rate limit's reset
 
 	mu        sync.Mutex
-	failed    int    // polls failed in a row
-	lastErr   string // the latest poll error, redacted
-	malformed int    // list items skipped as malformed
+	failed    int               // polls failed in a row
+	lastErr   string            // the latest poll error, redacted
+	malformed int               // list items skipped as malformed
+	dropped   map[string]string // Thread → why its reads are skipped (gone, or failing for dropAfter), redacted
 }
+
+// repo is one configured repository as a poll sees it.
+type repo struct {
+	key     string // canonical owner/name: Thread, cursor and state keys, request paths
+	full    string // GitHub's full_name, for Meta and Channel addresses
+	branch  string // the default branch
+	htmlURL string
+}
+
+func (r repo) path() string { return "/repos/" + r.key }
 
 // NewSource returns the Source over app's installation client. log defaults to a logger that discards.
 func NewSource(cfg SourceConfig, app *App, in Intake, kv KV, log *slog.Logger) *Source {
@@ -114,7 +149,8 @@ func NewSource(cfg SourceConfig, app *App, in Intake, kv KV, log *slog.Logger) *
 		log = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
 	s := &Source{cfg: cfg, app: app, in: in, kv: kv, log: log, repos: map[string]bool{}, now: time.Now, wait: sleepCtx,
-		perPage: pageSize, done: map[string]string{}, isPull: map[string]bool{}}
+		perPage: pageSize, maxRounds: defaultMaxRounds, done: map[string]string{}, isPull: map[string]bool{},
+		dropped: map[string]string{}}
 	for _, r := range cfg.Repos {
 		s.repos[strings.ToLower(r)] = true
 	}
@@ -167,6 +203,14 @@ func (s *Source) Malformed() int {
 	return s.malformed
 }
 
+// Dropped names the Threads whose reads the Source skips, with why: gone (deleted), or failing for a day. A Thread
+// leaves the list once a read of it succeeds.
+func (s *Source) Dropped() map[string]string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return maps.Clone(s.dropped)
+}
+
 // Run polls every repository at once and then every Interval until ctx is done, and returns nil then.
 func (s *Source) Run(ctx context.Context) error {
 	interval := s.cfg.Interval
@@ -203,6 +247,7 @@ func (s *Source) poll(ctx context.Context) error {
 }
 
 func (s *Source) pollAll(ctx context.Context) error {
+	s.pulls = map[string]ghPull{}
 	if s.login == "" {
 		if err := s.throttle(ctx); err != nil {
 			return err
@@ -222,11 +267,11 @@ func (s *Source) pollAll(ctx context.Context) error {
 		s.warn("", "followed threads", err)
 		errs = append(errs, fmt.Errorf("github: followed threads: %w", err))
 	}
-	for _, repo := range s.cfg.Repos {
+	for _, r := range s.cfg.Repos {
 		if ctx.Err() != nil {
 			break
 		}
-		if err := s.pollRepo(ctx, repo, followed); err != nil {
+		if err := s.pollRepo(ctx, r, followed); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -235,48 +280,74 @@ func (s *Source) pollAll(ctx context.Context) error {
 
 var validRepo = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
 
-// pollRepo reads each endpoint of a repository in turn; one failing does not stop the others.
-func (s *Source) pollRepo(ctx context.Context, repo string, followed []string) error {
-	if !validRepo.MatchString(repo) {
-		return fmt.Errorf("github: repository %q is not owner/name", repo)
+// pollRepo reads the repository record, then each endpoint in turn; one failing does not stop the others.
+func (s *Source) pollRepo(ctx context.Context, name string, followed []string) error {
+	if !validRepo.MatchString(name) {
+		return fmt.Errorf("github: repository %q is not owner/name", name)
+	}
+	r := repo{key: strings.ToLower(name)}
+	var rec struct {
+		FullName      string `json:"full_name"`
+		DefaultBranch string `json:"default_branch"`
+		HTMLURL       string `json:"html_url"`
+	}
+	if _, err := s.get(ctx, r.path(), &rec); err != nil {
+		s.warn(r.key, "repository", err)
+		return fmt.Errorf("github: %s: repository: %w", r.key, err)
+	}
+	r.full, r.branch, r.htmlURL = rec.FullName, rec.DefaultBranch, rec.HTMLURL
+	if r.full == "" {
+		r.full = name
 	}
 	var errs []error
-	step := func(name string, fn func() error) {
+	step := func(what string, fn func() error) {
 		if ctx.Err() != nil {
 			return
 		}
 		if err := fn(); err != nil {
-			s.warn(repo, name, err)
-			errs = append(errs, fmt.Errorf("github: %s %s: %w", repo, name, err))
+			s.warn(r.key, what, err)
+			errs = append(errs, fmt.Errorf("github: %s %s: %w", r.key, what, err))
 		}
 	}
-	base := "/repos/" + repo
 	step(endpointIssues, func() error {
+		floor, err := s.floor(r, floorIssues)
+		if err != nil {
+			return err
+		}
 		q := url.Values{"state": {"all"}, "sort": {"updated"}, "direction": {"asc"}}
-		return s.cursorList(ctx, repo, endpointIssues, base+"/issues", q, func(raw json.RawMessage, since time.Time) (time.Time, error) {
-			return s.handleIssue(ctx, repo, raw, since)
+		return s.cursorList(ctx, r, endpointIssues, r.path()+"/issues", q, func(raw json.RawMessage) (time.Time, error) {
+			return s.handleIssue(ctx, r, raw, floor)
 		})
 	})
 	step(endpointComments, func() error {
 		q := url.Values{"sort": {"updated"}, "direction": {"asc"}}
-		return s.cursorList(ctx, repo, endpointComments, base+"/issues/comments", q, func(raw json.RawMessage, _ time.Time) (time.Time, error) {
-			return s.handleIssueComment(repo, raw)
+		return s.cursorList(ctx, r, endpointComments, r.path()+"/issues/comments", q, func(raw json.RawMessage) (time.Time, error) {
+			return s.handleIssueComment(ctx, r, raw)
 		})
 	})
 	step(endpointReviewComments, func() error {
 		q := url.Values{"sort": {"updated"}, "direction": {"asc"}}
-		return s.cursorList(ctx, repo, endpointReviewComments, base+"/pulls/comments", q, func(raw json.RawMessage, _ time.Time) (time.Time, error) {
-			return s.handleReviewComment(repo, raw)
+		return s.cursorList(ctx, r, endpointReviewComments, r.path()+"/pulls/comments", q, func(raw json.RawMessage) (time.Time, error) {
+			return s.handleReviewComment(ctx, r, raw)
 		})
 	})
+	seen := map[int]bool{}
 	for _, thread := range followed {
-		n, ok := threadNumber(repo, thread)
-		if !ok {
+		n, ok := threadNumber(r.key, thread)
+		if !ok || seen[n] {
 			continue
 		}
-		step("pull "+strconv.Itoa(n), func() error { return s.pollFollowedPull(ctx, repo, thread, n) })
+		seen[n] = true
+		step("pull "+strconv.Itoa(n), func() error {
+			canon := ThreadKey(r.key, n)
+			if st, _, err := s.kv.KVGet(stateKey(canon)); err != nil || st == stateGone {
+				return err
+			}
+			_, err := s.threadRead(canon, s.pollFollowedPull(ctx, r, canon, n))
+			return err
+		})
 	}
-	step("default branch ci", func() error { return s.pollDefaultBranch(ctx, repo) })
+	step("default branch ci", func() error { return s.pollDefaultBranch(ctx, r) })
 	return errors.Join(errs...)
 }
 
@@ -341,19 +412,32 @@ func (s *Source) paginate(ctx context.Context, path string, fn func(json.RawMess
 	return err
 }
 
-// read reads a list: the first page with get, so an unchanged list costs a 304 and nothing else once all its items
-// were processed, and, when the first page is full, the later pages with Paginate. items extracts a page's items and
-// handle processes one, returning its updated_at (zero for one it skipped). read stops at the first error and returns
-// the updated_at of the last item processed.
-func (s *Source) read(ctx context.Context, key, path string, items func([]byte) ([]json.RawMessage, error),
-	handle func(json.RawMessage) (time.Time, error)) (last time.Time, err error) {
+// pull returns a pull request, read once per poll.
+func (s *Source) pull(ctx context.Context, r repo, n int) (ghPull, error) {
+	thread := ThreadKey(r.key, n)
+	if pr, ok := s.pulls[thread]; ok {
+		return pr, nil
+	}
+	var pr ghPull
+	if _, err := s.get(ctx, r.path()+"/pulls/"+strconv.Itoa(n), &pr); err != nil {
+		return ghPull{}, err
+	}
+	s.pulls[thread] = pr
+	return pr, nil
+}
+
+// readAll reads a list that has no cursor (a pull request's reviews, a commit's check suites): the first page with
+// get, so an unchanged list costs a 304 and nothing else once all its items were processed, and, when it is full, the
+// later pages with Paginate. items extracts a page's items and handle processes one. It stops at the first error.
+func (s *Source) readAll(ctx context.Context, key, path string, items func([]byte) ([]json.RawMessage, error),
+	handle func(json.RawMessage) (time.Time, error)) error {
 	var body json.RawMessage
 	notModified, err := s.get(ctx, path, &body)
 	if err != nil {
-		return last, err
+		return err
 	}
 	if notModified && s.done[key] == path {
-		return last, nil
+		return nil
 	}
 	delete(s.done, key)
 	process := func(page []byte) (int, error) {
@@ -362,12 +446,8 @@ func (s *Source) read(ctx context.Context, key, path string, items func([]byte) 
 			return 0, fmt.Errorf("github: GET %s: %w", path, err)
 		}
 		for _, raw := range list {
-			u, err := handle(raw)
-			if err != nil {
+			if _, err := handle(raw); err != nil {
 				return 0, err
-			}
-			if u.After(last) {
-				last = u
 			}
 		}
 		return len(list), nil
@@ -382,7 +462,7 @@ func (s *Source) read(ctx context.Context, key, path string, items func([]byte) 
 	if err == nil {
 		s.done[key] = path
 	}
-	return last, err
+	return err
 }
 
 func arrayItems(body []byte) ([]json.RawMessage, error) {
@@ -391,23 +471,78 @@ func arrayItems(body []byte) ([]json.RawMessage, error) {
 	return list, err
 }
 
-// cursorList reads an endpoint of a repository from its cursor (github.cursor.<repo>.<endpoint>, an RFC 3339
-// updated_at; an hour ago the first time) and moves the cursor to the updated_at of the last item processed, also
-// when a later one failed. since is inclusive, so that item is seen again next time and answers duplicate.
-func (s *Source) cursorList(ctx context.Context, repo, endpoint, base string, q url.Values,
-	handle func(raw json.RawMessage, since time.Time) (time.Time, error)) error {
-	key := cursorKey(repo, endpoint)
-	since, had, err := s.cursor(key)
+// cursorList reads an endpoint of a repository (sorted by updated_at, oldest first) from its cursor
+// (github.cursor.<repo>.<endpoint>, an RFC 3339 updated_at; an hour ago the first time), starting overlap before it.
+// Pages are keyset: after a full page the next request starts at the last item's updated_at (since is inclusive, so
+// the overlap answers duplicate), and only a page whose items all share one updated_at moves on by page number; at
+// most maxRounds requests per poll. The cursor moves to the updated_at of the last item processed, also when a later
+// one failed.
+func (s *Source) cursorList(ctx context.Context, r repo, endpoint, base string, q url.Values,
+	handle func(raw json.RawMessage) (time.Time, error)) error {
+	key := cursorKey(r, endpoint)
+	cur, had, err := s.cursor(key)
 	if err != nil {
 		return err
 	}
-	q.Set("since", since.Format(time.RFC3339))
-	q.Set("per_page", strconv.Itoa(s.perPage))
-	path := base + "?" + q.Encode()
-	last, err := s.read(ctx, key, path, arrayItems, func(raw json.RawMessage) (time.Time, error) { return handle(raw, since) })
-	if last.After(since) || !had {
-		next := since
-		if last.After(since) {
+	since := cur
+	if had {
+		since = cur.Add(-overlap)
+	}
+	var last time.Time
+	page, complete := 1, false
+	for round := 0; round < s.maxRounds; round++ {
+		q.Set("since", since.UTC().Format(time.RFC3339))
+		q.Set("per_page", strconv.Itoa(s.perPage))
+		q.Del("page")
+		if page > 1 {
+			q.Set("page", strconv.Itoa(page))
+		}
+		path := base + "?" + q.Encode()
+		var list []json.RawMessage
+		var notModified bool
+		if notModified, err = s.get(ctx, path, &list); err != nil {
+			break
+		}
+		if round == 0 {
+			if notModified && s.done[key] == path {
+				complete = true
+				break
+			}
+			delete(s.done, key)
+		}
+		var pageLast time.Time
+		for _, raw := range list {
+			u, herr := handle(raw)
+			if herr != nil {
+				err = herr
+				break
+			}
+			if u.After(pageLast) {
+				pageLast = u
+			}
+		}
+		if pageLast.After(last) {
+			last = pageLast
+		}
+		if err != nil {
+			break
+		}
+		if len(list) < s.perPage {
+			complete = true
+			if round == 0 {
+				s.done[key] = path
+			}
+			break
+		}
+		if pageLast.After(since) {
+			since, page = pageLast, 1
+		} else {
+			page++
+		}
+	}
+	if last.After(cur) || !had {
+		next := cur
+		if last.After(cur) {
 			next = last
 		}
 		if serr := s.kv.KVSet(key, next.UTC().Format(time.RFC3339)); serr != nil {
@@ -415,10 +550,16 @@ func (s *Source) cursorList(ctx context.Context, repo, endpoint, base string, q 
 			delete(s.done, key)
 		}
 	}
+	if err == nil && !complete {
+		s.log.Info("github endpoint read capped for this poll; it goes on next poll", "repo", r.key, "endpoint", endpoint)
+	}
 	return err
 }
 
-func cursorKey(repo, endpoint string) string { return "github.cursor." + repo + "." + endpoint }
+func cursorKey(r repo, endpoint string) string { return "github.cursor." + r.key + "." + endpoint }
+
+func stateKey(thread string) string   { return "github.state." + thread }
+func failingKey(thread string) string { return "github.failing." + thread }
 
 // cursor returns a stored cursor, or an hour ago when there is none.
 func (s *Source) cursor(key string) (time.Time, bool, error) {
@@ -435,12 +576,100 @@ func (s *Source) cursor(key string) (time.Time, bool, error) {
 	return s.now().Add(-firstLookback).UTC().Truncate(time.Second), false, nil
 }
 
+// floor is github.cursor.<repo>.<name>, set once to an hour before the repository's first poll.
+func (s *Source) floor(r repo, name string) (time.Time, error) {
+	key := cursorKey(r, name)
+	floor, had, err := s.cursor(key)
+	if err != nil || had {
+		return floor, err
+	}
+	if err := s.kv.KVSet(key, floor.Format(time.RFC3339)); err != nil {
+		return floor, fmt.Errorf("github: save %s: %w", key, err)
+	}
+	return floor, nil
+}
+
 func (s *Source) skip(what string, err error) (time.Time, error) {
 	s.mu.Lock()
 	s.malformed++
 	s.mu.Unlock()
 	s.log.Warn("github item skipped as malformed", "item", what, "error", redact.String(fmt.Sprint(err)))
 	return time.Time{}, nil
+}
+
+// --- Failing reads ---
+
+// readError reports whether err is GitHub's answer to a read (not the Engine's, a rate limit or the context's).
+func readError(err error) bool {
+	if errors.Is(err, ErrRateLimited{}) {
+		return false
+	}
+	return errors.Is(err, ErrTransient) || errors.Is(err, ErrPermanent) || errors.Is(err, ErrGone)
+}
+
+// threadRead settles the outcome of reading a Thread's data. A success clears its first-failure time. A read GitHub
+// answers as gone records the Thread closed and gone, and drops it. Another read error keeps the Thread's first
+// failure (github.failing.<thread>) and stands until reads have failed for dropAfter; then the Thread is dropped:
+// the caller skips it, so it no longer fails the poll or holds back its endpoint. Other errors stand.
+func (s *Source) threadRead(thread string, err error) (drop bool, _ error) {
+	if err == nil {
+		return false, s.readOK(thread)
+	}
+	if !readError(err) {
+		return false, err
+	}
+	if errors.Is(err, ErrGone) {
+		return true, s.gone(thread, err)
+	}
+	key := failingKey(thread)
+	v, ok, kerr := s.kv.KVGet(key)
+	if kerr != nil {
+		return false, errors.Join(err, kerr)
+	}
+	first, perr := time.Parse(time.RFC3339, v)
+	if !ok || perr != nil {
+		if kerr := s.kv.KVSet(key, s.now().UTC().Format(time.RFC3339)); kerr != nil {
+			return false, errors.Join(err, kerr)
+		}
+		return false, err
+	}
+	if s.now().Sub(first) < dropAfter {
+		return false, err
+	}
+	why := "reads failing since " + v + ": " + redact.String(err.Error())
+	s.mu.Lock()
+	s.dropped[thread] = why
+	s.mu.Unlock()
+	s.log.Warn("github thread dropped", "thread", thread, "reason", why)
+	return true, nil
+}
+
+// readOK clears a Thread's failure once a read of it succeeds.
+func (s *Source) readOK(thread string) error {
+	s.mu.Lock()
+	delete(s.dropped, thread)
+	s.mu.Unlock()
+	key := failingKey(thread)
+	v, ok, err := s.kv.KVGet(key)
+	if err != nil || !ok || v == "" {
+		return err
+	}
+	return s.kv.KVSet(key, "")
+}
+
+// gone records a deleted Thread: closed for the Tickets that follow it, and never read again.
+func (s *Source) gone(thread string, cause error) error {
+	s.mu.Lock()
+	s.dropped[thread] = "gone: " + redact.String(cause.Error())
+	s.mu.Unlock()
+	if st, _, err := s.kv.KVGet(stateKey(thread)); err != nil || st == stateGone {
+		return err
+	}
+	s.log.Info("github thread gone", "thread", thread)
+	if err := s.in.ThreadClosed(thread, core.OutcomeClosed, s.now().UTC()); err != nil {
+		return fmt.Errorf("close %s: %w", thread, err)
+	}
+	return s.kv.KVSet(stateKey(thread), stateGone)
 }
 
 // --- Translation ---
@@ -471,8 +700,11 @@ type ghPull struct {
 	Number  int    `json:"number"`
 	HTMLURL string `json:"html_url"`
 	Head    struct {
-		Ref string `json:"ref"`
-		SHA string `json:"sha"`
+		Ref  string `json:"ref"`
+		SHA  string `json:"sha"`
+		Repo *struct {
+			FullName string `json:"full_name"`
+		} `json:"repo"`
 	} `json:"head"`
 }
 
@@ -546,8 +778,6 @@ func (s *Source) addressed(text string) string {
 	return ""
 }
 
-func issueThread(repo string, n int) string { return SourceName + ":" + repo + "#" + strconv.Itoa(n) }
-
 func kindOf(pull bool) string {
 	if pull {
 		return "pull"
@@ -556,9 +786,9 @@ func kindOf(pull bool) string {
 }
 
 // trigger fills what every message Trigger of a person or bot shares.
-func (s *Source) trigger(id, kind, scope, repo string, n int, pull bool, u ghUser, at time.Time, text, link string) core.Trigger {
-	thread := issueThread(repo, n)
-	meta := map[string]string{"repo": repo, "number": strconv.Itoa(n), "kind": kindOf(pull)}
+func (s *Source) trigger(id, kind, scope string, r repo, n int, pull bool, u ghUser, at time.Time, text, link string) core.Trigger {
+	thread := ThreadKey(r.key, n)
+	meta := map[string]string{"repo": r.full, "number": strconv.Itoa(n), "kind": kindOf(pull)}
 	if link != "" {
 		meta["url"] = link
 	}
@@ -570,7 +800,7 @@ func (s *Source) trigger(id, kind, scope, repo string, n int, pull bool, u ghUse
 		ID: id, Source: SourceName, Kind: kind, Scope: scope,
 		Actor: core.ActorRef{Source: SourceName, ID: u.Login}, Human: !bot, Bot: bot,
 		Addressed: s.addressed(text), Threads: []string{thread}, At: at.UTC(), Text: text, Meta: meta,
-		Channels: []core.ChannelRef{{Source: SourceName, Thread: thread, Address: map[string]string{"repo": repo, "number": strconv.Itoa(n)}}},
+		Channels: []core.ChannelRef{{Source: SourceName, Thread: thread, Address: map[string]string{"repo": r.full, "number": strconv.Itoa(n)}}},
 	}
 }
 
@@ -589,24 +819,37 @@ func (s *Source) receive(t core.Trigger) error {
 	return nil
 }
 
+// itemPull reads the pull request an item belongs to under the failing-read rules: skip is set when the item is to
+// be skipped (its pull request is gone, or its reads failed for dropAfter).
+func (s *Source) itemPull(ctx context.Context, r repo, n int) (pr ghPull, skip bool, err error) {
+	pr, rerr := s.pull(ctx, r, n)
+	skip, err = s.threadRead(ThreadKey(r.key, n), rerr)
+	return pr, skip, err
+}
+
 // handleIssue handles one issue or pull request of the issues list: the Trigger of a new one (created since the
-// cursor), the binding of a pull request from a Ticket's branch the first time it is seen and when it reopens, and a
-// close or merge once per transition.
-func (s *Source) handleIssue(ctx context.Context, repo string, raw json.RawMessage, since time.Time) (time.Time, error) {
+// repository's issues floor; a repeat answers duplicate), the binding of a pull request from a Ticket's branch of
+// this repository the first time it is seen and when it reopens, and a close or merge once per transition.
+func (s *Source) handleIssue(ctx context.Context, r repo, raw json.RawMessage, floor time.Time) (time.Time, error) {
 	var it ghIssue
 	if err := json.Unmarshal(raw, &it); err != nil || it.ID == 0 || it.Number <= 0 || it.UpdatedAt.IsZero() {
-		return s.skip(repo+" issue", errOr(err, "no id, number or updated_at"))
+		return s.skip(r.key+" issue", errOr(err, "no id, number or updated_at"))
 	}
-	thread := issueThread(repo, it.Number)
+	thread := ThreadKey(r.key, it.Number)
 	pull := it.PullRequest != nil
 	s.isPull[thread] = pull
 	var pr ghPull
 	ticket := ""
 	if pull {
-		if _, err := s.get(ctx, "/repos/"+repo+"/pulls/"+strconv.Itoa(it.Number), &pr); err != nil {
-			return time.Time{}, err
+		var skip bool
+		var err error
+		if pr, skip, err = s.itemPull(ctx, r, it.Number); err != nil || skip {
+			return it.UpdatedAt, err
 		}
-		ticket = ticketOfBranch(pr.Head.Ref)
+		// Only a branch of this repository is a Ticket's: a fork can name its branch athena/<ticket-id> too.
+		if pr.Head.Repo != nil && strings.EqualFold(pr.Head.Repo.FullName, r.key) {
+			ticket = ticketOfBranch(pr.Head.Ref)
+		}
 	}
 	state := stateOpen
 	closedAt := it.UpdatedAt
@@ -619,8 +862,7 @@ func (s *Source) handleIssue(ctx context.Context, repo string, raw json.RawMessa
 			state, closedAt = stateMerged, *it.PullRequest.MergedAt
 		}
 	}
-	stateKey := "github.state." + thread
-	prev, had, err := s.kv.KVGet(stateKey)
+	prev, had, err := s.kv.KVGet(stateKey(thread))
 	if err != nil {
 		return time.Time{}, err
 	}
@@ -630,7 +872,7 @@ func (s *Source) handleIssue(ctx context.Context, repo string, raw json.RawMessa
 			return time.Time{}, err
 		}
 	}
-	if u := user(it.User); !it.CreatedAt.Before(since) && !s.own(u) {
+	if u := user(it.User); !it.CreatedAt.Before(floor) && !s.own(u) {
 		scope := "issues"
 		if pull {
 			scope = "pulls"
@@ -639,7 +881,7 @@ func (s *Source) handleIssue(ctx context.Context, repo string, raw json.RawMessa
 		if it.Body != "" {
 			text += "\n\n" + it.Body
 		}
-		t := s.trigger("github:issue:"+strconv.FormatInt(it.ID, 10), core.KindMessage, scope, repo, it.Number, pull, u, it.CreatedAt, text, it.HTMLURL)
+		t := s.trigger("github:issue:"+strconv.FormatInt(it.ID, 10), core.KindMessage, scope, r, it.Number, pull, u, it.CreatedAt, text, it.HTMLURL)
 		if pull && pr.Head.Ref != "" {
 			t.Meta["head"] = pr.Head.Ref
 		}
@@ -652,11 +894,11 @@ func (s *Source) handleIssue(ctx context.Context, repo string, raw json.RawMessa
 		if err := s.in.ThreadClosed(thread, core.TicketOutcome(state), closedAt.UTC()); err != nil {
 			return time.Time{}, fmt.Errorf("close %s: %w", thread, err)
 		}
-		if err := s.kv.KVSet(stateKey, state); err != nil {
+		if err := s.kv.KVSet(stateKey(thread), state); err != nil {
 			return time.Time{}, err
 		}
 	case reopened || (state == stateOpen && !had && ticket != ""):
-		if err := s.kv.KVSet(stateKey, stateOpen); err != nil {
+		if err := s.kv.KVSet(stateKey(thread), stateOpen); err != nil {
 			return time.Time{}, err
 		}
 	}
@@ -688,23 +930,32 @@ func ticketOfBranch(ref string) string {
 	return strings.ToUpper(m[1])
 }
 
-func (s *Source) handleIssueComment(repo string, raw json.RawMessage) (time.Time, error) {
+func (s *Source) handleIssueComment(ctx context.Context, r repo, raw json.RawMessage) (time.Time, error) {
 	var c ghComment
 	if err := json.Unmarshal(raw, &c); err != nil || c.ID == 0 || c.UpdatedAt.IsZero() {
-		return s.skip(repo+" issue comment", errOr(err, "no id or updated_at"))
+		return s.skip(r.key+" issue comment", errOr(err, "no id or updated_at"))
 	}
 	n, ok := lastNumber(c.IssueURL)
 	if !ok {
-		return s.skip(repo+" issue comment "+strconv.FormatInt(c.ID, 10), errors.New("no issue number in issue_url"))
+		return s.skip(r.key+" issue comment "+strconv.FormatInt(c.ID, 10), errors.New("no issue number in issue_url"))
 	}
 	// An issue comment's page is /pull/<n> when the issue is a pull request.
 	pull := strings.Contains(c.HTMLURL, "/pull/")
-	s.isPull[issueThread(repo, n)] = pull
+	s.isPull[ThreadKey(r.key, n)] = pull
 	u := user(c.User)
 	if s.own(u) {
 		return c.UpdatedAt, nil
 	}
-	t := s.trigger("github:issuecomment:"+strconv.FormatInt(c.ID, 10), core.KindMessage, "comments", repo, n, pull, u, c.CreatedAt, c.Body, c.HTMLURL)
+	t := s.trigger("github:issuecomment:"+strconv.FormatInt(c.ID, 10), core.KindMessage, "comments", r, n, pull, u, c.CreatedAt, c.Body, c.HTMLURL)
+	if pull {
+		pr, skip, err := s.itemPull(ctx, r, n)
+		if err != nil || skip {
+			return c.UpdatedAt, err
+		}
+		if pr.Head.Ref != "" {
+			t.Meta["head"] = pr.Head.Ref
+		}
+	}
 	if err := s.receive(t); err != nil {
 		return time.Time{}, err
 	}
@@ -713,21 +964,28 @@ func (s *Source) handleIssueComment(repo string, raw json.RawMessage) (time.Time
 
 // handleReviewComment: a comment on a pull request's diff, on the pull request's Thread; replies go under the top
 // comment of its review thread, which a reply also answers.
-func (s *Source) handleReviewComment(repo string, raw json.RawMessage) (time.Time, error) {
+func (s *Source) handleReviewComment(ctx context.Context, r repo, raw json.RawMessage) (time.Time, error) {
 	var c ghComment
 	if err := json.Unmarshal(raw, &c); err != nil || c.ID == 0 || c.UpdatedAt.IsZero() {
-		return s.skip(repo+" review comment", errOr(err, "no id or updated_at"))
+		return s.skip(r.key+" review comment", errOr(err, "no id or updated_at"))
 	}
 	n, ok := lastNumber(c.PullRequestURL)
 	if !ok {
-		return s.skip(repo+" review comment "+strconv.FormatInt(c.ID, 10), errors.New("no number in pull_request_url"))
+		return s.skip(r.key+" review comment "+strconv.FormatInt(c.ID, 10), errors.New("no number in pull_request_url"))
 	}
-	s.isPull[issueThread(repo, n)] = true
+	s.isPull[ThreadKey(r.key, n)] = true
 	u := user(c.User)
 	if s.own(u) {
 		return c.UpdatedAt, nil
 	}
-	t := s.trigger("github:reviewcomment:"+strconv.FormatInt(c.ID, 10), core.KindMessage, "comments", repo, n, true, u, c.CreatedAt, c.Body, c.HTMLURL)
+	pr, skip, err := s.itemPull(ctx, r, n)
+	if err != nil || skip {
+		return c.UpdatedAt, err
+	}
+	t := s.trigger("github:reviewcomment:"+strconv.FormatInt(c.ID, 10), core.KindMessage, "comments", r, n, true, u, c.CreatedAt, c.Body, c.HTMLURL)
+	if pr.Head.Ref != "" {
+		t.Meta["head"] = pr.Head.Ref
+	}
 	top := c.ID
 	if c.InReplyToID != 0 {
 		top = c.InReplyToID
@@ -741,12 +999,11 @@ func (s *Source) handleReviewComment(repo string, raw json.RawMessage) (time.Tim
 }
 
 // pollFollowedPull reads the reviews and the head's check suites of a pull request an open Ticket follows.
-func (s *Source) pollFollowedPull(ctx context.Context, repo, thread string, n int) error {
-	base := "/repos/" + repo
+func (s *Source) pollFollowedPull(ctx context.Context, r repo, thread string, n int) error {
 	pull, known := s.isPull[thread]
 	if !known {
 		var it ghIssue
-		if _, err := s.get(ctx, base+"/issues/"+strconv.Itoa(n), &it); err != nil {
+		if _, err := s.get(ctx, r.path()+"/issues/"+strconv.Itoa(n), &it); err != nil {
 			return err
 		}
 		pull = it.PullRequest != nil
@@ -755,99 +1012,90 @@ func (s *Source) pollFollowedPull(ctx context.Context, repo, thread string, n in
 	if !pull {
 		return nil
 	}
-	var pr ghPull
-	if _, err := s.get(ctx, base+"/pulls/"+strconv.Itoa(n), &pr); err != nil {
+	pr, err := s.pull(ctx, r, n)
+	if err != nil {
 		return err
 	}
-	path := fmt.Sprintf("%s/pulls/%d/reviews?per_page=%d", base, n, s.perPage)
-	if _, err := s.read(ctx, "reviews "+thread, path, arrayItems, func(raw json.RawMessage) (time.Time, error) {
-		return s.handleReview(repo, n, pr.Head.Ref, raw)
+	path := fmt.Sprintf("%s/pulls/%d/reviews?per_page=%d", r.path(), n, s.perPage)
+	if err := s.readAll(ctx, "reviews "+thread, path, arrayItems, func(raw json.RawMessage) (time.Time, error) {
+		return s.handleReview(r, n, pr.Head.Ref, raw)
 	}); err != nil {
 		return err
 	}
 	if pr.Head.SHA == "" {
 		return nil
 	}
-	return s.checkSuites(ctx, repo, thread, pr.Head.SHA, func(t *core.Trigger) {
+	return s.checkSuites(ctx, r, thread, pr.Head.SHA, func(t *core.Trigger) {
 		t.Meta["kind"], t.Meta["number"], t.Meta["head"] = "pull", strconv.Itoa(n), pr.Head.Ref
 		if pr.HTMLURL != "" {
 			t.Meta["url"] = pr.HTMLURL + "/checks"
 		}
-		t.Channels = []core.ChannelRef{{Source: SourceName, Thread: thread, Address: map[string]string{"repo": repo, "number": strconv.Itoa(n)}}}
+		t.Channels = []core.ChannelRef{{Source: SourceName, Thread: thread, Address: map[string]string{"repo": r.full, "number": strconv.Itoa(n)}}}
 	})
 }
 
 // handleReview: a submitted review, approvals with no body included; pending (unsubmitted) and dismissed ones are not
 // Triggers.
-func (s *Source) handleReview(repo string, n int, head string, raw json.RawMessage) (time.Time, error) {
-	var r ghReview
-	if err := json.Unmarshal(raw, &r); err != nil || r.ID == 0 {
-		return s.skip(repo+" review", errOr(err, "no id"))
+func (s *Source) handleReview(r repo, n int, head string, raw json.RawMessage) (time.Time, error) {
+	var rv ghReview
+	if err := json.Unmarshal(raw, &rv); err != nil || rv.ID == 0 {
+		return s.skip(r.key+" review", errOr(err, "no id"))
 	}
-	switch r.State {
+	switch rv.State {
 	case "APPROVED", "CHANGES_REQUESTED", "COMMENTED":
 	default:
 		return time.Time{}, nil
 	}
-	if r.SubmittedAt == nil {
+	if rv.SubmittedAt == nil {
 		return time.Time{}, nil
 	}
-	u := user(r.User)
+	u := user(rv.User)
 	if s.own(u) {
-		return *r.SubmittedAt, nil
+		return *rv.SubmittedAt, nil
 	}
-	t := s.trigger("github:review:"+strconv.FormatInt(r.ID, 10), core.KindReview, "comments", repo, n, true, u, *r.SubmittedAt, r.Body, r.HTMLURL)
-	t.Meta["state"] = r.State
+	t := s.trigger("github:review:"+strconv.FormatInt(rv.ID, 10), core.KindReview, "comments", r, n, true, u, *rv.SubmittedAt, rv.Body, rv.HTMLURL)
+	t.Meta["state"] = rv.State
 	if head != "" {
 		t.Meta["head"] = head
 	}
 	if err := s.receive(t); err != nil {
 		return time.Time{}, err
 	}
-	return *r.SubmittedAt, nil
+	return *rv.SubmittedAt, nil
 }
 
 // pollDefaultBranch reads the check suites of the default branch's head, on the Thread github:<repo>@<branch>.
-func (s *Source) pollDefaultBranch(ctx context.Context, repo string) error {
-	var rec struct {
-		DefaultBranch string `json:"default_branch"`
-		HTMLURL       string `json:"html_url"`
-	}
-	if _, err := s.get(ctx, "/repos/"+repo, &rec); err != nil {
-		return err
-	}
-	if rec.DefaultBranch == "" {
-		return fmt.Errorf("github: repository %s has no default branch: %w", repo, ErrPermanent)
+func (s *Source) pollDefaultBranch(ctx context.Context, r repo) error {
+	if r.branch == "" {
+		return fmt.Errorf("github: repository %s has no default branch: %w", r.key, ErrPermanent)
 	}
 	var br struct {
 		Commit struct {
 			SHA string `json:"sha"`
 		} `json:"commit"`
 	}
-	if _, err := s.get(ctx, "/repos/"+repo+"/branches/"+url.PathEscape(rec.DefaultBranch), &br); err != nil {
+	if _, err := s.get(ctx, r.path()+"/branches/"+url.PathEscape(r.branch), &br); err != nil {
 		return err
 	}
 	if br.Commit.SHA == "" {
-		return fmt.Errorf("github: branch %s of %s has no head commit: %w", rec.DefaultBranch, repo, ErrPermanent)
+		return fmt.Errorf("github: branch %s of %s has no head commit: %w", r.branch, r.key, ErrPermanent)
 	}
-	thread := SourceName + ":" + repo + "@" + rec.DefaultBranch
-	return s.checkSuites(ctx, repo, thread, br.Commit.SHA, func(t *core.Trigger) {
-		t.Meta["kind"], t.Meta["branch"] = "branch", rec.DefaultBranch
-		if rec.HTMLURL != "" {
-			t.Meta["url"] = rec.HTMLURL + "/commit/" + br.Commit.SHA + "/checks"
+	return s.checkSuites(ctx, r, BranchThreadKey(r.key, r.branch), br.Commit.SHA, func(t *core.Trigger) {
+		t.Meta["kind"], t.Meta["branch"] = "branch", r.branch
+		if r.htmlURL != "" {
+			t.Meta["url"] = r.htmlURL + "/commit/" + br.Commit.SHA + "/checks"
 		}
 	})
 }
 
 // checkSuites turns the completed check suites of a commit into CI Triggers on thread; decorate adds the Thread's
-// Meta and Channels. Suites last updated before the repository's CI floor (an hour before it was first polled) are
-// history.
-func (s *Source) checkSuites(ctx context.Context, repo, thread, sha string, decorate func(*core.Trigger)) error {
-	floor, err := s.ciFloor(repo)
+// Meta and Channels. Suites last updated before the repository's CI floor are history.
+func (s *Source) checkSuites(ctx context.Context, r repo, thread, sha string, decorate func(*core.Trigger)) error {
+	floor, err := s.floor(r, floorCI)
 	if err != nil {
 		return err
 	}
-	path := fmt.Sprintf("/repos/%s/commits/%s/check-suites?per_page=%d", repo, url.PathEscape(sha), s.perPage)
+	path := fmt.Sprintf("%s/commits/%s/check-suites?per_page=%d", r.path(), url.PathEscape(sha), s.perPage)
 	suites := func(body []byte) ([]json.RawMessage, error) {
 		var page struct {
 			CheckSuites []json.RawMessage `json:"check_suites"`
@@ -855,10 +1103,10 @@ func (s *Source) checkSuites(ctx context.Context, repo, thread, sha string, deco
 		err := json.Unmarshal(body, &page)
 		return page.CheckSuites, err
 	}
-	_, err = s.read(ctx, "suites "+thread, path, suites, func(raw json.RawMessage) (time.Time, error) {
+	return s.readAll(ctx, "suites "+thread, path, suites, func(raw json.RawMessage) (time.Time, error) {
 		var cs ghSuite
 		if err := json.Unmarshal(raw, &cs); err != nil || cs.ID == 0 {
-			return s.skip(repo+" check suite", errOr(err, "no id"))
+			return s.skip(r.key+" check suite", errOr(err, "no id"))
 		}
 		if cs.Status != "completed" || cs.Conclusion == nil || *cs.Conclusion == "" || cs.UpdatedAt.Before(floor) {
 			return time.Time{}, nil
@@ -877,7 +1125,7 @@ func (s *Source) checkSuites(ctx context.Context, repo, thread, sha string, deco
 		if len(short) > 7 {
 			short = short[:7]
 		}
-		meta := map[string]string{"repo": repo, "sha": sha, "conclusion": *cs.Conclusion}
+		meta := map[string]string{"repo": r.full, "sha": sha, "conclusion": *cs.Conclusion}
 		if s.cfg.ReceiveAll["ci"] {
 			meta["receiveAll"] = "true"
 		}
@@ -892,20 +1140,6 @@ func (s *Source) checkSuites(ctx context.Context, repo, thread, sha string, deco
 		}
 		return cs.UpdatedAt, nil
 	})
-	return err
-}
-
-// ciFloor is github.cursor.<repo>.ci, set once to an hour before the repository's first poll.
-func (s *Source) ciFloor(repo string) (time.Time, error) {
-	key := cursorKey(repo, endpointCI)
-	floor, had, err := s.cursor(key)
-	if err != nil || had {
-		return floor, err
-	}
-	if err := s.kv.KVSet(key, floor.Format(time.RFC3339)); err != nil {
-		return floor, fmt.Errorf("github: save cursor %s: %w", key, err)
-	}
-	return floor, nil
 }
 
 // threadNumber is n of github:<repo>#<n> when the Thread is of repo (compared case-insensitively).
