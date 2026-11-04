@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -29,6 +30,63 @@ func TestSandboxDefaultsOn(t *testing.T) {
 	}
 	if sb := c.nodeSandbox(); (sb != nil) != node.SandboxSupported() || (sb != nil && (sb.Required || len(sb.DenyRead) != 0)) {
 		t.Fatalf("default node sandbox = %+v", sb)
+	}
+}
+
+// weakerNetworkIsolation is on by default on macOS, where gh verifies TLS through trustd, and off elsewhere; an
+// explicit value wins on every platform.
+func TestSandboxWeakerNetworkIsolationDefault(t *testing.T) {
+	for _, tc := range []struct {
+		body       string
+		goos       string
+		want       bool
+		wantStored *bool
+	}{
+		{`{}`, "darwin", true, nil},
+		{`{}`, "linux", false, nil},
+		{`{"sandbox": {"weakerNetworkIsolation": false}}`, "darwin", false, new(false)},
+		{`{"sandbox": {"weakerNetworkIsolation": true}}`, "linux", true, new(true)},
+	} {
+		dir := t.TempDir()
+		writeConfigFile(t, dir, tc.body)
+		c, err := LoadConfig(dir)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.body, err)
+		}
+		if got := c.Sandbox.weakerNetworkIsolationOn(tc.goos); got != tc.want {
+			t.Errorf("%s on %s: weakerNetworkIsolation = %v, want %v", tc.body, tc.goos, got, tc.want)
+		}
+		// An explicit false survives `athena github setup` rewriting the file; an unset value stays unset.
+		if err := SaveConfig(dir, c); err != nil {
+			t.Fatal(err)
+		}
+		again, err := LoadConfig(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := again.Sandbox.WeakerNetworkIsolation; (got == nil) != (tc.wantStored == nil) || (got != nil && *got != *tc.wantStored) {
+			t.Errorf("%s: after save weakerNetworkIsolation = %v, want %v", tc.body, got, tc.wantStored)
+		}
+	}
+	if !node.SandboxSupported() {
+		return
+	}
+	// The node gets the effective value.
+	dir := t.TempDir()
+	writeConfigFile(t, dir, `{}`)
+	c, err := LoadConfig(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sb := c.nodeSandbox(); sb.WeakerNetworkIsolation != (runtime.GOOS == "darwin") {
+		t.Errorf("default node sandbox weakerNetworkIsolation = %v on %s", sb.WeakerNetworkIsolation, runtime.GOOS)
+	}
+	writeConfigFile(t, dir, `{"sandbox": {"weakerNetworkIsolation": false}}`)
+	if c, err = LoadConfig(dir); err != nil {
+		t.Fatal(err)
+	}
+	if sb := c.nodeSandbox(); sb.WeakerNetworkIsolation {
+		t.Error("weakerNetworkIsolation false still reached the node sandbox")
 	}
 }
 
@@ -106,6 +164,7 @@ func TestServerWorkersGetSandbox(t *testing.T) {
 	var settings struct {
 		Sandbox struct {
 			Enabled bool `json:"enabled"`
+			Weaker  bool `json:"enableWeakerNetworkIsolation"`
 			Network struct {
 				AllowedDomains   []string `json:"allowedDomains"`
 				AllowUnixSockets []string `json:"allowUnixSockets"`
@@ -119,5 +178,9 @@ func TestServerWorkersGetSandbox(t *testing.T) {
 	if !settings.Sandbox.Enabled || !slices.Contains(net.AllowedDomains, "proxy.golang.org") || !slices.Contains(net.AllowedDomains, "github.com") ||
 		!slices.Equal(net.AllowUnixSockets, []string{filepath.Join(dir, NodeSocket)}) {
 		t.Fatalf("worker sandbox:\n%s", raw)
+	}
+	// Unset in config.json, the worker's settings let gh reach trustd on macOS, and only there.
+	if settings.Sandbox.Weaker != (runtime.GOOS == "darwin") {
+		t.Fatalf("enableWeakerNetworkIsolation = %v on %s:\n%s", settings.Sandbox.Weaker, runtime.GOOS, raw)
 	}
 }

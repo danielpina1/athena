@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -75,7 +76,7 @@ func TestRealClaudeSandbox(t *testing.T) {
 	sock := filepath.Join(base, "node.sock")
 	n := New(Config{StateDir: filepath.Join(base, "state"), SocketPath: sock, AthenaBin: athena,
 		Sandbox: &SandboxConfig{Required: true, DenyRead: []string{secret}, CAFile: os.Getenv("ATHENA_TEST_SANDBOX_CA_FILE"),
-			WeakerNetworkIsolation: os.Getenv("ATHENA_TEST_SANDBOX_CA_FILE") != ""}}, nil)
+			WeakerNetworkIsolation: runtime.GOOS == "darwin"}}, nil) // the server's default: gh needs trustd on macOS
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
 	go n.Serve(ctx)

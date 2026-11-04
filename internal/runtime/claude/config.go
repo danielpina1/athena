@@ -70,9 +70,8 @@ type Sandbox struct {
 	UnixSockets []string
 	// AllowAllUnixSockets lets commands connect to any Unix socket; on Linux it is the only way to reach one.
 	AllowAllUnixSockets bool
-	// WeakerNetworkIsolation (macOS) lets commands reach the trustd service, which Go programs such as gh need to
-	// verify a certificate signed by a CA from the keychain (a TLS-inspecting proxy). It opens a path out of the
-	// sandbox through that service.
+	// WeakerNetworkIsolation (macOS) lets commands reach the trustd service, which Go programs such as gh verify every
+	// TLS certificate through (enableWeakerNetworkIsolation). It opens a path out of the sandbox through that service.
 	WeakerNetworkIsolation bool
 }
 
