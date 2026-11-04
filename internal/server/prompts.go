@@ -1,8 +1,9 @@
 package server
 
 import (
-	"google.golang.org/protobuf/types/known/timestamppb"
 	"log/slog"
+
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/danielpina1/athena/internal/pb/athenav1"
 	"github.com/danielpina1/athena/internal/store"

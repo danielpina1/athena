@@ -1523,21 +1523,20 @@ func (n *Node) dropPrompt(ticketID string) {
 
 // sessionPrompt is the system prompt of the Ticket's next session. A new session gets the current worker prompt
 // (overrides applied) and the node keeps it; a resumed one keeps the prompt it started with, so an override saved
-// meanwhile reaches only sessions that start after it. A session without a kept prompt (it started before overrides
-// existed, or there is no state directory) started with the default.
+// meanwhile reaches only sessions that start after it. A resume with no kept prompt (a reopened ended Ticket, whose
+// prompt went with it, or a session from before prompts were kept) gets the current effective prompt.
 func (n *Node) sessionPrompt(ticketID string, resumed bool) string {
 	path := ""
 	if n.cfg.StateDir != "" {
 		path = PromptPath(n.cfg.StateDir, ticketID)
 	}
-	if resumed {
-		if path != "" {
-			if b, err := os.ReadFile(path); err == nil {
-				return string(b)
-			}
+	if resumed && path != "" {
+		if b, err := os.ReadFile(path); err == nil {
+			return string(b)
 		}
-		return prompts.Worker
 	}
+	// A new session, or a resume with no kept prompt (the Ticket ended and was reopened, or the session predates kept
+	// prompts): the current effective prompt, which is kept from here on.
 	p := prompts.Worker
 	if n.cfg.WorkerPrompt != nil {
 		p = n.cfg.WorkerPrompt()
@@ -1548,7 +1547,7 @@ func (n *Node) sessionPrompt(ticketID string, resumed bool) string {
 			err = os.WriteFile(path, []byte(p), 0o600)
 		}
 		if err != nil {
-			n.log.Warn("keep the session prompt: a resume will use the default", "ticket", ticketID, "error", err)
+			n.log.Warn("keep the session prompt: a resume will use the current one", "ticket", ticketID, "error", err)
 		}
 	}
 	return p

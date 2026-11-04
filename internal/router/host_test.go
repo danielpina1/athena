@@ -739,14 +739,17 @@ func TestResumedRouterSessionKeepsPrompt(t *testing.T) {
 	}
 }
 
-// A session that started before prompts were kept started with the default.
-func TestResumedRouterSessionWithoutKeptPromptUsesDefault(t *testing.T) {
+// A resume with no kept prompt gets the current effective prompt and keeps it.
+func TestResumedRouterSessionWithoutKeptPromptUsesCurrent(t *testing.T) {
 	e := newEnv(t)
 	e.host.cfg.Prompt = func() string { return "NEW OVERRIDE" }
 	e.must(e.st.KVSet(sessionKey, "sess-before"))
 	e.start()
 	e.eventually("the router session to start", func() bool { return len(e.invocations()) == 1 })
-	if v, _ := flagValue(e.invocations()[0].Args, "--append-system-prompt"); v != prompts.Router {
-		t.Fatalf("system prompt = %q, want the default", v)
+	if v, _ := flagValue(e.invocations()[0].Args, "--append-system-prompt"); v != "NEW OVERRIDE" {
+		t.Fatalf("system prompt = %q, want the current one", v)
+	}
+	if kept, _, _ := e.st.KVGet(promptKey); kept != "NEW OVERRIDE" {
+		t.Fatalf("kept prompt = %q", kept)
 	}
 }

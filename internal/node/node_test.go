@@ -1624,3 +1624,37 @@ func TestResumedSessionKeepsPrompt(t *testing.T) {
 		t.Fatalf("new session prompt = %q, want OVERRIDE TWO", got)
 	}
 }
+
+// An ended Ticket's kept prompt goes with it; a person's follow-up reopens the Ticket and resumes its session with the
+// current effective prompt (ruling R18), not the compiled default.
+func TestReopenedTicketResumesWithEffectivePrompt(t *testing.T) {
+	var prompt atomic.Value
+	prompt.Store("OVERRIDE ONE")
+	h := newHarness(t, func(c *Config) { c.WorkerPrompt = func() string { return prompt.Load().(string) } })
+	a := h.submit("Fix the typo", "")
+	_, aa := h.running(a.ID)
+	if r := h.report(a.ID, aa.ID, core.ReportReady, "done"); !r.OK {
+		t.Fatalf("report = %+v", r)
+	}
+	path := PromptPath(h.cfg.StateDir, a.ID)
+	h.eventually("the Ticket ended and its kept prompt went", func() bool {
+		tk, _ := h.ticket(a.ID)
+		_, err := os.Stat(path)
+		return tk.Ended != nil && os.IsNotExist(err)
+	})
+	prompt.Store("OVERRIDE TWO")
+	if err := h.eng.AddPersonInput(a.ID, "one more thing"); err != nil {
+		t.Fatal(err)
+	}
+	h.eventually("the session resumed", func() bool { n, _ := h.starts(a.ID); return n == 2 })
+	_, args := h.starts(a.ID)
+	if _, ok := argValue(args, "--resume"); !ok {
+		t.Fatalf("second start did not resume: %v", args)
+	}
+	if got, _ := argValue(args, "--append-system-prompt"); got != "OVERRIDE TWO" {
+		t.Fatalf("reopened ticket prompt = %q, want the current effective prompt", got)
+	}
+	if b, err := os.ReadFile(path); err != nil || string(b) != "OVERRIDE TWO" {
+		t.Fatalf("kept prompt = %q, %v", b, err)
+	}
+}

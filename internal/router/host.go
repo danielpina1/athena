@@ -574,11 +574,11 @@ func (h *Host) sessionPrompt(resumed bool) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		if !ok {
-			return prompts.Router, nil
+		if ok {
+			return p, nil
 		}
-		return p, nil
 	}
+	// A new session, or a resume with no kept prompt: the current effective prompt, kept from here on.
 	p := prompts.Router
 	if h.cfg.Prompt != nil {
 		p = h.cfg.Prompt()
