@@ -78,19 +78,31 @@ export function RepoPicker({
       setFading(false);
       setOpen(false);
     };
+    // Whether the press in progress began outside the field.
+    let outsidePress = false;
     const down = (e: PointerEvent) => {
       pointerDown.current = true;
-      if (outside(e)) setFading(true);
+      outsidePress = outside(e);
+      clearTimeout(timer);
+      if (outsidePress) setFading(true);
     };
-    const up = (e: PointerEvent) => {
-      // A press that never becomes a click (a drag, a scroll) still closes it.
-      if (outside(e)) timer = setTimeout(close, 400);
+    const up = () => {
+      pointerDown.current = false;
+      // A press outside that never becomes a click still closes it, a moment later.
+      if (outsidePress) timer = setTimeout(close, 400);
+      outsidePress = false;
     };
     const click = (e: MouseEvent) => {
       if (outside(e)) close();
-      else pointerDown.current = false;
+      pointerDown.current = false;
     };
-    const cancel = () => close();
+    // The browser took the touch for a scroll: nothing was pressed, so the list stays exactly as it was.
+    const cancel = () => {
+      clearTimeout(timer);
+      pointerDown.current = false;
+      outsidePress = false;
+      setFading(false);
+    };
     document.addEventListener("pointerdown", down, true);
     document.addEventListener("pointerup", up, true);
     document.addEventListener("click", click);

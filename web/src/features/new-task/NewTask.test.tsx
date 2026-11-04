@@ -174,3 +174,20 @@ test("the list closes on a pointerdown outside and on picking", async () => {
   await user.click(screen.getByRole("option", { name: "Use o/r" }));
   expect(list().hidden).toBe(true);
 });
+
+test("a pointercancel never collapses the list", async () => {
+  const user = setup();
+  const list = () => document.querySelector("[cmdk-list]")?.parentElement as HTMLElement;
+  await user.click(repoBox());
+  // A touch scroll inside the list.
+  fireEvent.pointerDown(screen.getByRole("option", { name: "No repository" }));
+  fireEvent.pointerCancel(screen.getByRole("option", { name: "No repository" }));
+  expect(list().hidden).toBe(false);
+  expect(list().className).not.toContain("invisible");
+  // A touch scroll that began outside it: the list is as it was.
+  fireEvent.pointerDown(task());
+  expect(list().className).toContain("invisible");
+  fireEvent.pointerCancel(task());
+  expect(list().hidden).toBe(false);
+  expect(list().className).not.toContain("invisible");
+});
