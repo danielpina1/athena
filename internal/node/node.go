@@ -40,8 +40,8 @@ const (
 	recoveryAdvice = " Check your directory and git history before repeating any outside action."
 	// resumeNote opens the first message of a session resumed after it was paused with nothing to do: a handoff (a
 	// ready report that waits for its pull request), or a turn that ended idle before a node restart.
-	resumeNote = "Your session was paused while it waited; it resumes for the input that follows."
-	crashSummary   = "session crashed repeatedly"
+	resumeNote   = "Your session was paused while it waited; it resumes for the input that follows."
+	crashSummary = "session crashed repeatedly"
 	// nudgeText is sent, once, when a turn ends without a Report since the worker's last Input; blockedSummary is the
 	// report filed when the next turn ends without one too.
 	nudgeText      = "Your turn ended without a report. Call the report tool now with your status."
