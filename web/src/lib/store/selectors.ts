@@ -18,13 +18,23 @@ export type TicketFilter = {
 
 export type Counts = { needsYou: number; open: number; working: number; endedToday: number; mergedToday: number };
 
-type Slice = Pick<AthenaData, "tickets" | "approvals">;
+/** The state the selectors read. Without `answering` nothing is being answered. */
+type Slice = Pick<AthenaData, "tickets" | "approvals"> & Partial<Pick<AthenaData, "answering">>;
+type TicketsSlice = Pick<AthenaData, "tickets"> & Partial<Pick<AthenaData, "answering">>;
 
 const KINDS = new Set<string>(["approval", "answer", "review", "delivery", "blocked", "failed"]);
 
-/** The Needs you kind of a Ticket waiting on the owner, or undefined. */
-function needsYouKind(t: TicketSummary): NeedsYouKind | undefined {
-  return t.stage === "person" && KINDS.has(t.action) ? (t.action as NeedsYouKind) : undefined;
+const NOTHING_ANSWERED: Answering = new Map();
+
+/**
+ * The Needs you kind of a Ticket waiting on the owner, or undefined. A Ticket whose approval the owner answered here
+ * waits on no one while the answer is in flight (ruling R30): its approval was cleared from it optimistically, or the
+ * answering map still holds it (a Ticket Delta that came meanwhile names it again).
+ */
+function needsYouKind(t: TicketSummary, answering: Answering): NeedsYouKind | undefined {
+  if (t.stage !== "person" || !KINDS.has(t.action)) return undefined;
+  if (t.action === "approval" && (t.pendingApprovalId === "" || answering.has(t.pendingApprovalId))) return undefined;
+  return t.action as NeedsYouKind;
 }
 
 const ms = (ts: Timestamp | undefined) => (ts ? timestampMs(ts) : 0);
@@ -37,12 +47,20 @@ const since = (i: NeedsYouItem) => (i.approval ? ms(i.approval.createdAt) : ms(i
 
 type Tickets = AthenaData["tickets"];
 type Approvals = AthenaData["approvals"];
+type Answering = AthenaData["answering"];
 
-// Results are cached per tickets Map (and approvals Map), so a new Map, which every change makes, starts afresh and
-// the old results go with the old Map.
-const ticketLists = new WeakMap<Tickets, Map<string, TicketSummary[]>>();
-const needsYouLists = new WeakMap<Tickets, WeakMap<Approvals, NeedsYouItem[]>>();
-const countsByDay = new WeakMap<Tickets, WeakMap<Approvals, Map<number, Counts>>>();
+// Results are cached per tickets Map (and approvals and answering Maps), so a new Map, which every change makes,
+// starts afresh and the old results go with the old Map.
+const ticketLists = new WeakMap<Tickets, WeakMap<Answering, Map<string, TicketSummary[]>>>();
+const needsYouLists = new WeakMap<Tickets, WeakMap<Approvals, WeakMap<Answering, NeedsYouItem[]>>>();
+const countsByDay = new WeakMap<Tickets, WeakMap<Approvals, WeakMap<Answering, Map<number, Counts>>>>();
+
+const answeringOf = (s: { answering?: Answering }) => s.answering ?? NOTHING_ANSWERED;
+
+/** The cache of list results for s's tickets and answering. */
+function listCache(s: TicketsSlice): Map<string, TicketSummary[]> {
+  return cached(cached(ticketLists, s.tickets, () => new WeakMap()), answeringOf(s), () => new Map());
+}
 
 function cached<K, V>(m: { get(k: K): V | undefined; set(k: K, v: V): unknown }, key: K, compute: () => V): V {
   let v = m.get(key);
@@ -55,10 +73,12 @@ function cached<K, V>(m: { get(k: K): V | undefined; set(k: K, v: V): unknown },
 
 /** The Tickets waiting on the owner, each with its one action: approvals first, then answers, then the rest. */
 export function selectNeedsYou(s: Slice): NeedsYouItem[] {
-  return cached(cached(needsYouLists, s.tickets, () => new WeakMap()), s.approvals, () => {
+  const answering = answeringOf(s);
+  const byApprovals = cached(cached(needsYouLists, s.tickets, () => new WeakMap()), s.approvals, () => new WeakMap());
+  return cached(byApprovals, answering, () => {
     const items: NeedsYouItem[] = [];
     for (const ticket of s.tickets.values()) {
-      const kind = needsYouKind(ticket);
+      const kind = needsYouKind(ticket, answering);
       if (!kind) continue;
       const approval = kind === "approval" ? s.approvals.get(ticket.pendingApprovalId) : undefined;
       items.push(approval ? { kind, ticket, approval } : { kind, ticket });
@@ -71,27 +91,28 @@ function cmp(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
 
-function matchesStage(t: TicketSummary, stage: TicketFilter["stage"]): boolean {
+function matchesStage(t: TicketSummary, stage: TicketFilter["stage"], answering: Answering): boolean {
   switch (stage) {
     case undefined:
       return true;
     case "open":
       return t.stage !== "ended";
     case "needsYou":
-      return needsYouKind(t) !== undefined;
+      return needsYouKind(t, answering) !== undefined;
     default:
       return t.stage === stage;
   }
 }
 
 /** The Tickets the filter selects, most recently changed first. `q` matches the id or title, ignoring case. */
-export function selectTickets(s: Pick<AthenaData, "tickets">, f: TicketFilter): TicketSummary[] {
+export function selectTickets(s: TicketsSlice, f: TicketFilter): TicketSummary[] {
   const key = JSON.stringify([f.stage, f.repo, f.model, f.q]);
-  return cached(cached(ticketLists, s.tickets, () => new Map()), key, () => {
+  const answering = answeringOf(s);
+  return cached(listCache(s), key, () => {
     const q = f.q?.trim().toLowerCase();
     const out: TicketSummary[] = [];
     for (const t of s.tickets.values()) {
-      if (!matchesStage(t, f.stage)) continue;
+      if (!matchesStage(t, f.stage, answering)) continue;
       if (f.repo !== undefined && t.repo !== f.repo) continue;
       if (f.model !== undefined && t.model !== f.model) continue;
       if (q && !t.id.toLowerCase().includes(q) && !t.title.toLowerCase().includes(q)) continue;
@@ -109,24 +130,25 @@ function startOfDay(now: number): number {
 }
 
 /** The Tickets that ended today (local time), most recently changed first. */
-export function selectEndedToday(s: Pick<AthenaData, "tickets">, now: number = Date.now()): TicketSummary[] {
+export function selectEndedToday(s: TicketsSlice, now: number = Date.now()): TicketSummary[] {
   const from = startOfDay(now);
-  return cached(cached(ticketLists, s.tickets, () => new Map()), `endedSince:${from}`, () =>
+  return cached(listCache(s), `endedSince:${from}`, () =>
     selectTickets(s, { stage: "ended" }).filter((t) => ms(t.endedAt) >= from),
   );
 }
 
 /** The Tickets merged today (local time), most recently changed first. */
-export function selectMergedToday(s: Pick<AthenaData, "tickets">, now: number = Date.now()): TicketSummary[] {
+export function selectMergedToday(s: TicketsSlice, now: number = Date.now()): TicketSummary[] {
   const from = startOfDay(now);
-  return cached(cached(ticketLists, s.tickets, () => new Map()), `mergedSince:${from}`, () =>
+  return cached(listCache(s), `mergedSince:${from}`, () =>
     selectEndedToday(s, now).filter((t) => t.outcome === "merged"),
   );
 }
 
 /** The counts the sidebar and tabs show; each is the length of the list it links to. */
 export function selectCounts(s: Slice, now: number = Date.now()): Counts {
-  const byDay = cached(cached(countsByDay, s.tickets, () => new WeakMap()), s.approvals, () => new Map<number, Counts>());
+  const byApprovals = cached(cached(countsByDay, s.tickets, () => new WeakMap()), s.approvals, () => new WeakMap());
+  const byDay = cached(byApprovals, answeringOf(s), () => new Map<number, Counts>());
   return cached(byDay, startOfDay(now), () => ({
     needsYou: selectNeedsYou(s).length,
     open: selectTickets(s, { stage: "open" }).length,

@@ -3,5 +3,7 @@ bin/
 /athena
 bench/results.json
 web/node_modules/
+web/test-results/
+web/playwright-report/
 internal/web/ui/dist/*
 !internal/web/ui/dist/.gitkeep

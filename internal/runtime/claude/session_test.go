@@ -735,6 +735,31 @@ func TestChildEnvironmentIsAllowlisted(t *testing.T) {
 	}
 }
 
+// TestFakeEnvLogPerTicket: fakeclaude puts each Ticket's environment in its own file when the log path names
+// {ticket}, so a test driving several sessions (the dashboard e2e's sessionctl) finds the right one.
+func TestFakeEnvLogPerTicket(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("ATHENA_FAKE_ENV_LOG", filepath.Join(dir, "env-{ticket}.log"))
+	s, err := Start(context.Background(), withStubs(t, Options{
+		Binary: fakeBinary(t),
+		Dir:    t.TempDir(),
+		Env:    []string{"ATHENA_TICKET=T-7"},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = s.Close()
+	collect(t, s)
+	_ = s.Wait()
+	found := false
+	for _, l := range lines(t, filepath.Join(dir, "env-T-7.log")) {
+		found = found || l == "ATHENA_TICKET=T-7"
+	}
+	if !found {
+		t.Fatal("env-T-7.log lacks ATHENA_TICKET=T-7")
+	}
+}
+
 func TestBuildArgsTools(t *testing.T) {
 	none := ""
 	args := buildArgs(Options{SettingsPath: "s", MCPConfigPath: "m", Tools: &none})

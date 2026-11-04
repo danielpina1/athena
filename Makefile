@@ -35,9 +35,11 @@ web-check: web/node_modules
 	$(MAKE) web
 	npm --prefix web run bundle-budget
 
-# End-to-end browser tests (Task 9 fills this in).
-e2e:
-	@echo "e2e: not yet"
+# End-to-end browser tests: Playwright against a real server (web/e2e/global-setup.ts builds the dashboard and the
+# binaries and starts it). Slow, so not part of check; every UI task runs it. The first run needs the browser:
+# npx --prefix web playwright install chromium.
+e2e: web/node_modules
+	npm --prefix web run e2e
 
 build: web
 	CGO_ENABLED=0 go build -o bin/athena ./cmd/athena

@@ -17,15 +17,21 @@ export function Command({ className, ...props }: ComponentProps<typeof CommandPr
 export function CommandDialog({
   title = "Command palette",
   description = "Search for a page or an action.",
+  commandProps,
   children,
   ...props
-}: ComponentProps<typeof Dialog> & { title?: string; description?: string }) {
+}: ComponentProps<typeof Dialog> & {
+  title?: string;
+  description?: string;
+  /** Passed to the cmdk root: its filter, label or key handling. */
+  commandProps?: Omit<ComponentProps<typeof CommandPrimitive>, "children">;
+}) {
   return (
     <Dialog {...props}>
       <DialogContent hideClose className="mt-[12dvh] mb-auto max-w-xl overflow-hidden" bodyClassName="block gap-0 p-0">
         <DialogTitle className="sr-only">{title}</DialogTitle>
         <DialogDescription className="sr-only">{description}</DialogDescription>
-        <Command>{children}</Command>
+        <Command {...commandProps}>{children}</Command>
       </DialogContent>
     </Dialog>
   );

@@ -1,7 +1,7 @@
 import { create, type MessageInitShape } from "@bufbuild/protobuf";
 import { timestampFromMs } from "@bufbuild/protobuf/wkt";
 import { beforeEach, describe, expect, test } from "vitest";
-import { SnapshotSchema, TicketSummarySchema } from "@/gen/athena/v1/state_pb";
+import { DeltaSchema, SnapshotSchema, TicketSummarySchema } from "@/gen/athena/v1/state_pb";
 import { useAthena } from "./state";
 import { selectCounts, selectEndedToday, selectMergedToday, selectNeedsYou, selectTickets } from "./selectors";
 
@@ -66,6 +66,38 @@ describe("selectors", () => {
     expect(counts.endedToday).toBe(selectEndedToday(s, NOW).length);
     expect(counts.mergedToday).toBe(selectMergedToday(s, NOW).length);
     expect(selectMergedToday(s, NOW).map((t) => t.id)).toEqual(["T-merged"]);
+  });
+
+  test("an approval being answered leaves Needs you and its count (R30)", () => {
+    load(
+      [
+        ticket("T-a", { stage: "person", action: "approval", pendingApprovalId: "A-1", updatedAt: at(5) }),
+        ticket("T-b", { stage: "person", action: "answer", updatedAt: at(4) }),
+      ],
+      [{ id: "A-1", ticketId: "T-a", state: "pending", createdAt: at(5) }],
+    );
+    const needsYou = () => {
+      const s = useAthena.getState();
+      const ids = selectNeedsYou(s).map((i) => i.ticket.id);
+      expect(selectCounts(s, NOW).needsYou).toBe(ids.length);
+      expect(selectTickets(s, { stage: "needsYou" }).length).toBe(ids.length);
+      return ids;
+    };
+    expect(needsYou()).toEqual(["T-a", "T-b"]);
+
+    const change = useAthena.getState().markApprovalAnswered("A-1", true);
+    expect(needsYou()).toEqual(["T-b"]);
+    // A Ticket Delta that still names the approval, while the answer is in flight, does not bring it back.
+    useAthena.getState().applyDelta(
+      create(DeltaSchema, {
+        seq: 2n,
+        change: { case: "ticket", value: ticket("T-a", { stage: "person", action: "approval", pendingApprovalId: "A-1" }) },
+      }),
+    );
+    expect(needsYou()).toEqual(["T-b"]);
+    // The answer failed: the approval is back.
+    change.undo();
+    expect(needsYou()).toEqual(["T-a", "T-b"]);
   });
 
   test("selectTickets filters by stage, repo, model and text, newest first", () => {

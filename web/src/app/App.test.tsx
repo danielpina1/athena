@@ -27,7 +27,8 @@ const runtime = () => {
 test("a signed-in owner sees the app", async () => {
   fakeFetch({ "GET /auth/session": { json: { authenticated: true } } });
   render(<App runtime={runtime()} />);
-  expect(await screen.findByRole("heading", { name: "Athena" })).toBeTruthy();
+  expect(await screen.findByRole("heading", { name: "Needs you" })).toBeTruthy();
+  expect(screen.getByRole("navigation", { name: "Main" })).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Sign in with passkey" })).toBeNull();
 });
 

@@ -21,3 +21,12 @@ if (typeof HTMLDialogElement !== "undefined" && !HTMLDialogElement.prototype.sho
 if (typeof Element !== "undefined" && !Element.prototype.scrollIntoView) {
   Element.prototype.scrollIntoView = function () {};
 }
+
+// jsdom has no ResizeObserver; cmdk's list observes its height.
+if (typeof globalThis.ResizeObserver === "undefined") {
+  globalThis.ResizeObserver = class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  };
+}
