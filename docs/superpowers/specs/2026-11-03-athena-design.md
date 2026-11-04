@@ -23,7 +23,12 @@ The owner asked for it to be *extremely efficient* and to support *advanced comm
 ### Goals
 
 1. A request (GitHub mention/issue/PR comment, or a task typed in the dashboard) becomes a Ticket and is worked to completion by a Claude Code or Codex session on a suitable node, with the result delivered where it was asked (e.g. a pull request and a reply on GitHub).
-2. Tasks are not tied to one repository: a Ticket targets any repository a node has, or no repository (research, scripts, ops tasks).
+2. **Any repository, any task** (owner, repeated as a hard requirement). Nothing in Athena assumes a language, framework, build system, repository host or task type:
+   - **Any git repository**: GitHub, GitLab, Bitbucket, Gitea/self-hosted, or local-only with no remote. Worktrees (§6.1) work for all of them.
+   - **Any directory**: a non-git folder can be a Ticket's target (one active Ticket per non-git folder at a time, since it cannot be isolated with a worktree; further Tickets on it queue).
+   - **No repository**: research, writing, scripts, data work, ops tasks in a scratch directory.
+   - **Delivery adapts to the target**: GitHub → PR as the GitHub App (plan 2); other hosts → push the Ticket's branch and report its link (a host adapter for PR/MR creation, e.g. GitLab, plugs into the same Source/delivery interface later); local-only repos → the branch stays local and the dashboard shows its diff for review; no repository → the result is the Report plus any files left in the Ticket directory, viewable/downloadable from the dashboard.
+   - The worker prompt tells sessions to discover how a repository builds and tests itself (README, CI config, manifests) rather than assuming a toolchain.
 3. Runtime is selectable per Ticket: `claude`, `codex`, or a local model through either; with a configurable default.
 4. Multiple machines: a control server plus any number of nodes (macOS, Linux). Work is dispatched by node capability and load.
 5. Advanced inter-device communication, meaning all of:
@@ -118,6 +123,8 @@ New in Athena (additions to the domain, not changes):
 
 Each Assignment runs in one long-lived **worker session** on one node, in a per-Ticket working directory under the node's execution root (default `<stateDir>/work/<ticket-short-name>`), as in the reference.
 
+**Parallel Tickets on the same repository** (owner asked): a Ticket that targets a repository never runs in the owner's checkout. The node creates a **git worktree** for it from the node's clone (`git worktree add -b athena/<ticket-id> <work-root>/<ticket-short-name> <base>`; base = the repository's default branch, freshly fetched), so any number of Tickets can work on the same repository at once, each on its own branch, and each delivers its own PR. When a Ticket ends, its worktree is removed (`git worktree remove`) after its branch is pushed or the Ticket is dropped; the branch is kept until its PR closes. Merge conflicts between parallel Tickets surface on their PRs and are resolved by the later Ticket's session (rebase), escalating to a person when a resolution needs judgment.
+
 | | Claude Code | Codex |
 | --- | --- | --- |
 | Process | `claude -p --input-format stream-json --output-format stream-json --verbose` | `codex app-server` (JSON-RPC over stdio — the interface the official Codex SDK and IDE extensions use) |
@@ -130,6 +137,17 @@ Each Assignment runs in one long-lived **worker session** on one node, in a per-
 Exact flags and methods must be verified against the installed CLI versions during implementation; the node program pins and reports the versions it supports. The node program owns the child processes: it parses the event stream into the protocol's session events (§8), persists the session id, and restarts/resumes on crash with a recovery note (reference behavior).
 
 The reference's background-work rules (shell commands backgrounded after a few seconds so the worker can receive new Inputs; a 30-minute cap on post-turn background work; handoff frees the slot) are re-expressed with each tool's own mechanisms. Where a tool cannot express a rule exactly, the builder documents the deviation.
+
+### 6.1a Multi-runtime Tickets (use both usage limits)
+
+Owner asked to combine Claude Code and Codex in one Ticket so both accounts' usage limits are used. A Ticket's runtime may be `claude`, `codex`, or **`auto`** (default once plan 5 lands), and a Ticket's Assignments may run on different runtimes over its life. Each Assignment records its own `Runtime` and `Model`.
+
+- **Quota-aware choice.** Each node tracks, per account/runtime, live usage state from the runtimes themselves (rate-limit/usage-limit events and errors in the stream, reset times when reported, recent token burn) and reports it with its heartbeat. For `auto`, the dispatcher picks the runtime with headroom (ties → the Ticket's previous runtime for a warm session, then the owner's preferred default). The dashboard shows both accounts' headroom and reset times.
+- **Failover mid-Ticket.** When a session hits a usage limit, the node ends that Assignment cleanly and the Engine starts a new Assignment on the other runtime **in the same worktree**: work-in-progress is committed to the Ticket branch first (checkpoint), and the new session starts with a handoff note (the Ticket's Inputs, latest Reports, `git log`/`diff --stat` of the branch, and a summary of the previous session's last turn). When the first runtime's limit resets, later Assignments may move back. The Ticket's stage never shows a person stage just because a limit was hit.
+- **Pairing within one Ticket** (owner-selectable per Ticket, or a Policy default): 
+  - *Implement + review*: one runtime implements; before `ready`, a session on the other runtime reviews the branch diff read-only and returns findings; the implementer addresses them (bounded rounds). Spreads usage and adds an independent second opinion.
+  - *Split*: the lead session uses `hand_off` (§8.4) to create child Tickets pinned to the other runtime for separable pieces; children work in their own worktrees branched from the parent's branch and the lead merges their branches back. Two sessions never write the same worktree at the same time.
+- **Accounting**: spend, tokens and attention cost are tracked per Assignment and per runtime, so the Performance page (§10.3) shows how each Ticket used each account.
 
 ### 6.2 Hooks
 
@@ -259,9 +277,10 @@ Views (priority order, following reference `docs/005-panel.md`):
 
 1. **Needs you**: Tickets in person-stages, pending Approvals, offline-node Tickets — each with its one-tap action (answer, approve/deny, review link, retry, retry elsewhere, stop).
 2. **Tickets**: filter by stage/node/runtime/repo; Ticket detail with timeline (Triggers, Decisions, Reports, Approvals, agent messages), Placement, and a **live session view** (streamed output, tool activity) with an input box that sends an Input to the session.
-3. **New task**: free text; optional repository (from nodes' repositories), node pin, runtime, model (incl. local).
-4. **Nodes**: online state, slots in use, runtimes/versions, local models and GPU load, draining toggle, enroll a new node (§11).
-5. **Settings**: Policy, prompts (with the reference's override/versioning UX), execution environment, GitHub source, notification preferences.
+3. **Graph** (owner asked to see tasks as a graph): an interactive graph of work. Nodes are Tickets (shape/colour by stage, orange = needs you, ring = running), grouped into lanes by repository (or "no repository") with an optional machine overlay. Edges: `hand_off` parent → child, `wait_for` dependencies, `ask_agent` conversations (dashed, with message count), follow-ups routed to a Ticket, and **overlap warnings** between parallel Tickets on the same repository that touch the same files (computed from their branches' changed paths). Time can be scrubbed to replay how the graph grew. Clicking a node opens the Ticket detail; on the phone the graph is pan/zoom with a list fallback. Rendered with a force/DAG layout on canvas/SVG (builder's choice of library, e.g. `@xyflow/react` or `d3-force`), fed by the same protocol deltas.
+4. **New task**: free text; optional repository (from nodes' repositories), node pin, runtime, model (incl. local).
+5. **Nodes**: online state, slots in use, runtimes/versions, local models and GPU load, draining toggle, enroll a new node (§11).
+6. **Settings**: Policy, prompts (with the reference's override/versioning UX), execution environment, GitHub source, notification preferences.
 
 ### 10.2 Visibility over the running system
 
@@ -289,6 +308,36 @@ Owner asked for concrete visibility. Mockup: `system-visibility.html` (desktop "
 - **Optional export**: Prometheus `/metrics` and OTLP forwarding for owners who want Grafana; off by default.
 
 Structured logging (`log/slog`, JSON) with Ticket/Assignment/node ids on every line; secrets redacted at the logger.
+
+### 10.3 Performance metrics (owner asked for these to be rich)
+
+Measured from plan 1 onward by an in-process metrics core (`internal/metrics`: counters, gauges, and log-bucketed histograms giving p50/p95/p99; bounded label sets: runtime, model, node, tool, outcome, repo). Every metric below is sliceable by runtime, model, node and repository and comparable over time.
+
+**Agent performance** (per Ticket, stored on the Ticket, and aggregated):
+
+| Area | Metrics |
+| --- | --- |
+| Outcomes | completed / merged / dropped / failed / stopped rates; **first-try success** (no retry, no crash, no human correction); retry and crash counts |
+| Speed | queue wait; time to first output; time to first Report; active time vs time waiting on a person; wall time to `ready`; time to merge |
+| Human attention (the reference's core metric) | questions asked, Approvals requested, approval wait, person messages per Ticket, notifications sent — "attention cost" per Ticket |
+| Cost | input/output tokens, **prompt-cache hit ratio**, $ per Ticket, $ per merged PR, $ saved by local models |
+| Work | turns, tool calls by tool, tool error rate, hook denials/escalations, lines changed, CI passing on first push, PR review rounds |
+
+**Runtime/model comparison**: a scoreboard of success rate, median time, median cost and attention cost per runtime × model × task kind (repo task / no-repo / ops), so the owner can see where Claude, Codex or a local model performs best and set defaults from evidence.
+
+**System performance**:
+
+| Area | Metrics |
+| --- | --- |
+| Engine & store | command latency, SQLite transaction latency, queue depth, effect backlog |
+| Execution | dispatch latency (pending → started), session spawn time, time to `Init`, **hook decision latency**, MCP tool latency, worker slot utilization |
+| Link (plan 3+) | RTT, event lag (node event → every dashboard), reconnects, buffered events, replayed messages, bytes/s per channel |
+| Router | decisions per hour, decision latency, tokens per decision |
+| Resources | RSS, CPU, goroutines per process; disk use of work roots; GPU utilization/VRAM (local inference) |
+
+**Performance budgets, enforced** (the §2 efficiency targets become tests): `make bench` runs Go benchmarks and an end-to-end harness with a fake runtime and asserts: hook decision p99 < 10 ms; engine command p99 < 5 ms; dispatch latency p99 < 100 ms (excluding model time, and — for repository Tickets — excluding the external `git worktree add` process, whose cost scales with repository size; raw repository dispatch is still guarded by the regression rule); dashboard action → session input p95 < 250 ms (plan 3+); node idle RSS < 30 MB, control server < 100 MB. Results are stored as a baseline in the repo; CI fails on any budget breach or a > 10% regression against the baseline.
+
+**Surfaces**: plan 1 ships `athena metrics` (current values and percentiles over the last 1 h / 24 h) and per-Ticket stats in `athena status <id>`; plan 9 adds the dashboard Performance page (scoreboard, latency percentiles over time, cost and attention trends) and Prometheus export of the same metrics.
 
 ## 11. Security
 

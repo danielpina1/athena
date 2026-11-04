@@ -1,1 +1,4 @@
 .superpowers/
+bin/
+/athena
+bench/results.json

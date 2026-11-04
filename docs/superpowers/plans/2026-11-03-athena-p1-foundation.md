@@ -227,7 +227,7 @@ Hook stdin/stdout follow Claude Code's hook contract (input JSON with `session_i
   - `(*Node) Start(t core.Ticket, a core.Assignment)`, `Deliver`, `Stop` (implements `core.Executor`; never block the caller — enqueue onto the node's goroutine).
   - `(*Node) Serve(ctx context.Context) error` — Unix socket (0600) JSON lines: ops `hook` (→ Evaluate; `escalate` → `RequestApproval` + `WaitApproval` with `ApprovalTimeout` → allow/deny; `Stop` event → `TurnEnded`; `SessionStart` → returns `additionalContext` with execution variables), `report` (→ `FileReport`), `ping`.
   - `RunMCP(ticketID, socket string) error` — stdio MCP server (go-sdk) exposing tool `report{ status: enum[progress,waiting,ready,blocked,failed,dropped], summary: string, question?: string }` forwarding to the socket.
-  - Behavior: Start → create `<WorkRoot>/<ticket-short-name>` (slug of title + ticket id) or use `TaskOptions.Dir`, write `.athena/settings.json` and `.athena/mcp.json`, start the session (resuming `Assignment.SessionID` if set), send the worker prompt + undelivered Inputs as the first message, call `AssignmentStarted` on `Init`, `InputsDelivered` after each `Send`. Deliver while a turn runs → `Send` immediately (stream-json accepts mid-turn input). Process exit without Stop → restart with `ResumeID` and a recovery note ("Your previous process ended unexpectedly; continue the task.") at most 3 times, then `FileReport(failed, "session crashed repeatedly")`. Slots: queue Starts beyond `Slots`.
+  - Behavior: Start → the Ticket dir is `TicketDir(WorkRoot, t)` = `<WorkRoot>/<slug(title)>-<ticket id lowercased>`. If `Execution.Directory` (from `TaskOptions.Dir`) is a git repository, it is the **source repo**, never the working dir: create the Ticket dir as a worktree with `git -C <repo> worktree add -b athena/<ticket-id> <ticketDir> HEAD` (reuse it if it already exists, e.g. on resume); if it is a non-git dir, use it as-is but allow only one active Ticket per such dir — further Starts for the same dir wait in the node queue until it ends (test `TestNonGitDirSerialized`); if empty, create a plain dir. On Ticket end, `git worktree remove --force` only when the branch has no unpushed commits, otherwise keep it and log. Add test `TestParallelTicketsSameRepoGetSeparateWorktrees` (two tickets with the same `--dir` repo → two different dirs on branches `athena/t-0001`/`athena/t-0002`, source checkout untouched). Then write `.athena/settings.json` and `.athena/mcp.json`, start the session (resuming `Assignment.SessionID` if set), send the worker prompt + undelivered Inputs as the first message, call `AssignmentStarted` on `Init`, `InputsDelivered` after each `Send`. Deliver while a turn runs → `Send` immediately (stream-json accepts mid-turn input). Process exit without Stop → restart with `ResumeID` and a recovery note ("Your previous process ended unexpectedly; continue the task.") at most 3 times, then `FileReport(failed, "session crashed repeatedly")`. Slots: queue Starts beyond `Slots`.
 
 - [ ] **Step 1: Write failing tests** (fakeclaude + real store + real engine): `TestStartRunsSessionAndReportsStarted`; `TestReportToolEndsTicket` (MCP client in-memory transport calls `report{ready}` → Ticket ended `completed`); `TestEscalationCreatesApprovalAndWaits` (hook op with a deploy command → approval pending → `AnswerApproval(true)` → hook reply allow); `TestApprovalTimeoutDenies` (timeout 50 ms → deny, approval `expired`); `TestCrashResumesSameSession` (fakeclaude exits mid-turn once → second start has `--resume <id>` and the recovery note; stage never stuck) — Review Focus 1; `TestMidTurnInputsInOrder` — Review Focus 4; `TestSlotsQueue` (Slots=1, two tickets → second starts after first ends).
 - [ ] **Step 2: Run** → FAIL. **Step 3: Implement.** **Step 4: Run** → PASS; `make check`.
@@ -243,7 +243,7 @@ Hook stdin/stdout follow Claude Code's hook contract (input JSON with `session_i
 **Interfaces:**
 - Produces:
   - `func Run(ctx context.Context, cfg Config) error` with `Config{ StateDir string; Node node.Config }` — opens store `<StateDir>/athena.db`, builds Engine + Node, serves node socket `<StateDir>/node.sock` and control socket `<StateDir>/athena.sock` (both 0600), writes a pid file, slog JSON to `<StateDir>/logs/athena.log` and stderr.
-  - Startup recovery: for every open Ticket with a running Assignment, `node.Start` it again (resume + recovery note); for running Assignments with `Undelivered` Inputs, redeliver after start — Review Focus 2.
+  - Startup recovery (amended at final review, reference `assignmentInterrupted`): restart with resume + recovery note only Assignments interrupted mid-work or with an Input after their latest Report (`IdleAt == nil`, `DeliveredAt` after `IdleAt`, or `Undelivered` non-empty); an Assignment that reported and went idle keeps its Session and resumes lazily on its next Input — Review Focus 2.
   - Control ops (JSON lines, one request → one response, `logs` streams): `submit{text, dir?, model?}`, `tickets{all?}`, `ticket{id}`, `reply{id, text}`, `stop{id, reason}`, `retry{id}`, `approvals`, `answer{id, approve, note}`, `logs{id, follow}` (tails `<dir>/.athena/transcript.jsonl`, rendered as one line per event: time, kind, short text).
   - CLI (`internal/cli`): `athena server [--state-dir]`, `athena task "<text>" [--dir D] [--model M]` (prints ticket id), `athena status` (table: id, stage, title, age), `athena logs <id> [-f]`, `athena reply <id> "<text>"`, `athena stop <id> [--reason]`, `athena retry <id>`, `athena approvals`, `athena approve <id> [--note]`, `athena deny <id> [--note]`. Clear error `athena server is not running (no <path>)` when the socket is missing.
 - [ ] **Step 1: Write failing tests**: `TestEndToEndWithFake` (in-process server with fakeclaude; `task` → `status` shows `working` → simulated `report{ready}` via node socket → `status` shows ticket ended); `TestRestartResumesRunningAssignment` (stop server mid-run, start again → fakeclaude invoked with `--resume`, undelivered input delivered once) — Review Focus 2; `TestCLINoServer`; `TestApproveFromCLI`.
@@ -261,6 +261,27 @@ Hook stdin/stdout follow Claude Code's hook contract (input JSON with `session_i
 - [ ] **Step 4: Run** `make check` → PASS.
 - [ ] **Step 5: Commit** `test: live smoke test with claude code`.
 
+### Task 11: Metrics core, per-Ticket stats and performance budgets
+
+Runs after Task 10. Spec §10.3.
+
+**Files:**
+- Create: `internal/metrics/metrics.go`, `internal/metrics/histogram.go`, `internal/core/stats.go`, `bench/bench_test.go`, `bench/baseline.json`
+- Modify: `internal/core/engine.go`, `internal/node/node.go`, `internal/node/socket.go`, `internal/store/store.go`, `internal/server/control.go`, `internal/cli/cli.go`, `Makefile` (target `bench`)
+- Test: `internal/metrics/metrics_test.go`, `internal/core/stats_test.go`, `internal/server/metrics_test.go`
+
+**Interfaces:**
+- Produces:
+  - `type Registry`; `func NewRegistry() *Registry`; `(*Registry) Counter(name string, labels ...string) *Counter` (`Add(int64)`), `Gauge(name, labels...) *Gauge` (`Set(float64)`), `Histogram(name, labels...) *Histogram` (`Observe(time.Duration)`, `ObserveValue(float64)`); `(*Registry) Snapshot() Snapshot` with p50/p95/p99, count, sum per histogram. Histograms: fixed log-scale buckets (base 2^(1/4), 1 µs … 1 h), lock-free per bucket (`atomic.Int64`). Label values bounded: unknown label keys panic in tests.
+  - `type TicketStats struct{ QueueWait, TimeToFirstOutput, TimeToFirstReport, ActiveTime, PersonWaitTime time.Duration; Turns, ToolCalls, ToolErrors, HookDenials, Escalations, Questions, PersonMessages, Retries, Crashes int; InputTokens, OutputTokens, CacheReadTokens int64; CostUSD float64 }` stored on `Ticket.Stats` (new field, JSON `stats`); `func (s TicketStats) CacheHitRatio() float64`; `func FirstTrySuccess(t *Ticket) bool`.
+  - Instrumentation names (exact): `engine_command_seconds{command}`, `store_tx_seconds`, `dispatch_seconds`, `session_spawn_seconds{runtime}`, `session_init_seconds{runtime}`, `hook_decision_seconds{event,verdict}`, `mcp_tool_seconds{tool}`, `slots_in_use`, `tickets_ended_total{outcome,runtime,model}`, `tokens_total{kind,runtime,model}`, `cost_usd_total{runtime,model}`, `tool_calls_total{tool,error}`, `process_rss_bytes`, `goroutines`.
+  - Control op `metrics{window}` and CLI `athena metrics [--window 1h|24h]` (table: name, labels, count, p50, p95, p99 or value); `athena status <id>` prints the Ticket's stats.
+- [ ] **Step 1: Write failing tests**: `TestHistogramPercentiles` (10k known samples → p50/p95/p99 within one bucket of exact); `TestHistogramConcurrent` (-race, 8 goroutines); `TestTicketStatsAccumulate` (engine + fake executor: a ticket with a question, a person reply, a retry and a Result event → exact counts, PersonWaitTime from question to reply, tokens/cost summed); `TestFirstTrySuccess`; `TestMetricsCommand` (in-process server → `athena metrics` lists `engine_command_seconds` and `hook_decision_seconds` with non-zero counts after one task).
+- [ ] **Step 2: Run** → FAIL. **Step 3: Implement** — the engine records stats inside the same transaction as the command that causes them; the node records spawn/init/hook/tool timings; usage and cost come from `claude.Result`.
+- [ ] **Step 4: Budgets.** `bench/bench_test.go`: `BenchmarkHookDecision`, `BenchmarkEngineCommand`, `BenchmarkDispatch` (fake runtime) and `TestBudgets` asserting p99 hook < 10 ms, engine command < 5 ms, dispatch < 100 ms, and server idle RSS < 100 MB; `make bench` writes results and compares with `bench/baseline.json`, failing on a budget breach or > 10% regression; record the first baseline.
+- [ ] **Step 5: Run** `make check` and `make bench` → PASS.
+- [ ] **Step 6: Commit** `feat(metrics): metrics core, ticket stats and performance budgets`.
+
 ---
 
 ## Spec coverage for plan 1
@@ -273,5 +294,6 @@ Hook stdin/stdout follow Claude Code's hook contract (input JSON with `session_i
 - §11 containment, fail-closed hooks, 0600 files, secret-safe logs: Tasks 3, 6, 8, 9.
 - §16.1 item 1 approval defaults: Task 6.
 - §10.2 basic `athena status` / `athena logs`: Task 9.
+- §10.3 metrics core, per-Ticket stats, `athena metrics`, enforced performance budgets: Task 11.
 
 Deferred by design to later plans (see roadmap): router, Policy, GitHub, Outbox (2); link protocol, auth, TLS, push (3); dashboard (4); Codex (5); multi-node (6); agent-to-agent (7); local inference (8); visibility (9).

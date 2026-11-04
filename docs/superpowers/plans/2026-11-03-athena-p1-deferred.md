@@ -1,0 +1,89 @@
+# Plan 1 — deferred review items
+
+Minor findings parked during plan 1 reviews, and rulings R33–R35 from the final re-review. Each later plan's author checks the items in its area.
+
+- Task 1: minor (deferred): stub list duplicated between main.go and main_test.go
+- Task 2: minor (deferred): stage/action bare string literals repeated
+- Task 2: minor (deferred): Mandate.Scope omitempty though reference requires it
+- Task 2: minor (deferred): WaitsForPerson coverage — failed+human after, input exactly at Report.At
+- Task 3: minor (deferred): Open does not tighten modes of pre-existing dir/file to 0700/0600
+- Task 3: minor (deferred): runtime.Goexit inside Tx fn leaks tx (use committed flag + defer rollback)
+- Task 3: minor (deferred): panic(r) loses original stack
+- Task 3: minor (deferred): deferred BEGIN may SQLITE_BUSY across processes (_txlock=immediate)
+- Task 3: minor (deferred): coverage — ended upsert removes from OpenTickets; second migration + newer-schema refusal; non-UTC UpdatedAt ordering
+- Task 4: minor (deferred, CARRY TO TASK 8): Executor contract — methods must not wait on anything the Executor holds while calling the Engine; queues unbounded/non-blocking
+- Task 4: minor (deferred, CARRY TO TASK 8): Start must be idempotent per Assignment; Deliver should coalesce per Ticket and deliver what is waiting when it runs
+- Task 4: minor (deferred): no async-callback executor test
+- Task 4: minor (deferred): TestBlockedThenHumanInputReleases thin (no event/deliver asserts)
+- Task 4: minor (deferred): duplicate AssignmentStarted untested
+- Task 4: minor (deferred): event Data uses typed string values
+- Task 4: minor (deferred): store errors returned unwrapped
+- Task 5: minor (deferred): approval waiter tests do not deterministically force the read/register window
+- Task 5: minor (deferred): ctx-cancelled waiter channel stays registered until approval settles
+- Task 5: minor (deferred): RequestApproval does not validate AssignmentID belongs to ticket / Input valid JSON
+- Task 6: minor (deferred): wrappers with option args (sudo -u, nice -n, xargs -n, timeout N)
+- Task 6: minor (deferred): git push variants (git -C x push --force, +refspec, :branch delete, -uf)
+- Task 6: minor (deferred): venv detection too permissive (VIRTUAL_ENV=, pip3.12)
+- Task 6: minor (deferred): stdout write failure on decision event not fail-closed (return exit 2)
+- Task 6: minor (deferred): argv event not checked against hook_event_name
+- Task 6: minor (deferred): relative Glob patterns starting with .. not stem-checked
+- Task 6: minor (deferred): Bash file writes (>, tee, cp, sed -i) not confined, incl. to .athena/ and .claude/settings — known gap; consider in hardening
+- Task 6: minor (deferred): .claude symlink dodge — also check lexical <Ticket>/.claude/settings*.json and .athena spellings
+- Task 6: minor (deferred): select/coproc/function constructs; APFS NFC/NFD normalization
+- Task 7: minor (deferred): events dropped after Close if consumer >250ms/event (untested)
+- Task 7: minor (deferred, CARRY TO TASK 8): Wait() blocks until Events closed — node must drain Events and always call Close; closedCh only closed by Close
+- Task 7: minor (deferred): cmd.Stderr non-File writer → ErrWaitDelay with lingering grandchild
+- Task 7: minor (deferred): killGroup after natural exit / pid reuse window
+- Task 7: minor (deferred): capture script uses acceptEdits; machine-specific scrub path
+- Task 7: minor (deferred): fixtures carry thinking signatures/startup_timing noise
+- Task 7: minor (deferred): invalid JSON line loses raw in Unknown event
+- Task 7: minor (deferred): fakeclaude build-by-module-path note
+- Task 7: minor (deferred): InterruptTurn may wait behind a wedged Send until Close; weak InterruptTurn-after-Close assertion
+- Task 8: minor (deferred): onStop when ticket ended but live session is a different assignment
+- Task 8: minor (deferred): place() runs git rev-parse on loop goroutine
+- Task 8: minor (deferred): --dir subdirectory of repo dropped at worktree root
+- Task 8: minor (deferred): ensureWorktree reuses non-worktree dir; id restart reuses old athena/t-NNNN branch
+- Task 8: minor (deferred): crash counter never resets after healthy turns
+- Task 8: minor (deferred): escalation keeps waiting after session stop; stale approval lingers
+- Task 8: minor (deferred): removeStaleSocket deletes non-socket files; chmod after Listen window; 30s idle wait on shutdown
+- Task 8: minor (deferred): same-user trust — per-assignment random token would close cross-ticket report spoofing
+- Task 8: minor (deferred): worker.md has MIT line sent to model; branch wording wrong for non-git/no-dir
+- Task 8: minor (deferred): t.Fatalf in goroutines; unbounded <-got in TestEscalationDeniedByPerson
+- Task 8: minor (deferred): node.go ~1000 lines; split worktree.go
+- Task 9: minor (deferred): single-instance startup race (use flock first)
+- Task 9: minor (deferred): substring key masking over-masks
+- Task 9: minor (deferred): type/subtype text not truncated
+- Task 9: minor (deferred): text starting with - parsed as flag; document --
+- Task 9: minor (deferred): control failure log lacks ticket attr
+- Task 9: minor (deferred): duplicated test helpers server/cli
+- Task 9: minor (deferred): no CLI logs -f test
+- Task 9: minor (deferred): resend of unread inputs is at-least-once (possible duplicate if old session saved it)
+- Task 9: minor (deferred): startup-expired approvals have empty answer note
+- Task 9: minor (deferred): no pruning of <state>/transcripts
+- Task 9: minor (deferred): redaction gaps — escaped quotes, unterminated quotes, APIKey split, PASSPHRASE, -pX, -u user:pw, JSON bodies, X-Api-Key headers; over-masking prose/max_tokens/session_id; URL query @ mangling
+- Task 9: minor (deferred): privateDir chmods caller-supplied parent dir; ticket attr label for OpAnswer
+- Task 10: minor (deferred): Bash writes via python -c, sed -i, curl -o, scripts unconfined — enable Claude Code native sandbox (bash sandbox restricted to ticket dir) as hardening
+- Task 10: minor (deferred): worker may end a turn without report (~1/25); add a nudge (reference waiting-report behavior)
+- Task 10: minor (deferred): process substitution >(tee /tmp/x) slips through
+- Task 10: minor (deferred): unseenFailure race — set on node-side deny verdicts
+- Task 10: minor (deferred): weak denial-mention check in live test
+- Task 10: minor (deferred): reply-once crutch; HelloFile has no nudge (needs idle-without-report nudge in product)
+- Task 10: minor (deferred): Bash live test may check too early on progress report
+- Task 10: minor (deferred): smoke-test.md wording on --state-dir
+- Task 10: minor (deferred): regression test for false completion uses synthetic events not captured live fixture
+- Task 10: minor (deferred): cd with redirection token false positive; same-command symlink creation; eval not unwrapped; CDPATH
+- Task 10: minor (deferred): residual var alterations untainted — env -i/-u/-C, select, wait -p; ~user credential-read path; whole-text-matching limits → sandbox
+- Task 11: minor (deferred): worktree fallback path untested
+- Task 11: minor (deferred): place() treats any .git entry as top level
+- Task 11: minor (deferred): QueueWait equals dispatch_seconds
+- Task 11: minor (deferred): model label "default" when task names no model (should be node model)
+- Task 11: minor (deferred): hook-denial RecordUsage synchronous on deny path; denial+escalation double count
+- Task 11: minor (deferred): dispatch_worktree budget margin thin (89ms/100ms)
+- Task 11: minor (deferred): report baseline numbers differ from committed baseline
+- Task 11: minor (deferred): darwin process_rss_bytes is peak RSS
+- Task 11: minor (deferred): re-measure bias (15 draws vs 5) lets ~10-12% regressions slip; engine floor makes effective threshold ~15%; probe scaling may false-fail when baseline conditions differ; Probe/Best not paired
+- Task 11: minor (deferred): pre-change tickets without SessionCosts over-count once on resume; Linux engine budget unverified
+
+- Ruling R33: park nudge-not-delivered restart gap (nudged turn + restart → idle with no process until next Input) to plan 2 — narrow window, next Input recovers — cost if wrong: a silent Ticket shows working until poked.
+- Ruling R34: park errored-turn eager relaunch on restart (Stop hook may be skipped) to plan 2: treat latest failed/blocked Report as not interrupted — benign "continue" relaunch — cost if wrong: one surprise relaunch per failed Ticket per restart.
+- Ruling R35: park crash summary ~328 runes and tail-buffer mid-token cut as minors — cosmetic/theoretical — cost if wrong: a partially masked stderr fragment in a report.
