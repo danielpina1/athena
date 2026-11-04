@@ -82,6 +82,9 @@ type Config struct {
 	// CredentialRetry is the first pause before a launch that could not get its GitHub credentials yet tries again
 	// (default 5 s, doubling to 5 min).
 	CredentialRetry time.Duration
+	// WorkerPrompt returns the system prompt a new worker session starts with (the owner's overrides applied); nil
+	// gives prompts.Worker. A resumed session keeps the prompt it started with (see sessionPrompt).
+	WorkerPrompt func() string
 	// Sandbox, when set, turns on Claude Code's sandbox for worker sessions (sandbox.go); nil leaves it off.
 	Sandbox *SandboxConfig
 	// Logger receives the node's log lines (default slog.Default()).
@@ -923,6 +926,7 @@ func (r *runner) run() {
 	adir := filepath.Join(s.place.workDir, ".athena")
 	env := append([]string{"ATHENA_ASSIGNMENT=" + s.a.ID}, n.variables(s)...)
 	env = append(env, n.githubEnv(s)...)
+	systemPrompt := n.sessionPrompt(s.t.ID, resumeID != "")
 	for crashes := 0; ; {
 		spawnStart := time.Now()
 		sess, err := claude.Start(n.ctx, claude.Options{
@@ -932,7 +936,7 @@ func (r *runner) run() {
 			ResumeID:           resumeID,
 			SettingsPath:       filepath.Join(adir, "settings.json"),
 			MCPConfigPath:      filepath.Join(adir, "mcp.json"),
-			AppendSystemPrompt: prompts.Worker,
+			AppendSystemPrompt: systemPrompt,
 			Env:                env,
 			TranscriptPath:     n.transcriptPath(s.t.ID),
 			OnLine:             func(off int64, line []byte) { n.streams.add(s.t.ID, off, line) },
@@ -1497,6 +1501,45 @@ func renderInputs(t core.Ticket, ids []string, trigger func(id string) (core.Tri
 // worktree, and in the state directory, which sessions may not read.
 func TranscriptPath(stateDir, ticketID string) string {
 	return filepath.Join(stateDir, "transcripts", ticketID+".jsonl")
+}
+
+// PromptPath returns the file that keeps the system prompt a Ticket's session started with: <stateDir>/prompts/<ticket
+// id>.md. Next to the transcript, it lives in the state directory, which sessions may not read.
+func PromptPath(stateDir, ticketID string) string {
+	return filepath.Join(stateDir, "prompts", ticketID+".md")
+}
+
+// sessionPrompt is the system prompt of the Ticket's next session. A new session gets the current worker prompt
+// (overrides applied) and the node keeps it; a resumed one keeps the prompt it started with, so an override saved
+// meanwhile reaches only sessions that start after it. A session without a kept prompt (it started before overrides
+// existed, or there is no state directory) started with the default.
+func (n *Node) sessionPrompt(ticketID string, resumed bool) string {
+	path := ""
+	if n.cfg.StateDir != "" {
+		path = PromptPath(n.cfg.StateDir, ticketID)
+	}
+	if resumed {
+		if path != "" {
+			if b, err := os.ReadFile(path); err == nil {
+				return string(b)
+			}
+		}
+		return prompts.Worker
+	}
+	p := prompts.Worker
+	if n.cfg.WorkerPrompt != nil {
+		p = n.cfg.WorkerPrompt()
+	}
+	if path != "" {
+		err := os.MkdirAll(filepath.Dir(path), 0o700)
+		if err == nil {
+			err = os.WriteFile(path, []byte(p), 0o600)
+		}
+		if err != nil {
+			n.log.Warn("keep the session prompt: a resume will use the default", "ticket", ticketID, "error", err)
+		}
+	}
+	return p
 }
 
 // transcriptPath is the Ticket's TranscriptPath, or "" (the session's own default) without a state directory.

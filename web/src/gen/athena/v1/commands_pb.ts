@@ -12,7 +12,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file athena/v1/commands.proto.
  */
 export const file_athena_v1_commands: GenFile = /*@__PURE__*/
-  fileDesc("ChhhdGhlbmEvdjEvY29tbWFuZHMucHJvdG8SCWF0aGVuYS52MSLqBgoHQ29tbWFuZBIKCgJpZBgBIAEoCRIsCgtzdWJtaXRfdGFzaxgKIAEoCzIVLmF0aGVuYS52MS5TdWJtaXRUYXNrSAASIQoFcmVwbHkYCyABKAsyEC5hdGhlbmEudjEuUmVwbHlIABIfCgRzdG9wGAwgASgLMg8uYXRoZW5hLnYxLlN0b3BIABIhCgVyZXRyeRgNIAEoCzIQLmF0aGVuYS52MS5SZXRyeUgAEikKCWludGVycnVwdBgOIAEoCzIULmF0aGVuYS52MS5JbnRlcnJ1cHRIABI0Cg9hbnN3ZXJfYXBwcm92YWwYDyABKAsyGS5hdGhlbmEudjEuQW5zd2VyQXBwcm92YWxIABIrCgpyZWV2YWx1YXRlGBAgASgLMhUuYXRoZW5hLnYxLlJlZXZhbHVhdGVIABIlCgdkaXNtaXNzGBEgASgLMhIuYXRoZW5hLnYxLkRpc21pc3NIABItCgt1bnN1YnNjcmliZRgSIAEoCzIWLmF0aGVuYS52MS5VbnN1YnNjcmliZUgAEioKCnNldF9wb2xpY3kYEyABKAsyFC5hdGhlbmEudjEuU2V0UG9saWN5SAASLgoMd2F0Y2hfdGlja2V0GBQgASgLMhYuYXRoZW5hLnYxLldhdGNoVGlja2V0SAASMgoOdW53YXRjaF90aWNrZXQYFSABKAsyGC5hdGhlbmEudjEuVW53YXRjaFRpY2tldEgAEjIKDnB1c2hfc3Vic2NyaWJlGBYgASgLMhguYXRoZW5hLnYxLlB1c2hTdWJzY3JpYmVIABI2ChBwdXNoX3Vuc3Vic2NyaWJlGBcgASgLMhouYXRoZW5hLnYxLlB1c2hVbnN1YnNjcmliZUgAEkEKFnNldF9ub3RpZmljYXRpb25fcHJlZnMYGCABKAsyHy5hdGhlbmEudjEuU2V0Tm90aWZpY2F0aW9uUHJlZnNIABIrCgp2aXNpYmlsaXR5GBkgASgLMhUuYXRoZW5hLnYxLlZpc2liaWxpdHlIABIwCg1saXN0X3Bhc3NrZXlzGBogASgLMhcuYXRoZW5hLnYxLkxpc3RQYXNza2V5c0gAEjIKDnJldm9rZV9wYXNza2V5GBsgASgLMhguYXRoZW5hLnYxLlJldm9rZVBhc3NrZXlIAEIICgZhY3Rpb24iRAoKU3VibWl0VGFzaxIMCgR0ZXh0GAEgASgJEgwKBHJlcG8YAiABKAkSCwoDZGlyGAMgASgJEg0KBW1vZGVsGAQgASgJIigKBVJlcGx5EhEKCXRpY2tldF9pZBgBIAEoCRIMCgR0ZXh0GAIgASgJIikKBFN0b3ASEQoJdGlja2V0X2lkGAEgASgJEg4KBnJlYXNvbhgCIAEoCSIaCgVSZXRyeRIRCgl0aWNrZXRfaWQYASABKAkiHgoJSW50ZXJydXB0EhEKCXRpY2tldF9pZBgBIAEoCSJECg5BbnN3ZXJBcHByb3ZhbBITCgthcHByb3ZhbF9pZBgBIAEoCRIPCgdhcHByb3ZlGAIgASgIEgwKBG5vdGUYAyABKAkiIAoKUmVldmFsdWF0ZRISCgp0cmlnZ2VyX2lkGAEgASgJIh4KB0Rpc21pc3MSEwoLZGVjaXNpb25faWQYASABKAkiHQoLVW5zdWJzY3JpYmUSDgoGdGhyZWFkGAEgASgJIjkKCVNldFBvbGljeRIVCg1iYXNlX3JldmlzaW9uGAEgASgNEhUKDXNldHRpbmdzX2pzb24YAiABKAkiIAoLV2F0Y2hUaWNrZXQSEQoJdGlja2V0X2lkGAEgASgJIiIKDVVud2F0Y2hUaWNrZXQSEQoJdGlja2V0X2lkGAEgASgJIj8KDVB1c2hTdWJzY3JpYmUSEAoIZW5kcG9pbnQYASABKAkSDgoGcDI1NmRoGAIgASgJEgwKBGF1dGgYAyABKAkiIwoPUHVzaFVuc3Vic2NyaWJlEhAKCGVuZHBvaW50GAEgASgJIiUKFFNldE5vdGlmaWNhdGlvblByZWZzEg0KBW11dGVkGAEgAygJIh0KClZpc2liaWxpdHkSDwoHdmlzaWJsZRgBIAEoCCIOCgxMaXN0UGFzc2tleXMiGwoNUmV2b2tlUGFzc2tleRIKCgJpZBgBIAEoCSKsAQoNQ29tbWFuZFJlc3VsdBIKCgJpZBgBIAEoCRIKCgJvaxgCIAEoCBIMCgRjb2RlGAMgASgJEg8KB21lc3NhZ2UYBCABKAkSEwoJdGlja2V0X2lkGAogASgJSAASKgoIcGFzc2tleXMYCyABKAsyFi5hdGhlbmEudjEuUGFzc2tleUxpc3RIABIZCg9wb2xpY3lfcmV2aXNpb24YDCABKA1IAEIICgZyZXN1bHQiMwoLUGFzc2tleUxpc3QSJAoIcGFzc2tleXMYASADKAsyEi5hdGhlbmEudjEuUGFzc2tleSKFAQoHUGFzc2tleRIKCgJpZBgBIAEoCRIMCgRuYW1lGAIgASgJEi4KCmNyZWF0ZWRfYXQYAyABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEjAKDGxhc3RfdXNlZF9hdBgEIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXBCPVo7Z2l0aHViLmNvbS9kYW5pZWxwaW5hMS9hdGhlbmEvaW50ZXJuYWwvcGIvYXRoZW5hdjE7YXRoZW5hdjFiBnByb3RvMw", [file_google_protobuf_timestamp]);
+  fileDesc("ChhhdGhlbmEvdjEvY29tbWFuZHMucHJvdG8SCWF0aGVuYS52MSLyBwoHQ29tbWFuZBIKCgJpZBgBIAEoCRIsCgtzdWJtaXRfdGFzaxgKIAEoCzIVLmF0aGVuYS52MS5TdWJtaXRUYXNrSAASIQoFcmVwbHkYCyABKAsyEC5hdGhlbmEudjEuUmVwbHlIABIfCgRzdG9wGAwgASgLMg8uYXRoZW5hLnYxLlN0b3BIABIhCgVyZXRyeRgNIAEoCzIQLmF0aGVuYS52MS5SZXRyeUgAEikKCWludGVycnVwdBgOIAEoCzIULmF0aGVuYS52MS5JbnRlcnJ1cHRIABI0Cg9hbnN3ZXJfYXBwcm92YWwYDyABKAsyGS5hdGhlbmEudjEuQW5zd2VyQXBwcm92YWxIABIrCgpyZWV2YWx1YXRlGBAgASgLMhUuYXRoZW5hLnYxLlJlZXZhbHVhdGVIABIlCgdkaXNtaXNzGBEgASgLMhIuYXRoZW5hLnYxLkRpc21pc3NIABItCgt1bnN1YnNjcmliZRgSIAEoCzIWLmF0aGVuYS52MS5VbnN1YnNjcmliZUgAEioKCnNldF9wb2xpY3kYEyABKAsyFC5hdGhlbmEudjEuU2V0UG9saWN5SAASLgoMd2F0Y2hfdGlja2V0GBQgASgLMhYuYXRoZW5hLnYxLldhdGNoVGlja2V0SAASMgoOdW53YXRjaF90aWNrZXQYFSABKAsyGC5hdGhlbmEudjEuVW53YXRjaFRpY2tldEgAEjIKDnB1c2hfc3Vic2NyaWJlGBYgASgLMhguYXRoZW5hLnYxLlB1c2hTdWJzY3JpYmVIABI2ChBwdXNoX3Vuc3Vic2NyaWJlGBcgASgLMhouYXRoZW5hLnYxLlB1c2hVbnN1YnNjcmliZUgAEkEKFnNldF9ub3RpZmljYXRpb25fcHJlZnMYGCABKAsyHy5hdGhlbmEudjEuU2V0Tm90aWZpY2F0aW9uUHJlZnNIABIrCgp2aXNpYmlsaXR5GBkgASgLMhUuYXRoZW5hLnYxLlZpc2liaWxpdHlIABIwCg1saXN0X3Bhc3NrZXlzGBogASgLMhcuYXRoZW5hLnYxLkxpc3RQYXNza2V5c0gAEjIKDnJldm9rZV9wYXNza2V5GBsgASgLMhguYXRoZW5hLnYxLlJldm9rZVBhc3NrZXlIABIqCgpnZXRfcHJvbXB0GBwgASgLMhQuYXRoZW5hLnYxLkdldFByb21wdEgAEioKCnNldF9wcm9tcHQYHSABKAsyFC5hdGhlbmEudjEuU2V0UHJvbXB0SAASLgoMcmVzZXRfcHJvbXB0GB4gASgLMhYuYXRoZW5hLnYxLlJlc2V0UHJvbXB0SABCCAoGYWN0aW9uIkQKClN1Ym1pdFRhc2sSDAoEdGV4dBgBIAEoCRIMCgRyZXBvGAIgASgJEgsKA2RpchgDIAEoCRINCgVtb2RlbBgEIAEoCSIoCgVSZXBseRIRCgl0aWNrZXRfaWQYASABKAkSDAoEdGV4dBgCIAEoCSIpCgRTdG9wEhEKCXRpY2tldF9pZBgBIAEoCRIOCgZyZWFzb24YAiABKAkiGgoFUmV0cnkSEQoJdGlja2V0X2lkGAEgASgJIh4KCUludGVycnVwdBIRCgl0aWNrZXRfaWQYASABKAkiRAoOQW5zd2VyQXBwcm92YWwSEwoLYXBwcm92YWxfaWQYASABKAkSDwoHYXBwcm92ZRgCIAEoCBIMCgRub3RlGAMgASgJIiAKClJlZXZhbHVhdGUSEgoKdHJpZ2dlcl9pZBgBIAEoCSIeCgdEaXNtaXNzEhMKC2RlY2lzaW9uX2lkGAEgASgJIh0KC1Vuc3Vic2NyaWJlEg4KBnRocmVhZBgBIAEoCSI5CglTZXRQb2xpY3kSFQoNYmFzZV9yZXZpc2lvbhgBIAEoDRIVCg1zZXR0aW5nc19qc29uGAIgASgJIiAKC1dhdGNoVGlja2V0EhEKCXRpY2tldF9pZBgBIAEoCSIiCg1VbndhdGNoVGlja2V0EhEKCXRpY2tldF9pZBgBIAEoCSI/Cg1QdXNoU3Vic2NyaWJlEhAKCGVuZHBvaW50GAEgASgJEg4KBnAyNTZkaBgCIAEoCRIMCgRhdXRoGAMgASgJIiMKD1B1c2hVbnN1YnNjcmliZRIQCghlbmRwb2ludBgBIAEoCSIlChRTZXROb3RpZmljYXRpb25QcmVmcxINCgVtdXRlZBgBIAMoCSIdCgpWaXNpYmlsaXR5Eg8KB3Zpc2libGUYASABKAgiDgoMTGlzdFBhc3NrZXlzIhsKDVJldm9rZVBhc3NrZXkSCgoCaWQYASABKAkiGQoJR2V0UHJvbXB0EgwKBHBhcnQYASABKAkiPgoJU2V0UHJvbXB0EgwKBHBhcnQYASABKAkSFQoNYmFzZV9yZXZpc2lvbhgCIAEoDRIMCgR0ZXh0GAMgASgJIjIKC1Jlc2V0UHJvbXB0EgwKBHBhcnQYASABKAkSFQoNYmFzZV9yZXZpc2lvbhgCIAEoDSLXAQoNQ29tbWFuZFJlc3VsdBIKCgJpZBgBIAEoCRIKCgJvaxgCIAEoCBIMCgRjb2RlGAMgASgJEg8KB21lc3NhZ2UYBCABKAkSEwoJdGlja2V0X2lkGAogASgJSAASKgoIcGFzc2tleXMYCyABKAsyFi5hdGhlbmEudjEuUGFzc2tleUxpc3RIABIZCg9wb2xpY3lfcmV2aXNpb24YDCABKA1IABIpCgZwcm9tcHQYDSABKAsyFy5hdGhlbmEudjEuUHJvbXB0RGV0YWlsSABCCAoGcmVzdWx0IjMKC1Bhc3NrZXlMaXN0EiQKCHBhc3NrZXlzGAEgAygLMhIuYXRoZW5hLnYxLlBhc3NrZXkihQEKB1Bhc3NrZXkSCgoCaWQYASABKAkSDAoEbmFtZRgCIAEoCRIuCgpjcmVhdGVkX2F0GAMgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIwCgxsYXN0X3VzZWRfYXQYBCABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wIrUBCgxQcm9tcHREZXRhaWwSDAoEbmFtZRgBIAEoCRIUCgxkZWZhdWx0X3RleHQYAiABKAkSDAoEdGV4dBgDIAEoCRIdChVwcmV2aW91c19kZWZhdWx0X3RleHQYBCABKAkSEwoLZnVsbF93b3JrZXIYBSABKAkSEwoLZnVsbF9yb3V0ZXIYBiABKAkSKgoHaGlzdG9yeRgHIAMoCzIZLmF0aGVuYS52MS5Qcm9tcHRSZXZpc2lvbiJpCg5Qcm9tcHRSZXZpc2lvbhIQCghyZXZpc2lvbhgBIAEoDRImCgJhdBgCIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASDgoGb3JpZ2luGAMgASgJEg0KBXJlc2V0GAQgASgIQj1aO2dpdGh1Yi5jb20vZGFuaWVscGluYTEvYXRoZW5hL2ludGVybmFsL3BiL2F0aGVuYXYxO2F0aGVuYXYxYgZwcm90bzM", [file_google_protobuf_timestamp]);
 
 /**
  * @generated from message athena.v1.Command
@@ -134,6 +134,24 @@ export type Command = Message<"athena.v1.Command"> & {
      */
     value: RevokePasskey;
     case: "revokePasskey";
+  } | {
+    /**
+     * @generated from field: athena.v1.GetPrompt get_prompt = 28;
+     */
+    value: GetPrompt;
+    case: "getPrompt";
+  } | {
+    /**
+     * @generated from field: athena.v1.SetPrompt set_prompt = 29;
+     */
+    value: SetPrompt;
+    case: "setPrompt";
+  } | {
+    /**
+     * @generated from field: athena.v1.ResetPrompt reset_prompt = 30;
+     */
+    value: ResetPrompt;
+    case: "resetPrompt";
   } | { case: undefined; value?: undefined };
 };
 
@@ -497,6 +515,78 @@ export const RevokePasskeySchema: GenMessage<RevokePasskey> = /*@__PURE__*/
   messageDesc(file_athena_v1_commands, 18);
 
 /**
+ * GetPrompt asks for one prompt part with the assembled prompts and the part's history.
+ *
+ * @generated from message athena.v1.GetPrompt
+ */
+export type GetPrompt = Message<"athena.v1.GetPrompt"> & {
+  /**
+   * @generated from field: string part = 1;
+   */
+  part: string;
+};
+
+/**
+ * Describes the message athena.v1.GetPrompt.
+ * Use `create(GetPromptSchema)` to create a new message.
+ */
+export const GetPromptSchema: GenMessage<GetPrompt> = /*@__PURE__*/
+  messageDesc(file_athena_v1_commands, 19);
+
+/**
+ * SetPrompt overrides a prompt part. base_revision is the PromptsView revision the owner edited from.
+ *
+ * @generated from message athena.v1.SetPrompt
+ */
+export type SetPrompt = Message<"athena.v1.SetPrompt"> & {
+  /**
+   * @generated from field: string part = 1;
+   */
+  part: string;
+
+  /**
+   * @generated from field: uint32 base_revision = 2;
+   */
+  baseRevision: number;
+
+  /**
+   * @generated from field: string text = 3;
+   */
+  text: string;
+};
+
+/**
+ * Describes the message athena.v1.SetPrompt.
+ * Use `create(SetPromptSchema)` to create a new message.
+ */
+export const SetPromptSchema: GenMessage<SetPrompt> = /*@__PURE__*/
+  messageDesc(file_athena_v1_commands, 20);
+
+/**
+ * ResetPrompt returns a prompt part to its default.
+ *
+ * @generated from message athena.v1.ResetPrompt
+ */
+export type ResetPrompt = Message<"athena.v1.ResetPrompt"> & {
+  /**
+   * @generated from field: string part = 1;
+   */
+  part: string;
+
+  /**
+   * @generated from field: uint32 base_revision = 2;
+   */
+  baseRevision: number;
+};
+
+/**
+ * Describes the message athena.v1.ResetPrompt.
+ * Use `create(ResetPromptSchema)` to create a new message.
+ */
+export const ResetPromptSchema: GenMessage<ResetPrompt> = /*@__PURE__*/
+  messageDesc(file_athena_v1_commands, 21);
+
+/**
  * CommandResult answers a Command. code is one of the stable error codes when ok is false.
  *
  * @generated from message athena.v1.CommandResult
@@ -543,6 +633,12 @@ export type CommandResult = Message<"athena.v1.CommandResult"> & {
      */
     value: number;
     case: "policyRevision";
+  } | {
+    /**
+     * @generated from field: athena.v1.PromptDetail prompt = 13;
+     */
+    value: PromptDetail;
+    case: "prompt";
   } | { case: undefined; value?: undefined };
 };
 
@@ -551,7 +647,7 @@ export type CommandResult = Message<"athena.v1.CommandResult"> & {
  * Use `create(CommandResultSchema)` to create a new message.
  */
 export const CommandResultSchema: GenMessage<CommandResult> = /*@__PURE__*/
-  messageDesc(file_athena_v1_commands, 19);
+  messageDesc(file_athena_v1_commands, 22);
 
 /**
  * @generated from message athena.v1.PasskeyList
@@ -568,7 +664,7 @@ export type PasskeyList = Message<"athena.v1.PasskeyList"> & {
  * Use `create(PasskeyListSchema)` to create a new message.
  */
 export const PasskeyListSchema: GenMessage<PasskeyList> = /*@__PURE__*/
-  messageDesc(file_athena_v1_commands, 20);
+  messageDesc(file_athena_v1_commands, 23);
 
 /**
  * @generated from message athena.v1.Passkey
@@ -600,5 +696,94 @@ export type Passkey = Message<"athena.v1.Passkey"> & {
  * Use `create(PasskeySchema)` to create a new message.
  */
 export const PasskeySchema: GenMessage<Passkey> = /*@__PURE__*/
-  messageDesc(file_athena_v1_commands, 21);
+  messageDesc(file_athena_v1_commands, 24);
+
+/**
+ * PromptDetail is one prompt part: its default, the owner's text, and the full prompts a new session would get.
+ *
+ * @generated from message athena.v1.PromptDetail
+ */
+export type PromptDetail = Message<"athena.v1.PromptDetail"> & {
+  /**
+   * @generated from field: string name = 1;
+   */
+  name: string;
+
+  /**
+   * @generated from field: string default_text = 2;
+   */
+  defaultText: string;
+
+  /**
+   * text is the override, empty when the part is not overridden.
+   *
+   * @generated from field: string text = 3;
+   */
+  text: string;
+
+  /**
+   * previous_default_text is the default the override was saved against, set only when the default has since changed.
+   *
+   * @generated from field: string previous_default_text = 4;
+   */
+  previousDefaultText: string;
+
+  /**
+   * @generated from field: string full_worker = 5;
+   */
+  fullWorker: string;
+
+  /**
+   * @generated from field: string full_router = 6;
+   */
+  fullRouter: string;
+
+  /**
+   * history holds the last 20 revisions of the part, newest first.
+   *
+   * @generated from field: repeated athena.v1.PromptRevision history = 7;
+   */
+  history: PromptRevision[];
+};
+
+/**
+ * Describes the message athena.v1.PromptDetail.
+ * Use `create(PromptDetailSchema)` to create a new message.
+ */
+export const PromptDetailSchema: GenMessage<PromptDetail> = /*@__PURE__*/
+  messageDesc(file_athena_v1_commands, 25);
+
+/**
+ * @generated from message athena.v1.PromptRevision
+ */
+export type PromptRevision = Message<"athena.v1.PromptRevision"> & {
+  /**
+   * @generated from field: uint32 revision = 1;
+   */
+  revision: number;
+
+  /**
+   * @generated from field: google.protobuf.Timestamp at = 2;
+   */
+  at?: Timestamp | undefined;
+
+  /**
+   * @generated from field: string origin = 3;
+   */
+  origin: string;
+
+  /**
+   * reset is true when the revision returned the part to its default.
+   *
+   * @generated from field: bool reset = 4;
+   */
+  reset: boolean;
+};
+
+/**
+ * Describes the message athena.v1.PromptRevision.
+ * Use `create(PromptRevisionSchema)` to create a new message.
+ */
+export const PromptRevisionSchema: GenMessage<PromptRevision> = /*@__PURE__*/
+  messageDesc(file_athena_v1_commands, 26);
 

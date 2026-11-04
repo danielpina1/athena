@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"fmt"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 	"io"
 	"log/slog"
@@ -35,12 +36,13 @@ type fakeSource struct {
 	repoReads int
 	kinds     []string
 	muted     []string
+	prompts   *athenav1.PromptsView
 }
 
 func newFake() *fakeSource {
 	return &fakeSource{tickets: map[string]core.Ticket{}, approvals: map[string]core.Approval{},
 		triggers: map[string]core.Trigger{}, threads: map[string]core.Thread{}, decisions: map[string]core.Decision{},
-		settings: "{}"}
+		settings: "{}", prompts: &athenav1.PromptsView{}}
 }
 
 var epoch0 = time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
@@ -125,6 +127,12 @@ func (f *fakeSource) Notifications() ([]string, []string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.kinds, f.muted, nil
+}
+
+func (f *fakeSource) Prompts() (*athenav1.PromptsView, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return proto.Clone(f.prompts).(*athenav1.PromptsView), nil
 }
 
 func (f *fakeSource) setMuted(m ...string) { f.mu.Lock(); f.muted = m; f.mu.Unlock() }
@@ -939,5 +947,25 @@ func TestNotificationsInSnapshotAndDeltaOnChange(t *testing.T) {
 	d := next(t, sub)
 	if n := d.GetNotifications(); len(n.GetMuted()) != 1 || n.Muted[0] != "answer" || len(n.Kinds) != 2 {
 		t.Fatalf("notifications delta = %v", d)
+	}
+}
+
+func (f *fakeSource) setPrompts(v *athenav1.PromptsView) { f.mu.Lock(); f.prompts = v; f.mu.Unlock() }
+
+func TestPromptsDeltaOnSave(t *testing.T) {
+	f := newFake()
+	f.setPrompts(&athenav1.PromptsView{Revision: 1, Parts: []*athenav1.PromptPartView{{Name: "worker", Overridden: true}}})
+	h := start(t, f)
+	snap, _ := h.Snapshot()
+	if got := snap.Prompts; got.GetRevision() != 1 || len(got.Parts) != 1 || !got.Parts[0].Overridden {
+		t.Fatalf("snapshot prompts = %v", got)
+	}
+	sub, _ := h.Subscribe(0, h.Epoch())
+	defer sub.Close()
+	f.setPrompts(&athenav1.PromptsView{Revision: 2, Parts: []*athenav1.PromptPartView{{Name: "worker", Overridden: true, DefaultUpdated: true}}})
+	h.OnCommit(store.Changes{Prompts: true})
+	d := next(t, sub)
+	if p := d.GetPrompts(); p.GetRevision() != 2 || !p.Parts[0].DefaultUpdated {
+		t.Fatalf("prompts delta = %v", d)
 	}
 }

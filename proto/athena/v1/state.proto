@@ -21,6 +21,7 @@ message Snapshot {
   // repos are the repositories and folders a task can be placed in, the last used first.
   repeated RepoView repos = 10;
   NotificationPrefsView notifications = 11;
+  PromptsView prompts = 12;
 }
 
 message Delta {
@@ -38,6 +39,7 @@ message Delta {
     // repos carries the whole list, sent only when it changed.
     RepoList repos = 19;
     NotificationPrefsView notifications = 20;
+    PromptsView prompts = 21;
   }
 }
 
@@ -189,4 +191,17 @@ message RepoList {
 message NotificationPrefsView {
   repeated string kinds = 1;
   repeated string muted = 2;
+}
+
+// PromptsView says which prompt parts the owner overrode. Its revision is the base for SetPrompt and ResetPrompt.
+message PromptsView {
+  uint32 revision = 1;
+  repeated PromptPartView parts = 2;
+}
+
+message PromptPartView {
+  string name = 1;
+  bool overridden = 2;
+  // default_updated is true when the override was saved against a default that has since changed.
+  bool default_updated = 3;
 }

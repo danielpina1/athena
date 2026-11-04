@@ -143,7 +143,7 @@ waiting on you and for Approvals) runs already.
 - **Passkeys only.** There are no passwords: a session starts with a passkey assertion with user verification (Face
   ID, Touch ID, a PIN), lasts 30 days unused and 90 days at most, and lives in an `HttpOnly`, `Secure`,
   `SameSite=Strict` cookie. Every login request and the WebSocket must come from the configured origin.
-- **Step-up for sensitive changes.** Changing the Policy, revoking a passkey and changing push settings need a passkey
+- **Step-up for sensitive changes.** Changing the Policy, changing or resetting a prompt part, revoking a passkey and changing push settings need a passkey
   assertion within the last 5 minutes (signing in counts); otherwise the dashboard answers `reauth_required` and asks
   for the passkey again. Approving a tool call is not sensitive.
 - **A lost device:** `athena web passkeys`, then `athena web revoke <id>` (a prefix of the id is enough). With the
@@ -216,6 +216,7 @@ is the reference client.
   | 4000 | The peer was silent for 45 s (no frame, no `Pong`). | Reconnect. |
   | 4001 | Protocol violation: a bad or late `Hello`, an undecodable frame (an `invalid` Error is sent first, best effort) or a sequence gap. | Fix the client; do not retry blindly. |
   | 4002 | The login behind the connection ended (revoked, logged out, expired). | Sign in again, then reconnect and resend commands without a result. |
+- **Prompts.** Prompt overrides: `GetPrompt` (a read, not stored) returns a `PromptDetail`; `SetPrompt` and `ResetPrompt` (sensitive) carry the `PromptsView.revision` as `base_revision`, which is one counter for all parts (stale: `conflict`; empty or over 64 KiB text: `invalid`; unknown part: `not_found`). A new session starts with the effective prompt, and a resumed one keeps the prompt it started with.
 - **Push.** `GET /push/key` is the VAPID public key for `pushManager.subscribe`; `PushSubscribe`,
   `PushUnsubscribe` and `SetNotificationPrefs` are commands (sensitive). Report `Visibility{visible}` while the
   dashboard is on screen: no push is sent while a client reported visible in the last 30 s.

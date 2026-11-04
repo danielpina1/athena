@@ -175,6 +175,7 @@ func Run(ctx context.Context, cfg Config) (err error) {
 		ncfg.Credentials = gh.creds
 	}
 	ncfg.StateDir = stateDir
+	ncfg.WorkerPrompt = func() string { return currentPrompt(st, logger, true) }
 	ncfg.SocketPath = filepath.Join(stateDir, NodeSocket)
 	if ncfg.Sandbox == nil {
 		ncfg.Sandbox = fileCfg.nodeSandbox()
@@ -248,7 +249,8 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	var host *router.Host
 	if routerOn {
 		host = router.New(router.Config{Bin: ncfg.AthenaBin, StateDir: stateDir, Model: fileCfg.Router.Model,
-			Socket: ncfg.SocketPath, ClaudeBinary: ncfg.ClaudeBinary, KV: st, Policy: pc.settings}, eng, fx, sourceReg, logger)
+			Socket: ncfg.SocketPath, ClaudeBinary: ncfg.ClaudeBinary, KV: st, Policy: pc.settings,
+			Prompt: func() string { return currentPrompt(st, logger, false) }}, eng, fx, sourceReg, logger)
 		n.SetRouter(host)
 	}
 	var webEP *webEndpoint

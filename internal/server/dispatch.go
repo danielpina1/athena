@@ -255,7 +255,7 @@ func (d *Dispatcher) detail(id string) (TicketDetail, error) {
 // Do carries out a dashboard's Command once: a (client, command id) with a stored result gets that result without
 // acting again; otherwise the result is stored after acting. Results that say nothing was done (reauth_required,
 // unauthenticated, unavailable, internal) are not stored, so the same Command can be sent again once that changes;
-// reads (ListPasskeys) are not stored either. Copies of one Command run one after the other, so a copy that arrives
+// reads (ListPasskeys, GetPrompt) are not stored either. Copies of one Command run one after the other, so a copy that arrives
 // while the first still acts waits and gets its result.
 func (d *Dispatcher) Do(_ context.Context, o web.Origin, c *athenav1.Command) *athenav1.CommandResult {
 	id := c.GetId()
@@ -267,7 +267,8 @@ func (d *Dispatcher) Do(_ context.Context, o web.Origin, c *athenav1.Command) *a
 	case c.GetAction() == nil:
 		return &athenav1.CommandResult{Id: id, Code: web.CodeInvalid, Message: "a command needs an action"}
 	}
-	if _, read := c.GetAction().(*athenav1.Command_ListPasskeys); read {
+	switch c.GetAction().(type) {
+	case *athenav1.Command_ListPasskeys, *athenav1.Command_GetPrompt:
 		res := d.act(o, c)
 		res.Id = id
 		return res
@@ -385,6 +386,27 @@ func (d *Dispatcher) act(o web.Origin, c *athenav1.Command) *athenav1.CommandRes
 		if _, err := d.revokePasskey(a.RevokePasskey.GetId()); err != nil {
 			return d.failure(err)
 		}
+	case *athenav1.Command_GetPrompt:
+		detail, err := d.getPrompt(a.GetPrompt.GetPart())
+		if err != nil {
+			return d.failure(err)
+		}
+		return &athenav1.CommandResult{Ok: true, Result: &athenav1.CommandResult_Prompt{Prompt: detail}}
+	case *athenav1.Command_SetPrompt:
+		if !o.Sensitive {
+			return proto.Clone(reauthRequired).(*athenav1.CommandResult)
+		}
+		text := a.SetPrompt.GetText()
+		if err := d.setPrompt(a.SetPrompt.GetPart(), a.SetPrompt.GetBaseRevision(), &text); err != nil {
+			return d.failure(err)
+		}
+	case *athenav1.Command_ResetPrompt:
+		if !o.Sensitive {
+			return proto.Clone(reauthRequired).(*athenav1.CommandResult)
+		}
+		if err := d.setPrompt(a.ResetPrompt.GetPart(), a.ResetPrompt.GetBaseRevision(), nil); err != nil {
+			return d.failure(err)
+		}
 	case *athenav1.Command_PushSubscribe:
 		if !o.Sensitive {
 			return proto.Clone(reauthRequired).(*athenav1.CommandResult)
@@ -444,6 +466,8 @@ func (d *Dispatcher) failure(err error) *athenav1.CommandResult {
 			code = web.CodeConflict
 		}
 		return &athenav1.CommandResult{Code: code, Message: ue.Msg}
+	case errors.Is(err, store.ErrConflict):
+		return &athenav1.CommandResult{Code: web.CodeConflict, Message: stalePrompts}
 	case errors.Is(err, node.ErrNoSession):
 		return &athenav1.CommandResult{Code: web.CodeUnavailable, Message: "the ticket has no session running"}
 	}

@@ -83,6 +83,8 @@ type Source interface {
 	Repos() ([]*athenav1.RepoView, error)
 	// Notifications returns the notification kinds that exist and the ones the owner muted.
 	Notifications() (kinds, muted []string, err error)
+	// Prompts returns the prompt revision and which parts the owner overrode.
+	Prompts() (*athenav1.PromptsView, error)
 }
 
 type ringEntry struct {
@@ -321,6 +323,14 @@ func (h *Hub) apply(c store.Changes) {
 		if !h.publishNotifications() {
 			return
 		}
+	}
+	if c.Prompts {
+		p, err := h.src.Prompts()
+		if err != nil {
+			h.lost("read prompts", "error", err)
+			return
+		}
+		h.publish(&athenav1.Delta{Change: &athenav1.Delta_Prompts{Prompts: p}})
 	}
 	if c.Policy {
 		if p, err := h.policyView(); err != nil {
@@ -678,6 +688,9 @@ func (h *Hub) Snapshot() (*athenav1.Snapshot, error) {
 		return nil, err
 	}
 	if s.Notifications, err = h.notificationsView(); err != nil {
+		return nil, err
+	}
+	if s.Prompts, err = h.src.Prompts(); err != nil {
 		return nil, err
 	}
 	return s, nil

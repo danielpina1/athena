@@ -138,6 +138,19 @@ var migrations = []string{
 	CREATE INDEX approvals_ticket ON approvals (ticket_id);
 	CREATE INDEX tickets_ended_updated ON tickets (ended, updated_at, id);
 	CREATE INDEX tickets_updated ON tickets (updated_at, id);`,
+	// 7: the owner's prompt overrides. Each save is a revision (one counter for all parts); a NULL text is a reset to
+	// the compiled-in default. default_hash and default_text record the default the owner saw, so a release that
+	// changes it is noticed.
+	`CREATE TABLE prompt_revisions (
+		revision INTEGER PRIMARY KEY,
+		part TEXT NOT NULL,
+		text TEXT,
+		default_hash TEXT NOT NULL,
+		default_text TEXT NOT NULL,
+		origin TEXT NOT NULL,
+		at INTEGER NOT NULL
+	);
+	CREATE INDEX prompt_revisions_part ON prompt_revisions (part, revision);`,
 }
 
 const schemaKey = "schema"

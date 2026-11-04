@@ -288,3 +288,6 @@ func (s hubSource) Notifications() ([]string, []string, error) {
 	}
 	return web.NotificationKinds(), muted, nil
 }
+
+// Prompts says which prompt parts the owner overrode.
+func (s hubSource) Prompts() (*athenav1.PromptsView, error) { return promptsView(s.d.st) }

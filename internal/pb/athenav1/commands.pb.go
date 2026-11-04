@@ -45,6 +45,9 @@ type Command struct {
 	//	*Command_Visibility
 	//	*Command_ListPasskeys
 	//	*Command_RevokePasskey
+	//	*Command_GetPrompt
+	//	*Command_SetPrompt
+	//	*Command_ResetPrompt
 	Action        isCommand_Action `protobuf_oneof:"action"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -256,6 +259,33 @@ func (x *Command) GetRevokePasskey() *RevokePasskey {
 	return nil
 }
 
+func (x *Command) GetGetPrompt() *GetPrompt {
+	if x != nil {
+		if x, ok := x.Action.(*Command_GetPrompt); ok {
+			return x.GetPrompt
+		}
+	}
+	return nil
+}
+
+func (x *Command) GetSetPrompt() *SetPrompt {
+	if x != nil {
+		if x, ok := x.Action.(*Command_SetPrompt); ok {
+			return x.SetPrompt
+		}
+	}
+	return nil
+}
+
+func (x *Command) GetResetPrompt() *ResetPrompt {
+	if x != nil {
+		if x, ok := x.Action.(*Command_ResetPrompt); ok {
+			return x.ResetPrompt
+		}
+	}
+	return nil
+}
+
 type isCommand_Action interface {
 	isCommand_Action()
 }
@@ -332,6 +362,18 @@ type Command_RevokePasskey struct {
 	RevokePasskey *RevokePasskey `protobuf:"bytes,27,opt,name=revoke_passkey,json=revokePasskey,proto3,oneof"`
 }
 
+type Command_GetPrompt struct {
+	GetPrompt *GetPrompt `protobuf:"bytes,28,opt,name=get_prompt,json=getPrompt,proto3,oneof"`
+}
+
+type Command_SetPrompt struct {
+	SetPrompt *SetPrompt `protobuf:"bytes,29,opt,name=set_prompt,json=setPrompt,proto3,oneof"`
+}
+
+type Command_ResetPrompt struct {
+	ResetPrompt *ResetPrompt `protobuf:"bytes,30,opt,name=reset_prompt,json=resetPrompt,proto3,oneof"`
+}
+
 func (*Command_SubmitTask) isCommand_Action() {}
 
 func (*Command_Reply) isCommand_Action() {}
@@ -367,6 +409,12 @@ func (*Command_Visibility) isCommand_Action() {}
 func (*Command_ListPasskeys) isCommand_Action() {}
 
 func (*Command_RevokePasskey) isCommand_Action() {}
+
+func (*Command_GetPrompt) isCommand_Action() {}
+
+func (*Command_SetPrompt) isCommand_Action() {}
+
+func (*Command_ResetPrompt) isCommand_Action() {}
 
 type SubmitTask struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -1232,6 +1280,165 @@ func (x *RevokePasskey) GetId() string {
 	return ""
 }
 
+// GetPrompt asks for one prompt part with the assembled prompts and the part's history.
+type GetPrompt struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Part          string                 `protobuf:"bytes,1,opt,name=part,proto3" json:"part,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetPrompt) Reset() {
+	*x = GetPrompt{}
+	mi := &file_athena_v1_commands_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetPrompt) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetPrompt) ProtoMessage() {}
+
+func (x *GetPrompt) ProtoReflect() protoreflect.Message {
+	mi := &file_athena_v1_commands_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetPrompt.ProtoReflect.Descriptor instead.
+func (*GetPrompt) Descriptor() ([]byte, []int) {
+	return file_athena_v1_commands_proto_rawDescGZIP(), []int{19}
+}
+
+func (x *GetPrompt) GetPart() string {
+	if x != nil {
+		return x.Part
+	}
+	return ""
+}
+
+// SetPrompt overrides a prompt part. base_revision is the PromptsView revision the owner edited from.
+type SetPrompt struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Part          string                 `protobuf:"bytes,1,opt,name=part,proto3" json:"part,omitempty"`
+	BaseRevision  uint32                 `protobuf:"varint,2,opt,name=base_revision,json=baseRevision,proto3" json:"base_revision,omitempty"`
+	Text          string                 `protobuf:"bytes,3,opt,name=text,proto3" json:"text,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SetPrompt) Reset() {
+	*x = SetPrompt{}
+	mi := &file_athena_v1_commands_proto_msgTypes[20]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SetPrompt) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SetPrompt) ProtoMessage() {}
+
+func (x *SetPrompt) ProtoReflect() protoreflect.Message {
+	mi := &file_athena_v1_commands_proto_msgTypes[20]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SetPrompt.ProtoReflect.Descriptor instead.
+func (*SetPrompt) Descriptor() ([]byte, []int) {
+	return file_athena_v1_commands_proto_rawDescGZIP(), []int{20}
+}
+
+func (x *SetPrompt) GetPart() string {
+	if x != nil {
+		return x.Part
+	}
+	return ""
+}
+
+func (x *SetPrompt) GetBaseRevision() uint32 {
+	if x != nil {
+		return x.BaseRevision
+	}
+	return 0
+}
+
+func (x *SetPrompt) GetText() string {
+	if x != nil {
+		return x.Text
+	}
+	return ""
+}
+
+// ResetPrompt returns a prompt part to its default.
+type ResetPrompt struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Part          string                 `protobuf:"bytes,1,opt,name=part,proto3" json:"part,omitempty"`
+	BaseRevision  uint32                 `protobuf:"varint,2,opt,name=base_revision,json=baseRevision,proto3" json:"base_revision,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ResetPrompt) Reset() {
+	*x = ResetPrompt{}
+	mi := &file_athena_v1_commands_proto_msgTypes[21]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResetPrompt) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResetPrompt) ProtoMessage() {}
+
+func (x *ResetPrompt) ProtoReflect() protoreflect.Message {
+	mi := &file_athena_v1_commands_proto_msgTypes[21]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResetPrompt.ProtoReflect.Descriptor instead.
+func (*ResetPrompt) Descriptor() ([]byte, []int) {
+	return file_athena_v1_commands_proto_rawDescGZIP(), []int{21}
+}
+
+func (x *ResetPrompt) GetPart() string {
+	if x != nil {
+		return x.Part
+	}
+	return ""
+}
+
+func (x *ResetPrompt) GetBaseRevision() uint32 {
+	if x != nil {
+		return x.BaseRevision
+	}
+	return 0
+}
+
 // CommandResult answers a Command. code is one of the stable error codes when ok is false.
 type CommandResult struct {
 	state   protoimpl.MessageState `protogen:"open.v1"`
@@ -1244,6 +1451,7 @@ type CommandResult struct {
 	//	*CommandResult_TicketId
 	//	*CommandResult_Passkeys
 	//	*CommandResult_PolicyRevision
+	//	*CommandResult_Prompt
 	Result        isCommandResult_Result `protobuf_oneof:"result"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1251,7 +1459,7 @@ type CommandResult struct {
 
 func (x *CommandResult) Reset() {
 	*x = CommandResult{}
-	mi := &file_athena_v1_commands_proto_msgTypes[19]
+	mi := &file_athena_v1_commands_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1263,7 +1471,7 @@ func (x *CommandResult) String() string {
 func (*CommandResult) ProtoMessage() {}
 
 func (x *CommandResult) ProtoReflect() protoreflect.Message {
-	mi := &file_athena_v1_commands_proto_msgTypes[19]
+	mi := &file_athena_v1_commands_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1276,7 +1484,7 @@ func (x *CommandResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CommandResult.ProtoReflect.Descriptor instead.
 func (*CommandResult) Descriptor() ([]byte, []int) {
-	return file_athena_v1_commands_proto_rawDescGZIP(), []int{19}
+	return file_athena_v1_commands_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *CommandResult) GetId() string {
@@ -1341,6 +1549,15 @@ func (x *CommandResult) GetPolicyRevision() uint32 {
 	return 0
 }
 
+func (x *CommandResult) GetPrompt() *PromptDetail {
+	if x != nil {
+		if x, ok := x.Result.(*CommandResult_Prompt); ok {
+			return x.Prompt
+		}
+	}
+	return nil
+}
+
 type isCommandResult_Result interface {
 	isCommandResult_Result()
 }
@@ -1357,11 +1574,17 @@ type CommandResult_PolicyRevision struct {
 	PolicyRevision uint32 `protobuf:"varint,12,opt,name=policy_revision,json=policyRevision,proto3,oneof"`
 }
 
+type CommandResult_Prompt struct {
+	Prompt *PromptDetail `protobuf:"bytes,13,opt,name=prompt,proto3,oneof"`
+}
+
 func (*CommandResult_TicketId) isCommandResult_Result() {}
 
 func (*CommandResult_Passkeys) isCommandResult_Result() {}
 
 func (*CommandResult_PolicyRevision) isCommandResult_Result() {}
+
+func (*CommandResult_Prompt) isCommandResult_Result() {}
 
 type PasskeyList struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -1372,7 +1595,7 @@ type PasskeyList struct {
 
 func (x *PasskeyList) Reset() {
 	*x = PasskeyList{}
-	mi := &file_athena_v1_commands_proto_msgTypes[20]
+	mi := &file_athena_v1_commands_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1384,7 +1607,7 @@ func (x *PasskeyList) String() string {
 func (*PasskeyList) ProtoMessage() {}
 
 func (x *PasskeyList) ProtoReflect() protoreflect.Message {
-	mi := &file_athena_v1_commands_proto_msgTypes[20]
+	mi := &file_athena_v1_commands_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1397,7 +1620,7 @@ func (x *PasskeyList) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PasskeyList.ProtoReflect.Descriptor instead.
 func (*PasskeyList) Descriptor() ([]byte, []int) {
-	return file_athena_v1_commands_proto_rawDescGZIP(), []int{20}
+	return file_athena_v1_commands_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *PasskeyList) GetPasskeys() []*Passkey {
@@ -1419,7 +1642,7 @@ type Passkey struct {
 
 func (x *Passkey) Reset() {
 	*x = Passkey{}
-	mi := &file_athena_v1_commands_proto_msgTypes[21]
+	mi := &file_athena_v1_commands_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1431,7 +1654,7 @@ func (x *Passkey) String() string {
 func (*Passkey) ProtoMessage() {}
 
 func (x *Passkey) ProtoReflect() protoreflect.Message {
-	mi := &file_athena_v1_commands_proto_msgTypes[21]
+	mi := &file_athena_v1_commands_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1444,7 +1667,7 @@ func (x *Passkey) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Passkey.ProtoReflect.Descriptor instead.
 func (*Passkey) Descriptor() ([]byte, []int) {
-	return file_athena_v1_commands_proto_rawDescGZIP(), []int{21}
+	return file_athena_v1_commands_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *Passkey) GetId() string {
@@ -1475,11 +1698,176 @@ func (x *Passkey) GetLastUsedAt() *timestamppb.Timestamp {
 	return nil
 }
 
+// PromptDetail is one prompt part: its default, the owner's text, and the full prompts a new session would get.
+type PromptDetail struct {
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	Name        string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	DefaultText string                 `protobuf:"bytes,2,opt,name=default_text,json=defaultText,proto3" json:"default_text,omitempty"`
+	// text is the override, empty when the part is not overridden.
+	Text string `protobuf:"bytes,3,opt,name=text,proto3" json:"text,omitempty"`
+	// previous_default_text is the default the override was saved against, set only when the default has since changed.
+	PreviousDefaultText string `protobuf:"bytes,4,opt,name=previous_default_text,json=previousDefaultText,proto3" json:"previous_default_text,omitempty"`
+	FullWorker          string `protobuf:"bytes,5,opt,name=full_worker,json=fullWorker,proto3" json:"full_worker,omitempty"`
+	FullRouter          string `protobuf:"bytes,6,opt,name=full_router,json=fullRouter,proto3" json:"full_router,omitempty"`
+	// history holds the last 20 revisions of the part, newest first.
+	History       []*PromptRevision `protobuf:"bytes,7,rep,name=history,proto3" json:"history,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PromptDetail) Reset() {
+	*x = PromptDetail{}
+	mi := &file_athena_v1_commands_proto_msgTypes[25]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PromptDetail) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PromptDetail) ProtoMessage() {}
+
+func (x *PromptDetail) ProtoReflect() protoreflect.Message {
+	mi := &file_athena_v1_commands_proto_msgTypes[25]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PromptDetail.ProtoReflect.Descriptor instead.
+func (*PromptDetail) Descriptor() ([]byte, []int) {
+	return file_athena_v1_commands_proto_rawDescGZIP(), []int{25}
+}
+
+func (x *PromptDetail) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *PromptDetail) GetDefaultText() string {
+	if x != nil {
+		return x.DefaultText
+	}
+	return ""
+}
+
+func (x *PromptDetail) GetText() string {
+	if x != nil {
+		return x.Text
+	}
+	return ""
+}
+
+func (x *PromptDetail) GetPreviousDefaultText() string {
+	if x != nil {
+		return x.PreviousDefaultText
+	}
+	return ""
+}
+
+func (x *PromptDetail) GetFullWorker() string {
+	if x != nil {
+		return x.FullWorker
+	}
+	return ""
+}
+
+func (x *PromptDetail) GetFullRouter() string {
+	if x != nil {
+		return x.FullRouter
+	}
+	return ""
+}
+
+func (x *PromptDetail) GetHistory() []*PromptRevision {
+	if x != nil {
+		return x.History
+	}
+	return nil
+}
+
+type PromptRevision struct {
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	Revision uint32                 `protobuf:"varint,1,opt,name=revision,proto3" json:"revision,omitempty"`
+	At       *timestamppb.Timestamp `protobuf:"bytes,2,opt,name=at,proto3" json:"at,omitempty"`
+	Origin   string                 `protobuf:"bytes,3,opt,name=origin,proto3" json:"origin,omitempty"`
+	// reset is true when the revision returned the part to its default.
+	Reset_        bool `protobuf:"varint,4,opt,name=reset,proto3" json:"reset,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PromptRevision) Reset() {
+	*x = PromptRevision{}
+	mi := &file_athena_v1_commands_proto_msgTypes[26]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PromptRevision) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PromptRevision) ProtoMessage() {}
+
+func (x *PromptRevision) ProtoReflect() protoreflect.Message {
+	mi := &file_athena_v1_commands_proto_msgTypes[26]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PromptRevision.ProtoReflect.Descriptor instead.
+func (*PromptRevision) Descriptor() ([]byte, []int) {
+	return file_athena_v1_commands_proto_rawDescGZIP(), []int{26}
+}
+
+func (x *PromptRevision) GetRevision() uint32 {
+	if x != nil {
+		return x.Revision
+	}
+	return 0
+}
+
+func (x *PromptRevision) GetAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.At
+	}
+	return nil
+}
+
+func (x *PromptRevision) GetOrigin() string {
+	if x != nil {
+		return x.Origin
+	}
+	return ""
+}
+
+func (x *PromptRevision) GetReset_() bool {
+	if x != nil {
+		return x.Reset_
+	}
+	return false
+}
+
 var File_athena_v1_commands_proto protoreflect.FileDescriptor
 
 const file_athena_v1_commands_proto_rawDesc = "" +
 	"\n" +
-	"\x18athena/v1/commands.proto\x12\tathena.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xd1\b\n" +
+	"\x18athena/v1/commands.proto\x12\tathena.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xfc\t\n" +
 	"\aCommand\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x128\n" +
 	"\vsubmit_task\x18\n" +
@@ -1506,7 +1894,12 @@ const file_athena_v1_commands_proto_rawDesc = "" +
 	"visibility\x18\x19 \x01(\v2\x15.athena.v1.VisibilityH\x00R\n" +
 	"visibility\x12>\n" +
 	"\rlist_passkeys\x18\x1a \x01(\v2\x17.athena.v1.ListPasskeysH\x00R\flistPasskeys\x12A\n" +
-	"\x0erevoke_passkey\x18\x1b \x01(\v2\x18.athena.v1.RevokePasskeyH\x00R\rrevokePasskeyB\b\n" +
+	"\x0erevoke_passkey\x18\x1b \x01(\v2\x18.athena.v1.RevokePasskeyH\x00R\rrevokePasskey\x125\n" +
+	"\n" +
+	"get_prompt\x18\x1c \x01(\v2\x14.athena.v1.GetPromptH\x00R\tgetPrompt\x125\n" +
+	"\n" +
+	"set_prompt\x18\x1d \x01(\v2\x14.athena.v1.SetPromptH\x00R\tsetPrompt\x12;\n" +
+	"\freset_prompt\x18\x1e \x01(\v2\x16.athena.v1.ResetPromptH\x00R\vresetPromptB\b\n" +
 	"\x06action\"\\\n" +
 	"\n" +
 	"SubmitTask\x12\x12\n" +
@@ -1558,7 +1951,16 @@ const file_athena_v1_commands_proto_rawDesc = "" +
 	"\avisible\x18\x01 \x01(\bR\avisible\"\x0e\n" +
 	"\fListPasskeys\"\x1f\n" +
 	"\rRevokePasskey\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\"\xe7\x01\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\"\x1f\n" +
+	"\tGetPrompt\x12\x12\n" +
+	"\x04part\x18\x01 \x01(\tR\x04part\"X\n" +
+	"\tSetPrompt\x12\x12\n" +
+	"\x04part\x18\x01 \x01(\tR\x04part\x12#\n" +
+	"\rbase_revision\x18\x02 \x01(\rR\fbaseRevision\x12\x12\n" +
+	"\x04text\x18\x03 \x01(\tR\x04text\"F\n" +
+	"\vResetPrompt\x12\x12\n" +
+	"\x04part\x18\x01 \x01(\tR\x04part\x12#\n" +
+	"\rbase_revision\x18\x02 \x01(\rR\fbaseRevision\"\x9a\x02\n" +
 	"\rCommandResult\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x0e\n" +
 	"\x02ok\x18\x02 \x01(\bR\x02ok\x12\x12\n" +
@@ -1567,7 +1969,8 @@ const file_athena_v1_commands_proto_rawDesc = "" +
 	"\tticket_id\x18\n" +
 	" \x01(\tH\x00R\bticketId\x124\n" +
 	"\bpasskeys\x18\v \x01(\v2\x16.athena.v1.PasskeyListH\x00R\bpasskeys\x12)\n" +
-	"\x0fpolicy_revision\x18\f \x01(\rH\x00R\x0epolicyRevisionB\b\n" +
+	"\x0fpolicy_revision\x18\f \x01(\rH\x00R\x0epolicyRevision\x121\n" +
+	"\x06prompt\x18\r \x01(\v2\x17.athena.v1.PromptDetailH\x00R\x06promptB\b\n" +
 	"\x06result\"=\n" +
 	"\vPasskeyList\x12.\n" +
 	"\bpasskeys\x18\x01 \x03(\v2\x12.athena.v1.PasskeyR\bpasskeys\"\xa6\x01\n" +
@@ -1577,7 +1980,22 @@ const file_athena_v1_commands_proto_rawDesc = "" +
 	"\n" +
 	"created_at\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x12<\n" +
 	"\flast_used_at\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
-	"lastUsedAtB=Z;github.com/danielpina1/athena/internal/pb/athenav1;athenav1b\x06proto3"
+	"lastUsedAt\"\x84\x02\n" +
+	"\fPromptDetail\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12!\n" +
+	"\fdefault_text\x18\x02 \x01(\tR\vdefaultText\x12\x12\n" +
+	"\x04text\x18\x03 \x01(\tR\x04text\x122\n" +
+	"\x15previous_default_text\x18\x04 \x01(\tR\x13previousDefaultText\x12\x1f\n" +
+	"\vfull_worker\x18\x05 \x01(\tR\n" +
+	"fullWorker\x12\x1f\n" +
+	"\vfull_router\x18\x06 \x01(\tR\n" +
+	"fullRouter\x123\n" +
+	"\ahistory\x18\a \x03(\v2\x19.athena.v1.PromptRevisionR\ahistory\"\x86\x01\n" +
+	"\x0ePromptRevision\x12\x1a\n" +
+	"\brevision\x18\x01 \x01(\rR\brevision\x12*\n" +
+	"\x02at\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\x02at\x12\x16\n" +
+	"\x06origin\x18\x03 \x01(\tR\x06origin\x12\x14\n" +
+	"\x05reset\x18\x04 \x01(\bR\x05resetB=Z;github.com/danielpina1/athena/internal/pb/athenav1;athenav1b\x06proto3"
 
 var (
 	file_athena_v1_commands_proto_rawDescOnce sync.Once
@@ -1591,7 +2009,7 @@ func file_athena_v1_commands_proto_rawDescGZIP() []byte {
 	return file_athena_v1_commands_proto_rawDescData
 }
 
-var file_athena_v1_commands_proto_msgTypes = make([]protoimpl.MessageInfo, 22)
+var file_athena_v1_commands_proto_msgTypes = make([]protoimpl.MessageInfo, 27)
 var file_athena_v1_commands_proto_goTypes = []any{
 	(*Command)(nil),               // 0: athena.v1.Command
 	(*SubmitTask)(nil),            // 1: athena.v1.SubmitTask
@@ -1612,10 +2030,15 @@ var file_athena_v1_commands_proto_goTypes = []any{
 	(*Visibility)(nil),            // 16: athena.v1.Visibility
 	(*ListPasskeys)(nil),          // 17: athena.v1.ListPasskeys
 	(*RevokePasskey)(nil),         // 18: athena.v1.RevokePasskey
-	(*CommandResult)(nil),         // 19: athena.v1.CommandResult
-	(*PasskeyList)(nil),           // 20: athena.v1.PasskeyList
-	(*Passkey)(nil),               // 21: athena.v1.Passkey
-	(*timestamppb.Timestamp)(nil), // 22: google.protobuf.Timestamp
+	(*GetPrompt)(nil),             // 19: athena.v1.GetPrompt
+	(*SetPrompt)(nil),             // 20: athena.v1.SetPrompt
+	(*ResetPrompt)(nil),           // 21: athena.v1.ResetPrompt
+	(*CommandResult)(nil),         // 22: athena.v1.CommandResult
+	(*PasskeyList)(nil),           // 23: athena.v1.PasskeyList
+	(*Passkey)(nil),               // 24: athena.v1.Passkey
+	(*PromptDetail)(nil),          // 25: athena.v1.PromptDetail
+	(*PromptRevision)(nil),        // 26: athena.v1.PromptRevision
+	(*timestamppb.Timestamp)(nil), // 27: google.protobuf.Timestamp
 }
 var file_athena_v1_commands_proto_depIdxs = []int32{
 	1,  // 0: athena.v1.Command.submit_task:type_name -> athena.v1.SubmitTask
@@ -1636,15 +2059,21 @@ var file_athena_v1_commands_proto_depIdxs = []int32{
 	16, // 15: athena.v1.Command.visibility:type_name -> athena.v1.Visibility
 	17, // 16: athena.v1.Command.list_passkeys:type_name -> athena.v1.ListPasskeys
 	18, // 17: athena.v1.Command.revoke_passkey:type_name -> athena.v1.RevokePasskey
-	20, // 18: athena.v1.CommandResult.passkeys:type_name -> athena.v1.PasskeyList
-	21, // 19: athena.v1.PasskeyList.passkeys:type_name -> athena.v1.Passkey
-	22, // 20: athena.v1.Passkey.created_at:type_name -> google.protobuf.Timestamp
-	22, // 21: athena.v1.Passkey.last_used_at:type_name -> google.protobuf.Timestamp
-	22, // [22:22] is the sub-list for method output_type
-	22, // [22:22] is the sub-list for method input_type
-	22, // [22:22] is the sub-list for extension type_name
-	22, // [22:22] is the sub-list for extension extendee
-	0,  // [0:22] is the sub-list for field type_name
+	19, // 18: athena.v1.Command.get_prompt:type_name -> athena.v1.GetPrompt
+	20, // 19: athena.v1.Command.set_prompt:type_name -> athena.v1.SetPrompt
+	21, // 20: athena.v1.Command.reset_prompt:type_name -> athena.v1.ResetPrompt
+	23, // 21: athena.v1.CommandResult.passkeys:type_name -> athena.v1.PasskeyList
+	25, // 22: athena.v1.CommandResult.prompt:type_name -> athena.v1.PromptDetail
+	24, // 23: athena.v1.PasskeyList.passkeys:type_name -> athena.v1.Passkey
+	27, // 24: athena.v1.Passkey.created_at:type_name -> google.protobuf.Timestamp
+	27, // 25: athena.v1.Passkey.last_used_at:type_name -> google.protobuf.Timestamp
+	26, // 26: athena.v1.PromptDetail.history:type_name -> athena.v1.PromptRevision
+	27, // 27: athena.v1.PromptRevision.at:type_name -> google.protobuf.Timestamp
+	28, // [28:28] is the sub-list for method output_type
+	28, // [28:28] is the sub-list for method input_type
+	28, // [28:28] is the sub-list for extension type_name
+	28, // [28:28] is the sub-list for extension extendee
+	0,  // [0:28] is the sub-list for field type_name
 }
 
 func init() { file_athena_v1_commands_proto_init() }
@@ -1671,11 +2100,15 @@ func file_athena_v1_commands_proto_init() {
 		(*Command_Visibility)(nil),
 		(*Command_ListPasskeys)(nil),
 		(*Command_RevokePasskey)(nil),
+		(*Command_GetPrompt)(nil),
+		(*Command_SetPrompt)(nil),
+		(*Command_ResetPrompt)(nil),
 	}
-	file_athena_v1_commands_proto_msgTypes[19].OneofWrappers = []any{
+	file_athena_v1_commands_proto_msgTypes[22].OneofWrappers = []any{
 		(*CommandResult_TicketId)(nil),
 		(*CommandResult_Passkeys)(nil),
 		(*CommandResult_PolicyRevision)(nil),
+		(*CommandResult_Prompt)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -1683,7 +2116,7 @@ func file_athena_v1_commands_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_athena_v1_commands_proto_rawDesc), len(file_athena_v1_commands_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   22,
+			NumMessages:   27,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

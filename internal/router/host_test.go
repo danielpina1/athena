@@ -709,3 +709,44 @@ func TestStoppedHostPutsMessagesOff(t *testing.T) {
 		t.Fatalf("relay rows = %+v, want one kept with no failed attempt", rows)
 	}
 }
+
+func TestNewRouterSessionUsesOverride(t *testing.T) {
+	e := newEnv(t)
+	e.host.cfg.Prompt = func() string { return "ROUTER OVERRIDE" }
+	e.start()
+	e.eventually("the router session to start", func() bool { return len(e.invocations()) == 1 })
+	if v, _ := flagValue(e.invocations()[0].Args, "--append-system-prompt"); v != "ROUTER OVERRIDE" {
+		t.Fatalf("system prompt = %q, want the override", v)
+	}
+	if kept, _, _ := e.st.KVGet(promptKey); kept != "ROUTER OVERRIDE" {
+		t.Fatalf("kept prompt = %q", kept)
+	}
+}
+
+func TestResumedRouterSessionKeepsPrompt(t *testing.T) {
+	e := newEnv(t)
+	e.host.cfg.Prompt = func() string { return "NEW OVERRIDE" }
+	e.must(e.st.KVSet(sessionKey, "sess-before"))
+	e.must(e.st.KVSet(promptKey, "PROMPT IT STARTED WITH"))
+	e.start()
+	e.eventually("the router session to start", func() bool { return len(e.invocations()) == 1 })
+	args := e.invocations()[0].Args
+	if v, _ := flagValue(args, "--resume"); v != "sess-before" {
+		t.Fatalf("args = %q, want a resume", args)
+	}
+	if v, _ := flagValue(args, "--append-system-prompt"); v != "PROMPT IT STARTED WITH" {
+		t.Fatalf("system prompt = %q, want the one the session started with", v)
+	}
+}
+
+// A session that started before prompts were kept started with the default.
+func TestResumedRouterSessionWithoutKeptPromptUsesDefault(t *testing.T) {
+	e := newEnv(t)
+	e.host.cfg.Prompt = func() string { return "NEW OVERRIDE" }
+	e.must(e.st.KVSet(sessionKey, "sess-before"))
+	e.start()
+	e.eventually("the router session to start", func() bool { return len(e.invocations()) == 1 })
+	if v, _ := flagValue(e.invocations()[0].Args, "--append-system-prompt"); v != prompts.Router {
+		t.Fatalf("system prompt = %q, want the default", v)
+	}
+}

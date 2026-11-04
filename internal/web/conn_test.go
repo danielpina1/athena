@@ -60,6 +60,7 @@ func (*connSource) TicketAnsweredApprovals(string) ([]core.Approval, error) {
 }
 func (*connSource) Repos() ([]*athenav1.RepoView, error)       { return nil, nil }
 func (*connSource) Notifications() ([]string, []string, error) { return nil, nil, nil }
+func (*connSource) Prompts() (*athenav1.PromptsView, error)    { return &athenav1.PromptsView{}, nil }
 func (*connSource) Approval(string) (core.Approval, error) {
 	return core.Approval{}, errors.New("none")
 }

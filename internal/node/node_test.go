@@ -1564,3 +1564,63 @@ func TestStatusFollowsSessionsAndQueue(t *testing.T) {
 		return s.Queued == 0 && len(s.LiveTicketIDs) == 1 && s.LiveTicketIDs[0] == second.ID
 	})
 }
+
+func TestNewSessionUsesOverride(t *testing.T) {
+	h := newHarness(t, func(c *Config) { c.WorkerPrompt = func() string { return "WORKER OVERRIDE" } })
+	tk := h.submit("Fix the typo", "")
+	h.running(tk.ID)
+	_, args := h.starts(tk.ID)
+	if got, ok := argValue(args, "--append-system-prompt"); !ok || got != "WORKER OVERRIDE" {
+		t.Fatalf("--append-system-prompt = %q, want the override", got)
+	}
+	if slices.Contains(args, "--resume") {
+		t.Errorf("first start resumed: %v", args)
+	}
+}
+
+// A session resumed after the owner changed the prompt keeps the prompt it started with; a Ticket's next fresh session
+// gets the new one.
+func TestResumedSessionKeepsPrompt(t *testing.T) {
+	hold := filepath.Join(t.TempDir(), "turn-may-end")
+	t.Setenv("ATHENA_FAKE_HOLD_RESULT", hold)
+	var prompt atomic.Value
+	prompt.Store("OVERRIDE ONE")
+	h := newHarness(t, func(c *Config) {
+		c.Slots = 2
+		c.WorkerPrompt = func() string { return prompt.Load().(string) }
+	})
+	a := h.submit("Open a pull request", "")
+	_, aa := h.running(a.ID)
+	pull := "github:o/r#7"
+	if err := h.eng.BindThread(a.ID, pull, true); err != nil {
+		t.Fatal(err)
+	}
+	if r := h.report(a.ID, aa.ID, core.ReportReady, "opened #7"); !r.OK {
+		t.Fatalf("ready report = %+v", r)
+	}
+	if err := os.WriteFile(hold, nil, 0o600); err != nil { // the ready turn ends, the session's process with it
+		t.Fatal(err)
+	}
+	h.eventually("the handoff", func() bool { return h.n.liveSession(a.ID) == nil })
+	prompt.Store("OVERRIDE TWO") // saved while the session waits
+	review := core.Trigger{ID: "github:review:1", Source: "github", Kind: core.KindMessage, Human: true,
+		Actor: core.ActorRef{Source: "github", ID: "alice"}, Threads: []string{pull}, At: time.Now(), Text: "please rename the flag"}
+	if _, err := h.eng.Receive(review); err != nil {
+		t.Fatal(err)
+	}
+	h.eventually("the session resumed", func() bool { n, _ := h.starts(a.ID); return n == 2 })
+	_, args := h.starts(a.ID)
+	if _, ok := argValue(args, "--resume"); !ok {
+		t.Fatalf("second start did not resume: %v", args)
+	}
+	if got, _ := argValue(args, "--append-system-prompt"); got != "OVERRIDE ONE" {
+		t.Fatalf("resumed with prompt %q, want the one the session started with", got)
+	}
+	// A different Ticket starts fresh with the new prompt.
+	b := h.submit("Second task", t.TempDir())
+	h.eventually("second started", func() bool { n, _ := h.starts(b.ID); return n == 1 })
+	_, bargs := h.starts(b.ID)
+	if got, _ := argValue(bargs, "--append-system-prompt"); got != "OVERRIDE TWO" {
+		t.Fatalf("new session prompt = %q, want OVERRIDE TWO", got)
+	}
+}
