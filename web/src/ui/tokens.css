@@ -1,0 +1,240 @@
+/*
+ * Precision: Athena's design tokens. The colour values are the plan's Global Constraints tables, verbatim;
+ * contrast.test.ts parses this file and fails on any drift or on a contrast pair below WCAG AA.
+ *
+ * Orange marks only what needs the owner. Orange text uses --accent-ink; an orange fill carries --accent-fg.
+ */
+
+:root,
+[data-theme="light"] {
+  --bg: #FFFFFF;
+  --surface: #FFFFFF;
+  --surface-2: #F5F5F5;
+  --stage: #E9E9E9;
+  --line: #111111;
+  --line-soft: #D9D9D9;
+  --text: #0A0A0A;
+  --muted: #6B6B6B;
+  --accent: #FF5A1F;
+  --accent-fg: #0A0A0A;
+  --accent-ink: #C2410C;
+  --ok: #0A0A0A;
+  --danger: #B42318;
+  color-scheme: light;
+}
+
+[data-theme="dark"] {
+  --bg: #0A0A0A;
+  --surface: #0F0F0F;
+  --surface-2: #1A1A1A;
+  --stage: #000000;
+  --line: #EDEDED;
+  --line-soft: #2E2E2E;
+  --text: #F5F5F5;
+  --muted: #9A9A9A;
+  --accent: #FF5A1F;
+  --accent-fg: #0A0A0A;
+  --accent-ink: #FF5A1F;
+  --ok: #F5F5F5;
+  --danger: #FF6B5E;
+  color-scheme: dark;
+}
+
+/* Before main.tsx sets data-theme (and with JS off) a dark system gets the dark theme: no white flash. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0A0A0A;
+    --surface: #0F0F0F;
+    --surface-2: #1A1A1A;
+    --stage: #000000;
+    --line: #EDEDED;
+    --line-soft: #2E2E2E;
+    --text: #F5F5F5;
+    --muted: #9A9A9A;
+    --accent: #FF5A1F;
+    --accent-fg: #0A0A0A;
+    --accent-ink: #FF5A1F;
+    --ok: #F5F5F5;
+    --danger: #FF6B5E;
+    color-scheme: dark;
+  }
+}
+
+:root {
+  --radius: 4px;
+  /* Body text is 15 px on the phone and 14 px on the desktop. */
+  --fs-body: 15px;
+  --lh-body: 22px;
+  --motion-fast: 120ms;
+  --motion: 160ms;
+  --motion-slow: 200ms;
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+
+@media (min-width: 1024px) {
+  :root {
+    --fs-body: 14px;
+    --lh-body: 20px;
+  }
+}
+
+/*
+ * The Tailwind theme is the tokens and nothing else: the default palette, shadows and blurs are removed, so a
+ * stray `bg-blue-500` or `shadow-md` simply does not exist.
+ */
+@theme inline {
+  --color-*: initial;
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-stage: var(--stage);
+  --color-line: var(--line);
+  --color-line-soft: var(--line-soft);
+  --color-text: var(--text);
+  --color-muted: var(--muted);
+  --color-accent: var(--accent);
+  --color-accent-fg: var(--accent-fg);
+  --color-accent-ink: var(--accent-ink);
+  --color-ok: var(--ok);
+  --color-danger: var(--danger);
+
+  --radius-*: initial;
+  --radius-xs: 2px;
+  --radius-md: var(--radius);
+
+  --shadow-*: initial;
+  --inset-shadow-*: initial;
+  --drop-shadow-*: initial;
+  --text-shadow-*: initial;
+  --blur-*: initial;
+
+  --font-*: initial;
+  --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+  /* Type scale: metadata 12, secondary 13, body 15/14, title 18, display 24. */
+  --text-*: initial;
+  --text-xs: 12px;
+  --text-xs--line-height: 16px;
+  --text-sm: 13px;
+  --text-sm--line-height: 18px;
+  --text-body: var(--fs-body);
+  --text-body--line-height: var(--lh-body);
+  --text-lg: 18px;
+  --text-lg--line-height: 24px;
+  --text-xl: 24px;
+  --text-xl--line-height: 28px;
+
+  --ease-out: var(--ease);
+  --default-transition-duration: var(--motion);
+  --default-transition-timing-function: var(--ease);
+
+  --animate-fade-in: athena-fade-in var(--motion) var(--ease);
+  --animate-fade-out: athena-fade-out var(--motion-fast) var(--ease);
+  --animate-pop-in: athena-pop-in var(--motion) var(--ease);
+  --animate-pop-out: athena-fade-out var(--motion-fast) var(--ease);
+  --animate-rise-in: athena-rise-in var(--motion-slow) var(--ease);
+  --animate-rise-out: athena-rise-out var(--motion) var(--ease);
+  --animate-pulse: athena-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes athena-fade-in {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes athena-fade-out {
+  to {
+    opacity: 0;
+  }
+}
+@keyframes athena-pop-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}
+@keyframes athena-rise-in {
+  from {
+    transform: translateY(100%);
+  }
+}
+@keyframes athena-rise-out {
+  to {
+    transform: translateY(100%);
+  }
+}
+@keyframes athena-pulse {
+  50% {
+    opacity: 0.45;
+  }
+}
+
+@layer base {
+  html {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-sans);
+    font-size: var(--fs-body);
+    line-height: var(--lh-body);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+    -webkit-text-size-adjust: 100%;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  body {
+    min-height: 100dvh;
+    background: var(--bg);
+  }
+
+  h1,
+  h2,
+  h3,
+  h4 {
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+
+  ::selection {
+    background: var(--text);
+    color: var(--bg);
+  }
+
+  /* The only "shadow" in the system: a 2 px accent focus outline, offset 2 px. */
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  /*
+   * Radix injects these rules from <style> elements, which the CSP (style-src 'self') blocks; the same rules
+   * live here so scroll locking and hidden native scrollbars still work.
+   */
+  body[data-scroll-locked] {
+    overflow: hidden !important;
+    overscroll-behavior: contain;
+  }
+  [data-radix-scroll-area-viewport],
+  [data-radix-select-viewport] {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+    -webkit-overflow-scrolling: touch;
+  }
+  [data-radix-scroll-area-viewport]::-webkit-scrollbar,
+  [data-radix-select-viewport]::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+/* Motion is 120–200 ms ease-out, and none at all under prefers-reduced-motion. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  ::before,
+  ::after {
+    animation: none !important;
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
+}
