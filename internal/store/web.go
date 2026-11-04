@@ -381,6 +381,14 @@ func (s *Store) BumpPushFailures(endpoint string) (int, error) {
 	return n, nil
 }
 
+// ResetPushFailures zeroes the failure count of the endpoint's subscription (a delivery succeeded).
+func (s *Store) ResetPushFailures(endpoint string) error {
+	if _, err := s.db.Exec(`UPDATE push_subscriptions SET failures = 0 WHERE endpoint = ?`, endpoint); err != nil {
+		return fmt.Errorf("store: reset push failures: %w", err)
+	}
+	return nil
+}
+
 // DeletePushSubscription removes the subscription for an endpoint.
 func (s *Store) DeletePushSubscription(endpoint string) error {
 	if _, err := s.db.Exec(`DELETE FROM push_subscriptions WHERE endpoint = ?`, endpoint); err != nil {

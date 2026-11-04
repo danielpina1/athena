@@ -28,6 +28,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/danielpina1/athena/internal/core"
 	"github.com/danielpina1/athena/internal/effects"
 	"github.com/danielpina1/athena/internal/store"
 )
@@ -52,12 +53,26 @@ var pushB64 = base64.RawURLEncoding
 // VAPID is the server's application server key pair.
 type VAPID struct {
 	key *ecdsa.PrivateKey
-	// Subject is the token's sub claim, an https URL naming the server. Empty: the origin of the push endpoint.
-	Subject string
+	// subject is the token's sub claim: the server's own https origin, never an email address.
+	subject string
 }
 
-// LoadOrCreateVAPID loads the P-256 key at <dir>/push/vapid.key, or creates it (0600) if there is none.
-func LoadOrCreateVAPID(dir string) (*VAPID, error) {
+// LoadOrCreateVAPID loads the P-256 key at <dir>/push/vapid.key, or creates it (0600) if there is none. subject is the
+// server's origin (https://host[:port]), which the tokens name as their sub.
+func LoadOrCreateVAPID(dir, subject string) (*VAPID, error) {
+	u, err := url.Parse(subject)
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.Path != "" {
+		return nil, fmt.Errorf("web: the VAPID subject must be an https origin, not %q", subject)
+	}
+	v, err := loadOrCreateVAPIDKey(dir)
+	if err != nil {
+		return nil, err
+	}
+	v.subject = subject
+	return v, nil
+}
+
+func loadOrCreateVAPIDKey(dir string) (*VAPID, error) {
 	path := filepath.Join(dir, "push", "vapid.key")
 	raw, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -72,19 +87,24 @@ func LoadOrCreateVAPID(dir string) (*VAPID, error) {
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			return nil, fmt.Errorf("web: create %s: %w", filepath.Dir(path), err)
 		}
-		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-		if errors.Is(err, os.ErrExist) {
-			return LoadOrCreateVAPID(dir) // created meanwhile
-		}
+		// Written whole to a temporary file and linked into place: a crash leaves no partial key, and a key created
+		// meanwhile is not replaced.
+		tmp, err := os.CreateTemp(filepath.Dir(path), "vapid-*.tmp")
 		if err != nil {
 			return nil, fmt.Errorf("web: create %s: %w", path, err)
 		}
-		_, err = f.WriteString(pushB64.EncodeToString(priv) + "\n")
-		if cerr := f.Close(); err == nil {
+		defer os.Remove(tmp.Name())
+		_, err = tmp.WriteString(pushB64.EncodeToString(priv) + "\n")
+		if cerr := tmp.Close(); err == nil {
 			err = cerr
 		}
 		if err != nil {
 			return nil, fmt.Errorf("web: write %s: %w", path, err)
+		}
+		if err := os.Link(tmp.Name(), path); errors.Is(err, os.ErrExist) {
+			return loadOrCreateVAPIDKey(dir)
+		} else if err != nil {
+			return nil, fmt.Errorf("web: create %s: %w", path, err)
 		}
 		return &VAPID{key: key}, nil
 	}
@@ -128,17 +148,14 @@ func (v *VAPID) Handler() http.Handler {
 }
 
 // VAPIDHeader is the Authorization header value for a push to endpoint (RFC 8292): "vapid t=<jwt>, k=<key>". The
-// token's aud is the endpoint's origin, exp is 12 h out and sub is an https URL, never an email address.
+// token's aud is the endpoint's origin, exp is 12 h out and sub is the server's https origin, never an email address. It returns "" when it cannot make the header.
 func VAPIDHeader(v *VAPID, endpoint string, now time.Time) string {
 	u, err := url.Parse(endpoint)
-	if err != nil || u.Host == "" {
+	if err != nil || u.Host == "" || v.subject == "" {
 		return ""
 	}
 	aud := u.Scheme + "://" + u.Host
-	sub := v.Subject
-	if sub == "" {
-		sub = "https://" + u.Hostname()
-	}
+	sub := v.subject
 	claims, _ := json.Marshal(struct {
 		Aud string `json:"aud"`
 		Exp int64  `json:"exp"`
@@ -179,19 +196,19 @@ func Encrypt(sub Subscription, plaintext, salt []byte, serverKey *ecdh.PrivateKe
 	}
 	uaRaw, err := pushB64.DecodeString(sub.P256dh)
 	if err != nil {
-		return nil, fmt.Errorf("web: push subscription key: %w", err)
+		return nil, fmt.Errorf("%w: key: %v", errBadSubscription, err)
 	}
 	authSecret, err := pushB64.DecodeString(sub.Auth)
 	if err != nil || len(authSecret) != 16 {
-		return nil, errors.New("web: push subscription auth secret must be 16 bytes")
+		return nil, fmt.Errorf("%w: auth secret must be 16 bytes", errBadSubscription)
 	}
 	uaPub, err := ecdh.P256().NewPublicKey(uaRaw)
 	if err != nil {
-		return nil, fmt.Errorf("web: push subscription key: %w", err)
+		return nil, fmt.Errorf("%w: key: %v", errBadSubscription, err)
 	}
 	shared, err := serverKey.ECDH(uaPub)
 	if err != nil {
-		return nil, fmt.Errorf("web: push key agreement: %w", err)
+		return nil, fmt.Errorf("%w: key agreement: %v", errBadSubscription, err)
 	}
 	asPub := serverKey.PublicKey().Bytes()
 
@@ -232,24 +249,41 @@ func Encrypt(sub Subscription, plaintext, salt []byte, serverKey *ecdh.PrivateKe
 	return aead.Seal(out, nonce, record, nil), nil
 }
 
-// Pusher delivers push messages: it is the handler of the "push" effects.
-type Pusher struct {
-	st     *store.Store
-	vapid  *VAPID
-	client *http.Client
-	log    *slog.Logger
+// errBadSubscription marks a subscription whose keys cannot be used; sending to it can never work.
+var errBadSubscription = errors.New("web: unusable push subscription")
+
+// PusherConfig is what a Pusher works from.
+type PusherConfig struct {
+	Store *store.Store
+	VAPID *VAPID
+	// Client sends the requests; nil gets one with a 20 s timeout.
+	Client *http.Client
+	// Stage returns a Ticket's current stage. A push is dropped when the Ticket is no longer in the person action the
+	// push announced, or is gone (a core.UserError); nil skips the check.
+	Stage func(ticketID string) (core.Stage, error)
+	// Visible says whether a dashboard is on screen at send time; nil means never.
+	Visible func() bool
+	Now     func() time.Time
+	Log     *slog.Logger
 }
 
-// NewPusher returns a Pusher over the store's subscriptions. A nil client gets one with a 20 s timeout; a nil log
-// discards logs.
-func NewPusher(st *store.Store, v *VAPID, client *http.Client, log *slog.Logger) *Pusher {
-	if client == nil {
-		client = &http.Client{Timeout: 20 * time.Second}
+// Pusher delivers push messages: it is the handler of the "push" effects.
+type Pusher struct {
+	PusherConfig
+}
+
+// NewPusher returns a Pusher over the store's subscriptions.
+func NewPusher(cfg PusherConfig) *Pusher {
+	if cfg.Client == nil {
+		cfg.Client = &http.Client{Timeout: 20 * time.Second}
 	}
-	if log == nil {
-		log = slog.New(slog.DiscardHandler)
+	if cfg.Log == nil {
+		cfg.Log = slog.New(slog.DiscardHandler)
 	}
-	return &Pusher{st: st, vapid: v, client: client, log: log}
+	if cfg.Now == nil {
+		cfg.Now = time.Now
+	}
+	return &Pusher{cfg}
 }
 
 // Register makes p the handler of the push effects: retries back off from 5 s to 300 s.
@@ -257,33 +291,56 @@ func (p *Pusher) Register(r *effects.Runner) {
 	r.Handle(PushKind, p.Handle, effects.Options{Concurrency: 2, Backoff: effects.Backoff{First: 5 * time.Second, Max: 300 * time.Second}})
 }
 
-// pushJob is the payload of a push effect: the message the browser shows and how urgent it is.
+// pushJob is the payload of a push effect: one message for one subscription, and what it announced, so that the
+// send can tell the announcement went stale.
 type pushJob struct {
-	Urgency string          `json:"urgency"`
-	Message json.RawMessage `json:"msg"`
+	Endpoint string          `json:"endpoint"`
+	Urgency  string          `json:"urgency"`
+	Ticket   string          `json:"ticket"`
+	Action   string          `json:"action"`
+	At       int64           `json:"at"` // unix seconds when it was enqueued
+	Message  json.RawMessage `json:"msg"`
 }
 
-// Handle sends the effect's message to every subscription: 2xx is done, 404 and 410 delete the subscription, 429 and
-// 5xx (and a failed connection) fail the effect so it is retried, and any other refusal counts against the
-// subscription, which is dropped after a few in a row.
-func (p *Pusher) Handle(ctx context.Context, _ string, payload []byte) error {
+// Handle sends the effect's message to its subscription. It is dropped (done, nothing sent) when it is older than
+// the push TTL, the Ticket moved on from the announced action or a dashboard is on screen. Then: 2xx is done, 404
+// and 410 delete the subscription, 429 and 5xx (and a failed connection) fail the effect so it is retried, and any
+// other refusal counts against the subscription, which is dropped after a few in a row.
+func (p *Pusher) Handle(ctx context.Context, key string, payload []byte) error {
 	var job pushJob
 	if err := json.Unmarshal(payload, &job); err != nil {
-		return nil // a payload that cannot be read cannot be fixed by retrying
+		p.Log.Error("push: unreadable payload, dropped", "key", key, "error", err)
+		return nil // retrying cannot fix it
 	}
-	subs, err := p.st.PushSubscriptions()
+	if p.Now().Sub(time.Unix(job.At, 0)) > pushTTL {
+		p.Log.Info("push: expired, dropped", "ticket", job.Ticket)
+		return nil
+	}
+	if p.Visible != nil && p.Visible() {
+		return nil
+	}
+	if p.Stage != nil {
+		st, err := p.Stage(job.Ticket)
+		var ue *core.UserError
+		switch {
+		case errors.As(err, &ue):
+			return nil // the Ticket is gone
+		case err != nil:
+			return err
+		case st.Stage != "person" || st.Action != job.Action:
+			return nil // it moved on: the owner no longer needs telling
+		}
+	}
+	subs, err := p.Store.PushSubscriptions()
 	if err != nil {
 		return err
 	}
-	var retry error
 	for _, s := range subs {
-		if err := p.send(ctx, s, job); err != nil {
-			if retry == nil || errors.Is(retry, effects.ErrLater) && !errors.Is(err, effects.ErrLater) {
-				retry = err
-			}
+		if s.Endpoint == job.Endpoint {
+			return p.send(ctx, s, job)
 		}
 	}
-	return retry
+	return nil // the subscription is gone
 }
 
 func (p *Pusher) send(ctx context.Context, s store.PushSubscription, job pushJob) error {
@@ -301,20 +358,28 @@ func (p *Pusher) send(ctx context.Context, s store.PushSubscription, job pushJob
 		return err
 	}
 	body, err := Encrypt(Subscription{Endpoint: s.Endpoint, P256dh: s.P256dh, Auth: s.Auth}, job.Message, salt, key)
+	if errors.Is(err, errBadSubscription) {
+		p.Log.Warn("push: subscription unusable, dropped", "host", host, "error", err)
+		return p.Store.DeletePushSubscription(s.Endpoint)
+	}
 	if err != nil {
-		p.log.Warn("push: subscription unusable, dropped", "host", host, "error", err)
-		return p.st.DeletePushSubscription(s.Endpoint)
+		p.Log.Error("push: message not sent", "host", host, "error", err)
+		return nil // the message itself cannot be sent; retrying cannot fix it
+	}
+	auth := VAPIDHeader(p.VAPID, s.Endpoint, p.Now())
+	if auth == "" {
+		return fmt.Errorf("push: no VAPID authorization for %s", host)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.Endpoint, bytes.NewReader(body))
 	if err != nil {
-		return p.st.DeletePushSubscription(s.Endpoint)
+		return p.Store.DeletePushSubscription(s.Endpoint)
 	}
-	req.Header.Set("Authorization", VAPIDHeader(p.vapid, s.Endpoint, time.Now()))
+	req.Header.Set("Authorization", auth)
 	req.Header.Set("Content-Encoding", "aes128gcm")
 	req.Header.Set("Content-Type", "application/octet-stream")
 	req.Header.Set("TTL", strconv.Itoa(int(pushTTL/time.Second)))
 	req.Header.Set("Urgency", job.Urgency)
-	resp, err := p.client.Do(req)
+	resp, err := p.Client.Do(req)
 	if err != nil {
 		return fmt.Errorf("push: send to %s: %w", host, errors.Unwrap(err))
 	}
@@ -322,10 +387,13 @@ func (p *Pusher) send(ctx context.Context, s store.PushSubscription, job pushJob
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 	switch c := resp.StatusCode; {
 	case c >= 200 && c < 300:
+		if s.Failures > 0 {
+			return p.Store.ResetPushFailures(s.Endpoint)
+		}
 		return nil
 	case c == http.StatusNotFound || c == http.StatusGone:
-		p.log.Info("push: subscription gone, deleted", "host", host)
-		return p.st.DeletePushSubscription(s.Endpoint)
+		p.Log.Info("push: subscription gone, deleted", "host", host)
+		return p.Store.DeletePushSubscription(s.Endpoint)
 	case c == http.StatusTooManyRequests:
 		if secs, err := strconv.Atoi(resp.Header.Get("Retry-After")); err == nil && secs > 0 {
 			return effects.Later(min(time.Duration(secs)*time.Second, 300*time.Second))
@@ -334,10 +402,10 @@ func (p *Pusher) send(ctx context.Context, s store.PushSubscription, job pushJob
 	case c >= 500:
 		return fmt.Errorf("push: %s answered %d", host, c)
 	default:
-		n, err := p.st.BumpPushFailures(s.Endpoint)
-		p.log.Warn("push: refused", "host", host, "status", c, "failures", n)
+		n, err := p.Store.BumpPushFailures(s.Endpoint)
+		p.Log.Warn("push: refused", "host", host, "status", c, "failures", n)
 		if err == nil && n >= maxPushFailures {
-			return p.st.DeletePushSubscription(s.Endpoint)
+			return p.Store.DeletePushSubscription(s.Endpoint)
 		}
 		return err
 	}

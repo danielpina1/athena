@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -39,6 +40,9 @@ func newNotifyEnv(t *testing.T, seed ...core.Ticket) *notifyEnv {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
+	if err := st.PutPushSubscription(store.PushSubscription{Endpoint: "https://push.test/one", P256dh: "k", Auth: "a", CreatedAt: t0}); err != nil {
+		t.Fatal(err)
+	}
 	e := &notifyEnv{t: t, st: st, handled: make(chan *athenav1.TicketSummary, 64), src: &connSource{tickets: map[string]core.Ticket{}}}
 	for _, tk := range seed {
 		e.src.put(tk)
@@ -145,7 +149,7 @@ func TestOneNotificationPerStageEntry(t *testing.T) {
 	for _, f := range fx {
 		key = f.Key
 	}
-	if want := "T-1:person:answer:" + t0.Add(time.Minute).Format(time.RFC3339Nano); key != want {
+	if want := "T-1:person:answer:" + t0.Add(time.Minute).Format(time.RFC3339Nano) + "|"; !strings.HasPrefix(key, want) {
 		t.Errorf("key %q, want %q", key, want)
 	}
 
@@ -341,5 +345,28 @@ func TestPushPayloadCopy(t *testing.T) {
 		if !found {
 			t.Errorf("%s: no notification", action)
 		}
+	}
+}
+
+func TestOneEffectPerSubscription(t *testing.T) {
+	e := newNotifyEnv(t)
+	if err := e.st.PutPushSubscription(store.PushSubscription{Endpoint: "https://push.test/two", P256dh: "k", Auth: "a", CreatedAt: t0}); err != nil {
+		t.Fatal(err)
+	}
+	e.set(asking("T-12", "Both", t0))
+	got := e.pushes()
+	if len(got) != 2 || got[0].Endpoint == got[1].Endpoint || got[0].Ticket != "T-12" || got[0].Action != "answer" {
+		t.Fatalf("%+v", got)
+	}
+}
+
+func TestNoSubscriptionsNoEffects(t *testing.T) {
+	e := newNotifyEnv(t)
+	if err := e.st.DeletePushSubscription("https://push.test/one"); err != nil {
+		t.Fatal(err)
+	}
+	e.set(asking("T-13", "Nobody", t0))
+	if n := len(e.pushes()); n != 0 {
+		t.Fatalf("%d effects without subscriptions", n)
 	}
 }

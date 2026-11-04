@@ -2,6 +2,8 @@ package web
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -166,6 +168,7 @@ type Notifier struct {
 	visible func() bool
 	wake    func()
 	log     *slog.Logger
+	now     func() time.Time
 	// known is the person action each Ticket was last seen in ("" when it is not in a person stage); only Run's
 	// goroutine touches it.
 	known map[string]string
@@ -175,7 +178,7 @@ type Notifier struct {
 
 // NewNotifier returns a Notifier; Run starts it.
 func NewNotifier(cfg NotifierConfig) *Notifier {
-	n := &Notifier{feed: cfg.Feed, st: cfg.Store, visible: cfg.Visible, wake: cfg.Wake, log: cfg.Log, known: map[string]string{}}
+	n := &Notifier{feed: cfg.Feed, st: cfg.Store, visible: cfg.Visible, wake: cfg.Wake, log: cfg.Log, known: map[string]string{}, now: time.Now}
 	if n.log == nil {
 		n.log = slog.New(slog.DiscardHandler)
 	}
@@ -303,7 +306,14 @@ func (n *Notifier) notify(t *athenav1.TicketSummary, action string) {
 	key := fmt.Sprintf("%s:person:%s:%s", t.GetId(), action, t.GetUpdatedAt().AsTime().UTC().Format(time.RFC3339Nano))
 	muted, err := MutedKinds(n.st)
 	if err != nil {
-		n.log.Error("push: read notification settings", "error", err)
+		// Not knowing what is muted must not push: the entry stays unhandled until the next reconciliation.
+		n.log.Error("push: read notification settings, entry skipped", "error", err)
+		return
+	}
+	subs, err := n.st.PushSubscriptions()
+	if err != nil {
+		n.log.Error("push: read subscriptions, entry skipped", "error", err)
+		return
 	}
 	skip := slices.Contains(muted, action) || n.visible != nil && n.visible()
 
@@ -324,7 +334,14 @@ func (n *Notifier) notify(t *athenav1.TicketSummary, action string) {
 		URL   string `json:"url"`
 		Tag   string `json:"tag"`
 	}{"Athena", title + " " + phrase, "/t/" + t.GetId(), t.GetId()})
-	payload, _ := json.Marshal(pushJob{Urgency: urgency, Message: msg})
+	// One effect per subscription, so a failing push service is retried alone.
+	jobs := make(map[string][]byte, len(subs))
+	for _, s := range subs {
+		sum := sha256.Sum256([]byte(s.Endpoint))
+		payload, _ := json.Marshal(pushJob{Endpoint: s.Endpoint, Urgency: urgency, Ticket: t.GetId(), Action: action,
+			At: n.now().Unix(), Message: msg})
+		jobs[key+"|"+hex.EncodeToString(sum[:6])] = payload
+	}
 
 	enqueued := false
 	err = n.st.Tx(func(tx *store.Tx) error {
@@ -341,8 +358,13 @@ func (n *Notifier) notify(t *athenav1.TicketSummary, action string) {
 		if skip {
 			return nil
 		}
-		enqueued = true
-		return tx.Enqueue(PushKind, key, payload)
+		for k, payload := range jobs {
+			enqueued = true
+			if err := tx.Enqueue(PushKind, k, payload); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 	if err != nil {
 		n.log.Error("push: enqueue", "ticket", t.GetId(), "error", err)
