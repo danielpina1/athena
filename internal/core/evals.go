@@ -95,6 +95,8 @@ type DecisionInput struct {
 	TicketID        string
 	Assessment      *Assessment
 	IgnoredFromCard bool
+	// Origin is who decides; OriginRouter for the main Session, whose stop then sends it no notice of the end.
+	Origin CommandOrigin
 }
 
 // DecisionResult is what Decide recorded, with the Ticket an accept created (or the earlier accept of the same Trigger
@@ -400,6 +402,7 @@ func (e *Engine) Decide(d DecisionInput) (DecisionResult, error) {
 	var res DecisionResult
 	err := e.command(cmdDecide, func(o *op) error {
 		res = DecisionResult{}
+		o.origin = d.Origin
 		p := o.currentPolicy()
 		if p == nil {
 			return userErrorf("deciding needs a Policy")
@@ -469,7 +472,8 @@ func (o *op) decide(d DecisionInput, p Policy, res *DecisionResult) error {
 			return nil
 		}
 	}
-	if d.Kind == DecisionAccept && titleOf(d.Title) == "" {
+	// An accept needs a title; one whose assessment does not accept records an ignore, which needs none.
+	if d.Kind == DecisionAccept && titleOf(d.Title) == "" && (d.Assessment == nil || d.Assessment.Accept) {
 		res.Refused = CodeTitleRequired + ": an accept needs a title"
 		return nil
 	}
@@ -849,9 +853,12 @@ func (o *op) handback(ticketID string, tr *Trigger, reason string) (bool, error)
 // --- People ---
 
 // Reevaluate is a person's replay: it queues a stored Trigger for a fresh Eval on its primary Thread and records the
-// requeue, after which no Ticket's worker decides it. A Trigger an Eval holds is refused.
-func (e *Engine) Reevaluate(triggerID string) error {
+// requeue, after which no Ticket's worker decides it. A Trigger an Eval holds is refused. The main Session's requeue
+// (origin OriginRouter) is refused for a follow-up a Ticket's worker decides: only the worker hands it back, while a
+// person may still send it to Eval (reference orchestrator_trigger_requeue). The main Session hears of a person's.
+func (e *Engine) Reevaluate(triggerID string, origin ...CommandOrigin) error {
 	return e.command(cmdReevaluate, func(o *op) error {
+		o.origin = originOf(origin)
 		tr, err := o.tx.GetTrigger(triggerID)
 		if err != nil {
 			return err
@@ -869,6 +876,16 @@ func (e *Engine) Reevaluate(triggerID string) error {
 		if th.Eval != nil && slices.Contains(th.Eval.TriggerIDs, triggerID) {
 			return userErrorf("an eval holds trigger %s already", triggerID)
 		}
+		if o.origin == OriginRouter {
+			owners, err := followupOwners(tr, o.tx.GetTicket, th)
+			if err != nil {
+				return err
+			}
+			if len(owners) > 0 {
+				return userErrorf("%s: ticket %s decides trigger %s; its worker hands it back if it is not its own",
+					CodeWorkerDecides, strings.Join(owners, ", "), triggerID)
+			}
+		}
 		queueForEval(th, triggerID)
 		if err := o.tx.PutThread(th); err != nil {
 			return err
@@ -878,7 +895,8 @@ func (e *Engine) Reevaluate(triggerID string) error {
 			return err
 		}
 		o.emitEvent(Event{Type: EventTriggerRequeued, At: o.at, Data: map[string]any{"triggerId": triggerID, "thread": th.Key}})
-		return nil
+		return o.notice("trigger_requeued:"+triggerID+":"+stamp(o.at),
+			Message{Kind: NoticeTriggerRequeued, TriggerID: triggerID, Thread: th.Key, At: o.at})
 	})
 }
 

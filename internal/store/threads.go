@@ -52,8 +52,16 @@ func (tx *Tx) GetDecision(id string) (*core.Decision, error) {
 
 // Decisions returns the Decisions made on a Thread, most recent first; limit <= 0 returns all.
 func (tx *Tx) Decisions(thread string, limit int) ([]*core.Decision, error) {
-	q := `SELECT doc FROM decisions WHERE thread = ? ORDER BY at DESC, id DESC`
-	args := []any{thread}
+	return tx.decisions(`SELECT doc FROM decisions WHERE thread = ? ORDER BY at DESC, id DESC`, thread, limit, thread)
+}
+
+// RecentDecisions returns the Decisions of every Thread, most recent first; limit <= 0 returns all.
+func (tx *Tx) RecentDecisions(limit int) ([]*core.Decision, error) {
+	return tx.decisions(`SELECT doc FROM decisions WHERE thread != '' ORDER BY at DESC, id DESC`, "every thread", limit)
+}
+
+// decisions runs a query of Decision documents; what names its Threads in errors.
+func (tx *Tx) decisions(q, thread string, limit int, args ...any) ([]*core.Decision, error) {
 	if limit > 0 {
 		q += ` LIMIT ?`
 		args = append(args, limit)

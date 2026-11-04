@@ -82,6 +82,8 @@ type Engine struct {
 	policy func() Policy
 	scope  SourceScope
 	wake   func()
+	// relays is Options.Relays.
+	relays bool
 }
 
 // Options configure an Engine beyond its Repositories and Executor. Every field may be left zero.
@@ -96,6 +98,9 @@ type Options struct {
 	Scope SourceScope
 	// Wake is called after a command that enqueued external work committed, such as the effects runner's Wake.
 	Wake func()
+	// Relays makes commands enqueue the main Session's relay and notice effects (see notices.go). Leave it off when no
+	// router runs, or they pile up unread.
+	Relays bool
 }
 
 // NewEngine returns an Engine with the plan 1 options: a clock and an event sink (see Options).
@@ -115,7 +120,7 @@ func NewEngineWith(repos Repositories, exec Executor, opts Options) *Engine {
 		emit = func(Event) {}
 	}
 	return &Engine{repos: repos, exec: exec, now: now, emit: emit, waiters: map[string]chan struct{}{},
-		policy: opts.Policy, scope: opts.Scope, wake: opts.Wake}
+		policy: opts.Policy, scope: opts.Scope, wake: opts.Wake, relays: opts.Relays}
 }
 
 // --- Owner tasks ---
@@ -336,6 +341,7 @@ func (e *Engine) FileReport(ticketID string, r ReportInput) error {
 			return userErrorf("an action of ticket %s waits for the owner's approval; report %s after it is answered", ticketID, r.State)
 		}
 		attention := t.Attention
+		var raised *Attention
 		if r.Question != "" && (attention == nil || attention.Question != r.Question) {
 			// A replaced question keeps the time the Ticket began waiting.
 			since := o.at
@@ -343,6 +349,7 @@ func (e *Engine) FileReport(ticketID string, r ReportInput) error {
 				since = attention.At
 			}
 			attention = &Attention{ID: newID(), Question: r.Question, At: since}
+			raised = attention
 			t.Stats.Questions++
 		}
 		if r.State == ReportReady {
@@ -366,6 +373,9 @@ func (e *Engine) FileReport(ticketID string, r ReportInput) error {
 			data["question"] = r.Question
 		}
 		o.event(EventReportFiled, t, a.ID, data)
+		if err := o.reportRelay(t, a, raised); err != nil {
+			return err
+		}
 		// A Ticket that follows Threads ends with them: ready ends it only once it is done with them, as they ended, and
 		// dropped after a close it deferred ends it as that close did.
 		done, isDone := t.FollowsDone()
@@ -541,6 +551,9 @@ type op struct {
 	policy func() Policy
 	// enqueued is set once the command enqueued external work; Wake runs after it committed.
 	enqueued bool
+	// relays is the Engine's Options.Relays; origin is who issued the command.
+	relays bool
+	origin CommandOrigin
 	// reg is the Engine's registry; observations wait in metrics until the command committed.
 	reg     *metrics.Registry
 	metrics []func(*metrics.Registry)
@@ -569,7 +582,7 @@ func (e *Engine) run(fn func(o *op) error) error {
 	var o *op
 	err := e.repos.Tx(func(tx Tx) error {
 		// A fresh op per attempt, so nothing collected by a failed attempt leaks.
-		o = &op{tx: tx, at: e.now(), reg: e.reg, policy: e.policy}
+		o = &op{tx: tx, at: e.now(), reg: e.reg, policy: e.policy, relays: e.relays}
 		return fn(o)
 	})
 	if err != nil {
@@ -810,6 +823,9 @@ func (o *op) endAt(t *Ticket, by TicketEndBy, outcome TicketOutcome, reason stri
 		data["reason"] = ended.Reason
 	}
 	o.event(EventTicketEnded, t, "", data)
+	if err := o.endNotice(t); err != nil {
+		return err
+	}
 	stopReason := reason
 	if stopReason == "" {
 		stopReason = string(outcome)
@@ -964,4 +980,61 @@ func clonePtr[T any](p *T) *T {
 	}
 	v := *p
 	return &v
+}
+
+// Trigger returns the stored Trigger with the given ID.
+func (e *Engine) Trigger(id string) (Trigger, error) {
+	var t *Trigger
+	err := e.repos.Tx(func(tx Tx) error {
+		var err error
+		t, err = tx.GetTrigger(id)
+		return err
+	})
+	if err != nil {
+		return Trigger{}, err
+	}
+	if t == nil {
+		return Trigger{}, userErrorf("trigger %s not found", id)
+	}
+	return *t, nil
+}
+
+// Thread returns the stored Thread with the given key.
+func (e *Engine) Thread(key string) (Thread, error) {
+	var th *Thread
+	err := e.repos.Tx(func(tx Tx) error {
+		var err error
+		th, err = tx.GetThread(key)
+		return err
+	})
+	if err != nil {
+		return Thread{}, err
+	}
+	if th == nil {
+		return Thread{}, userErrorf("thread %s not found", key)
+	}
+	return *th, nil
+}
+
+// Decisions returns the Decisions made on a Thread, or on every Thread when thread is empty, most recent first; limit
+// <= 0 returns all.
+func (e *Engine) Decisions(thread string, limit int) ([]Decision, error) {
+	var list []*Decision
+	err := e.repos.Tx(func(tx Tx) error {
+		var err error
+		if thread == "" {
+			list, err = tx.RecentDecisions(limit)
+		} else {
+			list, err = tx.Decisions(thread, limit)
+		}
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Decision, 0, len(list))
+	for _, d := range list {
+		out = append(out, *d)
+	}
+	return out, nil
 }

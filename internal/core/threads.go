@@ -37,6 +37,10 @@ func (e *Engine) FollowForContext(ticketID, thread string) error {
 		}
 		th.Subscriptions = append(th.Subscriptions, Subscription{TicketID: ticketID, Context: true})
 		o.event(EventThreadSubscribed, t, "", map[string]any{"thread": thread, "context": true})
+		if err := o.notice("thread_followed:"+ticketID+":"+thread,
+			Message{Kind: NoticeThreadFollowed, TicketID: ticketID, Thread: thread, At: o.at}); err != nil {
+			return err
+		}
 		return o.tx.PutThread(th)
 	})
 }
@@ -83,6 +87,10 @@ func (e *Engine) MarkUnrelated(ticketID, thread, reason string) error {
 			return err
 		}
 		o.event(EventThreadUnsubscribed, t, "", map[string]any{"thread": thread, "by": "executor", "reason": reason})
+		if err := o.notice("thread_unrelated:"+ticketID+":"+thread,
+			Message{Kind: NoticeThreadUnrelated, TicketID: ticketID, Thread: thread, Reason: reason, At: o.at}); err != nil {
+			return err
+		}
 		// The follow-ups on the Thread the Ticket decides go back, through Task 5's hand-back.
 		seen := map[string]bool{}
 		for _, in := range t.Inputs {
@@ -116,14 +124,15 @@ func (e *Engine) MarkUnrelated(ticketID, thread, reason string) error {
 	})
 }
 
-// Unsubscribe is a person's: every Subscription on the Thread is dropped, and the Tickets that followed it follow it
-// no more, so its close no longer ends them. Each keeps deciding the follow-ups it received there. A Thread with no
-// Subscriptions changes nothing.
-func (e *Engine) Unsubscribe(thread string) error {
+// Unsubscribe is a person's, or the main Session's (origin OriginRouter): every Subscription on the Thread is dropped,
+// and the Tickets that followed it follow it no more, so its close no longer ends them. Each keeps deciding the
+// follow-ups it received there. A Thread with no Subscriptions changes nothing. The main Session hears of a person's.
+func (e *Engine) Unsubscribe(thread string, origin ...CommandOrigin) error {
 	if !validThreadKey(thread) {
 		return userErrorf("thread key %q is not <source>:<key>", thread)
 	}
 	return e.command(cmdUnsubscribe, func(o *op) error {
+		o.origin = originOf(origin)
 		th, err := o.tx.GetThread(thread)
 		if err != nil || th == nil || len(th.Subscriptions) == 0 {
 			return err
@@ -153,7 +162,8 @@ func (e *Engine) Unsubscribe(thread string) error {
 			}
 			o.event(EventThreadUnsubscribed, t, "", map[string]any{"thread": thread, "by": "person"})
 		}
-		return nil
+		// One notice per Thread: a later removal replaces one not yet sent.
+		return o.notice("thread_unsubscribed:"+thread, Message{Kind: NoticeThreadUnsubscribed, Thread: thread, At: o.at})
 	})
 }
 

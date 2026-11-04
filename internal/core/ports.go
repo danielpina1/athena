@@ -45,6 +45,8 @@ type Tx interface {
 	GetDecision(id string) (*Decision, error)
 	// Decisions returns the Decisions made on a Thread, most recent first; limit <= 0 returns all.
 	Decisions(thread string, limit int) ([]*Decision, error)
+	// RecentDecisions returns the Decisions of every Thread, most recent first; limit <= 0 returns all.
+	RecentDecisions(limit int) ([]*Decision, error)
 	// Enqueue records external work for the effects runner in the same transaction. Work is identified by
 	// (kind, key): enqueuing a key still waiting replaces its payload, makes it due now and keeps its place in line.
 	Enqueue(kind, key string, payload []byte) error

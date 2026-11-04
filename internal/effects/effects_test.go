@@ -632,3 +632,29 @@ func TestKindsAreIndependent(t *testing.T) {
 		t.Fatalf("notice key %q", k)
 	}
 }
+
+func TestPendingAndCompleteOutsideHandler(t *testing.T) {
+	st, _, r := newEnv(t)
+	enqueue(t, st, "notice", "b", "2")
+	enqueue(t, st, "relay", "x", "r")
+	enqueue(t, st, "notice", "a", "1")
+	got, err := r.Pending("notice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].Key != "b" || got[1].Key != "a" {
+		t.Fatalf("pending = %+v, want b then a", got)
+	}
+	// A row replaced since it was read stays.
+	enqueue(t, st, "notice", "a", "1b")
+	if done, err := r.Complete("notice", "a", []byte("1")); err != nil || done {
+		t.Fatalf("complete of a replaced row: %v %v", done, err)
+	}
+	if done, err := r.Complete("notice", "b", []byte("2")); err != nil || !done {
+		t.Fatalf("complete: %v %v", done, err)
+	}
+	got, _ = r.Pending("notice")
+	if len(got) != 1 || got[0].Key != "a" || string(got[0].Payload) != "1b" {
+		t.Fatalf("after complete: %+v", got)
+	}
+}

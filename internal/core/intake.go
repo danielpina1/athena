@@ -149,6 +149,9 @@ func (o *op) receive(t *Trigger) error {
 		return err
 	}
 	queued := len(owners) == 0 && queueForEval(threads[t.Threads[0]], t.ID)
+	if err := o.followupRelay(t, owners); err != nil {
+		return err
+	}
 	for _, key := range keys {
 		if err := o.tx.PutThread(threads[key]); err != nil {
 			return err

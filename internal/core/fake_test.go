@@ -213,12 +213,20 @@ func (tx *memTx) GetDecision(id string) (*Decision, error) {
 	return &d, nil
 }
 
+func (tx *memTx) RecentDecisions(limit int) ([]*Decision, error) {
+	return tx.filterDecisions(nil, limit)
+}
+
 func (tx *memTx) Decisions(thread string, limit int) ([]*Decision, error) {
+	return tx.filterDecisions(&thread, limit)
+}
+
+func (tx *memTx) filterDecisions(thread *string, limit int) ([]*Decision, error) {
 	var out []*Decision
 	for _, raw := range tx.decisions {
 		var d Decision
 		mustUnmarshal(raw, &d)
-		if d.Thread == thread {
+		if thread == nil || d.Thread == *thread {
 			out = append(out, &d)
 		}
 	}

@@ -151,6 +151,15 @@ func (s *Store) NextEffectDue(kind string, now time.Time) (due time.Time, ok boo
 	return due, ok, err
 }
 
+// KindEffects returns every effect of kind, due or not, oldest seq first.
+func (s *Store) KindEffects(kind string) (out []Effect, err error) {
+	err = s.Tx(func(tx *Tx) (err error) {
+		out, err = queryEffects(tx, `SELECT `+effectColumns+` FROM effects WHERE kind = ? ORDER BY seq`, kind)
+		return err
+	})
+	return out, err
+}
+
 // ListEffects returns every effect, oldest seq first (for health and tests).
 func (s *Store) ListEffects() (out []Effect, err error) {
 	err = s.Tx(func(tx *Tx) (err error) {

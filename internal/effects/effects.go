@@ -204,6 +204,16 @@ func (r *Runner) Drain(timeout time.Duration) error {
 	return ErrDrainTimeout
 }
 
+// Pending returns the rows of a kind that wait, due or not, oldest seq first. Work one kind's handler carries out for
+// another kind (the router sends held notices along with a relay) settles those rows with Complete.
+func (r *Runner) Pending(kind string) ([]store.Effect, error) { return r.st.KindEffects(kind) }
+
+// Complete deletes the row (kind, key) a handler of another kind carried out, if it still holds payload; a row
+// enqueued again meanwhile stays to run. It reports whether it deleted the row.
+func (r *Runner) Complete(kind, key string, payload []byte) (bool, error) {
+	return r.st.CompleteEffect(kind, key, payload)
+}
+
 // Health reports the kinds that need attention: a kind is present, with an error naming it, the key and the last
 // failure, while one of its effects has failed three times in a row. The map is empty when all is well.
 func (r *Runner) Health() map[string]error {
