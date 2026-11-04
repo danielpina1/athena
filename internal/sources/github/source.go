@@ -74,9 +74,10 @@ type SourceConfig struct {
 	Repos []string
 	// Interval is the time between polls; DefaultInterval when zero.
 	Interval time.Duration
-	// ReceiveAll marks the scope rows (issues, pulls, comments, ci) that receive every message: their Triggers carry
-	// Meta["receiveAll"] = "true".
-	ReceiveAll map[string]bool
+	// ReceiveAll lists the repositories (owner/name, compared case-insensitively) that receive every message, not only
+	// mentions, in every scope row (issues, pulls, comments, ci): their Triggers carry Meta["receiveAll"] = "true", so
+	// the Policy's unaddressed admission cells and its ci row apply to them.
+	ReceiveAll []string
 }
 
 // Intake is the part of the Engine the Source drives.
@@ -116,6 +117,8 @@ type Source struct {
 	log   *slog.Logger
 	slug  string
 	repos map[string]bool // canonical owner/name
+	// receiveAll holds the canonical owner/name of the repositories that receive every message.
+	receiveAll map[string]bool
 
 	now       func() time.Time
 	wait      func(ctx context.Context, d time.Duration) error
@@ -160,6 +163,10 @@ func NewSource(cfg SourceConfig, app *App, in Intake, kv KV, log *slog.Logger) *
 		dropped: map[string]string{}}
 	for _, r := range cfg.Repos {
 		s.repos[strings.ToLower(r)] = true
+	}
+	s.receiveAll = map[string]bool{}
+	for _, r := range cfg.ReceiveAll {
+		s.receiveAll[strings.ToLower(r)] = true
 	}
 	if app != nil {
 		s.now = app.now
@@ -838,7 +845,7 @@ func (s *Source) trigger(id, kind, scope string, r repo, n int, pull bool, u ghU
 	if link != "" {
 		meta["url"] = link
 	}
-	if s.cfg.ReceiveAll[scope] {
+	if s.receiveAll[r.key] {
 		meta["receiveAll"] = "true"
 	}
 	bot := isBot(u)
@@ -1172,7 +1179,7 @@ func (s *Source) checkSuites(ctx context.Context, r repo, thread, sha string, de
 			short = short[:7]
 		}
 		meta := map[string]string{"repo": r.full, "sha": sha, "conclusion": *cs.Conclusion}
-		if s.cfg.ReceiveAll["ci"] {
+		if s.receiveAll[r.key] {
 			meta["receiveAll"] = "true"
 		}
 		t := core.Trigger{

@@ -78,6 +78,13 @@ Repeat `--repo owner/name` for more repositories (each must be one the installat
 `~/.athena/config.json`, mode 0600, with the key's path, never the key. Add `--state-dir DIR` to every command if you
 use another state directory. Add `--interval SECONDS` to poll more or less often than every 30 s.
 
+By default Athena takes in only the messages that mention the App, follow-ups on its own issues and pull requests,
+and CI on the pull requests it follows. To let it see every message of a repository (every issue, pull request,
+comment and check suite, mentioned or not), add `--receive-all owner/name` (repeatable; each must also be a
+`--repo`). It is the `"receive_all"` list in the `github` part of `config.json`, empty by default. Only those
+repositories reach the Policy's unaddressed admission cells and its `ci` row (section 4); a message of any other
+repository that does not mention the App is recorded as `not_received`.
+
 Check it. This talks to GitHub: it mints an installation token, reads the bot and the installation's account, and
 lists the repositories the installation reaches. Every configured repository must be among them.
 
@@ -149,7 +156,8 @@ field is refused. The shape, with your login in `allowed`:
   listed account that does not mention the App (`listedUnaddressed`: `inferred` or `ignore`), an account not on the list
   that mentions it (`unlistedAddressed`: `explicit`, `inferred` or `ignore`), and an account not on the list that does
   not (`unlistedUnaddressed`: `inferred` or `ignore`). The values above are the defaults and are what an empty cell
-  means. `ci` has only the last cell.
+  means. `ci` has only the last cell. The unaddressed cells and the `ci` row apply only to repositories on
+  `receive_all` (section 3); elsewhere such a message is `not_received`.
 - `rules`: named instructions for proactive work, each `{"name", "instructions", "enabled"}`.
 
 To watch Athena before it acts, run in `observe` with nobody on the list, so that no message is an explicit request.

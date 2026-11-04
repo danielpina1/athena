@@ -466,7 +466,7 @@ func at(s string) time.Time {
 }
 
 func TestNewIssueMentionBecomesTrigger(t *testing.T) {
-	h := newSourceHarness(t, SourceConfig{ReceiveAll: map[string]bool{"issues": true}})
+	h := newSourceHarness(t, SourceConfig{ReceiveAll: []string{"O/R"}})
 	h.mustPoll()
 
 	got := h.in.trigger(t, "github:issue:9001")
@@ -485,10 +485,10 @@ func TestNewIssueMentionBecomesTrigger(t *testing.T) {
 		t.Fatalf("issue trigger\n got %+v\nwant %+v", got, want)
 	}
 
-	// A person's pull request: Scope pulls, kind pull, its head; the pulls row does not receive all.
+	// A person's pull request: Scope pulls, kind pull, its head; the repository receives all in every scope.
 	pr := h.in.trigger(t, "github:issue:9003")
 	if pr.Scope != "pulls" || pr.Meta["kind"] != "pull" || pr.Meta["head"] != "fix-typo" || pr.Addressed != "" ||
-		pr.Meta["receiveAll"] != "" || pr.Threads[0] != "github:o/r#3" || !pr.Human {
+		pr.Meta["receiveAll"] != "true" || pr.Threads[0] != "github:o/r#3" || !pr.Human {
 		t.Fatalf("pull trigger = %+v", pr)
 	}
 	// An old issue that was only updated (closed) is not new: no Trigger for it.
@@ -805,8 +805,19 @@ func TestReviewApprovalWithoutBody(t *testing.T) {
 	}
 }
 
+// Receive-all is per repository: a repository that is not listed receives mentions only, in every scope.
+func TestReceiveAllIsPerRepository(t *testing.T) {
+	h := newSourceHarness(t, SourceConfig{ReceiveAll: []string{"o/other"}})
+	h.mustPoll()
+	for _, id := range []string{"github:issue:9001", "github:issue:9003"} {
+		if got := h.in.trigger(t, id); got.Meta["receiveAll"] != "" {
+			t.Fatalf("%s of an unlisted repository carries receiveAll: %+v", id, got.Meta)
+		}
+	}
+}
+
 func TestCIOnFollowedPRNotHuman(t *testing.T) {
-	h := newSourceHarness(t, SourceConfig{ReceiveAll: map[string]bool{"ci": true}})
+	h := newSourceHarness(t, SourceConfig{ReceiveAll: []string{"o/r"}})
 	h.in.followed = []string{"github:o/r#2"}
 	h.mustPoll()
 	got := h.in.trigger(t, "github:checksuite:402:failure")

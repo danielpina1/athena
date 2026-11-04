@@ -198,7 +198,8 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	n.SetEngine(eng)
 	// registerSource registers the GitHub Source once the App passed its check: here, or later in the background.
 	registerSource := func() {
-		src := github.NewSource(github.SourceConfig{Repos: fileCfg.GitHub.Repos, Interval: fileCfg.GitHub.interval()}, gh.app,
+		src := github.NewSource(github.SourceConfig{Repos: fileCfg.GitHub.Repos, Interval: fileCfg.GitHub.interval(),
+			ReceiveAll: fileCfg.GitHub.ReceiveAll}, gh.app,
 			intake{Engine: eng, hist: reg.Histogram("trigger_intake_seconds")}, st, logger.With("source", github.SourceName))
 		sourceReg.Register(timedSource{Source: src, hist: reg.Histogram("reply_send_seconds")})
 		gh.attach(src)

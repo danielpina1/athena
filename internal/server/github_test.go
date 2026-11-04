@@ -645,3 +645,37 @@ func TestCredentialsSeededByCheck(t *testing.T) {
 		t.Fatalf("bot looked up %d times, want once (by the check)", n)
 	}
 }
+
+// A repository on github.receive_all receives every message: an allowed account's comment that does not mention the App
+// takes the listedUnaddressed cell (inferred by default) and reaches the router as a candidate, instead of being
+// refused not_received.
+func TestReceiveAllAdmitsUnaddressed(t *testing.T) {
+	newFakeEnv(t, openTurnFixture(t))
+	fastEvaluate(t)
+	g := newFakeGitHub(t)
+	dir := newStateDir(t)
+	g.configure(t, dir, 600)
+	cfg, err := LoadConfig(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.GitHub.ReceiveAll = []string{"O/R"}
+	if err := SaveConfig(dir, cfg); err != nil {
+		t.Fatal(err)
+	}
+	s := startServer(t, dir)
+	eventually(t, "router running and github healthy", func() bool {
+		h := s.health()
+		return h.Router.State == "running" && len(h.Sources) == 1 && h.Sources[0].Error == ""
+	})
+	g.addComment(3, "o", "the login test is flaky again")
+	thread := github.ThreadKey(fakeRepo, 3)
+	eventually(t, "the unaddressed comment reached the router", func() bool {
+		for _, th := range s.threads() {
+			if th.Key == thread && th.Eval != nil && th.Eval.DeliveredAt != nil {
+				return true
+			}
+		}
+		return false
+	})
+}

@@ -19,7 +19,7 @@ import (
 
 // ConfigFile is the server's configuration in the state directory, written 0600 by `athena github setup`:
 //
-//	{"github": {"appId", "slug", "keyFile", "installationId", "repos": [], "intervalSeconds": 30},
+//	{"github": {"appId", "slug", "keyFile", "installationId", "repos": [], "intervalSeconds": 30, "receive_all": []},
 //	 "router": {"model": "haiku"}, "evalTimeoutSeconds": 600}
 //
 // It holds the path of the GitHub App's private key, never the key. Without the file, or without its github part,
@@ -49,6 +49,10 @@ type GitHubConfig struct {
 	Repos          []string `json:"repos"`
 	// IntervalSeconds is the time between two polls of every repository (default 30).
 	IntervalSeconds int `json:"intervalSeconds"`
+	// ReceiveAll lists the configured repositories that receive every message, not only mentions of the App, in every
+	// scope (issues, pulls, comments, ci): the Policy's unaddressed admission cells and its ci row apply only to them.
+	// Default empty.
+	ReceiveAll []string `json:"receive_all,omitempty"`
 	// APIURL is GitHub's REST endpoint (default https://api.github.com); it is set for GitHub Enterprise or a test
 	// stand-in, and left out of the file otherwise.
 	APIURL string `json:"apiUrl,omitempty"`
@@ -103,6 +107,7 @@ func (c FileConfig) withDefaults() FileConfig {
 			g.IntervalSeconds = DefaultIntervalSeconds
 		}
 		g.Repos = slices.Clone(g.Repos)
+		g.ReceiveAll = slices.Clone(g.ReceiveAll)
 		c.GitHub = &g
 	}
 	return c
@@ -138,6 +143,16 @@ func (g *GitHubConfig) validate() error {
 			return fmt.Errorf("github: repository %q is listed twice", r)
 		}
 		seen[strings.ToLower(r)] = true
+	}
+	all := map[string]bool{}
+	for _, r := range g.ReceiveAll {
+		if !seen[strings.ToLower(r)] {
+			return fmt.Errorf("github: receive_all repository %q is not one of repos", r)
+		}
+		if all[strings.ToLower(r)] {
+			return fmt.Errorf("github: receive_all repository %q is listed twice", r)
+		}
+		all[strings.ToLower(r)] = true
 	}
 	return nil
 }
@@ -222,6 +237,7 @@ func SetupGitHub(stateDir string, g GitHubConfig) error {
 		return err
 	}
 	g.Repos = slices.Clone(g.Repos)
+	g.ReceiveAll = slices.Clone(g.ReceiveAll)
 	if g.IntervalSeconds == 0 {
 		g.IntervalSeconds = DefaultIntervalSeconds
 	}

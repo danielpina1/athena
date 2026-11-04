@@ -64,10 +64,13 @@ func (c *command) githubSetup(args []string) int {
 	interval := c.fs.Int("interval", 0, "seconds between polls of every repository (default 30)")
 	var repos repoList
 	c.fs.Var(&repos, "repo", "a repository (owner/name) to work in; repeat for more")
+	var receiveAll repoList
+	c.fs.Var(&receiveAll, "receive-all", "a configured repository that receives every message, not only mentions; repeat for more")
 	if _, code, ok := c.parse(args, 0, 0); !ok {
 		return code
 	}
-	g := server.GitHubConfig{AppID: *appID, Slug: *slug, KeyFile: *key, InstallationID: *inst, Repos: repos, IntervalSeconds: *interval}
+	g := server.GitHubConfig{AppID: *appID, Slug: *slug, KeyFile: *key, InstallationID: *inst, Repos: repos, IntervalSeconds: *interval,
+		ReceiveAll: receiveAll}
 	if err := server.SetupGitHub(c.stateDir, g); err != nil {
 		return c.fail(err)
 	}

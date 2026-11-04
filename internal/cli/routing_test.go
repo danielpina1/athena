@@ -50,7 +50,7 @@ func TestGithubSetupAndCheckCommands(t *testing.T) {
 	}
 	key := keyFile(t, 0o600)
 	code, out, errOut := athena(ctx, "github", "setup", "--state-dir", dir, "--app-id", "12", "--slug", "athena-bot", "--key", key,
-		"--installation", "777", "--repo", "o/r", "--repo", "o/s,o/t")
+		"--installation", "777", "--repo", "o/r", "--repo", "o/s,o/t", "--receive-all", "o/s")
 	if code != 0 || !strings.Contains(out, "repositories o/r, o/s, o/t") {
 		t.Fatalf("setup: %d %q %q", code, out, errOut)
 	}
@@ -59,7 +59,8 @@ func TestGithubSetupAndCheckCommands(t *testing.T) {
 		t.Fatal(err)
 	}
 	if g := cfg.GitHub; g == nil || g.AppID != 12 || g.Slug != "athena-bot" || g.KeyFile != key || g.InstallationID != 777 ||
-		strings.Join(g.Repos, ",") != "o/r,o/s,o/t" || g.IntervalSeconds != 30 || cfg.Router.Model != "haiku" || cfg.EvalTimeoutSeconds != 600 {
+		strings.Join(g.Repos, ",") != "o/r,o/s,o/t" || strings.Join(g.ReceiveAll, ",") != "o/s" || g.IntervalSeconds != 30 ||
+		cfg.Router.Model != "haiku" || cfg.EvalTimeoutSeconds != 600 {
 		t.Fatalf("config = %+v %+v", cfg, cfg.GitHub)
 	}
 	raw, err := os.ReadFile(filepath.Join(dir, server.ConfigFile))
@@ -74,6 +75,10 @@ func TestGithubSetupAndCheckCommands(t *testing.T) {
 	if code, _, errOut := athena(ctx, "github", "setup", "--state-dir", dir, "--app-id", "12", "--slug", "x", "--key", key,
 		"--installation", "777", "--repo", "not-a-repo"); code != 1 || !strings.Contains(errOut, "not owner/name") {
 		t.Fatalf("setup with a bad repo: %d %q", code, errOut)
+	}
+	if code, _, errOut := athena(ctx, "github", "setup", "--state-dir", dir, "--app-id", "12", "--slug", "x", "--key", key,
+		"--installation", "777", "--repo", "o/r", "--receive-all", "o/s"); code != 1 || !strings.Contains(errOut, "not one of repos") {
+		t.Fatalf("setup receiving all of an unconfigured repo: %d %q", code, errOut)
 	}
 }
 
