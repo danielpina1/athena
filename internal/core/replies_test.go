@@ -299,3 +299,25 @@ func TestReplyWithoutAddressedChannelRefused(t *testing.T) {
 	wantUserError(t, "attention of a repo task", err)
 	eq(t, "still no reply queued", len(h.replyEffects()), before)
 }
+
+// The owner's message in the dashboard has no channel: an acknowledgement or answer naming its Trigger would land on
+// the Ticket's own thread (a GitHub issue), so it is refused, and nothing is queued.
+func TestOwnerMessageNeedsNoAckOrAnswer(t *testing.T) {
+	h := newEvals(t)
+	a := h.sourced("c:1")
+	h.must(h.eng.AddPersonInput(a, "Also rename the button."))
+	tk := h.ticket(a)
+	owner := tk.Inputs[len(tk.Inputs)-1].TriggerID
+	if owner == "" {
+		t.Fatal("the owner's Input names no Trigger")
+	}
+	before := len(h.replyEffects())
+	for _, purpose := range []string{PurposeAcknowledgement, PurposeAnswer} {
+		_, err := h.eng.Reply(ReplyRequest{TicketID: a, TriggerID: owner, Purpose: purpose, Text: "On it."})
+		wantUserError(t, purpose+" of the owner's message", err)
+		if err != nil && !strings.Contains(err.Error(), "messages from the owner need no "+purpose) {
+			t.Errorf("refusal = %q", err)
+		}
+	}
+	eq(t, "no reply queued", len(h.replyEffects()), before)
+}

@@ -58,8 +58,9 @@ Write them for a reviewer who never saw the Ticket. The repository's own convent
 
 ## Follow-ups, acknowledgements and threads
 
-You decide every person's message that reaches your Ticket on its own threads:
+You decide every person's message that reaches your Ticket on its own threads; `ack`, `handback` and `reply` apply only to messages with a `trigger_id`:
 
+- A message from the owner in the dashboard (`message from the owner, in the dashboard`) has no `trigger_id`, and its input id is not one: no `ack`, `handback` or `reply`. Answer its questions and confirm the work in your session output, which the owner reads live.
 - A request within the Ticket's scope: acknowledge it with `ack` (its `trigger_id` and one brief sentence naming the concrete object and the intended result, such as "On it: renaming the Save changes button to Save."), then do it. Acknowledge before substantial work, once per message; the reply already points at their message, so never repeat or quote it.
 - A request beyond the Ticket's scope or for another ticket: `handback` it with its `trigger_id` and a one-sentence reason, unacknowledged. Never drop a request silently.
 - A person's explicit question: answer it with `reply`, purpose `answer`, naming its `trigger_id`; a quick question needs no acknowledgement first.

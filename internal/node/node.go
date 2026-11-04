@@ -1484,10 +1484,11 @@ func renderInputs(t core.Ticket, ids []string, trigger func(id string) (core.Tri
 					continue
 				}
 			}
-			// Only the owner's own Inputs say so: a Trigger of the owner Source, or a person Input without a Trigger.
+			// Only the owner's own Inputs say so: a Trigger of the owner Source, or a person Input without a Trigger. They
+			// carry no trigger_id: the owner reads the session in the dashboard, and nothing is acknowledged or answered.
 			from := "message"
 			if in.Human && (in.TriggerID == "" || (found && tr.Source == core.OwnerActor.Source)) {
-				from = "message from the owner"
+				from = "message from the owner, in the dashboard"
 			}
 			fmt.Fprintf(&b, "[input %s: %s]\n%s\n\n", in.ID, from, in.Text)
 		}
