@@ -2,7 +2,11 @@ import { cleanup } from "@testing-library/react";
 import { afterEach } from "vitest";
 
 // Testing Library only cleans up on its own when test globals are on; they are off here.
-afterEach(cleanup);
+afterEach(async () => {
+  cleanup();
+  // Imported late, so a test's mock of the commands is already in place when the module loads.
+  (await import("@/lib/commands/useWatch")).__resetWatchesForTest();
+});
 
 // jsdom has <dialog> but not its methods: enough of showModal/close for components that use them.
 if (typeof HTMLDialogElement !== "undefined" && !HTMLDialogElement.prototype.showModal) {

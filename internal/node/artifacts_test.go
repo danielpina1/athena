@@ -403,3 +403,17 @@ func TestTicketFilesDirectoryQueueCapped(t *testing.T) {
 		t.Fatalf("err=%v truncated=%v files=%d", err, truncated, len(files))
 	}
 }
+
+func TestTicketDiffNonASCIINamesAreNotQuoted(t *testing.T) {
+	n, wt := diffNode(t)
+	writeFile(t, filepath.Join(wt, "café.txt"), "x\n")
+	git(t, wt, "add", "-A")
+	git(t, wt, "commit", "-q", "-m", "accent")
+	d, err := n.TicketDiff(context.Background(), "T-0001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(d.Patch, "diff --git a/café.txt b/café.txt") || strings.Contains(d.Patch, `\303`) {
+		t.Fatalf("patch = %q", d.Patch)
+	}
+}

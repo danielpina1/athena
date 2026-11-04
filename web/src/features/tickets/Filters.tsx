@@ -1,5 +1,6 @@
 // The Ticket list's filters, kept in the URL (?stage=working&repo=acme%2Fapi&model=opus&q=text) so a filtered list can
 // be shared, reloaded and returned to with the back link. Other parameters (the detail's `tab`) are left alone.
+import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router";
 import type { RepoView } from "@/gen/athena/v1/state_pb";
 import type { TicketFilter } from "@/lib/store/selectors";
@@ -45,28 +46,83 @@ export function hasFilters(sp: URLSearchParams): boolean {
   return KEYS.some((k) => sp.get(k));
 }
 
-export function useFilterParams() {
+export type FilterParams = {
+  sp: URLSearchParams;
+  /** Bumps when the URL changed from outside (back/forward, a link): local copies of it re-seed. */
+  external: number;
+  set(key: (typeof KEYS)[number], value: string): void;
+  clear(): void;
+  /** The search text as last written or read: newer than `sp` while a write is still in its transition. */
+  query(): string;
+};
+
+/**
+ * The filters' parameters. react-router applies a URL change in a transition, so the `sp` of one render can be older
+ * than a write already made: each write is built from the latest params written (a ref), never from the render's, so
+ * two changes before a commit both survive. A change that is not one of our own writes re-reads the URL.
+ */
+export function useFilterParams(): FilterParams {
   const [sp, setSp] = useSearchParams();
-  const set = (key: (typeof KEYS)[number], value: string) =>
-    setSp(
-      (prev) => {
-        const next = new URLSearchParams(prev);
-        if (value) next.set(key, value);
-        else next.delete(key);
-        return next;
-      },
-      { replace: true },
-    );
-  const clear = () =>
-    setSp(
-      (prev) => {
-        const next = new URLSearchParams(prev);
-        for (const k of KEYS) next.delete(k);
-        return next;
-      },
-      { replace: true },
-    );
-  return { sp, set, clear };
+  const routerKey = sp.toString();
+  const latest = useRef(new URLSearchParams(routerKey));
+  /** Our writes the router has not committed yet, oldest first. */
+  const pending = useRef<string[]>([]);
+  const [external, setExternal] = useState(0);
+
+  useEffect(() => {
+    const i = pending.current.indexOf(routerKey);
+    if (i >= 0) {
+      pending.current.splice(0, i + 1);
+      return;
+    }
+    if (pending.current.length === 0 && routerKey === latest.current.toString()) return;
+    pending.current = [];
+    latest.current = new URLSearchParams(routerKey);
+    setExternal((n) => n + 1);
+  }, [routerKey]);
+
+  const write = (next: URLSearchParams) => {
+    if (next.toString() === latest.current.toString()) return;
+    latest.current = next;
+    pending.current.push(next.toString());
+    setSp(next, { replace: true });
+  };
+  return {
+    sp,
+    external,
+    set(key, value) {
+      const next = new URLSearchParams(latest.current);
+      if (value) next.set(key, value);
+      else next.delete(key);
+      write(next);
+    },
+    query: () => latest.current.get("q") ?? "",
+    clear() {
+      const next = new URLSearchParams(latest.current);
+      for (const k of KEYS) next.delete(k);
+      write(next);
+      setExternal((n) => n + 1); // the search box shows the cleared text
+    },
+  };
+}
+
+/** The search box keeps its text itself: a text field cannot be driven by a router transition (the caret would jump). */
+function SearchBox({ params, inputRef }: { params: FilterParams; inputRef?: React.Ref<HTMLInputElement> }) {
+  const [q, setQ] = useState(() => params.query());
+  return (
+    <Input
+      ref={inputRef}
+      type="search"
+      aria-label="Search Tickets"
+      placeholder="Search by title or id"
+      autoComplete="off"
+      value={q}
+      onChange={(e) => {
+        setQ(e.target.value);
+        params.set("q", e.target.value);
+      }}
+    />
+  );
 }
 
 /** Options for a select: the known values, and the one the URL names even when it is not among them. */
@@ -75,15 +131,17 @@ function withCurrent(values: readonly string[], current: string | null): string[
 }
 
 export function Filters({
+  params,
   repos,
   models,
   searchRef,
 }: {
+  params: FilterParams;
   repos: readonly RepoView[];
   models: readonly string[];
   searchRef?: React.Ref<HTMLInputElement>;
 }) {
-  const { sp, set } = useFilterParams();
+  const { sp, set } = params;
   const stage = STAGES.find((s) => s.param === sp.get("stage"))?.param ?? "";
   return (
     <div className="grid gap-2">
@@ -121,15 +179,7 @@ export function Filters({
           ))}
         </Select>
       </div>
-      <Input
-        ref={searchRef}
-        type="search"
-        aria-label="Search Tickets"
-        placeholder="Search by title or id"
-        autoComplete="off"
-        value={sp.get("q") ?? ""}
-        onChange={(e) => set("q", e.target.value)}
-      />
+      <SearchBox key={params.external} params={params} inputRef={searchRef} />
     </div>
   );
 }

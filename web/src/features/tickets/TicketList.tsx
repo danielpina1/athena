@@ -51,7 +51,8 @@ function Row({ ticket, selected, needsYou, search }: { ticket: TicketSummary; se
 }
 
 export function TicketList({ selectedId }: { selectedId?: string }) {
-  const { sp, clear } = useFilterParams();
+  const params = useFilterParams();
+  const { sp, clear } = params;
   const filter = readFilters(sp);
   const tickets = useAthena((s) => s.tickets);
   const repos = useAthena((s) => s.repos);
@@ -87,7 +88,7 @@ export function TicketList({ selectedId }: { selectedId?: string }) {
           <h1 className="text-xl font-semibold">Tickets</h1>
           <Mono>{`${rows.length} ${rows.length === 1 ? "Ticket" : "Tickets"}`}</Mono>
         </div>
-        <Filters repos={repos} models={models} searchRef={search} />
+        <Filters params={params} repos={repos} models={models} searchRef={search} />
       </div>
       {total === 0 ? (
         <div className="px-4">

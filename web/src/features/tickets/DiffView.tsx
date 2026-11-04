@@ -156,7 +156,7 @@ function Changes({ diff }: { diff: Diff }) {
         </p>
       )}
       <div className="grid gap-1">
-        <Mono className="break-all">{`${diff.branch} against ${diff.base.slice(0, 7)}`}</Mono>
+        <Mono className="break-all">{diff.base ? `${diff.branch} against ${diff.base.slice(0, 7)}` : diff.branch}</Mono>
         <Mono tone="default">{`${diff.files.length} ${diff.files.length === 1 ? "file" : "files"}, +${added} −${deleted}`}</Mono>
       </div>
       <ul aria-label="Changed files" className="grid min-w-0 border-t border-line-soft">

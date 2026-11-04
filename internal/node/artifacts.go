@@ -117,7 +117,7 @@ func runDiffGit(ctx context.Context, dir string, env []string, limit int, args .
 //   - GIT_NO_REPLACE_OBJECTS and an empty graft file, so refs/replace/* and info/grafts cannot change what the owner
 //     reads in the diff or where its base is.
 func diffEnv() []string {
-	env := withGitConfig(nodeGitBaseEnv(), append(slices.Clone(noHooks), [][2]string{{"protocol.allow", "never"}, {"credential.helper", ""}, {"advice.graftFileDeprecated", "false"}}...))
+	env := withGitConfig(nodeGitBaseEnv(), append(slices.Clone(noHooks), [][2]string{{"protocol.allow", "never"}, {"credential.helper", ""}, {"advice.graftFileDeprecated", "false"}, {"core.quotePath", "false"}}...))
 	return append(env, "GIT_NO_LAZY_FETCH=1", "GIT_NO_REPLACE_OBJECTS=1", "GIT_GRAFT_FILE="+os.DevNull)
 }
 

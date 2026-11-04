@@ -1,10 +1,11 @@
-import { render, screen, within } from "@testing-library/react";
+import { act, render, renderHook, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter } from "react-router";
+import { MemoryRouter, useNavigate } from "react-router";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { Where } from "@/app/testkit";
 import { useAthena } from "@/lib/store/state";
 import { at, hasClasses, load } from "./fixtures";
+import { useFilterParams } from "./Filters";
 import { TicketList } from "./TicketList";
 
 beforeEach(() => {
@@ -116,4 +117,44 @@ test("a long title stays on one line", () => {
   const title = screen.getByText("x".repeat(2000));
   expect(hasClasses(title, "truncate")).toBe(true);
   expect((title).getAttribute("dir")).toBe("auto");
+});
+
+test("two filter changes before a re-render both land", () => {
+  const { result } = renderHook(() => useFilterParams(), { wrapper: ({ children }) => <MemoryRouter initialEntries={["/tickets?tab=changes"]}>{children}</MemoryRouter> });
+  act(() => {
+    result.current.set("stage", "working");
+    result.current.set("model", "opus");
+    result.current.set("q", "api");
+  });
+  expect(Object.fromEntries(result.current.sp)).toEqual({ tab: "changes", stage: "working", model: "opus", q: "api" });
+});
+
+test("typing in the middle of the search keeps the text and the caret", async () => {
+  const user = userEvent.setup();
+  renderList();
+  const box = screen.getByRole("searchbox", { name: "Search Tickets" }) as HTMLInputElement;
+  await user.type(box, "abcd");
+  box.setSelectionRange(2, 2);
+  await user.keyboard("X");
+  expect(box.value).toBe("abXcd");
+  expect(box.selectionStart).toBe(3);
+  expect(screen.getByTestId("where").textContent).toContain("q=abXcd");
+});
+
+test("the search box follows a change of the URL from outside", async () => {
+  const user = userEvent.setup();
+  function Jump() {
+    const navigate = useNavigate();
+    return <button onClick={() => navigate("/tickets?q=zebra")}>jump</button>;
+  }
+  render(
+    <MemoryRouter initialEntries={["/tickets?q=old"]}>
+      <TicketList />
+      <Jump />
+    </MemoryRouter>,
+  );
+  const box = () => screen.getByRole("searchbox", { name: "Search Tickets" }) as HTMLInputElement;
+  expect(box().value).toBe("old");
+  await user.click(screen.getByRole("button", { name: "jump" }));
+  expect(box().value).toBe("zebra");
 });

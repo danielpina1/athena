@@ -101,3 +101,13 @@ export function useWatch(ticketId: string): Watch {
     },
   };
 }
+
+/** Test only: forgets every count, watch and pending unwatch, so one test's Tickets cannot leak into the next. */
+export function __resetWatchesForTest(): void {
+  for (const t of releasing.values()) clearTimeout(t);
+  releasing.clear();
+  users.clear();
+  watching.clear();
+  lost = new Set();
+  for (const l of listeners) l();
+}

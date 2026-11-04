@@ -5,11 +5,54 @@ export type DiffLineKind = "hunk" | "add" | "del" | "ctx" | "note";
 export type DiffLine = { kind: DiffLineKind; /** The line without its marker. */ text: string };
 export type FileSection = { path: string; binary: boolean; lines: DiffLine[] };
 
-const HEADER = /^diff --git a\/(.+) b\/(.+)$/;
+const ESC: Record<string, number> = { a: 7, b: 8, f: 12, n: 10, r: 13, t: 9, v: 11, "\\": 92, '"': 34 };
+
+/**
+ * A path as git writes it: bare, or C-quoted ("a/caf\303\251.txt": octal bytes of the UTF-8 name, and \t \n \" \\
+ * for the rest). The quotes and escapes are decoded; a bare path is returned as it is.
+ */
+export function unquotePath(raw: string): string {
+  if (raw.length < 2 || !raw.startsWith('"') || !raw.endsWith('"')) return raw;
+  const bytes: number[] = [];
+  const enc = new TextEncoder();
+  const body = raw.slice(1, -1);
+  for (let i = 0; i < body.length; i++) {
+    const c = body[i];
+    if (c !== "\\") {
+      bytes.push(...enc.encode(c));
+      continue;
+    }
+    const oct = /^[0-7]{1,3}/.exec(body.slice(i + 1));
+    if (oct) {
+      bytes.push(parseInt(oct[0], 8) & 255);
+      i += oct[0].length;
+    } else if (body[i + 1] in ESC) {
+      bytes.push(ESC[body[i + 1]]);
+      i++;
+    } else {
+      bytes.push(92);
+    }
+  }
+  return new TextDecoder().decode(new Uint8Array(bytes));
+}
+
+const dropPrefix = (path: string, prefix: "a/" | "b/") => (path.startsWith(prefix) ? path.slice(2) : path);
+
+const Q = String.raw`"(?:[^"\\]|\\.)*"`;
+const HEADERS = [
+  new RegExp(`^(${Q}) (${Q})$`),
+  new RegExp(`^(a/.+) (${Q})$`),
+  new RegExp(`^(${Q}) (b/.+)$`),
+  /^(a\/.+) (b\/.+)$/,
+];
 
 function section(header: string): FileSection {
-  const m = HEADER.exec(header);
-  return { path: m?.[2] ?? "", binary: false, lines: [] };
+  const rest = header.slice("diff --git ".length);
+  for (const re of HEADERS) {
+    const m = re.exec(rest);
+    if (m) return { path: dropPrefix(unquotePath(m[2]), "b/"), binary: false, lines: [] };
+  }
+  return { path: "", binary: false, lines: [] };
 }
 
 /** The patch's files in order. Escapes are stripped, so no line can carry a terminal sequence. */
@@ -32,11 +75,11 @@ export function parsePatch(patch: string): FileSection[] {
         inHunk = true;
         cur.lines.push({ kind: "hunk", text: line });
       } else if (line.startsWith("rename to ")) {
-        cur.path = line.slice("rename to ".length);
-      } else if (line.startsWith("+++ b/")) {
-        cur.path = line.slice("+++ b/".length);
-      } else if (line.startsWith("--- a/") && cur.path === "") {
-        cur.path = line.slice("--- a/".length);
+        cur.path = unquotePath(line.slice("rename to ".length));
+      } else if (line.startsWith("+++ ") && line !== "+++ /dev/null") {
+        cur.path = dropPrefix(unquotePath(line.slice(4)), "b/");
+      } else if (line.startsWith("--- ") && line !== "--- /dev/null" && cur.path === "") {
+        cur.path = dropPrefix(unquotePath(line.slice(4)), "a/");
       } else if (line.startsWith("Binary files ") || line.startsWith("GIT binary patch")) {
         cur.binary = true;
       }

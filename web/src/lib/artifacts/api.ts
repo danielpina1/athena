@@ -76,7 +76,9 @@ export function useArtifact<T>(path: string): Artifact<T> {
   useEffect(() => {
     const ctl = new AbortController();
     getJson<T>(path, ctl.signal).then(
-      (data) => setState({ path, run: current.run, result: { data } }),
+      (data) => {
+        if (!ctl.signal.aborted) setState({ path, run: current.run, result: { data } });
+      },
       (e: unknown) => {
         if (ctl.signal.aborted) return;
         setState({ path, run: current.run, result: { error: e instanceof ArtifactError ? e : new ArtifactError("internal") } });
