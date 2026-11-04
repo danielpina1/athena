@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -68,7 +70,9 @@ type subscriber struct {
 	held    []Line
 	// dropFrom is the offset of the first line lost since the subscriber's channel last had room, or -1.
 	dropFrom int64
-	once     sync.Once
+	// floor is the lowest offset still to deliver: lines the backfill covered, or before from, are not sent again.
+	floor int64
+	once  sync.Once
 }
 
 // validStreamID reports whether id can name a Ticket's stream: it ends up in a file name.
@@ -118,6 +122,9 @@ func (h *streamHub) ringLocked(id string) *ring {
 // deliver offers l to the subscriber without blocking. A subscriber whose channel is full loses the line and is
 // told where the loss began, ahead of the next line it has room for.
 func (s *subscriber) deliver(l Line) {
+	if !s.holding && l.Offset < s.floor {
+		return
+	}
 	switch {
 	case s.holding:
 		if len(s.held) < subscriberBuffer {
@@ -224,8 +231,12 @@ func (n *Node) Subscribe(ticketID string, from int64) (backfill []Line, live <-c
 	}
 	h.mu.Lock()
 	s.holding = false
+	s.floor = max(from, 0)
+	if last >= 0 {
+		s.floor = last + 1
+	}
 	for _, l := range s.held {
-		if l.Offset > last { // a line the file read saw already is in the backfill
+		if l.Offset >= s.floor { // a line the file read saw already is in the backfill
 			s.ch <- l // at most subscriberBuffer held, an empty channel
 		}
 	}
@@ -255,7 +266,7 @@ func (n *Node) backfill(ticketID string, from int64, ring []Line) ([]Line, error
 		} else if size > tailScanBytes {
 			start = size - tailScanBytes
 		}
-		older, _, err := readLines(path, start, until, TailLines-len(ring), ringMaxBytes)
+		older, _, err := readLines(n.log, path, start, until, TailLines-len(ring), ringMaxBytes)
 		if err != nil {
 			return nil, err
 		}
@@ -269,7 +280,7 @@ func (n *Node) backfill(ticketID string, from int64, ring []Line) ([]Line, error
 	if path != "" {
 		var gap *Line
 		var err error
-		if older, gap, err = readLines(path, from, until, ringMaxLines, ringMaxBytes); err != nil {
+		if older, gap, err = readLines(n.log, path, from, until, ringMaxLines, ringMaxBytes); err != nil {
 			return nil, err
 		}
 		if gap != nil {
@@ -310,7 +321,7 @@ func fileSize(path string, until int64) (int64, error) {
 // the end), keeping at most the last maxLines of them and maxBytes of their data. When it had to drop earlier ones,
 // gap says what was left out, from the first line it read to the first it kept. A from inside a line begins at the
 // next line; a missing file has no lines.
-func readLines(path string, from, until int64, maxLines, maxBytes int) (lines []Line, gap *Line, err error) {
+func readLines(log *slog.Logger, path string, from, until int64, maxLines, maxBytes int) (lines []Line, gap *Line, err error) {
 	f, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil, nil
@@ -330,6 +341,9 @@ func readLines(path string, from, until int64, maxLines, maxBytes int) (lines []
 	if from > 0 {
 		skipped, err := skipLine(r)
 		if err != nil {
+			if err != io.EOF {
+				logReadError(log, path, err)
+			}
 			return nil, nil, nil
 		}
 		pos += skipped
@@ -338,6 +352,9 @@ func readLines(path string, from, until int64, maxLines, maxBytes int) (lines []
 	var size int
 	for until < 0 || pos < until {
 		data, n, complete, err := readLine(r)
+		if err != nil {
+			logReadError(log, path, err)
+		}
 		if err != nil || !complete {
 			break // the end, or a line still being written
 		}
@@ -357,6 +374,13 @@ func readLines(path string, from, until int64, maxLines, maxBytes int) (lines []
 		gap = &Line{Offset: first, GapTo: lines[0].Offset}
 	}
 	return slices.Clone(lines), gap, nil
+}
+
+func logReadError(log *slog.Logger, path string, err error) {
+	if log == nil {
+		log = slog.Default()
+	}
+	log.Warn("node: transcript read stopped", "path", filepath.Base(path), "error", err)
 }
 
 // skipLine reads through the next newline and returns how many bytes that took.

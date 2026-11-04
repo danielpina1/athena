@@ -581,23 +581,52 @@ func TestOlderDetailNeverFollowsNewer(t *testing.T) {
 	}
 }
 
-// fakeStreams is a Streams whose live feed the test drives.
+// fakeStreams is a Streams with the node's semantics over lines the test pushes: a history per Ticket, from = -1 the
+// last 200 lines, and a fresh live channel per Subscribe.
 type fakeStreams struct {
-	mu       sync.Mutex
-	backfill []node.Line
-	live     chan node.Line
-	from     int64
-	opened   int
-	cancels  int
+	mu      sync.Mutex
+	history map[string][]node.Line
+	live    map[string]chan node.Line
+	opened  int
+	cancels int
+	from    int64
 }
 
-func newFakeStreams() *fakeStreams { return &fakeStreams{live: make(chan node.Line, 1024)} }
+func newFakeStreams() *fakeStreams {
+	return &fakeStreams{history: map[string][]node.Line{}, live: map[string]chan node.Line{}}
+}
 
-func (f *fakeStreams) Subscribe(_ string, from int64) ([]node.Line, <-chan node.Line, func(), error) {
+func (f *fakeStreams) Subscribe(id string, from int64) ([]node.Line, <-chan node.Line, func(), error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.from, f.opened = from, f.opened+1
-	return f.backfill, f.live, func() { f.mu.Lock(); f.cancels++; f.mu.Unlock() }, nil
+	var back []node.Line
+	h := f.history[id]
+	if from < 0 {
+		back = append(back, h[max(0, len(h)-node.TailLines):]...)
+	} else {
+		for _, l := range h {
+			if l.Offset >= from {
+				back = append(back, l)
+			}
+		}
+	}
+	ch := make(chan node.Line, 512)
+	f.live[id] = ch
+	return back, ch, func() { f.mu.Lock(); f.cancels++; f.mu.Unlock() }, nil
+}
+
+// push appends a line to a Ticket's history and offers it to its current subscriber.
+func (f *fakeStreams) push(id string, l node.Line) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.history[id] = append(f.history[id], l)
+	if ch := f.live[id]; ch != nil {
+		select {
+		case ch <- l:
+		default:
+		}
+	}
 }
 
 func (f *fakeStreams) state() (opened, cancels int, from int64) {
@@ -632,28 +661,39 @@ func (c *wsClient) items(n int) (texts []string, offs []int64) {
 	return texts, offs
 }
 
-// quiet fails when a stream frame arrives within d.
+// quiet fails when a stream frame arrives within d; with count set it returns how many items did instead.
 func (c *wsClient) quiet(d time.Duration) {
 	c.t.Helper()
+	if n := c.countItems(d); n != 0 {
+		c.t.Fatalf("%d unexpected stream items", n)
+	}
+}
+
+func (c *wsClient) countItems(d time.Duration) int {
 	deadline := time.After(d)
+	n := 0
 	for {
 		select {
 		case f := <-c.frames:
-			if f.GetStreamItems() != nil || f.GetStreamGap() != nil {
-				c.t.Fatalf("unexpected stream frame: %v", f)
+			if f.GetStreamItems() != nil {
+				n += len(f.GetStreamItems().GetItems())
+			} else {
+				c.backlog = append(c.backlog, f)
 			}
-			c.backlog = append(c.backlog, f)
 		case <-deadline:
-			return
+			return n
 		}
 	}
 }
 
-func streamConn(t *testing.T) (*connEnv, *fakeStreams, *wsClient) {
+// streamConn connects a client to a Dashboard whose connections start with credit initial.
+func streamConn(t *testing.T, initial uint64, tickets ...string) (*connEnv, *fakeStreams, *wsClient) {
 	t.Helper()
 	fs := newFakeStreams()
-	e := newConnEnv(t, func(d *Dashboard) { d.streams = fs })
-	e.src.put(ticketAt("T-0001", time.Date(2026, 11, 4, 9, 0, 0, 0, time.UTC)))
+	e := newConnEnv(t, func(d *Dashboard) { d.streams, d.streamCredit = fs, initial })
+	for _, id := range tickets {
+		e.src.put(ticketAt(id, time.Date(2026, 11, 4, 9, 0, 0, 0, time.UTC)))
+	}
 	c := e.connect(hello("phone"))
 	c.welcome()
 	c.snapshot()
@@ -661,14 +701,11 @@ func streamConn(t *testing.T) (*connEnv, *fakeStreams, *wsClient) {
 }
 
 func TestStreamOverConnWithCredit(t *testing.T) {
-	_, fs, c := streamConn(t)
-	if err := c.sess.Grant(athenav1.Channel_STREAM, 10); err != nil {
-		t.Fatal(err)
-	}
+	_, fs, c := streamConn(t, 10, "T-0001")
 	streamOpen(c, "T-0001", -1)
 	eventually(t, func() bool { o, _, _ := fs.state(); return o == 1 })
 	for i := 1; i <= 50; i++ {
-		fs.live <- say(i, fmt.Sprintf("line %d", i))
+		fs.push("T-0001", say(i, fmt.Sprintf("line %d", i)))
 	}
 	texts, offs := c.items(10)
 	for i, txt := range texts {
@@ -696,18 +733,74 @@ func TestStreamOverConnWithCredit(t *testing.T) {
 	if err := c.sess.Grant(athenav1.Channel_STREAM, 5); err != nil {
 		t.Fatal(err)
 	}
-	fs.live <- say(51, "line 51")
+	fs.push("T-0001", say(51, "line 51"))
 	if texts, _ := c.items(1); texts[0] != "line 51" {
 		t.Fatalf("live = %v", texts)
 	}
 }
 
-func TestStreamResumesFromOffsetAndRedacts(t *testing.T) {
-	_, fs, c := streamConn(t)
-	fs.backfill = []node.Line{say(7, "token=ghp_"+strings.Repeat("a1B2", 10)), say(8, "plain")}
-	if err := c.sess.Grant(athenav1.Channel_STREAM, 256); err != nil {
+// A grant that comes while lines keep arriving still gets the gap and the latest tail, never the oldest lines.
+func TestStreamGrantUnderHeavyOutputSkipsAhead(t *testing.T) {
+	_, fs, c := streamConn(t, 0, "T-0001")
+	streamOpen(c, "T-0001", -1)
+	eventually(t, func() bool { o, _, _ := fs.state(); return o == 1 })
+	for i := 1; i <= 100; i++ {
+		fs.push("T-0001", say(i, fmt.Sprintf("line %d", i)))
+	}
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 101; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+				fs.push("T-0001", say(i, fmt.Sprintf("line %d", i)))
+				time.Sleep(100 * time.Microsecond)
+			}
+		}
+	}()
+	time.Sleep(50 * time.Millisecond)
+	if err := c.sess.Grant(athenav1.Channel_STREAM, 20); err != nil {
 		t.Fatal(err)
 	}
+	gap := c.next("gap", func(f *athenav1.Frame) bool { return f.GetStreamGap() != nil }).GetStreamGap()
+	_, offs := c.items(1)
+	close(stop)
+	<-done
+	if gap.GetFrom() != 100 || gap.GetTo() <= 100*100 || offs[0] != gap.GetTo() {
+		t.Fatalf("gap %v then first item at %d: the oldest lines were sent", gap, offs[0])
+	}
+}
+
+// Several streams share one credit: together they never send more than it covers.
+func TestStreamsShareCreditWithoutOverspending(t *testing.T) {
+	ids := []string{"T-0001", "T-0002", "T-0003", "T-0004"}
+	_, fs, c := streamConn(t, 0, ids...)
+	for _, id := range ids {
+		for i := 1; i <= 100; i++ {
+			fs.push(id, say(i, "x"))
+		}
+		streamOpen(c, id, 0)
+	}
+	eventually(t, func() bool { o, _, _ := fs.state(); return o == len(ids) })
+	if n := c.countItems(200 * time.Millisecond); n != 0 {
+		t.Fatalf("%d items without credit", n)
+	}
+	if err := c.sess.Grant(athenav1.Channel_STREAM, 30); err != nil {
+		t.Fatal(err)
+	}
+	if n := c.countItems(500 * time.Millisecond); n > 30 {
+		t.Fatalf("%d items sent on a credit of 30", n)
+	}
+}
+
+func TestStreamResumesFromOffsetAndRedacts(t *testing.T) {
+	_, fs, c := streamConn(t, 256, "T-0001")
+	fs.push("T-0001", say(6, "before"))
+	fs.push("T-0001", say(7, "token=ghp_"+strings.Repeat("a1B2", 10)))
+	fs.push("T-0001", say(8, "plain"))
 	streamOpen(c, "T-0001", 700)
 	texts, offs := c.items(2)
 	if _, _, from := fs.state(); from != 700 || offs[0] != 700 || offs[1] != 800 {
@@ -719,7 +812,7 @@ func TestStreamResumesFromOffsetAndRedacts(t *testing.T) {
 }
 
 func TestStreamOpenErrorsAndClose(t *testing.T) {
-	_, fs, c := streamConn(t)
+	_, fs, c := streamConn(t, 100, "T-0001")
 	streamOpen(c, "T-9999", -1)
 	if f := c.next("error", func(f *athenav1.Frame) bool { return f.GetError() != nil }); f.GetError().GetCode() != CodeNotFound {
 		t.Fatalf("unknown ticket: %v", f.GetError())
@@ -732,23 +825,21 @@ func TestStreamOpenErrorsAndClose(t *testing.T) {
 		t.Fatalf("no ticket: %v", f.GetError())
 	}
 
-	if err := c.sess.Grant(athenav1.Channel_STREAM, 100); err != nil {
-		t.Fatal(err)
-	}
 	streamOpen(c, "T-0001", -1)
-	fs.live <- say(1, "one")
+	eventually(t, func() bool { o, _, _ := fs.state(); return o == 1 })
+	fs.push("T-0001", say(1, "one"))
 	c.items(1)
 	if err := c.sess.Send(athenav1.Channel_CONTROL, false, &athenav1.Frame{Body: &athenav1.Frame_StreamClose{
 		StreamClose: &athenav1.StreamClose{TicketId: "T-0001"}}}); err != nil {
 		t.Fatal(err)
 	}
 	eventually(t, func() bool { _, n, _ := fs.state(); return n == 1 })
-	fs.live <- say(2, "two")
+	fs.push("T-0001", say(2, "two"))
 	c.quiet(200 * time.Millisecond)
 }
 
 func TestStreamsStopWhenConnectionEnds(t *testing.T) {
-	_, fs, c := streamConn(t)
+	_, fs, c := streamConn(t, 256, "T-0001")
 	streamOpen(c, "T-0001", -1)
 	eventually(t, func() bool { o, _, _ := fs.state(); return o == 1 })
 	c.close()

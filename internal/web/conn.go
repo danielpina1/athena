@@ -92,8 +92,10 @@ type Dashboard struct {
 	hub     *hub.Hub
 	cmd     Commander
 	streams Streams
-	log     *slog.Logger
-	version string
+	// streamCredit is the STREAM credit a connection starts with, before any grant.
+	streamCredit uint64
+	log          *slog.Logger
+	version      string
 	// helloTimeout, recheck and linkOpts are fixed at creation; tests shorten them. recheck is how often an open
 	// connection checks its session (a heartbeat).
 	helloTimeout time.Duration
@@ -111,7 +113,7 @@ func NewDashboard(cfg DashboardConfig) *Dashboard {
 		log = slog.Default()
 	}
 	d := &Dashboard{auth: cfg.Auth, hub: cfg.Hub, cmd: cfg.Commander, streams: cfg.Streams, log: log, version: cfg.Version,
-		helloTimeout: HelloTimeout, recheck: heartbeat, conns: map[string]map[*conn]struct{}{}}
+		streamCredit: InitialStreamCredit, helloTimeout: HelloTimeout, recheck: heartbeat, conns: map[string]map[*conn]struct{}{}}
 	d.auth.OnRevoke(d.revoked)
 	return d
 }

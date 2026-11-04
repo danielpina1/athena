@@ -186,3 +186,16 @@ func TestItemsFixture(t *testing.T) {
 		}
 	}
 }
+
+// Secrets are masked before the cut, however many there are: no part of one survives where the text is cut.
+func TestRenderManySecretsNoFragment(t *testing.T) {
+	tok := "abcdefghijklmnopqrstuvwxyz0123456789ABCDEF"
+	text := strings.Repeat("API_TOKEN="+tok+" and plain words\n", 6000)
+	b, _ := json.Marshal(text)
+	line := []byte(`{"type":"assistant","message":{"content":[{"type":"text","text":` + string(b) + `}]}}`)
+	for _, it := range Items(line, 0) {
+		if strings.Contains(it.Text, "abcdefghij") || strings.Contains(it.Text, "API_TOKEN="+tok[:6]) || len(it.Text) > SayMaxBytes {
+			t.Fatalf("text keeps a secret fragment or is not capped (%d bytes)", len(it.Text))
+		}
+	}
+}

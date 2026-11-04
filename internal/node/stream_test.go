@@ -120,8 +120,8 @@ func TestSubscribeBackfillFromFileThenLive(t *testing.T) {
 	if got := nums(back4); got != "1 2 3 4 5 6 7" {
 		t.Fatalf("from inside line 0 = %s", got)
 	}
-	// Past the end: nothing, but live still works.
-	back5, live5, cancel5, _ := e.n.Subscribe("T-1", e.next+1000)
+	// At the end: nothing, but live still works.
+	back5, live5, cancel5, _ := e.n.Subscribe("T-1", e.next)
 	defer cancel5()
 	if len(back5) != 0 {
 		t.Fatalf("past the end = %s", nums(back5))
@@ -310,30 +310,59 @@ func eventually(t *testing.T, ok func() bool) {
 	t.Fatal("condition not reached")
 }
 
-// TestSessionLinesReachSubscribers: a launched session's lines arrive through Subscribe at the offsets the
-// transcript file has them.
+// TestSessionLinesReachSubscribers: a launched session's lines reach the ring through the OnLine wiring, at the
+// offsets the transcript file has them, and a subscriber's backfill is served from that ring.
 func TestSessionLinesReachSubscribers(t *testing.T) {
 	h := newHarness(t, nil)
 	tk := h.submit("Streamed task", "")
 	h.running(tk.ID)
 	tr := TranscriptPath(h.cfg.StateDir, tk.ID)
-	h.eventually("transcript written", func() bool {
+	ringLines := func() []Line {
+		h.n.streams.mu.Lock()
+		defer h.n.streams.mu.Unlock()
+		if r := h.n.streams.rings[tk.ID]; r != nil {
+			return append([]Line(nil), r.lines...)
+		}
+		return nil
+	}
+	h.eventually("ring has the transcript's lines", func() bool {
 		b, err := os.ReadFile(tr)
-		return err == nil && strings.Contains(string(b), fixtureSessionID)
+		return err == nil && strings.Contains(string(b), fixtureSessionID) && len(ringLines()) == strings.Count(string(b), "\n")
 	})
-	back, live, cancel, err := h.n.Subscribe(tk.ID, 0)
+	file, _ := os.ReadFile(tr)
+	ring := ringLines()
+	if len(ring) == 0 {
+		t.Fatal("the ring is empty: OnLine is not wired")
+	}
+	for _, l := range ring {
+		if end := int(l.Offset) + len(l.Data); end >= len(file) || string(file[l.Offset:end]) != string(l.Data) {
+			t.Fatalf("ring line at %d does not match the transcript", l.Offset)
+		}
+	}
+	back, _, cancel, err := h.n.Subscribe(tk.ID, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer cancel()
-	_ = live
-	file, _ := os.ReadFile(tr)
-	if len(back) == 0 {
-		t.Fatal("no backfill")
+	if len(back) < len(ring) || nums(back[len(back)-1:]) == "" {
+		t.Fatalf("backfill has %d lines, ring %d", len(back), len(ring))
 	}
-	for _, l := range back {
-		if end := int(l.Offset) + len(l.Data); end >= len(file) || string(file[l.Offset:end]) != string(l.Data) {
-			t.Fatalf("line at %d does not match the transcript", l.Offset)
-		}
+}
+
+// A line the backfill covered, or one before from, is not delivered live.
+func TestSubscriberFloorFiltersCoveredLines(t *testing.T) {
+	e := newStreamEnv(t)
+	e.file(t, 0, 3)
+	back, live, cancel, _ := e.n.Subscribe("T-1", 0)
+	defer cancel()
+	if len(back) != 3 {
+		t.Fatalf("backfill = %s", nums(back))
+	}
+	e.n.streams.add("T-1", back[2].Offset, back[2].Data) // OnLine of a line the file read saw already
+	off := e.next
+	e.file(t, 3, 1)
+	e.n.streams.add("T-1", off, []byte(body(3)))
+	if l := recv(t, live); string(l.Data) != body(3) {
+		t.Fatalf("live = %+v, want line 3 only", l)
 	}
 }

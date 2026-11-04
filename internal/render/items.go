@@ -149,25 +149,6 @@ func cut(s string, n int) string {
 	return s[:end] + ell
 }
 
-// redactCut masks the secrets in s, then cuts it to n bytes. A text far longer than n is first cut to 4n, which
-// keeps redaction cheap on the huge tool results and leaves the final cut, a quarter of the way in, clear of the
-// first cut; a cut text always ends in an ellipsis.
-func redactCut(s string, n int) string {
-	trimmed := len(s) > 4*n
-	if trimmed {
-		end := 4 * n
-		for end > 0 && !utf8.RuneStart(s[end]) {
-			end--
-		}
-		s = s[:end]
-	}
-	s = redact.String(s)
-	if !trimmed {
-		return cut(s, n)
-	}
-	s = cut(s, n-len("…"))
-	if !strings.HasSuffix(s, "…") {
-		s += "…"
-	}
-	return s
-}
+// redactCut masks the secrets in all of s, then cuts it to n bytes: a cut never leaves part of a secret. The cost is
+// bounded by the line cap of the stream (256 KiB).
+func redactCut(s string, n int) string { return cut(redact.String(s), n) }
