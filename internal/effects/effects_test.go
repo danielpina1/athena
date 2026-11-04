@@ -558,6 +558,21 @@ func TestDrainKeepsPendingRows(t *testing.T) {
 
 	drained := make(chan error, 1)
 	go func() { drained <- r.Drain(wait) }()
+	// Release only once Drain marked the Runner drained: a handler released earlier would let the loop start b, which
+	// then blocks on release until Drain times out.
+	deadline := time.Now().Add(wait)
+	for {
+		r.mu.Lock()
+		marked := r.drained
+		r.mu.Unlock()
+		if marked {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("Drain never marked the Runner drained")
+		}
+		time.Sleep(time.Millisecond)
+	}
 	release <- struct{}{} // the running handler finishes within the timeout
 	if err := recv(t, drained); err != nil {
 		t.Fatalf("Drain = %v, want nil", err)
