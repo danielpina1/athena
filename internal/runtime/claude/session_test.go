@@ -632,6 +632,61 @@ func TestTranscriptPathAppendsAcrossSessions(t *testing.T) {
 	}
 }
 
+// TestOnLineOffsetsMatchFile: OnLine gets each line with the byte offset it starts at in the transcript, also when
+// the file already held lines from an earlier session.
+func TestOnLineOffsetsMatchFile(t *testing.T) {
+	dir := t.TempDir()
+	tr := filepath.Join(t.TempDir(), "transcripts", "T-0001.jsonl")
+	for i := 0; i < 2; i++ {
+		type got struct {
+			off  int64
+			line string
+		}
+		var mu sync.Mutex
+		var seen []got
+		s, err := Start(context.Background(), withStubs(t, Options{
+			Binary:         fakeBinary(t),
+			Dir:            dir,
+			TranscriptPath: tr,
+			Env:            []string{"ATHENA_FAKE_FIXTURE=" + fixtureAbs(t, "simple-turn.jsonl")},
+			OnLine: func(off int64, line []byte) {
+				mu.Lock()
+				seen = append(seen, got{off, string(line)})
+				mu.Unlock()
+			},
+		}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Send("go"); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Close(); err != nil {
+			t.Fatal(err)
+		}
+		collect(t, s)
+		_ = s.Wait()
+		file, err := os.ReadFile(tr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		mu.Lock()
+		if len(seen) == 0 {
+			t.Fatal("OnLine was never called")
+		}
+		for _, g := range seen {
+			end := int(g.off) + len(g.line)
+			if int(g.off) > len(file) || end >= len(file) || string(file[g.off:end]) != g.line || file[end] != '\n' {
+				t.Fatalf("session %d: OnLine(%d, %.40q) does not match the file", i, g.off, g.line)
+			}
+		}
+		if i == 1 && seen[0].off == 0 {
+			t.Fatal("the second session's first offset is 0: it ignored what the file held")
+		}
+		mu.Unlock()
+	}
+}
+
 // TestChildEnvironmentIsAllowlisted: a worker session sees only the basic process variables, the locale, XDG,
 // Claude Code's and Anthropic's own variables (its credentials among them), Athena's variables without secret-looking
 // names, and Options.Env; never the server's other variables, such as its tokens and cloud keys.

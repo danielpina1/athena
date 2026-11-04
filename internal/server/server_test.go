@@ -21,6 +21,7 @@ import (
 
 	"github.com/danielpina1/athena/internal/core"
 	"github.com/danielpina1/athena/internal/node"
+	"github.com/danielpina1/athena/internal/render"
 	"github.com/danielpina1/athena/internal/store"
 )
 
@@ -392,7 +393,7 @@ func TestEndToEndWithFake(t *testing.T) {
 	}
 
 	// Logs: one rendered line per event of the transcript; never a raw line.
-	var lines []LogLine
+	var lines []render.LogLine
 	eventually(t, "transcript rendered", func() bool {
 		lines = s.logs(id, false)
 		return len(lines) > 0 && lines[len(lines)-1].Kind == "other"
@@ -409,7 +410,7 @@ func TestEndToEndWithFake(t *testing.T) {
 			t.Errorf("no %s line in %+v", k, lines)
 		}
 	}
-	if !slices.ContainsFunc(lines, func(l LogLine) bool { return l.Kind == "tool" && strings.HasPrefix(l.Text, "Write ") }) {
+	if !slices.ContainsFunc(lines, func(l render.LogLine) bool { return l.Kind == "tool" && strings.HasPrefix(l.Text, "Write ") }) {
 		t.Errorf("no Write tool line in %+v", lines)
 	}
 
@@ -437,7 +438,7 @@ func TestEndToEndWithFake(t *testing.T) {
 }
 
 // logs reads a logs stream to its end.
-func (s *testServer) logs(id string, follow bool) []LogLine {
+func (s *testServer) logs(id string, follow bool) []render.LogLine {
 	s.t.Helper()
 	conn, err := net.DialTimeout("unix", filepath.Join(s.stateDir, "athena.sock"), time.Second)
 	if err != nil {
@@ -447,13 +448,13 @@ func (s *testServer) logs(id string, follow bool) []LogLine {
 	if err := json.NewEncoder(conn).Encode(Request{Op: OpLogs, ID: id, Follow: follow}); err != nil {
 		s.t.Fatal(err)
 	}
-	var out []LogLine
+	var out []render.LogLine
 	sc := bufio.NewScanner(conn)
 	for sc.Scan() {
 		var r struct {
-			OK    bool    `json:"ok"`
-			Error string  `json:"error"`
-			Data  LogLine `json:"data"`
+			OK    bool           `json:"ok"`
+			Error string         `json:"error"`
+			Data  render.LogLine `json:"data"`
 		}
 		if err := json.Unmarshal(sc.Bytes(), &r); err != nil || !r.OK {
 			s.t.Fatalf("logs line %s: %v", sc.Bytes(), err)
@@ -470,7 +471,7 @@ func TestLogsFollowEndsWithTicket(t *testing.T) {
 	id := s.submit("Follow me")
 	a := s.running(id)
 
-	got := make(chan []LogLine, 1)
+	got := make(chan []render.LogLine, 1)
 	go func() { got <- s.logs(id, true) }()
 	// The stream stays open while the Ticket runs.
 	select {

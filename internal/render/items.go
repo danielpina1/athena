@@ -1,0 +1,173 @@
+package render
+
+import (
+	"encoding/json"
+	"fmt"
+	"strings"
+	"time"
+	"unicode/utf8"
+
+	"google.golang.org/protobuf/types/known/timestamppb"
+
+	"github.com/danielpina1/athena/internal/pb/athenav1"
+	"github.com/danielpina1/athena/internal/redact"
+)
+
+const (
+	// SayMaxBytes caps the text of a say or thinking item, ResultMaxBytes that of a tool result, and
+	// toolInputMaxRunes the shown input of a tool call.
+	SayMaxBytes       = 16 << 10
+	ResultMaxBytes    = 4 << 10
+	toolInputMaxRunes = 400
+)
+
+// Items renders one transcript line (without its newline), which starts at offset in the transcript file, into the
+// StreamItems a dashboard shows: one per content block, at least one. Every item carries the line's offset. Text is
+// redacted before it is cut, so a cut never leaves part of a secret. A nil line stands for one too big to keep.
+func Items(line []byte, offset int64) []*athenav1.StreamItem {
+	other := func(text string) []*athenav1.StreamItem {
+		return []*athenav1.StreamItem{{Offset: offset, Kind: "other", Text: text}}
+	}
+	if line == nil {
+		return other("line too large to show")
+	}
+	var l struct {
+		Type      string  `json:"type"`
+		Subtype   string  `json:"subtype"`
+		Timestamp string  `json:"timestamp"`
+		SessionID string  `json:"session_id"`
+		Model     string  `json:"model"`
+		IsError   bool    `json:"is_error"`
+		NumTurns  int     `json:"num_turns"`
+		CostUSD   float64 `json:"total_cost_usd"`
+		Result    string  `json:"result"`
+		Message   struct {
+			Content json.RawMessage `json:"content"`
+		} `json:"message"`
+	}
+	if json.Unmarshal(line, &l) != nil {
+		return other("unreadable transcript line")
+	}
+	var at *timestamppb.Timestamp
+	if t, err := time.Parse(time.RFC3339Nano, l.Timestamp); err == nil {
+		at = timestamppb.New(t)
+	}
+	var out []*athenav1.StreamItem
+	add := func(it *athenav1.StreamItem) {
+		it.Offset, it.At = offset, at
+		out = append(out, it)
+	}
+
+	switch l.Type {
+	case "system":
+		if l.Subtype == "init" {
+			add(&athenav1.StreamItem{Kind: "init", Text: redact.String(strings.TrimSpace(fmt.Sprintf("session %s model %s", l.SessionID, l.Model)))})
+		}
+	case "result":
+		s := fmt.Sprintf("%s turns=%d cost=$%.4f", l.Subtype, l.NumTurns, l.CostUSD)
+		if l.Result != "" {
+			s += "\n" + l.Result
+		}
+		add(&athenav1.StreamItem{Kind: "result", Text: redactCut(s, SayMaxBytes), IsError: l.IsError})
+	case "assistant", "user":
+		var text string
+		if json.Unmarshal(l.Message.Content, &text) == nil && l.Type == "user" && text != "" {
+			add(&athenav1.StreamItem{Kind: "other", Text: redactCut("user: "+text, ResultMaxBytes)})
+			break
+		}
+		var blocks []struct {
+			Type      string          `json:"type"`
+			Text      string          `json:"text"`
+			Thinking  string          `json:"thinking"`
+			ID        string          `json:"id"`
+			Name      string          `json:"name"`
+			Input     json.RawMessage `json:"input"`
+			ToolUseID string          `json:"tool_use_id"`
+			IsError   bool            `json:"is_error"`
+			Content   json.RawMessage `json:"content"`
+		}
+		_ = json.Unmarshal(l.Message.Content, &blocks)
+		for _, b := range blocks {
+			switch {
+			case l.Type == "assistant" && b.Type == "text":
+				add(&athenav1.StreamItem{Kind: "say", Text: redactCut(b.Text, SayMaxBytes)})
+			case l.Type == "assistant" && b.Type == "thinking":
+				add(&athenav1.StreamItem{Kind: "thinking", Text: redactCut(b.Thinking, SayMaxBytes)})
+			case l.Type == "assistant" && b.Type == "tool_use":
+				add(&athenav1.StreamItem{Kind: "tool_call", Tool: b.Name, ToolUseId: b.ID, Text: summarizeInput(b.Input, toolInputMaxRunes)})
+			case l.Type == "user" && b.Type == "tool_result":
+				add(&athenav1.StreamItem{Kind: "tool_result", ToolUseId: b.ToolUseID, IsError: b.IsError,
+					Text: redactCut(resultText(b.Content), ResultMaxBytes)})
+			}
+		}
+	}
+	if len(out) == 0 {
+		label := l.Type
+		if l.Subtype != "" {
+			label += "/" + l.Subtype
+		}
+		if label == "" {
+			label = "untyped line"
+		}
+		add(&athenav1.StreamItem{Kind: "other", Text: redact.String(oneLine(label))})
+	}
+	return out
+}
+
+// resultText is the text of a tool result's content: a string, or the text blocks of an array joined by newlines.
+func resultText(raw json.RawMessage) string {
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s
+	}
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(raw, &blocks) != nil {
+		return ""
+	}
+	var parts []string
+	for _, b := range blocks {
+		if b.Type == "text" {
+			parts = append(parts, b.Text)
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+// cut limits s to n bytes, at a rune boundary, ending in an ellipsis when it cut.
+func cut(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	const ell = "…"
+	end := n - len(ell)
+	for end > 0 && !utf8.RuneStart(s[end]) {
+		end--
+	}
+	return s[:end] + ell
+}
+
+// redactCut masks the secrets in s, then cuts it to n bytes. A text far longer than n is first cut to 4n, which
+// keeps redaction cheap on the huge tool results and leaves the final cut, a quarter of the way in, clear of the
+// first cut; a cut text always ends in an ellipsis.
+func redactCut(s string, n int) string {
+	trimmed := len(s) > 4*n
+	if trimmed {
+		end := 4 * n
+		for end > 0 && !utf8.RuneStart(s[end]) {
+			end--
+		}
+		s = s[:end]
+	}
+	s = redact.String(s)
+	if !trimmed {
+		return cut(s, n)
+	}
+	s = cut(s, n-len("…"))
+	if !strings.HasSuffix(s, "…") {
+		s += "…"
+	}
+	return s
+}

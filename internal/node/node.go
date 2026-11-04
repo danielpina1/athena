@@ -147,6 +147,9 @@ type Node struct {
 	mu   sync.Mutex
 	live map[string]*session // by Ticket ID: launched sessions until their runner ends
 
+	// streams holds the Tickets' stream rings (stream.go).
+	streams streamHub
+
 	// restartDelay is the pause before restart n (1-based) of a crashed session.
 	restartDelay func(n int) time.Duration
 
@@ -444,6 +447,9 @@ func (n *Node) onDeliver(st *loopState, t core.Ticket, a core.Assignment) {
 
 func (n *Node) onStop(st *loopState, t core.Ticket, a core.Assignment, reason string) {
 	ended := t.Ended != nil
+	if ended {
+		n.streams.end(t.ID)
+	}
 	st.queue = slices.DeleteFunc(st.queue, func(q *session) bool {
 		return q.a.ID == a.ID || (ended && q.t.ID == t.ID)
 	})
@@ -929,6 +935,7 @@ func (r *runner) run() {
 			AppendSystemPrompt: prompts.Worker,
 			Env:                env,
 			TranscriptPath:     n.transcriptPath(s.t.ID),
+			OnLine:             func(off int64, line []byte) { n.streams.add(s.t.ID, off, line) },
 		})
 		if err != nil {
 			r.fail("start claude: " + err.Error())

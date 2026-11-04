@@ -66,9 +66,12 @@ type Options struct {
 	// OnFrame receives every frame except Ping, Pong and Credit, in order, once each, from the reader goroutine.
 	// It must not block for long.
 	OnFrame func(*athenav1.Frame)
-	Resume  *Resume
-	Now     func() time.Time                     // default time.Now
-	After   func(time.Duration) <-chan time.Time // default time.After
+	// OnCredit is called from the reader goroutine after a Credit frame raised ch's total (see Session.Credit). It must
+	// not block for long.
+	OnCredit func(ch athenav1.Channel)
+	Resume   *Resume
+	Now      func() time.Time                     // default time.Now
+	After    func(time.Duration) <-chan time.Time // default time.After
 }
 
 // Session is the reliable layer of one link connection. Durable frames are numbered per direction from 1 and acked
@@ -306,6 +309,9 @@ func (s *Session) readLoop(ctx context.Context) error {
 		}
 		if deliver && s.o.OnFrame != nil {
 			s.o.OnFrame(f)
+		}
+		if c := f.GetCredit(); c != nil && s.o.OnCredit != nil {
+			s.o.OnCredit(c.GetChannel())
 		}
 	}
 }

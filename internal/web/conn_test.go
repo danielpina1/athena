@@ -580,3 +580,222 @@ func TestOlderDetailNeverFollowsNewer(t *testing.T) {
 		t.Fatalf("detail after the first is at %v, want the newer read only", at(f))
 	}
 }
+
+// fakeStreams is a Streams whose live feed the test drives.
+type fakeStreams struct {
+	mu       sync.Mutex
+	backfill []node.Line
+	live     chan node.Line
+	from     int64
+	opened   int
+	cancels  int
+}
+
+func newFakeStreams() *fakeStreams { return &fakeStreams{live: make(chan node.Line, 1024)} }
+
+func (f *fakeStreams) Subscribe(_ string, from int64) ([]node.Line, <-chan node.Line, func(), error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.from, f.opened = from, f.opened+1
+	return f.backfill, f.live, func() { f.mu.Lock(); f.cancels++; f.mu.Unlock() }, nil
+}
+
+func (f *fakeStreams) state() (opened, cancels int, from int64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.opened, f.cancels, f.from
+}
+
+// say is a transcript line of an assistant text block, as the session writes it; n is its offset.
+func say(n int, text string) node.Line {
+	return node.Line{Offset: int64(n) * 100, Data: []byte(fmt.Sprintf(
+		`{"type":"assistant","timestamp":"2026-11-04T09:00:00.000Z","message":{"content":[{"type":"text","text":%q}]}}`, text))}
+}
+
+func streamOpen(c *wsClient, ticket string, from int64) {
+	c.t.Helper()
+	if err := c.sess.Send(athenav1.Channel_CONTROL, false, &athenav1.Frame{Body: &athenav1.Frame_StreamOpen{
+		StreamOpen: &athenav1.StreamOpen{TicketId: ticket, FromOffset: from}}}); err != nil {
+		c.t.Fatal(err)
+	}
+}
+
+// items collects n StreamItems' texts, skipping other frames.
+func (c *wsClient) items(n int) (texts []string, offs []int64) {
+	c.t.Helper()
+	for len(texts) < n {
+		f := c.next(fmt.Sprintf("stream items (%d of %d)", len(texts), n), func(f *athenav1.Frame) bool { return f.GetStreamItems() != nil })
+		for _, it := range f.GetStreamItems().GetItems() {
+			texts, offs = append(texts, it.GetText()), append(offs, it.GetOffset())
+		}
+	}
+	return texts, offs
+}
+
+// quiet fails when a stream frame arrives within d.
+func (c *wsClient) quiet(d time.Duration) {
+	c.t.Helper()
+	deadline := time.After(d)
+	for {
+		select {
+		case f := <-c.frames:
+			if f.GetStreamItems() != nil || f.GetStreamGap() != nil {
+				c.t.Fatalf("unexpected stream frame: %v", f)
+			}
+			c.backlog = append(c.backlog, f)
+		case <-deadline:
+			return
+		}
+	}
+}
+
+func streamConn(t *testing.T) (*connEnv, *fakeStreams, *wsClient) {
+	t.Helper()
+	fs := newFakeStreams()
+	e := newConnEnv(t, func(d *Dashboard) { d.streams = fs })
+	e.src.put(ticketAt("T-0001", time.Date(2026, 11, 4, 9, 0, 0, 0, time.UTC)))
+	c := e.connect(hello("phone"))
+	c.welcome()
+	c.snapshot()
+	return e, fs, c
+}
+
+func TestStreamOverConnWithCredit(t *testing.T) {
+	_, fs, c := streamConn(t)
+	if err := c.sess.Grant(athenav1.Channel_STREAM, 10); err != nil {
+		t.Fatal(err)
+	}
+	streamOpen(c, "T-0001", -1)
+	eventually(t, func() bool { o, _, _ := fs.state(); return o == 1 })
+	for i := 1; i <= 50; i++ {
+		fs.live <- say(i, fmt.Sprintf("line %d", i))
+	}
+	texts, offs := c.items(10)
+	for i, txt := range texts {
+		if txt != fmt.Sprintf("line %d", i+1) || offs[i] != int64(i+1)*100 {
+			t.Fatalf("item %d = %q at %d", i, txt, offs[i])
+		}
+	}
+	c.quiet(300 * time.Millisecond) // out of credit: nothing more, however many lines come
+
+	// A grant of 10 finds 40 lines it cannot all have: a gap over the first 30 and the latest 10.
+	if err := c.sess.Grant(athenav1.Channel_STREAM, 10); err != nil {
+		t.Fatal(err)
+	}
+	gap := c.next("gap", func(f *athenav1.Frame) bool { return f.GetStreamGap() != nil }).GetStreamGap()
+	if gap.GetTicketId() != "T-0001" || gap.GetFrom() != 1100 || gap.GetTo() != 4100 {
+		t.Fatalf("gap = %v, want 1100..4100", gap)
+	}
+	texts, _ = c.items(10)
+	if texts[0] != "line 41" || texts[9] != "line 50" {
+		t.Fatalf("tail = %v", texts)
+	}
+	c.quiet(200 * time.Millisecond)
+
+	// With credit left, lines flow in order, one by one.
+	if err := c.sess.Grant(athenav1.Channel_STREAM, 5); err != nil {
+		t.Fatal(err)
+	}
+	fs.live <- say(51, "line 51")
+	if texts, _ := c.items(1); texts[0] != "line 51" {
+		t.Fatalf("live = %v", texts)
+	}
+}
+
+func TestStreamResumesFromOffsetAndRedacts(t *testing.T) {
+	_, fs, c := streamConn(t)
+	fs.backfill = []node.Line{say(7, "token=ghp_"+strings.Repeat("a1B2", 10)), say(8, "plain")}
+	if err := c.sess.Grant(athenav1.Channel_STREAM, 256); err != nil {
+		t.Fatal(err)
+	}
+	streamOpen(c, "T-0001", 700)
+	texts, offs := c.items(2)
+	if _, _, from := fs.state(); from != 700 || offs[0] != 700 || offs[1] != 800 {
+		t.Fatalf("from %d, offsets %v", from, offs)
+	}
+	if strings.Contains(texts[0], "ghp_") || texts[1] != "plain" {
+		t.Fatalf("texts = %q", texts)
+	}
+}
+
+func TestStreamOpenErrorsAndClose(t *testing.T) {
+	_, fs, c := streamConn(t)
+	streamOpen(c, "T-9999", -1)
+	if f := c.next("error", func(f *athenav1.Frame) bool { return f.GetError() != nil }); f.GetError().GetCode() != CodeNotFound {
+		t.Fatalf("unknown ticket: %v", f.GetError())
+	}
+	if f := c.next("close", func(f *athenav1.Frame) bool { return f.GetStreamClose() != nil }); f.GetStreamClose().GetTicketId() != "T-9999" {
+		t.Fatalf("close: %v", f)
+	}
+	streamOpen(c, "", -1)
+	if f := c.next("error", func(f *athenav1.Frame) bool { return f.GetError() != nil }); f.GetError().GetCode() != CodeInvalid {
+		t.Fatalf("no ticket: %v", f.GetError())
+	}
+
+	if err := c.sess.Grant(athenav1.Channel_STREAM, 100); err != nil {
+		t.Fatal(err)
+	}
+	streamOpen(c, "T-0001", -1)
+	fs.live <- say(1, "one")
+	c.items(1)
+	if err := c.sess.Send(athenav1.Channel_CONTROL, false, &athenav1.Frame{Body: &athenav1.Frame_StreamClose{
+		StreamClose: &athenav1.StreamClose{TicketId: "T-0001"}}}); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, func() bool { _, n, _ := fs.state(); return n == 1 })
+	fs.live <- say(2, "two")
+	c.quiet(200 * time.Millisecond)
+}
+
+func TestStreamsStopWhenConnectionEnds(t *testing.T) {
+	_, fs, c := streamConn(t)
+	streamOpen(c, "T-0001", -1)
+	eventually(t, func() bool { o, _, _ := fs.state(); return o == 1 })
+	c.close()
+	eventually(t, func() bool { _, n, _ := fs.state(); return n == 1 })
+}
+
+func TestStreamWithoutStreamsIsUnavailable(t *testing.T) {
+	e := newConnEnv(t)
+	e.src.put(ticketAt("T-0001", time.Now()))
+	c := e.connect(hello("phone"))
+	c.welcome()
+	c.snapshot()
+	streamOpen(c, "T-0001", -1)
+	if f := c.next("error", func(f *athenav1.Frame) bool { return f.GetError() != nil }); f.GetError().GetCode() != CodeUnavailable {
+		t.Fatalf("got %v", f.GetError())
+	}
+}
+
+func eventually(t *testing.T, ok func() bool) {
+	t.Helper()
+	for end := time.Now().Add(connWait); time.Now().Before(end); time.Sleep(5 * time.Millisecond) {
+		if ok() {
+			return
+		}
+	}
+	t.Fatal("condition not reached")
+}
+
+func TestPendingStaysBounded(t *testing.T) {
+	p := &pending{skipFrom: -1}
+	for i := 0; i < pendingItems+100; i++ {
+		p.absorb(say(i, "x"))
+	}
+	if len(p.items) != pendingItems || p.skipFrom != 0 || p.items[len(p.items)-1].GetOffset() != int64(pendingItems+99)*100 {
+		t.Fatalf("pending holds %d items, skipFrom %d", len(p.items), p.skipFrom)
+	}
+	// Big items: the bytes bound holds too, and the latest item stays.
+	q := &pending{skipFrom: -1}
+	for i := 0; i < 90; i++ {
+		q.absorb(say(i, strings.Repeat("y", 14<<10)))
+	}
+	if q.bytes > pendingBytes || q.skipFrom != 0 || q.items[len(q.items)-1].GetOffset() != 8900 {
+		t.Fatalf("pending holds %d items, %d bytes, skipFrom %d", len(q.items), q.bytes, q.skipFrom)
+	}
+	// A gap from the node drops what is held, which is older than the loss.
+	p.absorb(node.Line{Offset: 900000, GapTo: 950000})
+	if len(p.items) != 0 || p.skipFrom != 0 {
+		t.Fatalf("after node gap: %d items, skipFrom %d", len(p.items), p.skipFrom)
+	}
+}

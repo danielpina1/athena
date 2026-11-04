@@ -14,6 +14,7 @@ import (
 	"github.com/danielpina1/athena/internal/core"
 	"github.com/danielpina1/athena/internal/outbox"
 	"github.com/danielpina1/athena/internal/policy"
+	"github.com/danielpina1/athena/internal/render"
 	"github.com/danielpina1/athena/internal/router"
 	"github.com/danielpina1/athena/internal/sources/github"
 )
@@ -115,7 +116,7 @@ type TriggerView struct {
 
 func triggerView(t *core.Trigger) TriggerView {
 	v := TriggerView{ID: t.ID, At: t.At, Source: t.Source, Actor: t.Actor.ID, Kind: t.Kind, Addressed: t.Addressed,
-		Text: clip(t.Text, previewRunes)}
+		Text: render.Clip(t.Text, previewRunes)}
 	if len(t.Threads) > 0 {
 		v.Thread = t.Threads[0]
 	}
@@ -213,7 +214,7 @@ func decisionView(d *core.Decision) DecisionView {
 	for _, r := range d.Reasons {
 		s := r.Code
 		if text := r.Values["text"]; text != "" {
-			s += ": " + clip(text, previewRunes)
+			s += ": " + render.Clip(text, previewRunes)
 		}
 		v.Reasons = append(v.Reasons, s)
 	}

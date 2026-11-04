@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -388,7 +389,12 @@ func (g *gatedConn) blocked() bool {
 func TestCreditTracking(t *testing.T) {
 	ca, cb := memPair()
 	a, _ := start(t, ca, Options{})
-	b, _ := start(t, cb, Options{})
+	var heard atomic.Int32
+	b, _ := start(t, cb, Options{OnCredit: func(ch athenav1.Channel) {
+		if ch == athenav1.Channel_STREAM {
+			heard.Add(1)
+		}
+	}})
 	if err := a.Grant(athenav1.Channel_STREAM, 256); err != nil {
 		t.Fatal(err)
 	}
@@ -404,6 +410,7 @@ func TestCreditTracking(t *testing.T) {
 		t.Fatalf("credit frames are durable: %d unacked", n)
 	}
 	eventually(t, "credit", func() bool { return b.Credit(athenav1.Channel_STREAM) == 300 && b.Credit(athenav1.Channel_EVENTS) == 5 })
+	eventually(t, "OnCredit", func() bool { return heard.Load() == 2 })
 	if b.Credit(athenav1.Channel_EVENTS) != 5 || b.Credit(athenav1.Channel_CONTROL) != 0 || a.Credit(athenav1.Channel_STREAM) != 0 {
 		t.Fatalf("credit: events %d control %d, a's own %d", b.Credit(athenav1.Channel_EVENTS), b.Credit(athenav1.Channel_CONTROL), a.Credit(athenav1.Channel_STREAM))
 	}

@@ -15,6 +15,7 @@ import (
 
 	"github.com/danielpina1/athena/internal/core"
 	"github.com/danielpina1/athena/internal/node"
+	"github.com/danielpina1/athena/internal/render"
 )
 
 // The control socket speaks JSON lines: one request line per connection, answered by one response line, except logs,
@@ -229,7 +230,7 @@ func (c *control) logs(ctx context.Context, req Request, send func(Response) err
 	}
 	// The node keeps the transcript in the state dir, so it outlives the Ticket's worktree.
 	path := node.TranscriptPath(c.stateDir, t.ID)
-	tl := &tail{path: path, r: newRenderer(t.CreatedAt)}
+	tl := &tail{path: path, r: render.New(t.CreatedAt)}
 	defer tl.close()
 	for {
 		// Look whether the Ticket ended before reading, so nothing written before its end is missed.
@@ -266,10 +267,10 @@ type tail struct {
 	path    string
 	f       *os.File
 	partial []byte
-	r       *renderer
+	r       *render.Renderer
 }
 
-func (tl *tail) read() ([]LogLine, error) {
+func (tl *tail) read() ([]render.LogLine, error) {
 	if tl.f == nil {
 		f, err := os.Open(tl.path)
 		if errors.Is(err, os.ErrNotExist) {
@@ -285,14 +286,14 @@ func (tl *tail) read() ([]LogLine, error) {
 		return nil, fmt.Errorf("read transcript: %w", err)
 	}
 	data = append(tl.partial, data...)
-	var out []LogLine
+	var out []render.LogLine
 	for {
 		i := bytes.IndexByte(data, '\n')
 		if i < 0 {
 			break
 		}
 		if line := data[:i]; len(bytes.TrimSpace(line)) > 0 {
-			out = append(out, tl.r.render(line)...)
+			out = append(out, tl.r.Render(line)...)
 		}
 		data = data[i+1:]
 	}

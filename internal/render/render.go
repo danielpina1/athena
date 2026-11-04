@@ -1,4 +1,4 @@
-package server
+package render
 
 import (
 	"encoding/json"
@@ -30,16 +30,17 @@ const (
 // primaryKeys are tool input keys whose value alone says what a tool call does, in order of preference.
 var primaryKeys = []string{"command", "file_path", "notebook_path", "path", "pattern", "url", "query", "description", "prompt"}
 
-// renderer turns transcript lines into LogLines. Stream-json lines carry a timestamp only on messages; a line without
+// Renderer turns transcript lines into LogLines. Stream-json lines carry a timestamp only on messages; a line without
 // one takes the last timestamp seen, or the fallback before any.
-type renderer struct {
+type Renderer struct {
 	last time.Time
 }
 
-func newRenderer(fallback time.Time) *renderer { return &renderer{last: fallback} }
+// New returns a Renderer that dates lines before the first timestamp with fallback.
+func New(fallback time.Time) *Renderer { return &Renderer{last: fallback} }
 
-// render returns the LogLines of one transcript line: one per event, at least one.
-func (r *renderer) render(line []byte) []LogLine {
+// Render returns the LogLines of one transcript line: one per event, at least one.
+func (r *Renderer) Render(line []byte) []LogLine {
 	var head struct {
 		Type      string `json:"type"`
 		Subtype   string `json:"subtype"`
@@ -95,9 +96,9 @@ func describe(ev claude.Event, typ, subtype string) (kind, text string) {
 	case claude.Init:
 		return "init", strings.TrimSpace(fmt.Sprintf("session %s model %s", e.SessionID, e.Model))
 	case claude.AssistantText:
-		return "say", clip(e.Text, sayMaxRunes)
+		return "say", Clip(e.Text, sayMaxRunes)
 	case claude.ToolUse:
-		if s := summarizeInput(e.Input); s != "" {
+		if s := summarizeInput(e.Input, summaryMaxRunes); s != "" {
 			return "tool", e.Name + " " + s
 		}
 		return "tool", e.Name
@@ -122,16 +123,16 @@ func describe(ev claude.Event, typ, subtype string) (kind, text string) {
 	return "other", oneLine(typ)
 }
 
-// summarizeInput says in at most summaryMaxRunes runes what a tool input is: the value of its primary key, or its
+// summarizeInput says in at most max runes what a tool input is: the value of its primary key, or its
 // scalar fields as key=value. Values of env-like keys are never shown.
-func summarizeInput(raw json.RawMessage) string {
+func summarizeInput(raw json.RawMessage, max int) string {
 	var in map[string]any
 	if json.Unmarshal(raw, &in) != nil || len(in) == 0 {
 		return ""
 	}
 	for _, k := range primaryKeys {
 		if v, ok := in[k].(string); ok && v != "" && !sensitiveKey(k) {
-			return clip(v, summaryMaxRunes)
+			return Clip(v, max)
 		}
 	}
 	keys := make([]string, 0, len(in))
@@ -157,7 +158,7 @@ func summarizeInput(raw json.RawMessage) string {
 			}
 		}
 	}
-	return truncate(strings.Join(parts, " "), summaryMaxRunes)
+	return truncate(strings.Join(parts, " "), max)
 }
 
 // sensitiveKey reports whether a key is env-like: it holds environment variables ("env", "environment") or its name
@@ -170,8 +171,8 @@ func sensitiveKey(k string) bool {
 	return redact.SecretName(k)
 }
 
-// clip makes s one line, masks the secrets in it and cuts it to n runes.
-func clip(s string, n int) string { return truncate(redact.String(oneLine(s)), n) }
+// Clip makes s one line, masks the secrets in it and cuts it to n runes.
+func Clip(s string, n int) string { return truncate(redact.String(oneLine(s)), n) }
 
 // oneLine collapses all whitespace runs, newlines included, into single spaces.
 func oneLine(s string) string { return strings.Join(strings.Fields(s), " ") }

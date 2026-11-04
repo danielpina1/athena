@@ -79,7 +79,9 @@ type DashboardConfig struct {
 	Auth      *Auth
 	Hub       *hub.Hub
 	Commander Commander
-	Log       *slog.Logger
+	// Streams serves the sessions' output; nil answers every stream_open unavailable.
+	Streams Streams
+	Log     *slog.Logger
 	// Version is the server version the Welcome names.
 	Version string
 }
@@ -89,6 +91,7 @@ type Dashboard struct {
 	auth    *Auth
 	hub     *hub.Hub
 	cmd     Commander
+	streams Streams
 	log     *slog.Logger
 	version string
 	// helloTimeout, recheck and linkOpts are fixed at creation; tests shorten them. recheck is how often an open
@@ -107,7 +110,7 @@ func NewDashboard(cfg DashboardConfig) *Dashboard {
 	if log == nil {
 		log = slog.Default()
 	}
-	d := &Dashboard{auth: cfg.Auth, hub: cfg.Hub, cmd: cfg.Commander, log: log, version: cfg.Version,
+	d := &Dashboard{auth: cfg.Auth, hub: cfg.Hub, cmd: cfg.Commander, streams: cfg.Streams, log: log, version: cfg.Version,
 		helloTimeout: HelloTimeout, recheck: heartbeat, conns: map[string]map[*conn]struct{}{}}
 	d.auth.OnRevoke(d.revoked)
 	return d
@@ -159,7 +162,8 @@ func (d *Dashboard) ServeConn(w http.ResponseWriter, r *http.Request) {
 		return // Accept answered
 	}
 	c := &conn{d: d, r: r, lc: lc, resync: make(chan struct{}, 1), cmds: make(chan *athenav1.Command, commandQueue),
-		details: make(chan detailMsg), watching: map[string]bool{}, sentDetail: map[string]time.Time{}}
+		details: make(chan detailMsg), watching: map[string]bool{}, sentDetail: map[string]time.Time{},
+		streams: map[string]*streamer{}, creditWake: make(chan struct{})}
 	d.add(s.Hash, c)
 	defer d.remove(s.Hash, c)
 	// A revoke between the check above and the registration would have found nothing to close.
@@ -191,6 +195,16 @@ type conn struct {
 	mu       sync.Mutex
 	sub      *hub.Sub
 	watching map[string]bool
+
+	// The session streams (stream.go). smu guards streams, itemsSent and creditWake; streamCtx and streamCancel are
+	// set before the Session starts.
+	smu          sync.Mutex
+	streams      map[string]*streamer
+	itemsSent    uint64        // STREAM items sent on this connection, all streams: never more than the client granted
+	creditWake   chan struct{} // closed, and replaced, at each grant
+	streamCtx    context.Context
+	streamCancel context.CancelFunc
+	streamWG     sync.WaitGroup
 }
 
 // end closes the connection with code, once; Run then returns.
@@ -223,6 +237,9 @@ func (c *conn) serve(ctx context.Context) {
 
 	opts := c.d.linkOpts
 	opts.OnFrame = c.onFrame
+	opts.OnCredit = c.onCredit
+	c.streamCtx, c.streamCancel = context.WithCancel(ctx)
+	defer c.streamCancel()
 	// A Hello sent durable took seq 1: the client numbers on from it.
 	opts.Resume = &link.Resume{Received: seq}
 	opts.SendQueue = map[athenav1.Channel]int{athenav1.Channel_EVENTS: eventsQueue}
@@ -259,6 +276,7 @@ func (c *conn) serve(ctx context.Context) {
 	}()
 	err := c.sess.Run(ctx)
 	cancel()
+	c.stopStreams()
 	wg.Wait()
 	c.d.log.Debug("dashboard connection closed", "client", c.clientID, "error", err)
 }
@@ -350,8 +368,10 @@ func (c *conn) onFrame(f *athenav1.Frame) {
 		case c.resync <- struct{}{}:
 		default:
 		}
-	case *athenav1.Frame_StreamOpen, *athenav1.Frame_StreamClose:
-		c.sendError(CodeUnavailable, "session streams are not available yet")
+	case *athenav1.Frame_StreamOpen:
+		c.openStream(b.StreamOpen)
+	case *athenav1.Frame_StreamClose:
+		c.closeStream(b.StreamClose.GetTicketId())
 	default:
 		c.sendError(CodeInvalid, fmt.Sprintf("a client does not send %T", b))
 	}

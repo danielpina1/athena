@@ -26,6 +26,7 @@ import (
 	"github.com/danielpina1/athena/internal/core"
 	"github.com/danielpina1/athena/internal/metrics"
 	"github.com/danielpina1/athena/internal/node"
+	"github.com/danielpina1/athena/internal/render"
 	"github.com/danielpina1/athena/internal/server"
 )
 
@@ -466,7 +467,7 @@ func (c *command) logs(ctx context.Context, args []string) int {
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	err := stream(ctx, c.stateDir, server.Request{Op: server.OpLogs, ID: pos[0], Follow: follow}, func(raw json.RawMessage) {
-		var l server.LogLine
+		var l render.LogLine
 		if json.Unmarshal(raw, &l) == nil {
 			fmt.Fprintf(c.stdout, "%s  %s  %s\n", l.At.Local().Format(time.TimeOnly), l.Kind, l.Text)
 		}
