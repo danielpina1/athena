@@ -20,6 +20,7 @@ import (
 
 	"github.com/danielpina1/athena/internal/core"
 	"github.com/danielpina1/athena/internal/node"
+	"github.com/danielpina1/athena/internal/render"
 )
 
 const liveOutside = "/tmp/athena-live-outside.txt"
@@ -132,7 +133,7 @@ func (s *liveServer) dumpOnFailure(t *testing.T, id string) {
 }
 
 // logLines reads the Ticket's rendered log through the control socket.
-func (s *liveServer) logLines(t *testing.T, id string) []LogLine {
+func (s *liveServer) logLines(t *testing.T, id string) []render.LogLine {
 	t.Helper()
 	conn, err := net.DialTimeout("unix", filepath.Join(s.stateDir, ControlSocket), time.Second)
 	if err != nil {
@@ -142,14 +143,14 @@ func (s *liveServer) logLines(t *testing.T, id string) []LogLine {
 	if err := json.NewEncoder(conn).Encode(Request{Op: OpLogs, ID: id}); err != nil {
 		t.Fatal(err)
 	}
-	var out []LogLine
+	var out []render.LogLine
 	sc := bufio.NewScanner(conn)
 	sc.Buffer(nil, 1<<20)
 	for sc.Scan() {
 		var r struct {
-			OK    bool    `json:"ok"`
-			Error string  `json:"error"`
-			Data  LogLine `json:"data"`
+			OK    bool           `json:"ok"`
+			Error string         `json:"error"`
+			Data  render.LogLine `json:"data"`
 		}
 		if err := json.Unmarshal(sc.Bytes(), &r); err != nil {
 			t.Fatalf("logs line: %v", err)

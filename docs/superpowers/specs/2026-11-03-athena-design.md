@@ -303,7 +303,7 @@ Owner asked for concrete visibility. Mockup: `system-visibility.html` (desktop "
 - **System page**: KPI tiles with sparklines (sessions/slots, queue, needs-you and oldest age, spend today vs budget, link p95, errors), node table, spend by model (local tokens shown at $0), live event stream with filters, health checks, guardrail counts.
 - **Ticket page**: full timeline plus per-Ticket cost, tool calls and durations.
 - **Audit log**: searchable, filterable by Ticket/node/rule, exportable as JSONL.
-- **Budgets & alerts**: daily/monthly spend budgets per model or account; push alerts for budget thresholds, node offline > N min, failing health check, error spikes — each alert type can be muted.
+- **Budgets & alerts**: daily/monthly spend budgets per model or account; push alerts for budget thresholds, node offline > N min, failing health check, error spikes — each alert type can be muted. A budget that runs out is a **hard brake**: no new Assignment starts on that model or account until the period resets or the owner raises it (§18.2); running sessions finish their turn.
 - **CLI**: `athena status`, `athena top` (live sessions), `athena logs -f [--ticket T]`, `athena audit`.
 - **Optional export**: Prometheus `/metrics` and OTLP forwarding for owners who want Grafana; off by default.
 
@@ -435,3 +435,29 @@ The owner has not answered these yet. The design adopts the defaults below (desi
 ## 17. Left to the builder
 
 Internal package boundaries beyond §14, SQLite schema details, timing constants (heartbeats, retries, timeouts) within the stated targets, dashboard visual design within the reference's panel principles, logging/metrics format, CI setup, and the order of implementation (suggested: core port + store → single-machine server with Claude Code runtime + dashboard → Codex runtime → multi-node link → agent-to-agent → local inference).
+
+## 18. Additions: autonomy brakes, trust and autopilot (owner, 2026-11-04)
+
+The owner asked to take functional inspiration from [nucleos](https://github.com/zDud4s/nucleos) (Apache-2.0). These five ideas were adopted; they are reimplemented in Go from their descriptions, and no nucleos code is copied.
+
+### 18.1 WIP brake
+
+Athena stops starting work it chose on its own (inferred accepts, autopilot Tickets) in a repository while too much of the owner's attention is already owed there: Tickets waiting in a person stage plus pending Approvals at or above a ceiling (default 3 per repository, a Policy setting). It clears itself as soon as the owner catches up. Explicit requests (an allowed person mentioning the App, an owner task) are never braked. A braked candidate is recorded as a Decision with reason `wip_brake` and re-evaluated when the count drops. Serves goal 6 (human attention) and the anti-spam anti-goal.
+
+### 18.2 Kill switch and hard spend brake
+
+- **Kill switch**: one owner action (`athena pause`, a dashboard control, re-auth required to resume) stops all new Assignments and all autonomous activity at once: running sessions are interrupted at the end of their current turn, router decisions stop, the Outbox holds replies. `athena resume` restarts everything; nothing queued is lost. This subsumes plan 2's deferred "Pause processing".
+- **Hard spend brake**: §10.2 budgets fail closed, as stated there.
+
+### 18.3 Trust class per Source
+
+Every Trigger carries a trust class derived from its Source and sender: `owner`, `allowed` (on the Policy list), `collaborator`, `stranger`, `bot`, `ci`. The trust class of the Ticket's originating Trigger selects a **tool policy** for its worker sessions — `stranger`-originated work (only possible through an `explicit` or `inferred` unlisted cell) runs with no network beyond its Git host, no Approval-escalable commands outside the worktree, and no MCP tools that read other Tickets. Untrusted text (third-party comments, fetched web pages) reaches a worker session marked as untrusted data, and, where a local model exists (§9), is first summarised by it so instructions embedded in it never reach the working session verbatim. Policy, not the router, owns the mapping.
+
+### 18.4 Shadow mode and Approval promotion
+
+A repository can be in `shadow` mode (a Policy setting per repository; default `live`): Athena works Tickets there but every outward effect (push, PR, GitHub reply) is held as a proposal the owner can apply or discard from the dashboard. Separately, when the owner approves the same action class (tool + rule + repository) N times (default 5) without a denial, the dashboard offers a one-tap "always allow this here" that writes a Policy rule; the offer never applies itself.
+
+### 18.5 Autopilot: scheduled and event-started Tickets
+
+A `schedule` Source emits Triggers on cron-like schedules and on repository events (default branch moved, dependency manifest changed, CI red on the default branch for > N hours). Each autopilot entry has a name, instructions, a target repository and a schedule, edited in Settings. Its Triggers go through the same router, Policy and admission as any other Source (strength `inferred`, so `observe` mode only records "would accept"), and are subject to the WIP brake (§18.1) and the kill switch (§18.2).
+

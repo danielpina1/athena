@@ -1,0 +1,81 @@
+syntax = "proto3";
+
+package athena.v1;
+
+import "athena/v1/commands.proto";
+import "athena/v1/state.proto";
+import "athena/v1/stream.proto";
+
+option go_package = "github.com/danielpina1/athena/internal/pb/athenav1;athenav1";
+
+// The link between a dashboard device and the server: one WebSocket, binary Frames only.
+
+enum Channel {
+  CHANNEL_UNSPECIFIED = 0;
+  CONTROL = 1;
+  EVENTS = 2;
+  STREAM = 3;
+  // BLOB is reserved: defined, unused until plan 6.
+  BLOB = 4;
+}
+
+// Frame is the unit on the wire. Exactly one body member is set.
+message Frame {
+  Channel channel = 1;
+  // seq is 0 for a frame that is not durable.
+  uint64 seq = 2;
+  uint64 ack = 3;
+  oneof body {
+    Hello hello = 10;
+    Welcome welcome = 11;
+    Ping ping = 12;
+    Pong pong = 13;
+    Credit credit = 14;
+    Error error = 15;
+    Resync resync = 16;
+    Command command = 17;
+    CommandResult command_result = 18;
+    Snapshot snapshot = 19;
+    Delta delta = 20;
+    StreamOpen stream_open = 21;
+    StreamItems stream_items = 22;
+    StreamGap stream_gap = 23;
+    StreamClose stream_close = 24;
+  }
+}
+
+message Hello {
+  uint32 protocol = 1;
+  string client_id = 2;
+  string epoch = 3;
+  uint64 cursor = 4;
+  uint64 last_seq = 5;
+}
+
+message Welcome {
+  string epoch = 1;
+  string server_version = 2;
+  uint32 heartbeat_ms = 3;
+  bool snapshot_follows = 4;
+}
+
+message Ping {
+  uint64 at_unix_ms = 1;
+}
+
+message Pong {
+  uint64 at_unix_ms = 1;
+}
+
+message Credit {
+  Channel channel = 1;
+  uint32 items = 2;
+}
+
+message Error {
+  string code = 1;
+  string message = 2;
+}
+
+// Resync is sent by the client: "send me a snapshot".
+message Resync {}

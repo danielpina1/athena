@@ -1,6 +1,16 @@
-.PHONY: check build bench bench-baseline
+.PHONY: check proto build bench bench-baseline
 
+# Regenerate the Go code of the wire contract (proto/) into internal/pb; the generated code is committed.
+proto:
+	go tool buf generate
+
+# check lints the protos and fails when the committed generated code is not what the protos generate.
 check:
+	go tool buf lint
+	@before=$$(find internal/pb -type f | sort | xargs shasum); \
+	go tool buf generate; \
+	after=$$(find internal/pb -type f | sort | xargs shasum); \
+	[ "$$before" = "$$after" ] || { echo "internal/pb is stale: run make proto and commit"; exit 1; }
 	go vet ./...
 	go test -race ./...
 	CGO_ENABLED=0 go build ./...

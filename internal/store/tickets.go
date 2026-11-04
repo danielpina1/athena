@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/danielpina1/athena/internal/core"
 )
@@ -36,13 +37,33 @@ func (tx *Tx) PutTicket(t *core.Ticket) error {
 	if t.Ended != nil {
 		ended = 1
 	}
-	_, err = tx.sql.Exec(`INSERT INTO tickets (id, ended, updated_at, doc) VALUES (?, ?, ?, ?)
-		ON CONFLICT(id) DO UPDATE SET ended = excluded.ended, updated_at = excluded.updated_at, doc = excluded.doc`,
-		t.ID, ended, t.UpdatedAt.UTC().Format(timeLayout), string(doc))
+	// request_id is NULL, not "", when unset: the unique index must not see Tickets that have none as equal.
+	var requestID any
+	if t.RequestID != "" {
+		requestID = t.RequestID
+	}
+	_, err = tx.sql.Exec(`INSERT INTO tickets (id, ended, updated_at, doc, request_id) VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET ended = excluded.ended, updated_at = excluded.updated_at, doc = excluded.doc,
+			request_id = excluded.request_id`,
+		t.ID, ended, t.UpdatedAt.UTC().Format(timeLayout), string(doc), requestID)
 	if err != nil {
 		return fmt.Errorf("store: put ticket %q: %w", t.ID, err)
 	}
+	tx.changes.Tickets = addID(tx.changes.Tickets, t.ID)
 	return nil
+}
+
+// TicketByRequestID returns the Ticket created under the given request id, or nil, nil if there is none.
+func (tx *Tx) TicketByRequestID(requestID string) (*core.Ticket, error) {
+	var doc string
+	err := tx.sql.QueryRow(`SELECT doc FROM tickets WHERE request_id = ?`, requestID).Scan(&doc)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: ticket by request id: %w", err)
+	}
+	return decodeTicket(doc)
 }
 
 // OpenTickets returns every Ticket that has not ended, least recently updated first.
@@ -95,6 +116,7 @@ func (tx *Tx) PutApproval(a *core.Approval) error {
 	if err != nil {
 		return fmt.Errorf("store: put approval %q: %w", a.ID, err)
 	}
+	tx.changes.Approvals = addID(tx.changes.Approvals, a.ID)
 	return nil
 }
 
@@ -127,6 +149,50 @@ func (tx *Tx) PendingApprovals() ([]*core.Approval, error) {
 		}
 		return out[i].ID < out[j].ID
 	})
+	return out, nil
+}
+
+// AnsweredApprovals returns the Approvals no longer pending (answered or expired), the most recently answered first;
+// limit <= 0 returns all. It reads in a transaction of its own. The table keeps no answer column, so the rows are
+// sorted here by the document's own times (one without an answer time by its creation).
+func (s *Store) AnsweredApprovals(limit int) (out []core.Approval, err error) {
+	err = s.Tx(func(tx *Tx) error {
+		rows, err := tx.sql.Query(`SELECT doc FROM approvals WHERE state != ?`, core.ApprovalPending)
+		if err != nil {
+			return fmt.Errorf("store: answered approvals: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var doc string
+			if err := rows.Scan(&doc); err != nil {
+				return fmt.Errorf("store: answered approvals: %w", err)
+			}
+			a, err := decodeApproval(doc)
+			if err != nil {
+				return err
+			}
+			out = append(out, *a)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+	answered := func(a *core.Approval) time.Time {
+		if a.AnsweredAt != nil {
+			return *a.AnsweredAt
+		}
+		return a.CreatedAt
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if ti, tj := answered(&out[i]), answered(&out[j]); !ti.Equal(tj) {
+			return ti.After(tj)
+		}
+		return out[i].ID > out[j].ID
+	})
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
 	return out, nil
 }
 

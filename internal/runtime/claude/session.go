@@ -2,6 +2,7 @@ package claude
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -52,6 +53,11 @@ type Options struct {
 	// TranscriptPath, when set, is the file every stdout line is appended to instead of <Dir>/.athena/transcript.jsonl.
 	// Its directory is created 0700 and the file 0600.
 	TranscriptPath string
+	// OnLine, when set, is called for each stdout line after it is written to the transcript, on the reader goroutine
+	// (it must not block): offset is the byte offset the line starts at in the transcript file, counting what the file
+	// held before this session appended; line is the line without its newline, and is the callee's to keep. Each
+	// line takes len(line)+1 bytes in the file.
+	OnLine func(offset int64, line []byte)
 	// Tools, when set, is passed as --tools: the built-in tools the session has. A pointer to "" disables every
 	// built-in tool (`--tools ""`, checked against Claude Code 2.1.280: its init lists no tools, MCP tools stay).
 	Tools *string
@@ -118,6 +124,8 @@ type Session struct {
 	waitErr    error
 	killed     atomic.Bool
 	transcript *os.File
+	onLine     func(offset int64, line []byte)
+	trOff      int64 // where the next transcript write lands (reader goroutine only)
 	stderr     *tailBuffer
 }
 
@@ -164,6 +172,10 @@ func Start(ctx context.Context, o Options) (*Session, error) {
 		return nil, fmt.Errorf("claude: chmod transcript: %w", err)
 	}
 
+	var trOff int64
+	if st, err := tr.Stat(); err == nil {
+		trOff = st.Size()
+	}
 	s := &Session{
 		closeGrace: o.CloseGrace,
 		events:     make(chan Event, eventBuffer),
@@ -172,6 +184,8 @@ func Start(ctx context.Context, o Options) (*Session, error) {
 		exited:     make(chan struct{}),
 		done:       make(chan struct{}),
 		transcript: tr,
+		onLine:     o.OnLine,
+		trOff:      trOff,
 		stderr:     &tailBuffer{max: stderrTail},
 	}
 
@@ -298,9 +312,21 @@ func (s *Session) readLoop() {
 }
 
 func (s *Session) handleLine(line []byte) {
-	_, _ = s.transcript.Write(line)
+	at := s.trOff
+	n, _ := s.transcript.Write(line)
 	if line[len(line)-1] != '\n' {
-		_, _ = s.transcript.Write([]byte{'\n'})
+		m, _ := s.transcript.Write([]byte{'\n'})
+		n += m
+	}
+	if n != len(line)+btoi(line[len(line)-1] != '\n') {
+		// A short write: the file is the truth for where the next line lands.
+		if st, err := s.transcript.Stat(); err == nil {
+			n = int(st.Size() - at)
+		}
+	}
+	s.trOff = at + int64(n)
+	if s.onLine != nil {
+		s.onLine(at, bytes.TrimSuffix(line, []byte{'\n'}))
 	}
 	evs, err := ParseEvents(line)
 	if err != nil {
@@ -310,6 +336,13 @@ func (s *Session) handleLine(line []byte) {
 	s.queue = append(s.queue, evs...)
 	s.qmu.Unlock()
 	s.wake()
+}
+
+func btoi(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 func (s *Session) wake() {

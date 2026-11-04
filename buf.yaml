@@ -1,0 +1,9 @@
+version: v2
+modules:
+  - path: proto
+lint:
+  use:
+    - STANDARD
+  except:
+    # Channel's values are CONTROL, EVENTS, STREAM and BLOB, as the wire contract names them.
+    - ENUM_VALUE_PREFIX

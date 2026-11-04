@@ -1,0 +1,160 @@
+syntax = "proto3";
+
+package athena.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/danielpina1/athena/internal/pb/athenav1;athenav1";
+
+// The state a dashboard shows: a Snapshot, then Deltas.
+
+message Snapshot {
+  uint64 cursor = 1;
+  repeated TicketSummary tickets = 2;
+  repeated ApprovalView approvals = 3;
+  repeated TriggerView triggers = 4;
+  repeated ThreadView threads = 5;
+  repeated DecisionView decisions = 6;
+  NodeStatus node = 7;
+  Health health = 8;
+  PolicyView policy = 9;
+}
+
+message Delta {
+  uint64 seq = 1;
+  oneof change {
+    TicketSummary ticket = 10;
+    TicketDetail ticket_detail = 11;
+    ApprovalView approval = 12;
+    TriggerView trigger = 13;
+    ThreadView thread = 14;
+    DecisionView decision = 15;
+    NodeStatus node = 16;
+    Health health = 17;
+    PolicyView policy = 18;
+  }
+}
+
+message TicketSummary {
+  string id = 1;
+  string title = 2;
+  string stage = 3;
+  string action = 4;
+  string repo = 5;
+  string dir = 6;
+  string model = 7;
+  google.protobuf.Timestamp created_at = 8;
+  google.protobuf.Timestamp updated_at = 9;
+  google.protobuf.Timestamp ended_at = 10;
+  string outcome = 11;
+  bool needs_you = 12;
+  bool can_retry = 13;
+  string pending_approval_id = 14;
+  string pr_url = 15;
+  string attention_question = 16;
+}
+
+message TicketDetail {
+  TicketSummary summary = 1;
+  repeated TimelineEntry timeline = 2;
+  repeated string threads = 3;
+}
+
+message TimelineEntry {
+  google.protobuf.Timestamp at = 1;
+  // kind is trigger, decision, input, report, assignment, approval or reply.
+  string kind = 2;
+  string text = 3;
+  string ref_id = 4;
+}
+
+message ApprovalView {
+  string id = 1;
+  string ticket_id = 2;
+  string tool = 3;
+  string summary = 4;
+  string rule = 5;
+  string input_redacted = 6;
+  string state = 7;
+  google.protobuf.Timestamp created_at = 8;
+  google.protobuf.Timestamp answered_at = 9;
+}
+
+// TriggerView is a Trigger in a list: no Meta, no Channel address, its text cut to one short line.
+message TriggerView {
+  string id = 1;
+  google.protobuf.Timestamp at = 2;
+  string source = 3;
+  string actor = 4;
+  string kind = 5;
+  string addressed = 6;
+  string thread = 7;
+  string text = 8;
+  // outcome says what became of it: filtered:<code>, reached/attached Tickets, requeued.
+  string outcome = 9;
+}
+
+message ThreadView {
+  string key = 1;
+  uint32 queued = 2;
+  // eval is the Eval in progress.
+  EvalView eval = 3;
+  // tickets are the subscribed Tickets, each with its flags: T-0001(own,bound,context).
+  repeated string tickets = 4;
+  uint32 decisions = 5;
+  string closed = 6;
+}
+
+message EvalView {
+  string id = 1;
+  string strength = 2;
+  google.protobuf.Timestamp started_at = 3;
+  google.protobuf.Timestamp delivered_at = 4;
+}
+
+// DecisionView is a Decision in the routing records.
+message DecisionView {
+  string id = 1;
+  google.protobuf.Timestamp at = 2;
+  string kind = 3;
+  string thread = 4;
+  string ticket_id = 5;
+  repeated string triggers = 6;
+  repeated Reason reasons = 7;
+  bool would_accept = 8;
+  // dismissed_at is unset while the Decision is not dismissed.
+  google.protobuf.Timestamp dismissed_at = 9;
+}
+
+message Reason {
+  string code = 1;
+  map<string, string> values = 2;
+}
+
+message NodeStatus {
+  string name = 1;
+  uint32 slots = 2;
+  uint32 slots_in_use = 3;
+  repeated string live_ticket_ids = 4;
+  uint32 queued = 5;
+  string claude_version = 6;
+}
+
+message Health {
+  repeated HealthItem items = 1;
+}
+
+// HealthItem covers the Sources, the router, effects kinds, tls and push.
+message HealthItem {
+  string name = 1;
+  bool ok = 2;
+  string message = 3;
+  google.protobuf.Timestamp since = 4;
+}
+
+// PolicyView carries the Policy as its canonical JSON; internal/policy stays its only schema.
+message PolicyView {
+  uint32 revision = 1;
+  string version = 2;
+  string settings_json = 3;
+}

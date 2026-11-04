@@ -1,0 +1,624 @@
+// Package hub turns store commits into the dashboard's state: a bounded Snapshot, then Deltas.
+//
+// A commit tells the hub only the ids it wrote (store.Changes). The hub reads each one's current state from its Source
+// once, maps it to a view, gives it the next seq and fans it out to the subscribers. It never trusts the order of
+// commit hooks: the view is what the Source holds when the hub reads, so a later read can only be newer.
+package hub
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"log/slog"
+	"sort"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"google.golang.org/protobuf/proto"
+
+	"github.com/danielpina1/athena/internal/core"
+	"github.com/danielpina1/athena/internal/node"
+	"github.com/danielpina1/athena/internal/pb/athenav1"
+	"github.com/danielpina1/athena/internal/store"
+)
+
+const (
+	// Snapshot bounds.
+	endedTickets     = 100
+	answeredApproval = 50
+	recentThreads    = 100
+	recentDecisions  = 200
+	recentTriggers   = 200
+
+	// ringDeltas and ringBytes bound the replay ring: whichever is reached first.
+	ringDeltas = 4096
+	ringBytes  = 8 << 20
+
+	// subBuffer is how many deltas a subscriber may have waiting; one more closes it with resync.
+	subBuffer = 256
+	// changeBuffer is how many commits may wait for the hub's loop.
+	changeBuffer = 1024
+	// healthEvery is the period of the one probe the dashboard path has.
+	healthEvery = 15 * time.Second
+)
+
+// HealthItem is one probed component: a Source, the router, an effects kind, tls or push.
+type HealthItem struct {
+	Name    string
+	OK      bool
+	Message string
+}
+
+// Source is what the hub reads. The Engine and the Store implement the ticket, approval, trigger, thread and decision
+// reads (the server adapts them); tests use a fake. Every read returns the current committed state.
+type Source interface {
+	// Tickets returns the open Tickets, or every Ticket when includeEnded is set.
+	Tickets(includeEnded bool) ([]core.Ticket, error)
+	Ticket(id string) (core.Ticket, core.Stage, error)
+	PendingApprovals() ([]core.Approval, error)
+	// AnsweredApprovals returns the most recently answered (not pending) Approvals, newest first.
+	AnsweredApprovals(limit int) ([]core.Approval, error)
+	Approval(id string) (core.Approval, error)
+	// RecentTriggers returns the newest Triggers, newest first.
+	RecentTriggers(limit int) ([]core.Trigger, error)
+	Trigger(id string) (core.Trigger, error)
+	ActiveThreads() ([]core.Thread, error)
+	// RecentThreads returns the most recently active stored Threads, active ones included.
+	RecentThreads(limit int) ([]core.Thread, error)
+	Thread(key string) (core.Thread, error)
+	// Decisions returns the Decisions of a Thread, or of every Thread when thread is empty, newest first.
+	Decisions(thread string, limit int) ([]core.Decision, error)
+	Decision(id string) (core.Decision, error)
+	// Health probes every component. The hub calls it every 15 s on a goroutine of its own, once in Start, and in
+	// Snapshot only before Start; it must not call back into the hub.
+	Health() []HealthItem
+	// Policy returns the current Policy revision (0 while nobody saved settings), its version and canonical JSON.
+	Policy() (revision int, version string, settingsJSON string, err error)
+	NodeStatus() node.Status
+}
+
+type ringEntry struct {
+	d    *athenav1.Delta
+	size int
+}
+
+// Hub fans store commits out as Deltas. Its methods are safe for concurrent use.
+type Hub struct {
+	src   Source
+	log   *slog.Logger
+	epoch string
+	now   func() time.Time
+
+	// in carries the commits to the loop; the commit hook never blocks on it (OnCommit). overflowed is set when it was
+	// full and a commit was dropped, wake tells the loop.
+	in         chan store.Changes
+	overflowed atomic.Bool
+	wake       chan struct{}
+	nodeWake   chan struct{}
+	healthTick time.Duration
+
+	mu        sync.Mutex
+	seq       uint64
+	floor     uint64 // the oldest cursor a resume can start from: ring[0].seq-1, or seq when the ring is empty
+	ring      []ringEntry
+	ringBytes int
+	subs      map[*Sub]struct{}
+	// What the loop last published, to publish a change only.
+	health      *athenav1.Health
+	healthSince map[string]healthState
+	node        *athenav1.NodeStatus
+	closed      bool // the hub has stopped: Subscribe returns closed feeds
+
+	// running counts the loop and the health probe; Wait waits for both after ctx is done.
+	running sync.WaitGroup
+}
+
+type healthState struct {
+	ok    bool
+	msg   string
+	since time.Time
+}
+
+// New returns a Hub reading src; Start runs it. Its epoch is random per process start.
+func New(src Source, log *slog.Logger) *Hub {
+	if log == nil {
+		log = slog.Default()
+	}
+	var b [8]byte
+	_, _ = rand.Read(b[:])
+	return &Hub{
+		src: src, log: log, epoch: hex.EncodeToString(b[:]), now: time.Now,
+		in: make(chan store.Changes, changeBuffer), wake: make(chan struct{}, 1), nodeWake: make(chan struct{}, 1),
+		healthTick: healthEvery, subs: map[*Sub]struct{}{}, healthSince: map[string]healthState{},
+	}
+}
+
+// Epoch identifies this process's delta sequence: a cursor from another epoch is meaningless.
+func (h *Hub) Epoch() string { return h.epoch }
+
+// OnCommit is the function to register with (*store.Store).OnCommit. It only does a non-blocking send: when the loop
+// is behind and the buffer is full, the commit is not queued and the hub is marked overflowed instead. The loop then
+// drops what is queued, forgets its ring (so no cursor resumes across the loss) and closes every subscriber with
+// resync; each client takes a fresh Snapshot, which is read after the lost commit and so includes it.
+func (h *Hub) OnCommit(c store.Changes) {
+	select {
+	case h.in <- c:
+	default:
+		h.overflowed.Store(true)
+		h.signal(h.wake)
+	}
+}
+
+// NodeChanged tells the hub the node's slots, live Tickets or queue changed (wire it to node.Config.OnStatus).
+func (h *Hub) NodeChanged() { h.signal(h.nodeWake) }
+
+func (h *Hub) signal(ch chan struct{}) {
+	select {
+	case ch <- struct{}{}:
+	default:
+	}
+}
+
+// Start runs the hub until ctx is done. It takes the first health reading before it returns.
+func (h *Hub) Start(ctx context.Context) {
+	health, n := h.probeHealth(), nodeStatus(h.src.NodeStatus())
+	h.mu.Lock()
+	h.health, h.node = health, n
+	h.mu.Unlock()
+	h.running.Add(2) // the loop and its probe
+	go h.run(ctx)
+}
+
+// Wait returns once the goroutines Start began have returned, after ctx is done: no read of the Source is in flight
+// then, so the store behind it may close. Snapshot and Detail, which run on their callers' goroutines, are the
+// callers' to stop first.
+func (h *Hub) Wait() { h.running.Wait() }
+
+func (h *Hub) run(ctx context.Context) {
+	defer h.running.Done()
+	defer h.closeAll()
+	probed := make(chan *athenav1.Health, 1)
+	go func() {
+		defer h.running.Done()
+		h.probeEvery(ctx, probed)
+	}()
+	for {
+		// An overflow comes first: what is queued is older than the loss and is dropped with it.
+		h.recover()
+		select {
+		case <-ctx.Done():
+			return
+		case c := <-h.in:
+			h.apply(c)
+		case <-h.wake:
+		case <-h.nodeWake:
+			h.publishNode()
+		case next := <-probed:
+			h.publishHealth(next)
+		}
+	}
+}
+
+// probeEvery probes health on its own goroutine, so a slow probe never delays the commits' deltas; the loop publishes
+// the result. A result the loop has not taken yet is skipped, not queued.
+func (h *Hub) probeEvery(ctx context.Context, out chan<- *athenav1.Health) {
+	tick := time.NewTicker(h.healthTick)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			select {
+			case out <- h.probeHealth():
+			default:
+			}
+		}
+	}
+}
+
+// recover handles an overflow, if there was one: see OnCommit.
+func (h *Hub) recover() {
+	if !h.overflowed.Swap(false) {
+		return
+	}
+	for drained := false; !drained; {
+		select {
+		case <-h.in:
+		default:
+			drained = true
+		}
+	}
+	h.log.Warn("hub fell behind the commits: resyncing subscribers")
+	h.mu.Lock()
+	h.seq++ // a gap, so a cursor from before the loss cannot match
+	h.ring, h.ringBytes, h.floor = nil, 0, h.seq
+	for s := range h.subs {
+		h.dropLocked(s, true)
+	}
+	h.mu.Unlock()
+}
+
+func (h *Hub) closeAll() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.closed = true
+	for s := range h.subs {
+		h.dropLocked(s, false)
+	}
+}
+
+// apply reads the current state of every id one commit wrote and publishes one delta each.
+func (h *Hub) apply(c store.Changes) {
+	for _, id := range c.Tickets {
+		t, st, err := h.src.Ticket(id)
+		if err != nil {
+			h.lost("read ticket", "id", id, "error", err)
+			return
+		}
+		h.publish(&athenav1.Delta{Change: &athenav1.Delta_Ticket{Ticket: ticketSummary(&t, st)}})
+		if h.watched(id) {
+			h.sendDetail(id, h.detail(&t, st))
+		}
+	}
+	for _, id := range c.Approvals {
+		a, err := h.src.Approval(id)
+		if err != nil {
+			h.lost("read approval", "id", id, "error", err)
+			return
+		}
+		h.publish(&athenav1.Delta{Change: &athenav1.Delta_Approval{Approval: approvalView(&a)}})
+	}
+	for _, id := range c.Triggers {
+		t, err := h.src.Trigger(id)
+		if err != nil {
+			h.lost("read trigger", "id", id, "error", err)
+			return
+		}
+		h.publish(&athenav1.Delta{Change: &athenav1.Delta_Trigger{Trigger: triggerView(&t)}})
+	}
+	for _, key := range c.Threads {
+		th, err := h.src.Thread(key)
+		if err != nil {
+			h.lost("read thread", "key", key, "error", err)
+			return
+		}
+		h.publish(&athenav1.Delta{Change: &athenav1.Delta_Thread{Thread: threadView(&th)}})
+	}
+	for _, id := range c.Decisions {
+		d, err := h.src.Decision(id)
+		if err != nil {
+			h.lost("read decision", "id", id, "error", err)
+			return
+		}
+		h.publish(&athenav1.Delta{Change: &athenav1.Delta_Decision{Decision: decisionView(&d)}})
+	}
+	if c.Policy {
+		if p, err := h.policyView(); err != nil {
+			h.lost("read policy", "error", err)
+			return
+		} else {
+			h.publish(&athenav1.Delta{Change: &athenav1.Delta_Policy{Policy: p}})
+		}
+	}
+}
+
+// lost handles a commit whose state the hub could not read: it cannot publish what changed, so it resyncs everyone
+// (see OnCommit) rather than leave clients with stale state.
+func (h *Hub) lost(what string, args ...any) {
+	h.log.Warn("hub: "+what+": resyncing subscribers", args...)
+	h.overflowed.Store(true)
+}
+
+func (h *Hub) policyView() (*athenav1.PolicyView, error) {
+	rev, version, settings, err := h.src.Policy()
+	if err != nil {
+		return nil, err
+	}
+	return &athenav1.PolicyView{Revision: uint32(rev), Version: version, SettingsJson: settings}, nil
+}
+
+func (h *Hub) publishNode() {
+	n := nodeStatus(h.src.NodeStatus())
+	h.mu.Lock()
+	same := h.node != nil && proto.Equal(h.node, n)
+	h.node = n
+	h.mu.Unlock()
+	if !same {
+		h.publish(&athenav1.Delta{Change: &athenav1.Delta_Node{Node: n}})
+	}
+}
+
+// probeHealth reads the Source's health (without the lock: it may do I/O) and stamps each item with when its state
+// last changed.
+func (h *Hub) probeHealth() *athenav1.Health {
+	items := h.src.Health()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	now := h.now()
+	out := &athenav1.Health{}
+	seen := map[string]bool{}
+	for _, it := range items {
+		seen[it.Name] = true
+		prev, ok := h.healthSince[it.Name]
+		if !ok || prev.ok != it.OK || prev.msg != it.Message {
+			prev = healthState{ok: it.OK, msg: it.Message, since: now}
+			h.healthSince[it.Name] = prev
+		}
+		out.Items = append(out.Items, &athenav1.HealthItem{Name: it.Name, Ok: it.OK, Message: it.Message, Since: ts(prev.since)})
+	}
+	for name := range h.healthSince {
+		if !seen[name] {
+			delete(h.healthSince, name)
+		}
+	}
+	sort.Slice(out.Items, func(i, j int) bool { return out.Items[i].Name < out.Items[j].Name })
+	return out
+}
+
+func (h *Hub) publishHealth(next *athenav1.Health) {
+	h.mu.Lock()
+	same := h.health != nil && proto.Equal(h.health, next)
+	h.health = next
+	h.mu.Unlock()
+	if !same {
+		h.publish(&athenav1.Delta{Change: &athenav1.Delta_Health{Health: next}})
+	}
+}
+
+// publish gives d the next seq, keeps it in the ring and offers it to every subscriber. A subscriber whose buffer is
+// full is closed with resync; nothing here waits.
+func (h *Hub) publish(d *athenav1.Delta) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.seq++
+	d.Seq = h.seq
+	size := proto.Size(d)
+	h.ring = append(h.ring, ringEntry{d, size})
+	h.ringBytes += size
+	for len(h.ring) > ringDeltas || (h.ringBytes > ringBytes && len(h.ring) > 1) {
+		h.ringBytes -= h.ring[0].size
+		h.ring[0] = ringEntry{}
+		h.ring = h.ring[1:]
+	}
+	h.floor = h.ring[0].d.Seq - 1
+	for s := range h.subs {
+		select {
+		case s.ch <- d:
+		default:
+			h.dropLocked(s, true)
+		}
+	}
+}
+
+// sendDetail sends a ticket_detail delta to the subscribers watching the Ticket. Detail deltas are not sequenced (seq
+// 0) and not kept in the ring: they are per-watcher state, so they must not leave a gap in the others' seq. A client
+// gets the current detail from Detail when it starts watching.
+func (h *Hub) sendDetail(id string, td *athenav1.TicketDetail) {
+	d := &athenav1.Delta{Change: &athenav1.Delta_TicketDetail{TicketDetail: td}}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for s := range h.subs {
+		if !s.watching[id] {
+			continue
+		}
+		select {
+		case s.ch <- d:
+		default:
+			h.dropLocked(s, true)
+		}
+	}
+}
+
+func (h *Hub) watched(id string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for s := range h.subs {
+		if s.watching[id] {
+			return true
+		}
+	}
+	return false
+}
+
+// dropLocked removes s and closes its channel; resync says the hub did it because s fell behind.
+func (h *Hub) dropLocked(s *Sub, resync bool) {
+	if _, ok := h.subs[s]; !ok {
+		return
+	}
+	delete(h.subs, s)
+	s.resync = resync
+	close(s.ch)
+}
+
+// Sub is one subscriber's feed.
+type Sub struct {
+	h        *Hub
+	ch       chan *athenav1.Delta
+	watching map[string]bool // guarded by h.mu
+	resync   bool            // guarded by h.mu; written before ch is closed
+}
+
+// C delivers the subscriber's deltas. Deltas are shared between subscribers: do not modify them. The channel is closed
+// by Close, by the hub's shutdown, or, when Resync reports true, because the subscriber fell behind.
+func (s *Sub) C() <-chan *athenav1.Delta { return s.ch }
+
+// Resync reports whether the hub closed the feed because the subscriber could not keep up (or the hub lost commits):
+// the client must take a new Snapshot and subscribe again.
+func (s *Sub) Resync() bool {
+	s.h.mu.Lock()
+	defer s.h.mu.Unlock()
+	return s.resync
+}
+
+// Close ends the feed; it is idempotent.
+func (s *Sub) Close() {
+	s.h.mu.Lock()
+	defer s.h.mu.Unlock()
+	s.h.dropLocked(s, false)
+}
+
+// Watch asks for ticket_detail deltas of a Ticket; Unwatch stops them.
+func (s *Sub) Watch(ticketID string) {
+	s.h.mu.Lock()
+	defer s.h.mu.Unlock()
+	s.watching[ticketID] = true
+}
+
+func (s *Sub) Unwatch(ticketID string) {
+	s.h.mu.Lock()
+	defer s.h.mu.Unlock()
+	delete(s.watching, ticketID)
+}
+
+// Subscribe starts a feed. When cursor (of this epoch) is still inside the ring, the feed first replays the deltas
+// after it and snapshotNeeded is false. Otherwise (a cursor outside the ring, ahead of it, or of another epoch)
+// snapshotNeeded is true and the feed carries only what is published from now on: the caller takes a Snapshot, sends
+// it, and then forwards the feed's deltas with seq above the snapshot's cursor, dropping the rest. Deltas are full
+// states of one record, so applying one the snapshot already includes is idempotent; one above the cursor can carry
+// older state than the snapshot read (the hub reads each record when it publishes), which is transient: a newer
+// delta for that record follows and corrects it.
+func (h *Hub) Subscribe(cursor uint64, epoch string) (sub *Sub, snapshotNeeded bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var replay []*athenav1.Delta
+	snapshotNeeded = epoch != h.epoch || cursor < h.floor || cursor > h.seq
+	if !snapshotNeeded {
+		for _, e := range h.ring {
+			if e.d.Seq > cursor {
+				replay = append(replay, e.d)
+			}
+		}
+	}
+	sub = &Sub{h: h, ch: make(chan *athenav1.Delta, subBuffer+len(replay)), watching: map[string]bool{}}
+	for _, d := range replay {
+		sub.ch <- d
+	}
+	if h.closed {
+		close(sub.ch)
+		return sub, true
+	}
+	h.subs[sub] = struct{}{}
+	return sub, snapshotNeeded
+}
+
+// Snapshot returns the bounded state at the hub's cursor: the cursor is read first, so every delta above it is
+// either already in the state or still to come. Tickets: every open one and the 100 most recently ended; Approvals:
+// the pending and the last 50 answered; Threads: the active and the 100 most recent; Decisions and Triggers: the last
+// 200. It reads the Source afresh; an error means no snapshot (never a partial one).
+func (h *Hub) Snapshot() (*athenav1.Snapshot, error) {
+	h.mu.Lock()
+	cursor := h.seq
+	health := h.health
+	h.mu.Unlock()
+	s := &athenav1.Snapshot{Cursor: cursor}
+
+	tickets, err := h.src.Tickets(true)
+	if err != nil {
+		return nil, err
+	}
+	for _, t := range boundTickets(tickets) {
+		s.Tickets = append(s.Tickets, ticketSummary(&t, core.TicketStage(&t)))
+	}
+
+	pending, err := h.src.PendingApprovals()
+	if err != nil {
+		return nil, err
+	}
+	answered, err := h.src.AnsweredApprovals(answeredApproval)
+	if err != nil {
+		return nil, err
+	}
+	for _, a := range append(pending, answered...) {
+		s.Approvals = append(s.Approvals, approvalView(&a))
+	}
+
+	trigs, err := h.src.RecentTriggers(recentTriggers)
+	if err != nil {
+		return nil, err
+	}
+	for _, t := range trigs {
+		s.Triggers = append(s.Triggers, triggerView(&t))
+	}
+
+	active, err := h.src.ActiveThreads()
+	if err != nil {
+		return nil, err
+	}
+	recent, err := h.src.RecentThreads(recentThreads)
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	for _, th := range append(active, recent...) {
+		if !seen[th.Key] {
+			seen[th.Key] = true
+			s.Threads = append(s.Threads, threadView(&th))
+		}
+	}
+
+	decs, err := h.src.Decisions("", recentDecisions)
+	if err != nil {
+		return nil, err
+	}
+	for _, d := range decs {
+		s.Decisions = append(s.Decisions, decisionView(&d))
+	}
+
+	s.Node = nodeStatus(h.src.NodeStatus())
+	if health == nil {
+		health = h.probeHealth() // before Start
+	}
+	s.Health = health
+	if s.Policy, err = h.policyView(); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+// boundTickets keeps every open Ticket and the 100 most recently ended, the most recently updated first.
+func boundTickets(all []core.Ticket) []core.Ticket {
+	var open, ended []core.Ticket
+	for _, t := range all {
+		if t.Ended == nil {
+			open = append(open, t)
+		} else {
+			ended = append(ended, t)
+		}
+	}
+	sort.SliceStable(ended, func(i, j int) bool { return ended[i].Ended.At.After(ended[j].Ended.At) })
+	if len(ended) > endedTickets {
+		ended = ended[:endedTickets]
+	}
+	out := append(open, ended...)
+	sort.SliceStable(out, func(i, j int) bool { return out[i].UpdatedAt.After(out[j].UpdatedAt) })
+	return out
+}
+
+// Detail returns a Ticket's summary, timeline and Threads.
+func (h *Hub) Detail(ticketID string) (*athenav1.TicketDetail, error) {
+	t, st, err := h.src.Ticket(ticketID)
+	if err != nil {
+		return nil, err
+	}
+	return h.detail(&t, st), nil
+}
+
+func (h *Hub) detail(t *core.Ticket, st core.Stage) *athenav1.TicketDetail {
+	var origin *core.Trigger
+	if id := t.Origin.TriggerID; id != "" {
+		if tr, err := h.src.Trigger(id); err == nil {
+			origin = &tr
+		} else {
+			h.log.Debug("hub: detail: origin trigger", "ticket", t.ID, "trigger", id, "error", err)
+		}
+	}
+	var pending *core.Approval
+	if id := t.PendingApproval; id != "" {
+		if a, err := h.src.Approval(id); err == nil {
+			pending = &a
+		}
+	}
+	return ticketDetail(t, st, origin, pending)
+}

@@ -340,6 +340,19 @@ func (tx *memTx) PutTicket(t *Ticket) error {
 	return nil
 }
 
+func (tx *memTx) TicketByRequestID(requestID string) (*Ticket, error) {
+	for id := range tx.tickets {
+		t, err := tx.GetTicket(id)
+		if err != nil {
+			return nil, err
+		}
+		if t.RequestID == requestID {
+			return t, nil
+		}
+	}
+	return nil, nil
+}
+
 func (tx *memTx) list(includeEnded bool) ([]*Ticket, error) {
 	var out []*Ticket
 	for id := range tx.tickets {

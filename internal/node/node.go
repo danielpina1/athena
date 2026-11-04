@@ -86,6 +86,11 @@ type Config struct {
 	Sandbox *SandboxConfig
 	// Logger receives the node's log lines (default slog.Default()).
 	Logger *slog.Logger
+	// Name and ClaudeVersion are shown in Status; the node does not interpret them.
+	Name, ClaudeVersion string
+	// OnStatus is called, from the node's loop goroutine, whenever the sessions in use or the launches queued change
+	// (see Status). It must not block or call back into the node.
+	OnStatus func()
 }
 
 // EngineCallbacks is the part of *core.Engine the node calls: the Executor callbacks, the Ticket query and Approvals.
@@ -142,8 +147,16 @@ type Node struct {
 	mu   sync.Mutex
 	live map[string]*session // by Ticket ID: launched sessions until their runner ends
 
+	// streams holds the Tickets' stream rings (stream.go).
+	streams streamHub
+
 	// restartDelay is the pause before restart n (1-based) of a crashed session.
 	restartDelay func(n int) time.Duration
+
+	// queued is the number of launches waiting (written by the loop goroutine); statusSig is the last status
+	// OnStatus was told of (loop goroutine only).
+	queued    atomic.Int32
+	statusSig string
 
 	// tokens holds each GitHub Assignment's token, in memory only.
 	tokens *tokenStore
@@ -242,6 +255,29 @@ func (n *Node) Deliver(t core.Ticket, a core.Assignment) {
 // Stop ends an Assignment's session (core.Executor); once its Ticket ended, the Ticket's worktree is cleaned up.
 func (n *Node) Stop(t core.Ticket, a core.Assignment, reason string) {
 	n.post(message{kind: msgStop, t: t, a: a, reason: reason})
+}
+
+// ErrNoSession is an Interrupt of a Ticket that has no session process running.
+var ErrNoSession = errors.New("node: no live session")
+
+// Interrupt asks the Ticket's running session to abandon its current turn; the process stays for the next Input. A
+// Ticket without a running process is ErrNoSession.
+func (n *Node) Interrupt(ticketID string) error {
+	s := n.liveSession(ticketID)
+	if s == nil {
+		return ErrNoSession
+	}
+	p := s.process()
+	if p == nil {
+		return ErrNoSession
+	}
+	if err := p.InterruptTurn(); err != nil {
+		if errors.Is(err, claude.ErrExited) || s.over() { // the process is ending
+			return ErrNoSession
+		}
+		return err
+	}
+	return nil
 }
 
 // Close stops every session without reporting anything (their Assignments stay running, to be resumed by the next
@@ -351,6 +387,7 @@ func (n *Node) loop() {
 				n.schedule(st)
 			}
 		}
+		n.publishStatus(st)
 		if st.shutting && n.liveCount() == 0 {
 			return
 		}
@@ -410,6 +447,9 @@ func (n *Node) onDeliver(st *loopState, t core.Ticket, a core.Assignment) {
 
 func (n *Node) onStop(st *loopState, t core.Ticket, a core.Assignment, reason string) {
 	ended := t.Ended != nil
+	if ended {
+		n.streams.end(t.ID)
+	}
 	st.queue = slices.DeleteFunc(st.queue, func(q *session) bool {
 		return q.a.ID == a.ID || (ended && q.t.ID == t.ID)
 	})
@@ -563,6 +603,20 @@ type session struct {
 	// a queued launch put off for them falls due. Both are fixed at creation.
 	credAttempt int
 	notBefore   time.Time
+	// proc is the session's running process, nil between processes and after the last.
+	proc *claude.Session
+}
+
+func (s *session) setProcess(p *claude.Session) {
+	s.mu.Lock()
+	s.proc = p
+	s.mu.Unlock()
+}
+
+func (s *session) process() *claude.Session {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.proc
 }
 
 // noteHandoff records the state of the Report the session just filed: ready on a Ticket that stays open hands off.
@@ -881,6 +935,7 @@ func (r *runner) run() {
 			AppendSystemPrompt: prompts.Worker,
 			Env:                env,
 			TranscriptPath:     n.transcriptPath(s.t.ID),
+			OnLine:             func(off int64, line []byte) { n.streams.add(s.t.ID, off, line) },
 		})
 		if err != nil {
 			r.fail("start claude: " + err.Error())
@@ -916,6 +971,8 @@ func (r *runner) run() {
 // drains the events and closes the process.
 func (r *runner) drive(sess *claude.Session, recovering bool) (crashed bool, cause string) {
 	s := r.s
+	s.setProcess(sess)
+	defer s.setProcess(nil)
 	events := sess.Events()
 	r.initSeen = false
 	r.send = sess.Send

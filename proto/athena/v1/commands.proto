@@ -1,0 +1,137 @@
+syntax = "proto3";
+
+package athena.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/danielpina1/athena/internal/pb/athenav1;athenav1";
+
+// What a dashboard asks the server to do, and the answer.
+
+message Command {
+  string id = 1;
+  oneof action {
+    SubmitTask submit_task = 10;
+    Reply reply = 11;
+    Stop stop = 12;
+    Retry retry = 13;
+    Interrupt interrupt = 14;
+    AnswerApproval answer_approval = 15;
+    Reevaluate reevaluate = 16;
+    Dismiss dismiss = 17;
+    Unsubscribe unsubscribe = 18;
+    SetPolicy set_policy = 19;
+    WatchTicket watch_ticket = 20;
+    UnwatchTicket unwatch_ticket = 21;
+    PushSubscribe push_subscribe = 22;
+    PushUnsubscribe push_unsubscribe = 23;
+    SetNotificationPrefs set_notification_prefs = 24;
+    Visibility visibility = 25;
+    ListPasskeys list_passkeys = 26;
+    RevokePasskey revoke_passkey = 27;
+  }
+}
+
+message SubmitTask {
+  string text = 1;
+  string repo = 2;
+  string dir = 3;
+  string model = 4;
+}
+
+message Reply {
+  string ticket_id = 1;
+  string text = 2;
+}
+
+message Stop {
+  string ticket_id = 1;
+  string reason = 2;
+}
+
+message Retry {
+  string ticket_id = 1;
+}
+
+message Interrupt {
+  string ticket_id = 1;
+}
+
+message AnswerApproval {
+  string approval_id = 1;
+  bool approve = 2;
+  string note = 3;
+}
+
+message Reevaluate {
+  string trigger_id = 1;
+}
+
+message Dismiss {
+  string decision_id = 1;
+}
+
+message Unsubscribe {
+  string thread = 1;
+}
+
+message SetPolicy {
+  uint32 base_revision = 1;
+  string settings_json = 2;
+}
+
+message WatchTicket {
+  string ticket_id = 1;
+}
+
+message UnwatchTicket {
+  string ticket_id = 1;
+}
+
+message PushSubscribe {
+  string endpoint = 1;
+  string p256dh = 2;
+  string auth = 3;
+}
+
+message PushUnsubscribe {
+  string endpoint = 1;
+}
+
+message SetNotificationPrefs {
+  repeated string muted = 1;
+}
+
+message Visibility {
+  bool visible = 1;
+}
+
+message ListPasskeys {}
+
+message RevokePasskey {
+  string id = 1;
+}
+
+// CommandResult answers a Command. code is one of the stable error codes when ok is false.
+message CommandResult {
+  string id = 1;
+  bool ok = 2;
+  string code = 3;
+  string message = 4;
+  oneof result {
+    string ticket_id = 10;
+    PasskeyList passkeys = 11;
+    uint32 policy_revision = 12;
+  }
+}
+
+message PasskeyList {
+  repeated Passkey passkeys = 1;
+}
+
+message Passkey {
+  string id = 1;
+  string name = 2;
+  google.protobuf.Timestamp created_at = 3;
+  google.protobuf.Timestamp last_used_at = 4;
+}

@@ -1,11 +1,14 @@
 package bench
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,17 +17,27 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
+
 	"github.com/danielpina1/athena/internal/core"
+	"github.com/danielpina1/athena/internal/link"
 	"github.com/danielpina1/athena/internal/metrics"
 	"github.com/danielpina1/athena/internal/node"
+	"github.com/danielpina1/athena/internal/pb/athenav1"
 	"github.com/danielpina1/athena/internal/server"
 	"github.com/danielpina1/athena/internal/store"
+	"github.com/danielpina1/athena/internal/web"
+	"github.com/danielpina1/athena/internal/web/webauthntest"
 )
 
 // The rig is the real store, Engine and node wired as `athena server` wires them, with the fake `claude` of the
 // runtime package as the runtime: no model, no network. What it measures is Athena's own overhead.
 
-const startTimeout = 20 * time.Second
+const (
+	startTimeout = 20 * time.Second
+	// stopTimeout is how long a server gets to exit after SIGINT.
+	stopTimeout = 10 * time.Second
+)
 
 var (
 	buildMu   sync.Mutex
@@ -384,6 +397,19 @@ func newRepo(tb testing.TB) string {
 	return dir
 }
 
+// stopServer interrupts a server subprocess and waits for it; one that has not exited after stopTimeout is killed.
+func stopServer(cmd *exec.Cmd) {
+	_ = cmd.Process.Signal(os.Interrupt)
+	done := make(chan struct{})
+	go func() { _ = cmd.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(stopTimeout):
+		_ = cmd.Process.Kill()
+		<-done
+	}
+}
+
 // idleRSS starts a real `athena server` with the fake runtime, leaves it idle past two samples of its resource
 // gauges and returns the process_rss_bytes it reports (its peak RSS where the OS offers nothing better).
 func idleRSS(tb testing.TB, idle time.Duration) uint64 {
@@ -395,10 +421,7 @@ func idleRSS(tb testing.TB, idle time.Duration) uint64 {
 	if err := cmd.Start(); err != nil {
 		tb.Fatal(err)
 	}
-	tb.Cleanup(func() {
-		_ = cmd.Process.Signal(os.Interrupt)
-		_ = cmd.Wait()
-	})
+	tb.Cleanup(func() { stopServer(cmd) })
 	deadline := time.Now().Add(startTimeout)
 	for {
 		if _, err := controlMetrics(dir); err == nil {
@@ -425,24 +448,355 @@ func idleRSS(tb testing.TB, idle time.Duration) uint64 {
 
 // controlMetrics asks a server's control socket for its metrics.
 func controlMetrics(stateDir string) (metrics.Snapshot, error) {
+	var snap metrics.Snapshot
+	err := controlCall(stateDir, server.Request{Op: server.OpMetrics, Window: "start"}, &snap)
+	return snap, err
+}
+
+// controlCall sends one request to a server's control socket and decodes the data of its answer into out (nil to
+// ignore it).
+func controlCall(stateDir string, req server.Request, out any) error {
 	conn, err := net.DialTimeout("unix", filepath.Join(stateDir, server.ControlSocket), time.Second)
 	if err != nil {
-		return metrics.Snapshot{}, err
+		return err
 	}
 	defer conn.Close()
-	if err := json.NewEncoder(conn).Encode(server.Request{Op: server.OpMetrics, Window: "start"}); err != nil {
-		return metrics.Snapshot{}, err
+	if err := json.NewEncoder(conn).Encode(req); err != nil {
+		return err
 	}
 	var resp struct {
-		OK    bool             `json:"ok"`
-		Error string           `json:"error"`
-		Data  metrics.Snapshot `json:"data"`
+		OK    bool            `json:"ok"`
+		Error string          `json:"error"`
+		Data  json.RawMessage `json:"data"`
 	}
 	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
-		return metrics.Snapshot{}, err
+		return err
 	}
 	if !resp.OK {
-		return metrics.Snapshot{}, fmt.Errorf("metrics: %s", resp.Error)
+		return fmt.Errorf("%s: %s", req.Op, resp.Error)
 	}
-	return resp.Data, nil
+	if out == nil {
+		return nil
+	}
+	return json.Unmarshal(resp.Data, out)
+}
+
+// dashboard is a real `athena server` (fake runtime) with the dashboard's endpoint on loopback, tls off, and one
+// signed-in client on the link: the path a phone takes, minus the network. It has one running Ticket whose session
+// answers every message with a line (ATHENA_FAKE_LATER_FIXTURE).
+type dashboard struct {
+	tb     testing.TB
+	dir    string
+	origin string
+	ticket string
+
+	sess   *link.Session
+	frames chan *athenav1.Frame
+	cmds   int
+	// seq and offset are the latest delta and stream offset taken from the link.
+	seq    uint64
+	offset int64
+}
+
+// webWait bounds every wait for the server.
+const webWait = 20 * time.Second
+
+// quiet is how long the link must be silent before a sample is over: the late frames of one sample (the session's
+// echo, the Ticket's changes after it) must not answer the next.
+const quiet = 15 * time.Millisecond
+
+func startDashboard(tb testing.TB) *dashboard {
+	tb.Helper()
+	bin := build(tb, "athena", "github.com/danielpina1/athena/cmd/athena")
+	fake := fakeClaude(tb)
+	dir := shortDir(tb)
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		tb.Fatal(err)
+	}
+	listen := l.Addr().String()
+	l.Close()
+	if err := server.SetupWeb(dir, server.WebConfig{Listen: listen, Host: "localhost", TLS: "off"}); err != nil {
+		tb.Fatal(err)
+	}
+	// Every user line the session reads after the first is answered with one assistant line.
+	later := filepath.Join(dir, "later.jsonl")
+	line := `{"type":"assistant","message":{"model":"fake","id":"msg_bench","type":"message","role":"assistant",` +
+		`"content":[{"type":"text","text":"ok"}],"stop_reason":null,"usage":{"input_tokens":1,"output_tokens":1}}}` + "\n"
+	if err := os.WriteFile(later, []byte(line), 0o600); err != nil {
+		tb.Fatal(err)
+	}
+	cmd := exec.Command(bin, "server", "--state-dir", dir, "--claude", fake)
+	cmd.Env = append(os.Environ(), "ATHENA_FAKE_LATER_FIXTURE="+later)
+	if err := cmd.Start(); err != nil {
+		tb.Fatal(err)
+	}
+	tb.Cleanup(func() { stopServer(cmd) })
+	d := &dashboard{tb: tb, dir: dir, origin: "http://localhost" + listen[strings.LastIndex(listen, ":"):], frames: make(chan *athenav1.Frame, 1<<14)}
+	for deadline := time.Now().Add(startTimeout); ; time.Sleep(20 * time.Millisecond) {
+		var st server.WebStatusResult
+		if err := controlCall(dir, server.Request{Op: server.OpWebStatus}, &st); err == nil && st.Serving {
+			break
+		}
+		if time.Now().After(deadline) {
+			tb.Fatal("the dashboard's endpoint did not come up")
+		}
+	}
+	d.connect(d.signIn())
+	d.ticket = d.startTicket()
+	return d
+}
+
+// signIn enrolls a software passkey with a token issued the way `athena web enroll` does (the store is shared with
+// the running server) and logs in; it returns the session cookie.
+func (d *dashboard) signIn() string {
+	tb := d.tb
+	st, err := store.Open(filepath.Join(d.dir, "athena.db"))
+	if err != nil {
+		tb.Fatal(err)
+	}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	token, err := web.IssueEnrollToken(st, 0)
+	slog.SetDefault(prev)
+	st.Close()
+	if err != nil {
+		tb.Fatal(err)
+	}
+	authn := webauthntest.New(tb, d.origin, "localhost")
+	cookies := map[string]*http.Cookie{}
+	post := func(path string, body []byte) []byte {
+		req, err := http.NewRequest("POST", d.origin+path, bytes.NewReader(body))
+		if err != nil {
+			tb.Fatal(err)
+		}
+		req.Header.Set("Origin", d.origin)
+		req.Header.Set("Content-Type", "application/json")
+		for _, c := range cookies {
+			req.AddCookie(c)
+		}
+		resp, err := (&http.Client{Timeout: webWait}).Do(req)
+		if err != nil {
+			tb.Fatal(err)
+		}
+		defer resp.Body.Close()
+		out, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode != http.StatusOK {
+			tb.Fatalf("%s = %d %s", path, resp.StatusCode, out)
+		}
+		for _, c := range resp.Cookies() {
+			if c.MaxAge < 0 {
+				delete(cookies, c.Name)
+			} else {
+				cookies[c.Name] = c
+			}
+		}
+		return out
+	}
+	body, _ := json.Marshal(map[string]string{"token": token, "name": "bench"})
+	post("/auth/register/finish", authn.Create(tb, post("/auth/register/begin", body)))
+	cookies = map[string]*http.Cookie{}
+	post("/auth/login/finish", authn.Assert(tb, post("/auth/login/begin", nil)))
+	return cookies[web.SessionCookie].Value
+}
+
+// connect opens the link and says hello; the snapshot is taken off the frames.
+func (d *dashboard) connect(cookie string) {
+	tb := d.tb
+	h := http.Header{}
+	h.Set("Origin", d.origin)
+	h.Set("Cookie", web.SessionCookie+"="+cookie)
+	ctx, cancel := context.WithTimeout(context.Background(), webWait)
+	defer cancel()
+	c, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(d.origin, "http")+"/ws", &websocket.DialOptions{
+		HTTPHeader: h, Subprotocols: []string{link.Subprotocol}, CompressionMode: websocket.CompressionNoContextTakeover})
+	if err != nil {
+		tb.Fatalf("dial: %v", err)
+	}
+	d.sess = link.New(link.NewWS(c), link.Options{OnFrame: func(f *athenav1.Frame) {
+		select {
+		case d.frames <- f:
+		default: // never blocks the reader; a sample then times out
+		}
+	}})
+	hello := &athenav1.Hello{Protocol: web.Protocol, ClientId: "bench"}
+	if err := d.sess.Send(athenav1.Channel_CONTROL, false, &athenav1.Frame{Body: &athenav1.Frame_Hello{Hello: hello}}); err != nil {
+		tb.Fatal(err)
+	}
+	rctx, stop := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { _ = d.sess.Run(rctx); close(done) }()
+	tb.Cleanup(func() {
+		stop()
+		select {
+		case <-done:
+		case <-time.After(webWait):
+		}
+	})
+	snap := d.await(func(f *athenav1.Frame) bool { return f.GetSnapshot() != nil }).GetSnapshot()
+	d.seq = snap.GetCursor()
+}
+
+// await returns the first frame match accepts, dropping the others; it fails the run after webWait.
+func (d *dashboard) await(match func(*athenav1.Frame) bool) *athenav1.Frame {
+	d.tb.Helper()
+	timeout := time.After(webWait)
+	for {
+		select {
+		case f := <-d.frames:
+			if match(f) {
+				return f
+			}
+		case <-timeout:
+			d.tb.Fatal("timed out waiting for a frame")
+		}
+	}
+}
+
+// settle drains the link until it has been silent for quiet, and keeps the latest delta seq and stream offset.
+func (d *dashboard) settle() {
+	for {
+		select {
+		case f := <-d.frames:
+			d.note(f)
+		case <-time.After(quiet):
+			return
+		}
+	}
+}
+
+func (d *dashboard) note(f *athenav1.Frame) {
+	d.seq = max(d.seq, f.GetDelta().GetSeq())
+	for _, it := range f.GetStreamItems().GetItems() {
+		d.offset = max(d.offset, it.GetOffset())
+	}
+}
+
+// startTicket submits a task through the control socket and waits until its session runs and its output is open on
+// the link; the grant lets the stream carry every sample's lines.
+func (d *dashboard) startTicket() string {
+	tb := d.tb
+	var sub struct {
+		ID string `json:"id"`
+	}
+	if err := controlCall(d.dir, server.Request{Op: server.OpSubmit, Text: "dashboard benchmark"}, &sub); err != nil {
+		tb.Fatal(err)
+	}
+	if err := d.sess.Grant(athenav1.Channel_STREAM, 1<<20); err != nil {
+		tb.Fatal(err)
+	}
+	if err := d.sess.Send(athenav1.Channel_CONTROL, true, &athenav1.Frame{Body: &athenav1.Frame_StreamOpen{
+		StreamOpen: &athenav1.StreamOpen{TicketId: sub.ID}}}); err != nil {
+		tb.Fatal(err)
+	}
+	d.await(func(f *athenav1.Frame) bool {
+		d.note(f)
+		return f.GetStreamItems().GetTicketId() == sub.ID && len(f.GetStreamItems().GetItems()) > 0
+	})
+	d.settle()
+	return sub.ID
+}
+
+// reply sends a Reply Command over the link; it returns the Command's id.
+func (d *dashboard) reply() string {
+	d.cmds++
+	id := fmt.Sprintf("c%d", d.cmds)
+	cmd := &athenav1.Command{Id: id, Action: &athenav1.Command_Reply{Reply: &athenav1.Reply{TicketId: d.ticket, Text: "again " + id}}}
+	if err := d.sess.Send(athenav1.Channel_CONTROL, true, &athenav1.Frame{Body: &athenav1.Frame_Command{Command: cmd}}); err != nil {
+		d.tb.Fatal(err)
+	}
+	return id
+}
+
+// measureLinkDelta returns n latencies from an Engine commit (a Reply through the control socket, so that the link
+// is not part of what triggers it) to the Ticket's delta arriving on the link. The control socket's round trip to the
+// commit is inside it: nothing outside the server sees the commit itself.
+func measureLinkDelta(tb testing.TB, n int) []time.Duration {
+	d := startDashboard(tb)
+	out := make([]time.Duration, 0, n)
+	for i := 0; i < n+10; i++ {
+		start := time.Now()
+		req := server.Request{Op: server.OpReply, ID: d.ticket, Text: fmt.Sprintf("delta %d", i)}
+		if err := controlCall(d.dir, req, nil); err != nil {
+			tb.Fatal(err)
+		}
+		got := d.await(func(f *athenav1.Frame) bool {
+			return f.GetDelta().GetTicket().GetId() == d.ticket && f.GetDelta().GetSeq() > d.seq
+		})
+		took := time.Since(start)
+		d.note(got)
+		d.settle()
+		if i >= 10 { // the first commands warm the page cache
+			out = append(out, took)
+		}
+	}
+	return out
+}
+
+// measureStreamItem returns n latencies from a Reply to the fake runtime's answer to it (its assistant line, a "say"
+// item) arriving on the link; the echo of the Reply's own user line (an "other" item) does not end a sample.
+func measureStreamItem(tb testing.TB, n int) []time.Duration {
+	d := startDashboard(tb)
+	out := make([]time.Duration, 0, n)
+	for i := 0; i < n+10; i++ {
+		start := time.Now()
+		d.reply()
+		got := d.await(func(f *athenav1.Frame) bool {
+			for _, it := range f.GetStreamItems().GetItems() {
+				if f.GetStreamItems().GetTicketId() == d.ticket && it.GetOffset() > d.offset && it.GetKind() == "say" {
+					return true
+				}
+			}
+			return false
+		})
+		took := time.Since(start)
+		d.note(got)
+		d.settle()
+		if i >= 10 {
+			out = append(out, took)
+		}
+	}
+	return out
+}
+
+// measureCommandResult returns n latencies from a Reply Command sent on the link to its CommandResult.
+func measureCommandResult(tb testing.TB, n int) []time.Duration {
+	d := startDashboard(tb)
+	out := make([]time.Duration, 0, n)
+	for i := 0; i < n+10; i++ {
+		start := time.Now()
+		id := d.reply()
+		res := d.await(func(f *athenav1.Frame) bool { return f.GetCommandResult().GetId() == id }).GetCommandResult()
+		took := time.Since(start)
+		if !res.GetOk() {
+			tb.Fatalf("reply = %v", res)
+		}
+		d.settle()
+		if i >= 10 {
+			out = append(out, took)
+		}
+	}
+	return out
+}
+
+// webIdleRSS is idleRSS with one client connected to the dashboard's endpoint, as the owner's phone is.
+func webIdleRSS(tb testing.TB, idle time.Duration) uint64 {
+	tb.Helper()
+	d := startDashboard(tb)
+	time.Sleep(idle)
+	snap, err := controlMetrics(d.dir)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	var st server.WebStatusResult
+	if err := controlCall(d.dir, server.Request{Op: server.OpWebStatus}, &st); err != nil || st.Clients != 1 {
+		tb.Fatalf("web.status = %+v, %v; want one connected client", st, err)
+	}
+	for _, g := range snap.Gauges {
+		if g.Name == "process_rss_bytes" {
+			return uint64(g.Value)
+		}
+	}
+	tb.Fatal("server reports no process_rss_bytes")
+	return 0
 }

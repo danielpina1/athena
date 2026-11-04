@@ -19,6 +19,8 @@ type Tx interface {
 	GetTicket(id string) (*Ticket, error)
 	// PutTicket inserts or replaces a Ticket.
 	PutTicket(t *Ticket) error
+	// TicketByRequestID returns the Ticket created under the given request id, or nil, nil if there is none.
+	TicketByRequestID(requestID string) (*Ticket, error)
 	// OpenTickets returns every Ticket that has not ended, least recently updated first.
 	OpenTickets() ([]*Ticket, error)
 	// AllTickets returns every Ticket, ended ones included, least recently updated first.

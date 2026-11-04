@@ -13,7 +13,11 @@ import (
 
 // PutTrigger inserts or replaces a Trigger.
 func (tx *Tx) PutTrigger(t *core.Trigger) error {
-	return tx.putDoc("triggers", t.ID, t)
+	if err := tx.putDoc("triggers", t.ID, t); err != nil {
+		return err
+	}
+	tx.changes.Triggers = addID(tx.changes.Triggers, t.ID)
+	return nil
 }
 
 // GetTrigger returns the Trigger with the given ID, or nil, nil if there is none.
@@ -38,6 +42,7 @@ func (tx *Tx) PutDecision(d *core.Decision) error {
 	if err != nil {
 		return fmt.Errorf("store: put decision %q: %w", d.ID, err)
 	}
+	tx.changes.Decisions = addID(tx.changes.Decisions, d.ID)
 	return nil
 }
 
@@ -118,6 +123,7 @@ func (tx *Tx) PutThread(t *core.Thread) error {
 	if err != nil {
 		return fmt.Errorf("store: put thread %q: %w", t.Key, err)
 	}
+	tx.changes.Threads = addID(tx.changes.Threads, t.Key)
 	return nil
 }
 
@@ -174,6 +180,14 @@ func (tx *Tx) KVSet(key, value string) error {
 		ON CONFLICT(key) DO UPDATE SET value = excluded.value`, key, value)
 	if err != nil {
 		return fmt.Errorf("store: kv set %q: %w", key, err)
+	}
+	return nil
+}
+
+// KVDelete removes the plain string stored under key, if any.
+func (tx *Tx) KVDelete(key string) error {
+	if _, err := tx.sql.Exec(`DELETE FROM kv WHERE key = ?`, key); err != nil {
+		return fmt.Errorf("store: kv delete %q: %w", key, err)
 	}
 	return nil
 }

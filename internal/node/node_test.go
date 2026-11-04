@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1531,4 +1532,35 @@ func TestReadyHandoffFreesTheSlotAndAFollowUpResumes(t *testing.T) {
 	if tk, _ := h.ticket(a.ID); tk.LatestAssignment().ID != aa.ID {
 		t.Fatalf("assignment %s, want the same one resumed", tk.LatestAssignment().ID)
 	}
+}
+
+// TestStatusFollowsSessionsAndQueue: Status reports the live Tickets and the queue, and OnStatus fires when they
+// change, from the loop.
+func TestStatusFollowsSessionsAndQueue(t *testing.T) {
+	var calls atomic.Int32
+	h := newHarness(t, func(c *Config) {
+		c.Name, c.ClaudeVersion, c.Slots = "mac", "2.0.1", 1
+		c.OnStatus = func() { calls.Add(1) }
+	})
+	if s := h.n.Status(); s.Name != "mac" || s.Slots != 1 || s.SlotsInUse != 0 || s.ClaudeVersion != "2.0.1" || len(s.LiveTicketIDs) != 0 {
+		t.Fatalf("idle status = %+v", s)
+	}
+	first := h.submit("first body", t.TempDir())
+	h.eventually("first live", func() bool { return h.n.Status().SlotsInUse == 1 })
+	second := h.submit("second body", t.TempDir())
+	h.eventually("second queued", func() bool { return h.n.Status().Queued == 1 })
+	if s := h.n.Status(); len(s.LiveTicketIDs) != 1 || s.LiveTicketIDs[0] != first.ID {
+		t.Fatalf("status = %+v, want only %s live", s, first.ID)
+	}
+	if calls.Load() < 2 {
+		t.Errorf("OnStatus called %d times, want at least 2", calls.Load())
+	}
+	_, a := h.running(first.ID)
+	if r := h.report(first.ID, a.ID, core.ReportReady, "done"); !r.OK {
+		t.Fatalf("report = %+v", r)
+	}
+	h.eventually("second takes the slot", func() bool {
+		s := h.n.Status()
+		return s.Queued == 0 && len(s.LiveTicketIDs) == 1 && s.LiveTicketIDs[0] == second.ID
+	})
 }

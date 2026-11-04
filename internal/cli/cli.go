@@ -1,7 +1,8 @@
 // Package cli implements the owner's commands: `athena server`, `athena github setup|check` (which read and write the
 // configuration and talk to GitHub directly), and the commands that talk to the server over the control socket (task,
 // status, logs, reply, stop, retry, approvals, approve, deny, metrics, policy, triggers, threads, decisions,
-// reevaluate, dismiss, unsubscribe).
+// reevaluate, dismiss, unsubscribe), and `athena web setup|status|ca|enroll|passkeys|revoke`, which work on the
+// configuration, the CA and the store directly.
 package cli
 
 import (
@@ -26,6 +27,7 @@ import (
 	"github.com/danielpina1/athena/internal/core"
 	"github.com/danielpina1/athena/internal/metrics"
 	"github.com/danielpina1/athena/internal/node"
+	"github.com/danielpina1/athena/internal/render"
 	"github.com/danielpina1/athena/internal/server"
 )
 
@@ -52,6 +54,7 @@ var usage = map[string]string{
 	"approve":     "athena approve <id> [--note N]",
 	"deny":        "athena deny <id> [--note N]",
 	"metrics":     "athena metrics [--window 1h|24h|start]",
+	"web":         "athena web setup --host H [--ip IP ...] [--listen ADDR] [--tls ca|acme|off] [--acme-email E --acme-provider P --acme-agree-tos] | athena web status | athena web ca | athena web enroll [--ttl D] | athena web passkeys | athena web revoke <id>",
 }
 
 // Run runs one command and returns its exit code: 0 on success, 1 when it failed, 2 on a usage error.
@@ -85,6 +88,8 @@ func Run(ctx context.Context, cmd string, args []string, stdout, stderr io.Write
 		return c.metrics(args)
 	case "github":
 		return c.github(ctx, args)
+	case "web":
+		return c.web(args)
 	case "policy":
 		return c.policy(args)
 	case "triggers":
@@ -463,7 +468,7 @@ func (c *command) logs(ctx context.Context, args []string) int {
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	err := stream(ctx, c.stateDir, server.Request{Op: server.OpLogs, ID: pos[0], Follow: follow}, func(raw json.RawMessage) {
-		var l server.LogLine
+		var l render.LogLine
 		if json.Unmarshal(raw, &l) == nil {
 			fmt.Fprintf(c.stdout, "%s  %s  %s\n", l.At.Local().Format(time.TimeOnly), l.Kind, l.Text)
 		}
@@ -603,6 +608,11 @@ func call(stateDir string, req server.Request, out any) error {
 		return err
 	}
 	defer conn.Close()
+	return exchange(conn, req, out)
+}
+
+// exchange is call on a connection already dialed.
+func exchange(conn net.Conn, req server.Request, out any) error {
 	if err := send(conn, req); err != nil {
 		return err
 	}
