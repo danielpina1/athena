@@ -10,6 +10,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 
@@ -138,9 +139,12 @@ func (u *acmeUser) GetRegistration() *registration.Resource { return u.reg }
 func (u *acmeUser) GetPrivateKey() crypto.PrivateKey        { return u.key }
 
 // Obtain registers the account if the CA does not know its key yet (giving the address in the configuration as
-// contact and agreeing to the CA's terms of service on the owner's behalf by configuring acme), then issues host.
-// lego does not take a context, so cancellation only stops waiting for it.
+// contact and agreeing to the CA's terms of service only if the owner set AgreeTOS), then issues host. Without
+// AgreeTOS it fails before any network call. lego does not take a context, so cancellation only stops waiting for it.
 func (o *legoObtainer) Obtain(ctx context.Context, host string) ([]byte, []byte, error) {
+	if !o.cfg.AgreeTOS {
+		return nil, nil, errors.New("acme: agree to the certificate authority's terms first (config web.acme.agreeTos, or athena web setup --acme-agree-tos); Let's Encrypt terms: https://letsencrypt.org/repository/")
+	}
 	type result struct {
 		cert, key []byte
 		err       error
@@ -178,7 +182,8 @@ func (o *legoObtainer) obtain(host string) ([]byte, []byte, error) {
 	}
 	reg, err := client.Registration.ResolveAccountByKey()
 	if err != nil {
-		reg, err = client.Registration.Register(registration.RegisterOptions{TermsOfServiceAgreed: true})
+		slog.Info("acme: account not found by key, registering", "err", err)
+		reg, err = client.Registration.Register(registration.RegisterOptions{TermsOfServiceAgreed: o.cfg.AgreeTOS})
 		if err != nil {
 			return nil, nil, fmt.Errorf("web: acme account: %w", err)
 		}

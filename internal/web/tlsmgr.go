@@ -50,6 +50,8 @@ type ACMEConfig struct {
 	Provider  string
 	Resolvers []string
 	Directory string
+	// AgreeTOS is the owner's agreement to the CA's terms of service; without it no account is registered.
+	AgreeTOS bool `json:"agreeTos"`
 }
 
 // TLSManager holds the certificate the web listener presents and replaces it before it expires.

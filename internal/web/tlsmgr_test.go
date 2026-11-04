@@ -177,6 +177,7 @@ func TestCAModeReissuesCertFromAnotherCA(t *testing.T) {
 type fakeObtainer struct {
 	mu    sync.Mutex
 	err   error
+	host  string // when set, certificates are issued for this name instead of the requested one
 	calls int
 	valid time.Duration
 	clk   *clock
@@ -191,6 +192,9 @@ func (f *fakeObtainer) Obtain(_ context.Context, host string) ([]byte, []byte, e
 	}
 	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	serial, _ := rand.Int(rand.Reader, big.NewInt(1<<62))
+	if f.host != "" {
+		host = f.host
+	}
 	now := f.clk.now()
 	tmpl := &x509.Certificate{
 		SerialNumber: serial, Subject: pkix.Name{CommonName: host}, DNSNames: []string{host},
@@ -379,5 +383,63 @@ func TestLegoObtainerCreatesAccountKey(t *testing.T) {
 	}
 	if after, _ := os.ReadFile(p); string(after) != string(before) {
 		t.Fatal("account key was replaced on the second start")
+	}
+}
+
+func TestACMERejectsWrongHostAndExpiredResult(t *testing.T) {
+	clk := &clock{t: time.Now()}
+	for name, obt := range map[string]*fakeObtainer{
+		"wrong host": {valid: 90 * 24 * time.Hour, clk: clk, host: "other.example"},
+		"expired":    {valid: -2 * time.Hour, clk: clk},
+	} {
+		m, err := NewTLSManager(t.TempDir(), acmeConfig(), obt, quietLog(), clk.now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := m.check(context.Background()); got != time.Hour {
+			t.Errorf("%s: next = %v", name, got)
+		}
+		if ok, _, na := m.Health(); ok || !na.IsZero() {
+			t.Errorf("%s: a bad result was installed", name)
+		}
+		if _, err := handshake(serve(t, m), nil); err == nil {
+			t.Errorf("%s: served a rejected certificate", name)
+		}
+	}
+}
+
+func TestLegoObtainerNeedsTOSAgreement(t *testing.T) {
+	t.Setenv("HTTPREQ_ENDPOINT", "http://127.0.0.1:1")
+	state := t.TempDir()
+	o, err := NewLegoObtainer(state, ACMEConfig{Provider: "httpreq", Directory: "http://127.0.0.1:1/dir"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := o.Obtain(context.Background(), testHost); err == nil || !strings.Contains(err.Error(), "agreeTos") || !strings.Contains(err.Error(), "letsencrypt.org/repository") {
+		t.Fatalf("err = %v", err)
+	}
+	clk := &clock{t: time.Now()}
+	m, err := NewTLSManager(state, acmeConfig(), o, quietLog(), clk.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.check(context.Background())
+	if ok, msg, _ := m.Health(); ok || !strings.Contains(msg, "agreeTos") {
+		t.Fatalf("health = %v %q", ok, msg)
+	}
+}
+
+func TestLegoObtainerRejectsOpenAccountKey(t *testing.T) {
+	t.Setenv("HTTPREQ_ENDPOINT", "http://127.0.0.1:1")
+	state := t.TempDir()
+	if _, err := NewLegoObtainer(state, ACMEConfig{Provider: "httpreq"}); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(state, "tls", "acme", "account.key")
+	if err := os.Chmod(p, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewLegoObtainer(state, ACMEConfig{Provider: "httpreq"}); err == nil || !strings.Contains(err.Error(), "mode 0644") {
+		t.Fatalf("err = %v", err)
 	}
 }
