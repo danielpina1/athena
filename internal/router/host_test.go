@@ -575,10 +575,25 @@ func TestEchoMatchedByUUID(t *testing.T) {
 		t.Fatalf("uuids %q %q, want two distinct", u1, u2)
 	}
 	e.host.observe(claude.UserEcho{Text: "m1 as the CLI reshaped it", UUID: u1})
-	e.host.observe(claude.UserEcho{Text: "m2", UUID: "another-message"})
+	e.host.observe(claude.UserEcho{Text: "m2 reshaped", UUID: "another-message"})
 	e.host.observe(claude.Result{SessionID: "s"})
 	if got := e.host.pendingTexts(); !slices.Equal(got, []string{"m2"}) {
 		t.Fatalf("unconfirmed = %q, want m1 taken by its uuid and m2 kept", got)
+	}
+}
+
+// An echo whose uuid matches no message (a CLI that gives the echo a uuid of its own) still takes its message by text,
+// so the message is not sent again on every start.
+func TestEchoWithForeignUUIDMatchedByText(t *testing.T) {
+	e := newEnv(t)
+	_, err := e.host.sent("m1")
+	e.must(err)
+	_, err = e.host.sent("m2")
+	e.must(err)
+	e.host.observe(claude.UserEcho{Text: "m2", UUID: "a-uuid-of-the-cli"})
+	e.host.observe(claude.Result{SessionID: "s"})
+	if got := e.host.pendingTexts(); !slices.Equal(got, []string{"m1"}) {
+		t.Fatalf("unconfirmed = %q, want m2 taken by its text", got)
 	}
 }
 

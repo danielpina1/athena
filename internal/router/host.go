@@ -365,9 +365,10 @@ func (h *Host) runOnce(ctx context.Context, crashes *int) string {
 		}
 	}
 	err = sess.Wait()
-	if h.isStopped() && !sess.Killed() {
-		// A stop closed the session's input and it exited on its own: the CLI finished the turn it took the messages
-		// into, so they are in the conversation and the next start does not send them again.
+	if h.isStopped() && !sess.Killed() && err == nil {
+		// A stop closed the session's input and it exited cleanly on its own: the CLI finished the turn it took the
+		// messages into, so they are in the conversation and the next start does not send them again. A CLI that
+		// crashed on its way out keeps them, to be sent again.
 		h.dropTaken()
 	}
 	h.clearSession(sess)

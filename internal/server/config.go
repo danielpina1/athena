@@ -19,7 +19,7 @@ import (
 
 // ConfigFile is the server's configuration in the state directory, written 0600 by `athena github setup`:
 //
-//	{"github": {"appId", "slug", "keyFile", "installationId", "repos": [], "intervalSeconds": 30, "receive_all": []},
+//	{"github": {"appId", "slug", "keyFile", "installationId", "repos": [], "intervalSeconds": 30, "receiveAll": []},
 //	 "router": {"model": "haiku"}, "evalTimeoutSeconds": 600}
 //
 // It holds the path of the GitHub App's private key, never the key. Without the file, or without its github part,
@@ -52,7 +52,7 @@ type GitHubConfig struct {
 	// ReceiveAll lists the configured repositories that receive every message, not only mentions of the App, in every
 	// scope (issues, pulls, comments, ci): the Policy's unaddressed admission cells and its ci row apply only to them.
 	// Default empty.
-	ReceiveAll []string `json:"receive_all,omitempty"`
+	ReceiveAll []string `json:"receiveAll,omitempty"`
 	// APIURL is GitHub's REST endpoint (default https://api.github.com); it is set for GitHub Enterprise or a test
 	// stand-in, and left out of the file otherwise.
 	APIURL string `json:"apiUrl,omitempty"`
@@ -147,10 +147,10 @@ func (g *GitHubConfig) validate() error {
 	all := map[string]bool{}
 	for _, r := range g.ReceiveAll {
 		if !seen[strings.ToLower(r)] {
-			return fmt.Errorf("github: receive_all repository %q is not one of repos", r)
+			return fmt.Errorf("github: receiveAll repository %q is not one of repos", r)
 		}
 		if all[strings.ToLower(r)] {
-			return fmt.Errorf("github: receive_all repository %q is listed twice", r)
+			return fmt.Errorf("github: receiveAll repository %q is listed twice", r)
 		}
 		all[strings.ToLower(r)] = true
 	}

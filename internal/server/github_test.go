@@ -646,7 +646,7 @@ func TestCredentialsSeededByCheck(t *testing.T) {
 	}
 }
 
-// A repository on github.receive_all receives every message: an allowed account's comment that does not mention the App
+// A repository on github.receiveAll receives every message: an allowed account's comment that does not mention the App
 // takes the listedUnaddressed cell (inferred by default) and reaches the router as a candidate, instead of being
 // refused not_received.
 func TestReceiveAllAdmitsUnaddressed(t *testing.T) {

@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/danielpina1/athena/internal/runtime/claude"
@@ -105,8 +106,9 @@ func (h *Host) unsent(id string) {
 }
 
 // observe follows a session event: an echo marks its message taken, a Result drops the taken ones. An echo is matched
-// by its uuid; only an echo without one (a CLI that does not carry it back) is matched by text, to the first untaken
-// message of that text.
+// by its uuid; an echo whose uuid matches no message (a CLI that does not carry it back, or one that gives it a uuid of
+// its own) is matched by text, to the first untaken message of that text, so its message is not sent again on every
+// start.
 func (h *Host) observe(ev claude.Event) {
 	switch e := ev.(type) {
 	case claude.Init:
@@ -114,16 +116,19 @@ func (h *Host) observe(ev claude.Event) {
 	case claude.UserEcho:
 		h.unMu.Lock()
 		defer h.unMu.Unlock()
-		for i := range h.unconfirmed {
-			m := &h.unconfirmed[i]
-			if m.Taken || (e.UUID != "" && m.UUID != e.UUID) || (e.UUID == "" && m.Text != e.Text) {
-				continue
+		i := slices.IndexFunc(h.unconfirmed, func(m sentMsg) bool { return !m.Taken && e.UUID != "" && m.UUID == e.UUID })
+		if i < 0 {
+			i = slices.IndexFunc(h.unconfirmed, func(m sentMsg) bool { return !m.Taken && m.Text == e.Text })
+			if i >= 0 && e.UUID != "" {
+				h.log.Warn("router echo carries an unknown uuid; matched by text", "uuid", e.UUID)
 			}
-			m.Taken = true
-			if err := h.persist(); err != nil {
-				h.log.Error("mark a message taken", "error", err)
-			}
+		}
+		if i < 0 {
 			return
+		}
+		h.unconfirmed[i].Taken = true
+		if err := h.persist(); err != nil {
+			h.log.Error("mark a message taken", "error", err)
 		}
 	case claude.Result:
 		h.keepSession(e.SessionID)
