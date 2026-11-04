@@ -7,6 +7,8 @@ import (
 	"maps"
 	"slices"
 	"strings"
+
+	"github.com/danielpina1/athena/internal/metrics"
 )
 
 // Evals: the Evals of Threads and the Decisions they end with, the main Session's accept, ignore, stop and attach, a
@@ -146,6 +148,20 @@ func (e *Engine) EvaluateDue() error {
 	return errors.Join(errs...)
 }
 
+// ActiveThreads returns the Threads with Triggers queued or an Eval in progress, ordered by key: a cheap query that
+// tells whether EvaluateDue has anything to do.
+func (e *Engine) ActiveThreads() ([]Thread, error) {
+	threads, err := e.activeThreads()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Thread, 0, len(threads))
+	for _, th := range threads {
+		out = append(out, *th)
+	}
+	return out, nil
+}
+
 func (e *Engine) activeThreads() ([]*Thread, error) {
 	var threads []*Thread
 	err := e.repos.Tx(func(tx Tx) error {
@@ -269,14 +285,7 @@ func (o *op) startEval(key string, p Policy) error {
 	if err := o.tx.PutThread(th); err != nil {
 		return err
 	}
-	payload, err := json.Marshal(struct {
-		EvalID    string `json:"evalId"`
-		TriggerID string `json:"triggerId"`
-	}{ev.ID, ev.Primary})
-	if err != nil {
-		return err
-	}
-	if err := o.enqueue(EffectAssessment, ev.ID, payload); err != nil {
+	if err := o.enqueueAssessment(ev); err != nil {
 		return err
 	}
 	o.emitEvent(Event{Type: EventEvalStarted, At: o.at, Data: map[string]any{"evalId": ev.ID, "thread": th.Key,
@@ -1125,6 +1134,7 @@ func (o *op) finish(th *Thread, ev *Evaluation, d *Decision) (*Decision, error) 
 	if err := o.record(th, d); err != nil {
 		return nil, err
 	}
+	o.evalDone(ev)
 	if th.Eval != nil && th.Eval.ID == ev.ID {
 		th.Eval = nil
 		th.Expired = 0
@@ -1134,6 +1144,51 @@ func (o *op) finish(th *Thread, ev *Evaluation, d *Decision) (*Decision, error) 
 	return d, o.tx.PutThread(th)
 }
 
+// enqueueAssessment queues the effect that steers an Eval's candidate into the main Session.
+func (o *op) enqueueAssessment(ev *Evaluation) error {
+	payload, err := json.Marshal(struct {
+		EvalID    string `json:"evalId"`
+		TriggerID string `json:"triggerId"`
+	}{ev.ID, ev.Primary})
+	if err != nil {
+		return err
+	}
+	return o.enqueue(EffectAssessment, ev.ID, payload)
+}
+
+// ResumeAssessments is startup's check of the Evals in progress: one whose candidate never reached the main Session
+// still needs its assessment effect, which its start queued in the same transaction. pending names the Evals whose
+// effect waits; each other undelivered Eval has it queued again, and their IDs are returned (normally none). A
+// delivered Eval keeps its deadline and needs nothing.
+func (e *Engine) ResumeAssessments(pending map[string]bool) ([]string, error) {
+	var resumed []string
+	err := e.command(cmdEvaluateDue, func(o *op) error {
+		threads, err := o.tx.ActiveThreads()
+		if err != nil {
+			return err
+		}
+		for _, th := range threads {
+			if ev := th.Eval; ev != nil && ev.DeliveredAt == nil && !pending[ev.ID] {
+				if err := o.enqueueAssessment(ev); err != nil {
+					return err
+				}
+				resumed = append(resumed, ev.ID)
+			}
+		}
+		return nil
+	})
+	return resumed, err
+}
+
+// evalDone records eval_seconds, from an Eval's start to its Decision, once the command commits.
+func (o *op) evalDone(ev *Evaluation) {
+	if o.reg == nil || ev == nil || ev.StartedAt.IsZero() {
+		return
+	}
+	d := nonNegative(o.at.Sub(ev.StartedAt))
+	o.observe(func(r *metrics.Registry) { r.Histogram("eval_seconds").Observe(d) })
+}
+
 // reassess ends a Thread's Eval as unavailable for reason and queues its Triggers but skip again, ahead of the others.
 func (o *op) reassess(th *Thread, reason Reason, skip ...string) (*Decision, error) {
 	ids := without(th.Eval.TriggerIDs, skip...)
@@ -1141,6 +1196,7 @@ func (o *op) reassess(th *Thread, reason Reason, skip ...string) (*Decision, err
 	if err := o.record(th, d); err != nil {
 		return nil, err
 	}
+	o.evalDone(th.Eval)
 	th.Eval = nil
 	th.Expired = 0
 	th.Queued = requeueFirst(th.Queued, ids)

@@ -24,10 +24,10 @@ const (
 )
 
 // labelKeys are the label keys a series may carry: the bounded sets of the performance design (runtime, model, node,
-// tool, outcome, repo) and the dimensions of the instrumented operations.
+// tool, outcome, repo) and the dimensions of the instrumented operations (status: an HTTP status of a GitHub request).
 var labelKeys = map[string]bool{
 	"runtime": true, "model": true, "node": true, "tool": true, "outcome": true, "repo": true,
-	"command": true, "event": true, "verdict": true, "kind": true, "error": true,
+	"command": true, "event": true, "verdict": true, "kind": true, "error": true, "status": true,
 }
 
 type kind uint8

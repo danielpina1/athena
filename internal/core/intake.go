@@ -440,6 +440,24 @@ func validThreadKey(key string) bool {
 	return ok && source != "" && rest != ""
 }
 
+// validRepo reports whether repo is owner/name, each part of the letters, digits, '.', '_' and '-' repository names
+// use, and neither part "." or "..".
+func validRepo(repo string) bool {
+	owner, name, ok := strings.Cut(repo, "/")
+	part := func(p string) bool {
+		if p == "" || p == "." || p == ".." {
+			return false
+		}
+		for _, r := range p {
+			if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '.' || r == '_' || r == '-') {
+				return false
+			}
+		}
+		return true
+	}
+	return ok && part(owner) && part(name)
+}
+
 // cloneTrigger returns a copy that shares no slice or map with t.
 func cloneTrigger(t Trigger) Trigger {
 	c := t

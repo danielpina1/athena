@@ -275,6 +275,10 @@ func (a *App) ScopedToken(ctx context.Context, repo string, perms map[string]str
 	return a.mint(ctx, body)
 }
 
+// Account returns the login of the account the App is installed on (fetched once, then remembered): the owner of the
+// installation's repositories, and the person the default Policy allows.
+func (a *App) Account(ctx context.Context) (string, error) { return a.accountLogin(ctx) }
+
 // accountLogin is the login of the account the App is installed on, fetched once from GET /app/installations/{id}.
 func (a *App) accountLogin(ctx context.Context) (string, error) {
 	a.accMu.Lock()

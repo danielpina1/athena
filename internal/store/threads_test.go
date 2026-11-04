@@ -336,3 +336,57 @@ func TestStoreKVList(t *testing.T) {
 		t.Fatalf("a prefix with wildcards matches literally: %v, %v", got, err)
 	}
 }
+
+// The owner's views: every Thread by key, and the Triggers of one Thread (or of all) newest first.
+func TestThreadAndTriggerLists(t *testing.T) {
+	s, _ := openTemp(t)
+	inTx(t, s, func(tx core.Tx) error {
+		for _, th := range []*core.Thread{{Key: "github:o/r#2", Source: "github"}, {Key: "github:o/r#1", Source: "github"}} {
+			if err := tx.PutThread(th); err != nil {
+				return err
+			}
+		}
+		for _, tr := range []*core.Trigger{
+			{ID: "a", Source: "github", At: t0, Threads: []string{"github:o/r#1"}},
+			{ID: "b", Source: "github", At: t0.Add(2 * time.Minute), Threads: []string{"github:o/r#2", "github:o/r#1"}},
+			{ID: "c", Source: "github", At: t0.Add(time.Minute), Threads: []string{"github:o/r#2"}},
+		} {
+			if err := tx.PutTrigger(tr); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	threads, err := s.Threads()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(threads) != 2 || threads[0].Key != "github:o/r#1" || threads[1].Key != "github:o/r#2" {
+		t.Fatalf("Threads = %+v", threads)
+	}
+	ids := func(list []core.Trigger) []string {
+		var out []string
+		for _, tr := range list {
+			out = append(out, tr.ID)
+		}
+		return out
+	}
+	for _, c := range []struct {
+		thread string
+		limit  int
+		want   []string
+	}{
+		{"", 0, []string{"b", "c", "a"}},
+		{"github:o/r#1", 0, []string{"b", "a"}},
+		{"github:o/r#2", 1, []string{"b"}},
+		{"github:o/r#9", 0, nil},
+	} {
+		got, err := s.Triggers(c.thread, c.limit)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(ids(got), c.want) {
+			t.Errorf("Triggers(%q, %d) = %v, want %v", c.thread, c.limit, ids(got), c.want)
+		}
+	}
+}

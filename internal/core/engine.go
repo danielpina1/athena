@@ -51,6 +51,8 @@ func userErrorf(format string, args ...any) error {
 type TaskOptions struct {
 	Dir   string
 	Model string
+	// Repo is the repository (owner/name) the task works in, through its Source; it excludes Dir.
+	Repo string
 }
 
 // ReportInput is a worker's report on its Ticket. A Question asks a person (an empty one keeps the current question);
@@ -127,11 +129,20 @@ func NewEngineWith(repos Repositories, exec Executor, opts Options) *Engine {
 
 // SubmitOwnerTask records the owner's task: a Trigger, a direct accept Decision with an explicit Mandate, and a Ticket
 // whose title is the text's first line, with one pending Assignment and the text as its first Input; then it queues
-// the Assignment's launch.
+// the Assignment's launch. A task on a repository (TaskOptions.Repo, owner/name) works there and has no Channel: its
+// worker reports to the owner, and its replies are refused.
 func (e *Engine) SubmitOwnerTask(text string, opts TaskOptions) (Ticket, error) {
 	title := titleOf(text)
 	if title == "" {
 		return Ticket{}, userErrorf("a task needs text")
+	}
+	if opts.Repo != "" {
+		if !validRepo(opts.Repo) {
+			return Ticket{}, userErrorf("repository %q is not owner/name", opts.Repo)
+		}
+		if opts.Dir != "" {
+			return Ticket{}, userErrorf("a task on a repository runs in its own worktree: it takes no directory")
+		}
 	}
 	var created *Ticket
 	err := e.command(cmdSubmit, func(o *op) error {
@@ -142,6 +153,10 @@ func (e *Engine) SubmitOwnerTask(text string, opts TaskOptions) (Ticket, error) 
 		id := fmt.Sprintf("T-%04d", n)
 		trigger := &Trigger{ID: newID(), Source: ownerSource, Actor: OwnerActor, Human: true, At: o.at, Text: text}
 		mandate := Mandate{Strength: "explicit", PolicyVersion: OwnerPolicyVersion, Actor: OwnerActor, Scope: ownerScope}
+		if opts.Repo != "" {
+			// The owner's word is the whole basis: no Source admitted it, so no Source revalidates it.
+			mandate.Basis = MandateBasis{Via: ViaOwner}
+		}
 		decisionMandate := mandate
 		decision := &Decision{ID: newID(), Kind: "accept", TicketID: id, TriggerIDs: []string{trigger.ID}, At: o.at, Mandate: &decisionMandate}
 		t := &Ticket{
@@ -149,6 +164,7 @@ func (e *Engine) SubmitOwnerTask(text string, opts TaskOptions) (Ticket, error) 
 			CreatedAt: o.at, UpdatedAt: o.at,
 			Origin:    Origin{TriggerID: trigger.ID, TriggerIDs: []string{trigger.ID}},
 			Execution: &Execution{Directory: opts.Dir, Runtime: "claude", Model: opts.Model},
+			Repo:      opts.Repo,
 		}
 		assignment := o.newAssignment(t)
 		input := Input{ID: newID(), Kind: InputTrigger, At: o.at, TriggerID: trigger.ID, Text: text, Human: true}
@@ -216,11 +232,18 @@ func (e *Engine) AssignmentStarted(ticketID, assignmentID, sessionID, model stri
 
 // InputsDelivered is the Executor's fact that Inputs reached the Assignment that runs the open Ticket, which clears a
 // failed delivery. A fact about an Assignment that no longer runs, or about Inputs that no longer wait, changes nothing.
+// With no inputIDs it is the fact that a message that is no Input reached the worker, such as the nudge to report
+// after a turn without one (plan 1 R33): only the Assignment's DeliveredAt moves, so its worker counts as busy.
 func (e *Engine) InputsDelivered(ticketID, assignmentID string, inputIDs []string) error {
 	return e.command(cmdInputsDelivered, func(o *op) error {
 		t, err := o.running(ticketID, assignmentID)
 		if t == nil || err != nil {
 			return err
+		}
+		if len(inputIDs) == 0 {
+			runningAssignment(t).DeliveredAt = o.timestamp()
+			t.UpdatedAt = o.at
+			return o.tx.PutTicket(t)
 		}
 		delivered := map[string]bool{}
 		var waiting []string

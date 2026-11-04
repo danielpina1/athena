@@ -1149,6 +1149,11 @@ func (r *runner) turnEnded() {
 		r.log.Info("turn ended without a report; nudging the worker")
 		if err := r.send(nudgeText); err != nil {
 			r.log.Warn("send nudge", "error", err)
+			return
+		}
+		// The nudge is a delivery of no Input: DeliveredAt moves, so a restart sees the nudged turn as busy (R33).
+		if r.started {
+			r.delivered(nil)
 		}
 		return
 	}

@@ -52,6 +52,9 @@ const (
 	sessionWait = 5 * time.Second
 )
 
+// assessmentConcurrency is how many candidates are prepared at once (plan 2 Task 12).
+const assessmentConcurrency = 4
+
 // effectBackoff is the retry of the router's effects (reference 007 Effects: 2 s doubling to 60 s).
 var effectBackoff = effects.Backoff{First: 2 * time.Second, Max: 60 * time.Second}
 
@@ -115,8 +118,9 @@ type Host struct {
 	windows map[string]window
 }
 
-// New returns a Host and registers its effect handlers on fx: assessment and relay, ordered, which send one message
-// each, and notice, which holds its notices for the next message.
+// New returns a Host and registers its effect handlers on fx: assessment (four at once) and relay (ordered), which
+// send one message each, and notice (ordered), which holds its notices for the next message; all retry after 2 s
+// doubling to 60 s.
 func New(cfg Config, eng *core.Engine, fx *effects.Runner, reg *sources.Registry, log *slog.Logger) *Host {
 	if cfg.Model == "" {
 		cfg.Model = defaultModel
@@ -135,8 +139,11 @@ func New(cfg Config, eng *core.Engine, fx *effects.Runner, reg *sources.Registry
 	h := &Host{cfg: cfg, eng: eng, fx: fx, reg: reg, log: log.With("component", "router"),
 		restartDelay: func(n int) time.Duration { return time.Duration(n) * time.Second },
 		windows:      map[string]window{}, up: make(chan struct{})}
+	// Candidates load their Thread's window (a Source read) before their message: four at once, so one slow or failing
+	// read holds no other back; the messages themselves still go one at a time (sendMu). Relays and notices keep their
+	// order.
+	fx.Handle(core.EffectAssessment, h.handleAssessment, effects.Options{Concurrency: assessmentConcurrency, Backoff: effectBackoff})
 	opts := effects.Options{Ordered: true, Backoff: effectBackoff}
-	fx.Handle(core.EffectAssessment, h.handleAssessment, opts)
 	fx.Handle(core.EffectRelay, h.handleRelay, opts)
 	fx.Handle(core.EffectNotice, h.handleNotice, opts)
 	return h
@@ -192,6 +199,40 @@ func (h *Host) Health() error {
 		return errNotRunning
 	}
 	return h.health
+}
+
+// Router states State reports.
+const (
+	StateRunning  = "running"
+	StateStarting = "starting"
+	StateCrashed  = "crashed"
+	StateStopped  = "stopped"
+)
+
+// State says what the router session does now: running (its process is up), starting (Start was called and the
+// first process is not up yet), crashed (its process ended on its own; it restarts after a pause) or stopped (never
+// started, or Stop was called).
+func (h *Host) State() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	switch {
+	case h.stopped || h.done == nil:
+		return StateStopped
+	case h.sess != nil:
+		return StateRunning
+	case h.health != nil:
+		return StateCrashed
+	}
+	return StateStarting
+}
+
+// SessionID is the router session's id as kept in kv (router.session), or empty before its first start.
+func (h *Host) SessionID() string {
+	id, _, err := h.cfg.KV.KVGet(sessionKey)
+	if err != nil {
+		return ""
+	}
+	return id
 }
 
 // ValidToken reports whether token is the running router process's (node.RouterHandler).

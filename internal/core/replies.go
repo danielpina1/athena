@@ -276,8 +276,9 @@ func (o *op) takeUp(t *Ticket, r ReplyRequest, tr *Trigger) error {
 }
 
 // replyChannel resolves where a reply goes: the Channel of the Trigger it is for, else the Ticket's first Channel on
-// that Trigger's primary Thread (or, without a Trigger, on the Mandate's Thread, or any when the Mandate names none),
-// else the Mandate Thread's own Channel.
+// that Trigger's primary Thread (or, without a Trigger, on the Mandate's Thread, or any when the Mandate names none).
+// A Ticket with no such Channel (an owner task, or one whose Triggers came without a Channel) has nowhere to reply:
+// a Channel made up from the Mandate's Thread alone would carry no address, and the Outbox could only retry it forever.
 func replyChannel(t *Ticket, tr *Trigger) (ChannelRef, bool) {
 	if tr != nil && len(tr.Channels) > 0 {
 		return cloneChannel(tr.Channels[0]), true
@@ -290,10 +291,6 @@ func replyChannel(t *Ticket, tr *Trigger) (ChannelRef, bool) {
 		if thread == "" || ch.Thread == thread {
 			return cloneChannel(ch), true
 		}
-	}
-	if m := t.Mandate.Thread; m != "" {
-		source, _, _ := strings.Cut(m, ":")
-		return ChannelRef{Source: source, Thread: m}, true
 	}
 	return ChannelRef{}, false
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"unicode/utf8"
 
 	"github.com/danielpina1/athena/internal/core"
@@ -222,4 +223,68 @@ func (s *Store) KVList(prefix string) (out map[string]string, err error) {
 // KVSet stores a plain string outside any transaction (in a transaction of its own).
 func (s *Store) KVSet(key, value string) error {
 	return s.Tx(func(tx *Tx) error { return tx.KVSet(key, value) })
+}
+
+// Threads returns every stored Thread, ordered by key: the owner's view (athena threads). It reads in a transaction of
+// its own.
+func (s *Store) Threads() (out []core.Thread, err error) {
+	err = s.Tx(func(tx *Tx) error {
+		rows, err := tx.sql.Query(`SELECT doc FROM threads ORDER BY key`)
+		if err != nil {
+			return fmt.Errorf("store: threads: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var doc string
+			if err := rows.Scan(&doc); err != nil {
+				return fmt.Errorf("store: threads: %w", err)
+			}
+			t, err := decodeThread(doc)
+			if err != nil {
+				return err
+			}
+			out = append(out, *t)
+		}
+		return rows.Err()
+	})
+	return out, err
+}
+
+// Triggers returns the stored Triggers of a Thread (any of their Threads), or of every Thread when thread is empty,
+// newest first; limit <= 0 returns all. It is the owner's view (athena triggers) and reads in a transaction of its own.
+// Times are compared as times (a Trigger's At may carry any zone), so the matching rows are sorted here.
+func (s *Store) Triggers(thread string, limit int) (out []core.Trigger, err error) {
+	err = s.Tx(func(tx *Tx) error {
+		rows, err := tx.sql.Query(`SELECT doc FROM triggers
+			WHERE ? = '' OR EXISTS (SELECT 1 FROM json_each(doc, '$.threads') WHERE value = ?)`, thread, thread)
+		if err != nil {
+			return fmt.Errorf("store: triggers of %q: %w", thread, err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var doc string
+			if err := rows.Scan(&doc); err != nil {
+				return fmt.Errorf("store: triggers of %q: %w", thread, err)
+			}
+			var t core.Trigger
+			if err := json.Unmarshal([]byte(doc), &t); err != nil {
+				return fmt.Errorf("store: decode trigger: %w", err)
+			}
+			out = append(out, t)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if !out[i].At.Equal(out[j].At) {
+			return out[i].At.After(out[j].At)
+		}
+		return out[i].ID > out[j].ID
+	})
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
 }

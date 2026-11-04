@@ -257,3 +257,26 @@ func TestReplyPurposeRules(t *testing.T) {
 	eq(t, "twice in one round: one receipt", h.reply(ReplyRequest{TicketID: a, Purpose: PurposeResult, Text: "Fixed in #2."}), second)
 	eq(t, "still one more", len(h.replyEffects()), n+1)
 }
+
+// Task 9 final triage: a Ticket whose replies have no Channel with an address is refused at Reply time; it never
+// queues a receipt the Outbox could only retry forever.
+func TestReplyWithoutAddressedChannelRefused(t *testing.T) {
+	h := newEvals(t)
+	a := h.acceptRequest("c:1", issue) // the Trigger has no Channel: only the Mandate's Thread is known
+	before := len(h.replyEffects())
+	_, err := h.eng.Reply(ReplyRequest{TicketID: a, TriggerID: "c:1", Purpose: PurposeAnswer, Text: "It is the cookie."})
+	wantUserError(t, "answer with no channel", err)
+	if err != nil && !strings.Contains(err.Error(), "no channel") {
+		t.Errorf("refusal = %q, want it to say there is no channel", err)
+	}
+	eq(t, "no reply queued", len(h.replyEffects()), before)
+
+	// An owner task on a repository has no Channel either.
+	tk, err := h.eng.SubmitOwnerTask("Bump the deps", TaskOptions{Repo: "o/r"})
+	h.must(err)
+	h.settle(true)
+	h.must(h.eng.FileReport(tk.ID, ReportInput{State: ReportProgress, Summary: "which ones?", Question: "Which deps?"}))
+	_, err = h.eng.Reply(ReplyRequest{TicketID: tk.ID, Purpose: PurposeAttention, Text: "Which deps?"})
+	wantUserError(t, "attention of a repo task", err)
+	eq(t, "still no reply queued", len(h.replyEffects()), before)
+}

@@ -812,3 +812,61 @@ func TestRefRecordsHowTicketEnded(t *testing.T) {
 	h.must(h.eng.StopTicket(id2, "stopped"))
 	eq(t, "no reason", h.ticket(id2).Ended.Reason, "")
 }
+
+// R33: a message to the worker that is no Input, such as the node's nudge to report, is a delivery too: an empty
+// InputsDelivered moves the running Assignment's DeliveredAt, so a restart sees the nudged turn as interrupted.
+func TestNudgeDeliveryMovesDeliveredAt(t *testing.T) {
+	h := newHarness(t)
+	id := h.accepted()
+	a := runningOf(h.ticket(id))
+	first := *a.DeliveredAt
+	h.must(h.eng.TurnEnded(id, a.ID))
+	h.tick(5)
+	h.must(h.eng.InputsDelivered(id, a.ID, nil))
+	got := runningOf(h.ticket(id))
+	if got.DeliveredAt == nil || !got.DeliveredAt.Equal(h.now()) || !got.DeliveredAt.After(first) {
+		t.Fatalf("DeliveredAt = %v, want %v (moved by the nudge)", got.DeliveredAt, h.now())
+	}
+	if !got.DeliveredAt.After(*got.IdleAt) {
+		t.Fatalf("DeliveredAt %v not after IdleAt %v", got.DeliveredAt, got.IdleAt)
+	}
+	// A nudge fact about an Assignment that no longer runs changes nothing.
+	h.must(h.eng.StopTicket(id, ""))
+	before := *h.ticket(id)
+	h.tick(5)
+	h.must(h.eng.InputsDelivered(id, a.ID, nil))
+	eq(t, "after stop", h.ticket(id).Assignments[0].DeliveredAt, before.Assignments[0].DeliveredAt)
+}
+
+// An owner task on a repository is a direct accept like any owner task, its Mandate's Basis says owner and the Ticket
+// works in the repository.
+func TestOwnerTaskOnRepository(t *testing.T) {
+	h := newHarness(t)
+	tk, err := h.eng.SubmitOwnerTask("Bump the deps\nall of them", TaskOptions{Repo: "o/r"})
+	h.must(err)
+	got := h.ticket(tk.ID)
+	eq(t, "repo", got.Repo, "o/r")
+	eq(t, "basis", got.Mandate.Basis, MandateBasis{Via: ViaOwner})
+	eq(t, "strength", got.Mandate.Strength, "explicit")
+	eq(t, "no mandate thread", got.Mandate.Thread, "")
+	if len(got.Assignments) != 1 || got.Assignments[0].State != AssignmentPending {
+		t.Fatalf("assignments = %+v, want one pending", got.Assignments)
+	}
+	_, err = h.eng.SubmitOwnerTask("x", TaskOptions{Repo: "not-a-repo"})
+	wantUserError(t, "malformed repo", err)
+	_, err = h.eng.SubmitOwnerTask("x", TaskOptions{Repo: "o/r", Dir: "/work/x"})
+	wantUserError(t, "repo and dir", err)
+}
+
+func TestActiveThreadsQuery(t *testing.T) {
+	h := newEvals(t)
+	got, err := h.eng.ActiveThreads()
+	h.must(err)
+	eq(t, "none at first", len(got), 0)
+	h.receive(h.request("c:1", issue))
+	got, err = h.eng.ActiveThreads()
+	h.must(err)
+	if len(got) != 1 || got[0].Key != issue || len(got[0].Queued) != 1 {
+		t.Fatalf("active = %+v, want %s with its queued trigger", got, issue)
+	}
+}

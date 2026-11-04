@@ -1,5 +1,7 @@
-// Package cli implements the owner's commands: `athena server` and the commands that talk to it over the control
-// socket (task, status, logs, reply, stop, retry, approvals, approve, deny).
+// Package cli implements the owner's commands: `athena server`, `athena github setup|check` (which read and write the
+// configuration and talk to GitHub directly), and the commands that talk to the server over the control socket (task,
+// status, logs, reply, stop, retry, approvals, approve, deny, metrics, policy, triggers, threads, decisions,
+// reevaluate, dismiss, unsubscribe).
 package cli
 
 import (
@@ -31,17 +33,25 @@ const dialTimeout = 2 * time.Second
 
 // usage is each command's usage line, without the --state-dir flag every command takes.
 var usage = map[string]string{
-	"server":    "athena server [--slots N] [--model M] [--blocked a,b] [--approval-timeout D] [--claude PATH]",
-	"task":      `athena task "<text>" [--dir D] [--model M]`,
-	"status":    "athena status [<id>] [--all]",
-	"logs":      "athena logs <id> [-f]",
-	"reply":     `athena reply <id> "<text>"`,
-	"stop":      "athena stop <id> [--reason R]",
-	"retry":     "athena retry <id>",
-	"approvals": "athena approvals",
-	"approve":   "athena approve <id> [--note N]",
-	"deny":      "athena deny <id> [--note N]",
-	"metrics":   "athena metrics [--window 1h|24h|start]",
+	"server":      "athena server [--slots N] [--model M] [--blocked a,b] [--approval-timeout D] [--claude PATH]",
+	"task":        `athena task "<text>" [--dir D | --repo owner/name] [--model M]`,
+	"github":      "athena github setup --app-id N --slug S --key FILE --installation N --repo owner/name [--repo ...] | athena github check",
+	"policy":      "athena policy show | athena policy set FILE",
+	"triggers":    "athena triggers [--thread K]",
+	"threads":     "athena threads",
+	"decisions":   "athena decisions [--thread K]",
+	"reevaluate":  "athena reevaluate <trigger>",
+	"dismiss":     "athena dismiss <decision>",
+	"unsubscribe": "athena unsubscribe <thread>",
+	"status":      "athena status [<id>] [--all]",
+	"logs":        "athena logs <id> [-f]",
+	"reply":       `athena reply <id> "<text>"`,
+	"stop":        "athena stop <id> [--reason R]",
+	"retry":       "athena retry <id>",
+	"approvals":   "athena approvals",
+	"approve":     "athena approve <id> [--note N]",
+	"deny":        "athena deny <id> [--note N]",
+	"metrics":     "athena metrics [--window 1h|24h|start]",
 }
 
 // Run runs one command and returns its exit code: 0 on success, 1 when it failed, 2 on a usage error.
@@ -73,6 +83,18 @@ func Run(ctx context.Context, cmd string, args []string, stdout, stderr io.Write
 		return c.approvals(args)
 	case "metrics":
 		return c.metrics(args)
+	case "github":
+		return c.github(ctx, args)
+	case "policy":
+		return c.policy(args)
+	case "triggers":
+		return c.triggers(args)
+	case "threads":
+		return c.threads(args)
+	case "decisions":
+		return c.decisions(args)
+	case "reevaluate", "dismiss", "unsubscribe":
+		return c.routingCommand(args)
 	default: // approve, deny
 		return c.answer(args, cmd == "approve")
 	}
@@ -155,7 +177,8 @@ func (c *command) server(ctx context.Context, args []string) int {
 		Node: node.Config{
 			Slots: *slots, Model: *model, Blocked: list, ApprovalTimeout: *timeout, ClaudeBinary: *claudeBin,
 		},
-		Stderr: c.stderr,
+		Stderr:  c.stderr,
+		Version: Version,
 	})
 	if err != nil {
 		return c.fail(err)
@@ -167,10 +190,16 @@ func (c *command) server(ctx context.Context, args []string) int {
 
 func (c *command) task(args []string) int {
 	dir := c.fs.String("dir", "", "directory the task runs in (a git repository gets its own worktree)")
+	repo := c.fs.String("repo", "", "GitHub repository (owner/name) the task works in, through the App")
 	model := c.fs.String("model", "", "model for this task")
 	pos, code, ok := c.parse(args, 1, -1)
 	if !ok {
 		return code
+	}
+	if *dir != "" && *repo != "" {
+		fmt.Fprintln(c.stderr, "athena task: --dir and --repo exclude each other")
+		c.fs.Usage()
+		return 2
 	}
 	// The server runs elsewhere: a relative directory means this command's working directory.
 	taskDir := *dir
@@ -184,7 +213,7 @@ func (c *command) task(args []string) int {
 	var out struct {
 		ID string `json:"id"`
 	}
-	if err := call(c.stateDir, server.Request{Op: server.OpSubmit, Text: strings.Join(pos, " "), Dir: taskDir, Model: *model}, &out); err != nil {
+	if err := call(c.stateDir, server.Request{Op: server.OpSubmit, Text: strings.Join(pos, " "), Dir: taskDir, Repo: *repo, Model: *model}, &out); err != nil {
 		return c.fail(err)
 	}
 	fmt.Fprintln(c.stdout, out.ID)
@@ -209,6 +238,12 @@ func (c *command) status(args []string) int {
 	if err := call(c.stateDir, server.Request{Op: server.OpTickets, All: *all}, &list); err != nil {
 		return c.fail(err)
 	}
+	var health server.HealthView
+	if err := call(c.stateDir, server.Request{Op: server.OpHealth}, &health); err != nil {
+		return c.fail(err)
+	}
+	printHealth(c.stdout, health)
+	fmt.Fprintln(c.stdout)
 	if len(list) == 0 {
 		fmt.Fprintln(c.stdout, "no tickets")
 		return 0
@@ -223,6 +258,44 @@ func (c *command) status(args []string) int {
 	return 0
 }
 
+// printHealth prints the Sources, the effects runner and the router, one line each.
+func printHealth(w io.Writer, h server.HealthView) {
+	if len(h.Sources) == 0 {
+		fmt.Fprintln(w, "sources:   none (owner tasks only; see athena github setup)")
+	}
+	for _, s := range h.Sources {
+		state := "ok"
+		if s.Error != "" {
+			state = "error: " + s.Error
+		}
+		line := fmt.Sprintf("source:    %s %s", s.Name, state)
+		if s.Name == "github" && h.GitHubRateRemaining != nil {
+			line += fmt.Sprintf(" (rate remaining %d)", *h.GitHubRateRemaining)
+		}
+		fmt.Fprintln(w, line)
+	}
+	if len(h.Effects) == 0 {
+		fmt.Fprintln(w, "effects:   ok")
+	} else {
+		kinds := make([]string, 0, len(h.Effects))
+		for k := range h.Effects {
+			kinds = append(kinds, k)
+		}
+		slices.Sort(kinds)
+		for _, k := range kinds {
+			fmt.Fprintf(w, "effects:   %s: %s\n", k, h.Effects[k])
+		}
+	}
+	line := "router:    " + h.Router.State
+	if h.Router.Session != "" {
+		line += " (session " + h.Router.Session + ")"
+	}
+	if h.Router.Error != "" {
+		line += ": " + h.Router.Error
+	}
+	fmt.Fprintln(w, line)
+}
+
 func printDetail(w io.Writer, d server.TicketDetail, now time.Time) {
 	fmt.Fprintf(w, "%s  %s\n", d.ID, d.Title)
 	fmt.Fprintf(w, "stage:     %s\n", d.Stage)
@@ -232,6 +305,9 @@ func printDetail(w io.Writer, d server.TicketDetail, now time.Time) {
 	}
 	if d.SourceDir != "" && d.SourceDir != d.Dir {
 		fmt.Fprintf(w, "source:    %s\n", d.SourceDir)
+	}
+	if d.Repo != "" {
+		fmt.Fprintf(w, "repo:      %s\n", d.Repo)
 	}
 	model := d.Model
 	if model == "" {

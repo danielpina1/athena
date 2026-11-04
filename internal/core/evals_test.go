@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/danielpina1/athena/internal/metrics"
 )
 
 // evalPolicy is a Policy whose gate admits by simple rules (or a per-Trigger override), whose version tests change,
@@ -747,4 +749,49 @@ func TestPolicyNoteDoesNotDeferClose(t *testing.T) {
 	if e := h.ticket(b).Ended; e == nil || e.Outcome != OutcomeMerged {
 		t.Fatalf("undelivered note: ended = %+v", e)
 	}
+}
+
+// eval_seconds measures an Eval from its start to its Decision.
+func TestEvalSecondsMetric(t *testing.T) {
+	h := newEvals(t)
+	reg := metrics.NewRegistry()
+	h.eng.SetMetrics(reg)
+	h.receive(h.request("c:1", issue))
+	h.due()
+	h.tick(7)
+	h.decide(DecisionInput{TriggerID: "c:1", Kind: "accept", Title: "Fix c:1"})
+	var found bool
+	for _, hv := range reg.Snapshot(0).Histograms {
+		if hv.Name == "eval_seconds" {
+			found = true
+			eq(t, "count", hv.Count, int64(1))
+			if hv.P50 < 6 || hv.P50 > 8 {
+				t.Errorf("p50 = %v, want about 7s", hv.P50)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("no eval_seconds histogram")
+	}
+}
+
+// At startup an undelivered Eval whose assessment effect is missing gets it again; one whose effect waits, and a
+// delivered one, are left as they are.
+func TestResumeAssessments(t *testing.T) {
+	h := newEvals(t)
+	h.receive(h.request("c:1", issue))
+	h.receive(h.request("c:2", other))
+	h.receive(h.request("c:3", pull1))
+	h.due()
+	a, b, c := h.evalOf(issue), h.evalOf(other), h.evalOf(pull1)
+	h.must(h.eng.CandidateDelivered(c.ID))
+	before := len(h.effectsOf(EffectAssessment))
+	got, err := h.eng.ResumeAssessments(map[string]bool{a.ID: true})
+	h.must(err)
+	eq(t, "resumed", got, []string{b.ID})
+	eq(t, "effects (a key enqueued again stays one row)", len(h.effectsOf(EffectAssessment)), before)
+	got, err = h.eng.ResumeAssessments(map[string]bool{a.ID: true, b.ID: true})
+	h.must(err)
+	eq(t, "nothing missing", got, []string(nil))
+	eq(t, "c keeps its deadline", h.evalOf(pull1).DeliveredAt != nil, true)
 }
