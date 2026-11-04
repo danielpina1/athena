@@ -77,6 +77,44 @@ var migrations = []string{
 		doc TEXT NOT NULL,
 		PRIMARY KEY (block, revision)
 	);`,
+	// 4: the dashboard's tables, and the Ticket's request id as a real column so a resent submit finds it.
+	`ALTER TABLE tickets ADD COLUMN request_id TEXT;
+	CREATE UNIQUE INDEX tickets_request_id ON tickets (request_id) WHERE request_id IS NOT NULL;
+	CREATE TABLE passkeys (
+		id TEXT PRIMARY KEY,
+		name TEXT NOT NULL,
+		credential BLOB NOT NULL,
+		created_at TEXT NOT NULL,
+		last_used_at TEXT NOT NULL DEFAULT ''
+	);
+	CREATE TABLE web_sessions (
+		hash BLOB PRIMARY KEY,
+		created_at TEXT NOT NULL,
+		seen_at TEXT NOT NULL,
+		reauth_at TEXT NOT NULL,
+		passkey_id TEXT NOT NULL
+	);
+	CREATE INDEX web_sessions_passkey ON web_sessions (passkey_id);
+	CREATE TABLE enroll_tokens (
+		hash BLOB PRIMARY KEY,
+		expires_at TEXT NOT NULL,
+		used_at TEXT NOT NULL DEFAULT ''
+	);
+	CREATE TABLE command_results (
+		client_id TEXT NOT NULL,
+		command_id TEXT NOT NULL,
+		result BLOB NOT NULL,
+		at TEXT NOT NULL,
+		PRIMARY KEY (client_id, command_id)
+	);
+	CREATE INDEX command_results_at ON command_results (at);
+	CREATE TABLE push_subscriptions (
+		endpoint TEXT PRIMARY KEY,
+		p256dh TEXT NOT NULL,
+		auth TEXT NOT NULL,
+		created_at TEXT NOT NULL,
+		failures INTEGER NOT NULL DEFAULT 0
+	);`,
 }
 
 const schemaKey = "schema"
@@ -88,6 +126,8 @@ type Store struct {
 	txSeconds atomic.Pointer[metrics.Histogram]
 	// clock overrides time.Now for stored times (effects); nil means time.Now.
 	clock atomic.Pointer[func() time.Time]
+	// onCommit is the commit hook; nil (the default) reports nothing.
+	onCommit atomic.Pointer[func(Changes)]
 }
 
 // SetMetrics makes the Store record the latency of every transaction, from begin to commit or rollback, as
@@ -184,7 +224,8 @@ func (s *Store) Tx(fn func(tx *Tx) error) (err error) {
 			panic(r)
 		}
 	}()
-	if err := fn(&Tx{sql: sqlTx, now: s.Now}); err != nil {
+	var changes Changes
+	if err := fn(&Tx{sql: sqlTx, now: s.Now, changes: &changes}); err != nil {
 		if rbErr := sqlTx.Rollback(); rbErr != nil {
 			return errors.Join(err, rbErr)
 		}
@@ -193,13 +234,15 @@ func (s *Store) Tx(fn func(tx *Tx) error) (err error) {
 	if err := sqlTx.Commit(); err != nil {
 		return fmt.Errorf("store: commit: %w", err)
 	}
+	s.report(changes)
 	return nil
 }
 
 // Tx is the handle for one transaction; it is valid only inside the function passed to Store.Tx.
 type Tx struct {
-	sql *sql.Tx
-	now func() time.Time
+	sql     *sql.Tx
+	now     func() time.Time
+	changes *Changes
 }
 
 // kvGetJSON loads the JSON value stored under key into v. It reports false if key is absent.

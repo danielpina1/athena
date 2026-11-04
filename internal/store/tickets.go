@@ -36,13 +36,33 @@ func (tx *Tx) PutTicket(t *core.Ticket) error {
 	if t.Ended != nil {
 		ended = 1
 	}
-	_, err = tx.sql.Exec(`INSERT INTO tickets (id, ended, updated_at, doc) VALUES (?, ?, ?, ?)
-		ON CONFLICT(id) DO UPDATE SET ended = excluded.ended, updated_at = excluded.updated_at, doc = excluded.doc`,
-		t.ID, ended, t.UpdatedAt.UTC().Format(timeLayout), string(doc))
+	// request_id is NULL, not "", when unset: the unique index must not see Tickets that have none as equal.
+	var requestID any
+	if t.RequestID != "" {
+		requestID = t.RequestID
+	}
+	_, err = tx.sql.Exec(`INSERT INTO tickets (id, ended, updated_at, doc, request_id) VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET ended = excluded.ended, updated_at = excluded.updated_at, doc = excluded.doc,
+			request_id = excluded.request_id`,
+		t.ID, ended, t.UpdatedAt.UTC().Format(timeLayout), string(doc), requestID)
 	if err != nil {
 		return fmt.Errorf("store: put ticket %q: %w", t.ID, err)
 	}
+	tx.changes.Tickets = addID(tx.changes.Tickets, t.ID)
 	return nil
+}
+
+// TicketByRequestID returns the Ticket created under the given request id, or nil, nil if there is none.
+func (tx *Tx) TicketByRequestID(requestID string) (*core.Ticket, error) {
+	var doc string
+	err := tx.sql.QueryRow(`SELECT doc FROM tickets WHERE request_id = ?`, requestID).Scan(&doc)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: ticket by request id: %w", err)
+	}
+	return decodeTicket(doc)
 }
 
 // OpenTickets returns every Ticket that has not ended, least recently updated first.
@@ -95,6 +115,7 @@ func (tx *Tx) PutApproval(a *core.Approval) error {
 	if err != nil {
 		return fmt.Errorf("store: put approval %q: %w", a.ID, err)
 	}
+	tx.changes.Approvals = addID(tx.changes.Approvals, a.ID)
 	return nil
 }
 

@@ -221,6 +221,8 @@ type Ticket struct {
 	Follows []Follow `json:"follows,omitempty"`
 	// Repo is the repository (owner/name) the Ticket works in, or empty.
 	Repo string `json:"repo,omitempty"`
+	// RequestID is the client's id for the submit that created the Ticket; a second submit under it is a duplicate.
+	RequestID string `json:"requestId,omitempty"`
 }
 
 // Follow is a Thread a Ticket follows: Own when the Ticket opened it, Closed once the Thread closed.

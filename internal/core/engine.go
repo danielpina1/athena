@@ -3,6 +3,7 @@ package core
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -43,6 +44,9 @@ type UserError struct{ Msg string }
 
 func (e *UserError) Error() string { return e.Msg }
 
+// ErrDuplicate is returned with the existing Ticket when a task is submitted again under the same request id.
+var ErrDuplicate = errors.New("duplicate request")
+
 func userErrorf(format string, args ...any) error {
 	return &UserError{Msg: fmt.Sprintf(format, args...)}
 }
@@ -53,6 +57,9 @@ type TaskOptions struct {
 	Model string
 	// Repo is the repository (owner/name) the task works in, through its Source; it excludes Dir.
 	Repo string
+	// RequestID makes the submit idempotent: a task submitted again with an id already stored creates nothing and
+	// returns the stored Ticket with ErrDuplicate.
+	RequestID string
 }
 
 // ReportInput is a worker's report on its Ticket. A Question asks a person (an empty one keeps the current question);
@@ -144,8 +151,18 @@ func (e *Engine) SubmitOwnerTask(text string, opts TaskOptions) (Ticket, error) 
 			return Ticket{}, userErrorf("a task on a repository runs in its own worktree: it takes no directory")
 		}
 	}
-	var created *Ticket
+	var created, existing *Ticket
 	err := e.command(cmdSubmit, func(o *op) error {
+		if opts.RequestID != "" {
+			t, err := o.tx.TicketByRequestID(opts.RequestID)
+			if err != nil {
+				return err
+			}
+			if t != nil {
+				existing = t
+				return nil
+			}
+		}
 		n, err := o.tx.NextSeq(ticketSeq)
 		if err != nil {
 			return err
@@ -165,6 +182,7 @@ func (e *Engine) SubmitOwnerTask(text string, opts TaskOptions) (Ticket, error) 
 			Origin:    Origin{TriggerID: trigger.ID, TriggerIDs: []string{trigger.ID}},
 			Execution: &Execution{Directory: opts.Dir, Runtime: "claude", Model: opts.Model},
 			Repo:      opts.Repo,
+			RequestID: opts.RequestID,
 		}
 		assignment := o.newAssignment(t)
 		input := Input{ID: newID(), Kind: InputTrigger, At: o.at, TriggerID: trigger.ID, Text: text, Human: true}
@@ -186,6 +204,9 @@ func (e *Engine) SubmitOwnerTask(text string, opts TaskOptions) (Ticket, error) 
 	})
 	if err != nil {
 		return Ticket{}, err
+	}
+	if existing != nil {
+		return cloneTicket(existing), ErrDuplicate
 	}
 	return cloneTicket(created), nil
 }
@@ -432,6 +453,15 @@ func (e *Engine) FileReport(ticketID string, r ReportInput) error {
 // stopped it or its Mandate no longer revalidates; a Ticket whose worker handed off (HandedOff) resumes only while its
 // Mandate revalidates too.
 func (e *Engine) AddPersonInput(ticketID, text string) error {
+	return e.AddPersonInputWithID(ticketID, newID(), text)
+}
+
+// AddPersonInputWithID is AddPersonInput under a caller-chosen Input id: an id the Ticket already has is a no-op, so
+// a message sent again changes nothing.
+func (e *Engine) AddPersonInputWithID(ticketID, inputID, text string) error {
+	if inputID == "" {
+		return userErrorf("a message needs an id")
+	}
 	if strings.TrimSpace(text) == "" {
 		return userErrorf("a message needs text")
 	}
@@ -439,6 +469,9 @@ func (e *Engine) AddPersonInput(ticketID, text string) error {
 		t, err := o.require(ticketID)
 		if err != nil {
 			return err
+		}
+		if findInput(t, inputID) != nil {
+			return nil
 		}
 		if t.Ended != nil && t.Ended.By == EndByHuman {
 			return userErrorf("ticket %s was stopped", ticketID)
@@ -453,7 +486,7 @@ func (e *Engine) AddPersonInput(ticketID, text string) error {
 		o.settleAttention(t)
 		t.Attention = nil
 		t.Stats.PersonMessages++
-		input := Input{ID: newID(), Kind: InputTrigger, At: o.at, TriggerID: trigger.ID, Text: text, Human: true}
+		input := Input{ID: inputID, Kind: InputTrigger, At: o.at, TriggerID: trigger.ID, Text: text, Human: true}
 		o.addInput(t, input)
 		o.event(EventInputAdded, t, "", map[string]any{"inputId": input.ID})
 		o.wake(t)

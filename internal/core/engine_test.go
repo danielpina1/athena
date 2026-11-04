@@ -870,3 +870,57 @@ func TestActiveThreadsQuery(t *testing.T) {
 		t.Fatalf("active = %+v, want %s with its queued trigger", got, issue)
 	}
 }
+
+func TestSubmitWithSameRequestIDCreatesOneTicket(t *testing.T) {
+	h := newHarness(t)
+	first, err := h.eng.SubmitOwnerTask("Fix it", TaskOptions{Dir: "/work/x", RequestID: "req-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	eq(t, "request id", h.ticket(first.ID).RequestID, "req-1")
+	starts := h.exec.count("start")
+	h.tick(5)
+	again, err := h.eng.SubmitOwnerTask("Fix it", TaskOptions{Dir: "/work/x", RequestID: "req-1"})
+	if !errors.Is(err, ErrDuplicate) {
+		t.Fatalf("second submit err = %v, want ErrDuplicate", err)
+	}
+	eq(t, "existing ticket returned", again, first)
+	tickets, triggers, decisions := h.repos.counts()
+	eq(t, "counts", []int{tickets, triggers, decisions}, []int{1, 1, 1})
+	eq(t, "starts", h.exec.count("start"), starts)
+
+	other, err := h.eng.SubmitOwnerTask("Fix it", TaskOptions{Dir: "/work/x", RequestID: "req-2"})
+	if err != nil || other.ID == first.ID {
+		t.Fatalf("a different request id must create a Ticket: %v %q", err, other.ID)
+	}
+	plain, err := h.eng.SubmitOwnerTask("No id", TaskOptions{Dir: "/work/x"})
+	if err != nil || plain.ID == first.ID {
+		t.Fatalf("a submit without a request id must create a Ticket: %v", err)
+	}
+}
+
+func TestPersonInputSameIDOnce(t *testing.T) {
+	h := newHarness(t)
+	id := h.accepted()
+	h.tick(1)
+	h.must(h.eng.AddPersonInputWithID(id, "in-1", "Blue"))
+	_, triggers, _ := h.repos.counts()
+	before := *h.ticket(id)
+	h.tick(1)
+	h.must(h.eng.AddPersonInputWithID(id, "in-1", "Blue"))
+	after := *h.ticket(id)
+	eq(t, "ticket unchanged", after, before)
+	_, again, _ := h.repos.counts()
+	eq(t, "triggers", again, triggers)
+	n := 0
+	for _, in := range after.Inputs {
+		if in.ID == "in-1" {
+			n++
+		}
+	}
+	eq(t, "inputs with the id", n, 1)
+	eq(t, "person messages", after.Stats.PersonMessages, 1)
+
+	h.must(h.eng.AddPersonInput(id, "Red"))
+	eq(t, "wrapper still adds", h.ticket(id).Stats.PersonMessages, 2)
+}

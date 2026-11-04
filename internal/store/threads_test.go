@@ -266,8 +266,8 @@ func TestMigration3FromV2(t *testing.T) {
 		threads, err = tx.ActiveThreads()
 		return err
 	})
-	if schema != 3 {
-		t.Fatalf("schema = %d after upgrade, want 3", schema)
+	if schema != len(migrations) {
+		t.Fatalf("schema = %d after upgrade, want %d", schema, len(migrations))
 	}
 	if get(t, s, "t1") == nil {
 		t.Fatal("ticket lost in the upgrade")
