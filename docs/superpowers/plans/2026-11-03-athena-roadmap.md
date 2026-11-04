@@ -8,7 +8,7 @@ The spec covers several subsystems, so it is built as a sequence of plans. Each 
 | --- | --- | --- | --- |
 | 1 | **Foundation: single-machine core + Claude Code** (`2026-11-03-athena-p1-foundation.md`) | `athena server` on one machine: owner tasks from the CLI become Tickets worked by headless Claude Code sessions, with hooks enforcing rules, Approvals, Reports, stages, resume after crash/restart | §4, §5 (subset), §6.1–6.2, §6.4 (`report`), §11 containment |
 | 2 | Router, Policy and GitHub | GitHub mentions/issues/PR comments → router decides → Tickets → PRs and replies as the GitHub App; Outbox; subscriptions and follow-ups | §5 (rest), §6.3, §11 GitHub App |
-| 3 | Link protocol and dashboard backend | Protobuf over WebSocket with seq/ack/resume, snapshot + deltas, passkey login, TLS (ACME + own CA), Web Push | §8.1–8.3, §11 TLS/auth |
+| 3 | **Link protocol and dashboard backend** (`2026-11-04-athena-p3-link-dashboard-backend.md`) | Protobuf over WebSocket with seq/ack/resume, snapshot + deltas, passkey login, TLS (ACME + own CA), Web Push | §8.1–8.3, §11 TLS/auth |
 | 4 | Dashboard UI | React PWA in the Precision style, phone and desktop layouts, live session view, Approvals, new task | §10, §10.1 |
 | 5 | Codex runtime and multi-runtime Tickets | `codex app-server` driver with hooks and MCP; per-Assignment runtime; `auto` runtime with quota tracking; usage-limit failover in the same worktree; implement + review pairing | §6.1, §6.1a, §6.2 (Codex) |
 | 6 | Multi-node | `athena node` with enrollment, mTLS, capabilities, dispatcher, heartbeats, buffering, checkpoints, Retry elsewhere, per-Ticket GitHub tokens on nodes | §7, §11 device identity |
