@@ -161,3 +161,76 @@ func TestWriteRouterMCPConfigShape(t *testing.T) {
 		t.Fatal("no token accepted")
 	}
 }
+
+func TestWriteSettingsWithSandbox(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	sb := &Sandbox{
+		AllowWrite:     []string{"/w/t-1", "/repo/.git"},
+		DenyWrite:      []string{"/repo/.git/config", "/repo/.git/hooks"},
+		DenyRead:       []string{"/home/o/.athena/github-app.pem"},
+		AllowedDomains: []string{"github.com", "*.github.com"},
+		UnixSockets:    []string{"/run/athena.sock"},
+	}
+	if err := WriteSettingsWith(path, "/opt/athena", "/run/athena.sock", 0, sb, "SSL_CERT_FILE=/etc/ca.pem"); err != nil {
+		t.Fatal(err)
+	}
+	got := readJSON(t, path).(map[string]any)
+	want := map[string]any{
+		"enabled":                  true,
+		"failIfUnavailable":        false,
+		"autoAllowBashIfSandboxed": false,
+		"allowUnsandboxedCommands": false,
+		"filesystem": map[string]any{
+			"allowWrite": []any{"/w/t-1", "/repo/.git"},
+			"denyWrite":  []any{"/repo/.git/config", "/repo/.git/hooks"},
+			"denyRead":   []any{"/home/o/.athena/github-app.pem"},
+		},
+		"network": map[string]any{
+			"allowedDomains":   []any{"github.com", "*.github.com"},
+			"strictAllowlist":  true,
+			"allowUnixSockets": []any{"/run/athena.sock"},
+		},
+	}
+	if !reflect.DeepEqual(got["sandbox"], want) {
+		gb, _ := json.MarshalIndent(got["sandbox"], "", " ")
+		t.Fatalf("sandbox block:\n%s", gb)
+	}
+	if env := got["env"]; !reflect.DeepEqual(env, map[string]any{"ATHENA_SOCKET": "/run/athena.sock", "SSL_CERT_FILE": "/etc/ca.pem"}) {
+		t.Fatalf("env = %v", env)
+	}
+	if got["hooks"].(map[string]any)["PreToolUse"] == nil {
+		t.Fatal("the sandbox replaced the hooks")
+	}
+
+	// The optional switches, and empty lists written as [] rather than null.
+	sb = &Sandbox{Required: true, AllowAllUnixSockets: true, WeakerNetworkIsolation: true}
+	if err := WriteSettingsWith(path, "/opt/athena", "/s", 0, sb); err != nil {
+		t.Fatal(err)
+	}
+	block := readJSON(t, path).(map[string]any)["sandbox"].(map[string]any)
+	if block["failIfUnavailable"] != true || block["enableWeakerNetworkIsolation"] != true ||
+		block["network"].(map[string]any)["allowAllUnixSockets"] != true {
+		t.Fatalf("switches not written: %v", block)
+	}
+	if fs := block["filesystem"].(map[string]any); !reflect.DeepEqual(fs["allowWrite"], []any{}) {
+		t.Fatalf("empty allowWrite = %#v, want []", fs["allowWrite"])
+	}
+}
+
+// The settings env cannot replace ATHENA_SOCKET, and a malformed entry is refused.
+func TestWriteSettingsEnv(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	if err := WriteSettingsWith(path, "athena", "/s", 0, nil, "ATHENA_SOCKET=/evil"); err != nil {
+		t.Fatal(err)
+	}
+	got := readJSON(t, path).(map[string]any)
+	if got["env"].(map[string]any)["ATHENA_SOCKET"] != "/s" {
+		t.Fatalf("env = %v", got["env"])
+	}
+	if _, ok := got["sandbox"]; ok {
+		t.Fatal("a sandbox block without a Sandbox")
+	}
+	if err := WriteSettingsWith(path, "athena", "/s", 0, nil, "NOEQUALS"); err == nil {
+		t.Fatal("want an error for an env entry without =")
+	}
+}

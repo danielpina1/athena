@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 )
@@ -42,16 +43,96 @@ type hookMatcher struct {
 }
 
 type settingsFile struct {
-	Env   map[string]string        `json:"env"`
-	Hooks map[string][]hookMatcher `json:"hooks"`
+	Env     map[string]string        `json:"env"`
+	Hooks   map[string][]hookMatcher `json:"hooks"`
+	Sandbox *sandboxSettings         `json:"sandbox,omitempty"`
 }
 
-// WriteSettings writes the Claude Code settings file passed with --settings.
+// Sandbox turns on Claude Code's sandbox for a session's Bash commands (and every process they start): writes only to
+// the session's working directory, the sandbox's own temporary directory and AllowWrite; outbound connections only to
+// AllowedDomains (through the sandbox's proxy) and the Unix sockets UnixSockets. It does not cover Claude Code's own
+// tools (Read, Edit, Write, WebFetch), hooks or MCP servers, which run outside it.
+//
+// The block always sets autoAllowBashIfSandboxed false, so a sandboxed command still goes through the hooks and the
+// permission flow as before, allowUnsandboxedCommands false, so a session cannot ask to run a command outside the
+// sandbox (dangerouslyDisableSandbox is ignored), and strictAllowlist, so a host not on the list is refused, never
+// asked about.
+type Sandbox struct {
+	// Required makes the session fail at startup when the sandbox cannot start (failIfUnavailable); otherwise Claude
+	// Code warns on stderr and runs commands unsandboxed.
+	Required bool
+	// AllowWrite are paths writable besides the working directory; DenyWrite are paths never writable, even inside
+	// an allowed one; DenyRead are paths that cannot be read.
+	AllowWrite, DenyWrite, DenyRead []string
+	// AllowedDomains are the hosts commands may reach ("*.example.com" matches the subdomains).
+	AllowedDomains []string
+	// UnixSockets are the Unix sockets commands may connect to (macOS only: Linux cannot filter sockets by path).
+	UnixSockets []string
+	// AllowAllUnixSockets lets commands connect to any Unix socket; on Linux it is the only way to reach one.
+	AllowAllUnixSockets bool
+	// WeakerNetworkIsolation (macOS) lets commands reach the trustd service, which Go programs such as gh need to
+	// verify a certificate signed by a CA from the keychain (a TLS-inspecting proxy). It opens a path out of the
+	// sandbox through that service.
+	WeakerNetworkIsolation bool
+}
+
+type sandboxSettings struct {
+	Enabled                      bool              `json:"enabled"`
+	FailIfUnavailable            bool              `json:"failIfUnavailable"`
+	AutoAllowBashIfSandboxed     bool              `json:"autoAllowBashIfSandboxed"`
+	AllowUnsandboxedCommands     bool              `json:"allowUnsandboxedCommands"`
+	EnableWeakerNetworkIsolation bool              `json:"enableWeakerNetworkIsolation,omitempty"`
+	Filesystem                   sandboxFilesystem `json:"filesystem"`
+	Network                      sandboxNetwork    `json:"network"`
+}
+
+type sandboxFilesystem struct {
+	AllowWrite []string `json:"allowWrite"`
+	DenyWrite  []string `json:"denyWrite"`
+	DenyRead   []string `json:"denyRead"`
+}
+
+type sandboxNetwork struct {
+	AllowedDomains      []string `json:"allowedDomains"`
+	StrictAllowlist     bool     `json:"strictAllowlist"`
+	AllowUnixSockets    []string `json:"allowUnixSockets"`
+	AllowAllUnixSockets bool     `json:"allowAllUnixSockets,omitempty"`
+}
+
+// settings is the "sandbox" block of sb, nil without one.
+func (sb *Sandbox) settings() *sandboxSettings {
+	if sb == nil {
+		return nil
+	}
+	list := func(v []string) []string {
+		if v == nil {
+			return []string{}
+		}
+		return slices.Clone(v)
+	}
+	return &sandboxSettings{
+		Enabled:                      true,
+		FailIfUnavailable:            sb.Required,
+		EnableWeakerNetworkIsolation: sb.WeakerNetworkIsolation,
+		Filesystem:                   sandboxFilesystem{AllowWrite: list(sb.AllowWrite), DenyWrite: list(sb.DenyWrite), DenyRead: list(sb.DenyRead)},
+		Network: sandboxNetwork{AllowedDomains: list(sb.AllowedDomains), StrictAllowlist: true,
+			AllowUnixSockets: list(sb.UnixSockets), AllowAllUnixSockets: sb.AllowAllUnixSockets},
+	}
+}
+
+// WriteSettings writes the Claude Code settings file passed with --settings, without a sandbox block (WriteSettingsWith).
+func WriteSettings(path, athenaBin, socket string, hookTimeout time.Duration) error {
+	return WriteSettingsWith(path, athenaBin, socket, hookTimeout, nil)
+}
+
+// WriteSettingsWith writes the Claude Code settings file passed with --settings.
 // Every hook event runs `<athenaBin> hook <event>`; the socket reaches the hook
 // process through the settings "env". hookTimeout applies to PreToolUse and
 // PermissionRequest, which block while a person answers an Approval (zero means
-// DefaultDecisionHookTimeout); the other events get 30 seconds.
-func WriteSettings(path, athenaBin, socket string, hookTimeout time.Duration) error {
+// DefaultDecisionHookTimeout); the other events get 30 seconds. A non-nil sb adds
+// the "sandbox" block; env is added to the settings "env" (Claude Code passes it
+// to the commands it runs).
+func WriteSettingsWith(path, athenaBin, socket string, hookTimeout time.Duration, sb *Sandbox, env ...string) error {
 	if athenaBin == "" {
 		return errors.New("claude: athena binary path is empty")
 	}
@@ -62,9 +143,18 @@ func WriteSettings(path, athenaBin, socket string, hookTimeout time.Duration) er
 		hookTimeout = DefaultDecisionHookTimeout
 	}
 	s := settingsFile{
-		Env:   map[string]string{"ATHENA_SOCKET": socket},
-		Hooks: map[string][]hookMatcher{},
+		Env:     map[string]string{},
+		Hooks:   map[string][]hookMatcher{},
+		Sandbox: sb.settings(),
 	}
+	for _, kv := range env {
+		k, v, ok := strings.Cut(kv, "=")
+		if !ok || k == "" {
+			return fmt.Errorf("claude: settings env %q is not NAME=value", kv)
+		}
+		s.Env[k] = v
+	}
+	s.Env["ATHENA_SOCKET"] = socket
 	for _, ev := range hookEvents {
 		d := quickHookTimeout
 		if ev.decision {

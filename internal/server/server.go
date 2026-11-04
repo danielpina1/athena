@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -165,6 +166,15 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	}
 	ncfg.StateDir = stateDir
 	ncfg.SocketPath = filepath.Join(stateDir, NodeSocket)
+	if ncfg.Sandbox == nil {
+		ncfg.Sandbox = fileCfg.nodeSandbox()
+	}
+	if ncfg.Sandbox == nil {
+		logger.Warn("claude code sandbox is off for workers: their commands can write anywhere this user can")
+	} else {
+		logger.Info("claude code sandbox is on for workers", "required", ncfg.Sandbox.Required,
+			"allowedDomains", append(slices.Clone(node.GitHubDomains), ncfg.Sandbox.AllowedDomains...))
+	}
 	if ncfg.WorkRoot == "" {
 		ncfg.WorkRoot = filepath.Join(stateDir, "work")
 	}

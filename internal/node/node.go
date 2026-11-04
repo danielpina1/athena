@@ -82,6 +82,8 @@ type Config struct {
 	// CredentialRetry is the first pause before a launch that could not get its GitHub credentials yet tries again
 	// (default 5 s, doubling to 5 min).
 	CredentialRetry time.Duration
+	// Sandbox, when set, turns on Claude Code's sandbox for worker sessions (sandbox.go); nil leaves it off.
+	Sandbox *SandboxConfig
 	// Logger receives the node's log lines (default slog.Default()).
 	Logger *slog.Logger
 }
@@ -1582,7 +1584,8 @@ func (n *Node) prepare(s *session) error {
 		return err
 	}
 	hookTimeout := n.cfg.ApprovalTimeout + hookTimeoutMargin
-	if err := claude.WriteSettings(filepath.Join(adir, "settings.json"), n.cfg.AthenaBin, n.cfg.SocketPath, hookTimeout); err != nil {
+	sb, sbEnv := n.sandboxFor(p.workDir)
+	if err := claude.WriteSettingsWith(filepath.Join(adir, "settings.json"), n.cfg.AthenaBin, n.cfg.SocketPath, hookTimeout, sb, sbEnv...); err != nil {
 		return err
 	}
 	return claude.WriteMCPConfig(filepath.Join(adir, "mcp.json"), n.cfg.AthenaBin, n.cfg.SocketPath, s.t.ID, s.a.ID)

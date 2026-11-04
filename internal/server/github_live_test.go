@@ -164,6 +164,17 @@ func TestLiveGitHubMention(t *testing.T) {
 		Repos: []string{repo}, IntervalSeconds: 10}); err != nil {
 		t.Fatal(err)
 	}
+	// The worker is sandboxed (the default); behind a TLS-inspecting proxy it needs that proxy's CA to push.
+	if ca := os.Getenv("ATHENA_LIVE_SANDBOX_CA_FILE"); ca != "" {
+		c, err := LoadConfig(stateDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.Sandbox.CAFile, c.Sandbox.WeakerNetworkIsolation = ca, true
+		if err := SaveConfig(stateDir, c); err != nil {
+			t.Fatal(err)
+		}
+	}
 	app, err := github.NewApp(github.AppConfig{AppID: appID, Slug: slug, KeyFile: key, InstallationID: inst, Version: "live-test"}, nil, nil)
 	if err != nil {
 		t.Fatal(err)

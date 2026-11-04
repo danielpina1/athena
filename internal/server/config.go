@@ -14,13 +14,16 @@ import (
 	"strings"
 	"time"
 
+	"github.com/danielpina1/athena/internal/node"
 	"github.com/danielpina1/athena/internal/sources/github"
 )
 
 // ConfigFile is the server's configuration in the state directory, written 0600 by `athena github setup`:
 //
 //	{"github": {"appId", "slug", "keyFile", "installationId", "repos": [], "intervalSeconds": 30, "receiveAll": []},
-//	 "router": {"model": "haiku"}, "evalTimeoutSeconds": 600}
+//	 "router": {"model": "haiku"}, "evalTimeoutSeconds": 600,
+//	 "sandbox": {"enabled": true, "required": false, "allowedDomains": [], "allowWrite": [],
+//	             "weakerNetworkIsolation": false, "caFile": ""}}
 //
 // It holds the path of the GitHub App's private key, never the key. Without the file, or without its github part,
 // the server runs owner tasks only: no Source, no router.
@@ -38,6 +41,74 @@ type FileConfig struct {
 	GitHub             *GitHubConfig `json:"github,omitempty"`
 	Router             RouterConfig  `json:"router"`
 	EvalTimeoutSeconds int           `json:"evalTimeoutSeconds"`
+	Sandbox            SandboxConfig `json:"sandbox"`
+}
+
+// SandboxConfig is Claude Code's sandbox for worker sessions (node.SandboxConfig). Every field is optional.
+type SandboxConfig struct {
+	// Enabled turns the sandbox on or off; unset means on where Claude Code has one (macOS and Linux).
+	Enabled *bool `json:"enabled,omitempty"`
+	// Required makes a worker fail to start when the sandbox cannot start, instead of running unsandboxed.
+	Required bool `json:"required,omitempty"`
+	// AllowedDomains are hosts workers' commands may reach besides GitHub ("*.example.com" for the subdomains).
+	AllowedDomains []string `json:"allowedDomains,omitempty"`
+	// AllowWrite are absolute paths workers' commands may write besides the Ticket's directory.
+	AllowWrite []string `json:"allowWrite,omitempty"`
+	// WeakerNetworkIsolation (macOS) opens the trustd service, which gh needs behind a TLS-inspecting proxy.
+	WeakerNetworkIsolation bool `json:"weakerNetworkIsolation,omitempty"`
+	// CAFile is an absolute path to a PEM bundle workers' git and curl verify TLS with.
+	CAFile string `json:"caFile,omitempty"`
+}
+
+// On reports whether the sandbox is on: Enabled, or unset on a platform that has it.
+func (c SandboxConfig) On() bool {
+	if c.Enabled != nil {
+		return *c.Enabled
+	}
+	return node.SandboxSupported()
+}
+
+// nodeSandbox is the node's sandbox configuration, nil when it is off. The GitHub App's private key is denied to
+// workers' commands: it is the one secret on this machine they could otherwise read.
+func (c FileConfig) nodeSandbox() *node.SandboxConfig {
+	sb := c.Sandbox
+	if !sb.On() {
+		return nil
+	}
+	var denyRead []string
+	if c.GitHub != nil && c.GitHub.KeyFile != "" {
+		denyRead = append(denyRead, c.GitHub.KeyFile)
+	}
+	return &node.SandboxConfig{
+		Required:               sb.Required,
+		AllowedDomains:         slices.Clone(sb.AllowedDomains),
+		AllowWrite:             slices.Clone(sb.AllowWrite),
+		DenyRead:               denyRead,
+		WeakerNetworkIsolation: sb.WeakerNetworkIsolation,
+		CAFile:                 sb.CAFile,
+	}
+}
+
+var domainRe = regexp.MustCompile(`^(\*\.)?[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*$`)
+
+func (c SandboxConfig) validate() error {
+	for _, d := range c.AllowedDomains {
+		if !domainRe.MatchString(d) {
+			return fmt.Errorf("sandbox: allowedDomains entry %q is not a host name (example.com or *.example.com)", d)
+		}
+	}
+	for _, p := range c.AllowWrite {
+		if !filepath.IsAbs(p) {
+			return fmt.Errorf("sandbox: allowWrite entry %q must be an absolute path", p)
+		}
+	}
+	if c.CAFile != "" && !filepath.IsAbs(c.CAFile) {
+		return errors.New("sandbox: caFile must be an absolute path")
+	}
+	if c.Enabled != nil && *c.Enabled && !node.SandboxSupported() {
+		return errors.New("sandbox: Claude Code has no sandbox on this platform; remove \"enabled\": true")
+	}
+	return nil
 }
 
 // GitHubConfig is the GitHub App the server works through and the repositories it polls.
@@ -90,6 +161,9 @@ func LoadConfig(stateDir string) (FileConfig, error) {
 	}
 	if c.EvalTimeoutSeconds < 0 {
 		return FileConfig{}, fmt.Errorf("config: %s: evalTimeoutSeconds must not be negative", path)
+	}
+	if err := c.Sandbox.validate(); err != nil {
+		return FileConfig{}, fmt.Errorf("config: %s: %w", path, err)
 	}
 	return c.withDefaults(), nil
 }
