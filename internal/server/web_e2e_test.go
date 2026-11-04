@@ -20,6 +20,7 @@ import (
 	"github.com/danielpina1/athena/internal/node"
 	"github.com/danielpina1/athena/internal/pb/athenav1"
 	"github.com/danielpina1/athena/internal/web"
+	"github.com/danielpina1/athena/internal/web/ui"
 )
 
 func TestWebDisabledByDefault(t *testing.T) {
@@ -156,7 +157,11 @@ func TestWebE2E(t *testing.T) {
 	if resp, body := get("/ca.mobileconfig"); resp.StatusCode != 200 || !strings.Contains(body, "PayloadContent") {
 		t.Fatalf("mobileconfig = %d", resp.StatusCode)
 	}
-	if resp, body := get("/"); resp.StatusCode != 200 || !strings.Contains(body, "Athena") {
+	wantIndex := "Dashboard not built: run make web"
+	if ui.Built() {
+		wantIndex = `id="root"`
+	}
+	if resp, body := get("/"); resp.StatusCode != 200 || !strings.Contains(body, wantIndex) {
 		t.Fatalf("index = %d %q", resp.StatusCode, body)
 	}
 	if resp, body := get("/push/key"); resp.StatusCode != 200 || body != w.ep.vapid.PublicKey() {

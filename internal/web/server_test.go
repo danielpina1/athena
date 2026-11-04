@@ -241,6 +241,8 @@ var spaFS = fstest.MapFS{
 	"index.html":           {Data: []byte(`<!doctype html><script type="module" src="/assets/index-abc.js"></script><div id="root"></div>`)},
 	"assets/index-abc.js":  {Data: []byte("console.log(1)")},
 	"assets/index-abc.css": {Data: []byte("a{}")},
+	".vite/manifest.json":  {Data: []byte("{}")},
+	".gitkeep":             {Data: []byte("")},
 	"sw.js":                {Data: []byte("self")},
 	"manifest.webmanifest": {Data: []byte("{}")},
 }
@@ -305,5 +307,19 @@ func TestPlaceholderRoutesGone(t *testing.T) {
 	_, h := newServerHandler(t, func(c *ServerConfig) { c.UI = spaFS })
 	if rec := get(t, h, "/app.js"); rec.Code != 404 {
 		t.Fatalf("/app.js = %d", rec.Code)
+	}
+}
+
+func TestSPARefusesDotfilesDirectoriesAndTraversal(t *testing.T) {
+	_, h := newServerHandler(t, func(c *ServerConfig) { c.UI = spaFS })
+	for _, path := range []string{"/.gitkeep", "/.vite/manifest.json", "/.vite", "/assets/", "/assets", "/go.mod", "/assets/%2e%2e/%2e%2e/go.mod"} {
+		if rec := get(t, h, path); rec.Code != 404 {
+			t.Fatalf("%s = %d %q", path, rec.Code, rec.Body)
+		}
+	}
+	// The mux cleans a traversal into a redirect to the cleaned path, which is itself a 404.
+	rec := get(t, h, "/assets/../../go.mod")
+	if rec.Code != http.StatusTemporaryRedirect || rec.Header().Get("Location") != "/go.mod" {
+		t.Fatalf("traversal = %d %v", rec.Code, rec.Header())
 	}
 }

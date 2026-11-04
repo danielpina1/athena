@@ -4,7 +4,7 @@ import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
-const devServer = process.env.ATHENA_DEV_SERVER ?? "http://127.0.0.1:8443";
+const devServer = process.env.ATHENA_DEV_SERVER ?? "http://localhost:8443";
 const origin = new URL(devServer).origin;
 
 // The dev server forwards the server's own routes, with the Origin the server expects.

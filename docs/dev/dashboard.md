@@ -215,7 +215,9 @@ embeds (the directory is git-ignored; without a build the server shows "Dashboar
 2. For fast iteration, run a server with TLS off on loopback (`athena web setup --tls off --host localhost --listen
    127.0.0.1:8443`, then `athena server`), and in another terminal `npm --prefix web run dev`. Vite serves the app
    with hot reload and proxies `/ws`, `/auth`, `/push` and `/api` to `ATHENA_DEV_SERVER` (default
-   `http://127.0.0.1:8443`), rewriting `Origin` to that server's.
+   `http://localhost:8443`), rewriting `Origin` to that server's. Passkey ceremonies are bound to the server's origin, so sign in once at
+   `http://localhost:8443` (the built app), then open the Vite dev server at `http://localhost:5173`: the session
+   cookie is not port-scoped, so the proxy reuses it.
 3. `make web-check` runs typecheck, lint, unit tests, the build and the bundle budget; `make check` includes it.
    `make e2e` will run the browser tests.
 

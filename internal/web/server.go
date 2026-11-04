@@ -125,6 +125,20 @@ func uiHandler(fsys fs.FS) http.Handler {
 			http.NotFound(w, r)
 			return
 		}
+		// The embedded tree has hidden files (.gitkeep, .vite/manifest.json): none is served. Nor is a directory of
+		// assets listed or answered with the app.
+		for _, seg := range strings.Split(name, "/") {
+			if strings.HasPrefix(seg, ".") {
+				http.NotFound(w, r)
+				return
+			}
+		}
+		if first == "assets" {
+			if st, err := fs.Stat(fsys, name); err != nil || st.IsDir() || !built {
+				http.NotFound(w, r)
+				return
+			}
+		}
 		if !built {
 			if path.Ext(name) != "" {
 				http.NotFound(w, r)
