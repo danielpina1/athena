@@ -301,6 +301,7 @@ func (s *Session) readLoop(ctx context.Context) error {
 		}
 		f, err := Decode(b)
 		if err != nil {
+			s.refuseFrame(err)
 			return fmt.Errorf("%w: %v", ErrProtocol, err)
 		}
 		deliver, err := s.receive(f)
@@ -314,6 +315,19 @@ func (s *Session) readLoop(ctx context.Context) error {
 			s.o.OnCredit(c.GetChannel())
 		}
 	}
+}
+
+// refuseFrame tells the peer, best effort, that a frame did not decode: an invalid Error written straight to the
+// connection (the write loop's queue is not drained on the way to the close, and Conn writes may be concurrent).
+func (s *Session) refuseFrame(cause error) {
+	b, err := Encode(&athenav1.Frame{Channel: athenav1.Channel_CONTROL,
+		Body: &athenav1.Frame_Error{Error: &athenav1.Error{Code: "invalid", Message: "undecodable frame: " + cause.Error()}}})
+	if err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_ = s.conn.Write(ctx, b)
 }
 
 // receive does the link-level bookkeeping of one frame and reports whether the caller should see it.

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/danielpina1/athena/internal/pb/athenav1"
@@ -272,6 +273,29 @@ func TestSequenceGapClosesConnection(t *testing.T) {
 	}
 	if cb.closeCode() != CloseProtocol {
 		t.Fatalf("close code %d", cb.closeCode())
+	}
+}
+
+func TestUndecodableFrameGetsInvalidErrorThenCloses(t *testing.T) {
+	ca, cb := memPair()
+	s := New(cb, Options{})
+	top, _ := Encode(&athenav1.Frame{Channel: athenav1.Channel_CONTROL, Body: &athenav1.Frame_Ping{Ping: &athenav1.Ping{}}})
+	unknown := protowire.AppendVarint(protowire.AppendTag(nil, 999, protowire.VarintType), 1)
+	_ = ca.Write(context.Background(), append(top, unknown...))
+	if err := s.Run(context.Background()); !errors.Is(err, ErrProtocol) {
+		t.Fatalf("Run: %v", err)
+	}
+	if cb.closeCode() != CloseProtocol {
+		t.Fatalf("close code %d", cb.closeCode())
+	}
+	select {
+	case b := <-ca.in:
+		f, err := Decode(b)
+		if err != nil || f.GetError().GetCode() != "invalid" {
+			t.Fatalf("frame before the close = %v, %v, want an invalid Error", f, err)
+		}
+	default:
+		t.Fatal("no Error written before the close")
 	}
 }
 

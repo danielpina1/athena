@@ -153,6 +153,10 @@ func (s *Store) DeletePasskey(id string) ([][]byte, error) {
 			}
 			hashes = append(hashes, h)
 		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return fmt.Errorf("store: delete passkey sessions: %w", err)
+		}
 		if err := rows.Close(); err != nil {
 			return err
 		}
@@ -263,7 +267,7 @@ func (s *Store) DeleteWebSession(hash []byte) error {
 	return nil
 }
 
-// PruneWebSessions removes the web sessions that are idle past WebSessionIdle or older than WebSessionAbsolute at
+// PruneWebSessions removes (with their push subscriptions) the web sessions that are idle past WebSessionIdle or older than WebSessionAbsolute at
 // now, and returns how many.
 func (s *Store) PruneWebSessions(now time.Time) (int, error) {
 	res, err := s.db.Exec(`DELETE FROM web_sessions WHERE seen_at < ? OR created_at < ?`,
@@ -278,6 +282,12 @@ func (s *Store) PutEnrollToken(hash []byte, expiresAt time.Time) error {
 		return fmt.Errorf("store: put enroll token: %w", err)
 	}
 	return nil
+}
+
+// PruneEnrollTokens removes the enrollment tokens that are spent or expired at now, and returns how many.
+func (s *Store) PruneEnrollTokens(now time.Time) (int, error) {
+	res, err := s.db.Exec(`DELETE FROM enroll_tokens WHERE used_at != '' OR expires_at <= ?`, formatTime(now))
+	return rowsAffected(res, err, "prune enroll tokens")
 }
 
 // UseEnrollToken spends an enrollment token: true if the hash names a token that is unspent and not expired at now,
@@ -325,21 +335,24 @@ func (s *Store) PruneCommandResults(before time.Time) (int, error) {
 	return rowsAffected(res, err, "prune command results")
 }
 
-// PushSubscription is a browser's Web Push subscription; Failures counts consecutive failed deliveries.
+// PushSubscription is a browser's Web Push subscription; Failures counts consecutive failed deliveries. SessionHash is
+// the web session that subscribed: the subscription ends with it.
 type PushSubscription struct {
-	Endpoint  string
-	P256dh    string
-	Auth      string
-	CreatedAt time.Time
-	Failures  int
+	SessionHash []byte
+	Endpoint    string
+	P256dh      string
+	Auth        string
+	CreatedAt   time.Time
+	Failures    int
 }
 
-// PutPushSubscription stores a subscription, replacing the one for the same endpoint and resetting its failures.
+// PutPushSubscription stores a subscription, replacing the one for the same endpoint (which moves to the new session)
+// and resetting its failures. The session must exist: one that ended first makes this fail (foreign key).
 func (s *Store) PutPushSubscription(p PushSubscription) error {
-	_, err := s.db.Exec(`INSERT INTO push_subscriptions (endpoint, p256dh, auth, created_at, failures) VALUES (?, ?, ?, ?, 0)
+	_, err := s.db.Exec(`INSERT INTO push_subscriptions (endpoint, p256dh, auth, created_at, failures, session_hash) VALUES (?, ?, ?, ?, 0, ?)
 		ON CONFLICT(endpoint) DO UPDATE SET p256dh = excluded.p256dh, auth = excluded.auth,
-			created_at = excluded.created_at, failures = 0`,
-		p.Endpoint, p.P256dh, p.Auth, formatTime(p.CreatedAt))
+			created_at = excluded.created_at, failures = 0, session_hash = excluded.session_hash`,
+		p.Endpoint, p.P256dh, p.Auth, formatTime(p.CreatedAt), p.SessionHash)
 	if err != nil {
 		return fmt.Errorf("store: put push subscription: %w", err)
 	}
@@ -348,7 +361,7 @@ func (s *Store) PutPushSubscription(p PushSubscription) error {
 
 // PushSubscriptions returns every subscription, oldest first.
 func (s *Store) PushSubscriptions() ([]PushSubscription, error) {
-	rows, err := s.db.Query(`SELECT endpoint, p256dh, auth, created_at, failures FROM push_subscriptions ORDER BY created_at, endpoint`)
+	rows, err := s.db.Query(`SELECT endpoint, p256dh, auth, created_at, failures, session_hash FROM push_subscriptions ORDER BY created_at, endpoint`)
 	if err != nil {
 		return nil, fmt.Errorf("store: push subscriptions: %w", err)
 	}
@@ -357,7 +370,7 @@ func (s *Store) PushSubscriptions() ([]PushSubscription, error) {
 	for rows.Next() {
 		var p PushSubscription
 		var created string
-		if err := rows.Scan(&p.Endpoint, &p.P256dh, &p.Auth, &created, &p.Failures); err != nil {
+		if err := rows.Scan(&p.Endpoint, &p.P256dh, &p.Auth, &created, &p.Failures, &p.SessionHash); err != nil {
 			return nil, fmt.Errorf("store: push subscriptions: %w", err)
 		}
 		if p.CreatedAt, err = parseTime(created); err != nil {

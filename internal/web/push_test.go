@@ -206,6 +206,7 @@ func newPushEnv(t *testing.T, statuses ...int) *pushEnv {
 	if err != nil {
 		t.Fatal(err)
 	}
+	hash := seedSession(t, st)
 	e := &pushEnv{t: t, st: st, vapid: v, now: time.Date(2026, 11, 4, 9, 0, 0, 0, time.UTC)}
 	for i, code := range statuses {
 		f := &fakeService{status: code}
@@ -225,7 +226,7 @@ func newPushEnv(t *testing.T, statuses ...int) *pushEnv {
 		ua, _ := ecdh.P256().GenerateKey(rand.Reader)
 		auth := make([]byte, 16)
 		auth[0] = byte(i + 1)
-		err := st.PutPushSubscription(store.PushSubscription{Endpoint: f.srv.URL + "/sub/1",
+		err := st.PutPushSubscription(store.PushSubscription{SessionHash: hash, Endpoint: f.srv.URL + "/sub/1",
 			P256dh: pushB64.EncodeToString(ua.PublicKey().Bytes()), Auth: pushB64.EncodeToString(auth), CreatedAt: time.Now()})
 		if err != nil {
 			t.Fatal(err)
@@ -429,7 +430,7 @@ func TestBadKeysDeleteButOversizeKeepsSubscription(t *testing.T) {
 	if subs, _ := e.st.PushSubscriptions(); len(subs) != 1 {
 		t.Fatal("an oversize message dropped the subscription")
 	}
-	_ = e.st.PutPushSubscription(store.PushSubscription{Endpoint: ep, P256dh: "AAAA", Auth: "AAAA", CreatedAt: time.Now()})
+	_ = e.st.PutPushSubscription(store.PushSubscription{SessionHash: []byte("seed-session-hash"), Endpoint: ep, P256dh: "AAAA", Auth: "AAAA", CreatedAt: time.Now()})
 	if err := e.pusher().Handle(context.Background(), "k", e.job(0, "normal", "x")); err != nil {
 		t.Fatal(err)
 	}

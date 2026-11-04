@@ -48,8 +48,8 @@ func TestMigration4FromV3(t *testing.T) {
 	if err := s.Tx(func(tx *Tx) (err error) { _, err = tx.kvGetJSON("schema", &schema); return }); err != nil {
 		t.Fatal(err)
 	}
-	if schema != 4 {
-		t.Fatalf("schema = %d after upgrade, want 4", schema)
+	if schema != len(migrations) {
+		t.Fatalf("schema = %d after upgrade, want %d", schema, len(migrations))
 	}
 	if got := get(t, s, "t1"); got == nil || got.Title != "old" || got.RequestID != "" {
 		t.Fatalf("ticket after upgrade = %+v", got)
@@ -301,7 +301,7 @@ func TestEnrollTokens(t *testing.T) {
 
 func TestPushSubscriptions(t *testing.T) {
 	s, _ := openTemp(t)
-	sub := PushSubscription{Endpoint: "https://push/1", P256dh: "k", Auth: "a", CreatedAt: t0}
+	sub := PushSubscription{SessionHash: seedSession(t, s, "p", "h1"), Endpoint: "https://push/1", P256dh: "k", Auth: "a", CreatedAt: t0}
 	if err := s.PutPushSubscription(sub); err != nil {
 		t.Fatal(err)
 	}
@@ -359,5 +359,128 @@ func TestAnsweredApprovalsNewestFirst(t *testing.T) {
 	}
 	if got, _ := s.AnsweredApprovals(2); len(got) != 2 || got[0].ID != "a3" {
 		t.Fatalf("limit 2 = %v", got)
+	}
+}
+
+// seedSession stores a passkey (if new) and a web session of it created at t0, and returns the session's hash.
+func seedSession(t *testing.T, s *Store, passkey, hash string) []byte {
+	t.Helper()
+	if _, ok, _ := s.Passkey(passkey); !ok {
+		if err := s.PutPasskey(Passkey{ID: passkey, Name: passkey, Credential: []byte("c"), CreatedAt: t0}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.PutWebSession(WebSession{Hash: []byte(hash), CreatedAt: t0, SeenAt: t0, ReauthAt: t0, PasskeyID: passkey}); err != nil {
+		t.Fatal(err)
+	}
+	return []byte(hash)
+}
+
+func TestMigration5FromV4(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "athena.db")
+	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=foreign_keys(ON)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range migrations[:4] {
+		if _, err := db.Exec(m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, q := range []string{
+		`INSERT INTO kv (key, value) VALUES ('schema', '4')`,
+		`INSERT INTO push_subscriptions (endpoint, p256dh, auth, created_at) VALUES ('https://old', 'k', 'a', '2026-01-01T00:00:00Z')`,
+	} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open on schema 4: %v", err)
+	}
+	defer s.Close()
+	if list, err := s.PushSubscriptions(); err != nil || len(list) != 0 {
+		t.Fatalf("subscriptions after upgrade = %+v, %v (the sessionless rows must go)", list, err)
+	}
+	h := seedSession(t, s, "p", "h1")
+	if err := s.PutPushSubscription(PushSubscription{SessionHash: h, Endpoint: "https://new", P256dh: "k", Auth: "a", CreatedAt: t0}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PutPushSubscription(PushSubscription{SessionHash: []byte("nobody"), Endpoint: "https://x", P256dh: "k", Auth: "a", CreatedAt: t0}); err == nil {
+		t.Fatal("a subscription of an unknown session was stored")
+	}
+}
+
+func TestPushSubscriptionFollowsItsSession(t *testing.T) {
+	s, _ := openTemp(t)
+	h1, h2 := seedSession(t, s, "p", "h1"), seedSession(t, s, "p", "h2")
+	put := func(h []byte, ep string) {
+		t.Helper()
+		if err := s.PutPushSubscription(PushSubscription{SessionHash: h, Endpoint: ep, P256dh: "k", Auth: "a", CreatedAt: t0}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	endpoints := func() []string {
+		list, err := s.PushSubscriptions()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []string
+		for _, p := range list {
+			out = append(out, p.Endpoint)
+		}
+		return out
+	}
+	put(h1, "https://a")
+	put(h2, "https://b")
+	// Subscribing the same endpoint from another session moves the row.
+	put(h2, "https://a")
+	if err := s.DeleteWebSession(h1); err != nil {
+		t.Fatal(err)
+	}
+	if got := endpoints(); len(got) != 2 {
+		t.Fatalf("endpoints after deleting the old session = %v, want both (a moved to h2)", got)
+	}
+	if err := s.DeleteWebSession(h2); err != nil {
+		t.Fatal(err)
+	}
+	if got := endpoints(); len(got) != 0 {
+		t.Fatalf("endpoints after deleting the session = %v", got)
+	}
+}
+
+func TestPruneCascadesAndEnrollTokens(t *testing.T) {
+	s, _ := openTemp(t)
+	h := seedSession(t, s, "p", "h1")
+	if err := s.PutPushSubscription(PushSubscription{SessionHash: h, Endpoint: "https://a", P256dh: "k", Auth: "a", CreatedAt: t0}); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := s.PruneWebSessions(t0.Add(time.Hour)); err != nil || n != 0 {
+		t.Fatalf("early prune = %d, %v", n, err)
+	}
+	if n, err := s.PruneWebSessions(t0.Add(WebSessionIdle + time.Hour)); err != nil || n != 1 {
+		t.Fatalf("prune = %d, %v", n, err)
+	}
+	if list, _ := s.PushSubscriptions(); len(list) != 0 {
+		t.Fatalf("a pruned session kept its subscription: %+v", list)
+	}
+
+	for name, exp := range map[string]time.Time{"live": t0.Add(time.Hour), "spent": t0.Add(time.Hour), "old": t0.Add(-time.Hour)} {
+		if err := s.PutEnrollToken([]byte(name), exp); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if ok, err := s.UseEnrollToken([]byte("spent"), t0); err != nil || !ok {
+		t.Fatal(ok, err)
+	}
+	if n, err := s.PruneEnrollTokens(t0); err != nil || n != 2 {
+		t.Fatalf("PruneEnrollTokens = %d, %v, want 2 (spent and expired)", n, err)
+	}
+	if ok, _ := s.UseEnrollToken([]byte("live"), t0); !ok {
+		t.Fatal("the live token was pruned")
 	}
 }

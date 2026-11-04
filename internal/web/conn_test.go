@@ -916,3 +916,78 @@ func TestVisibilityReachesPresence(t *testing.T) {
 		t.Error("a closed connection still counts as visible")
 	}
 }
+
+func TestOversizedDeltaClosesConnection(t *testing.T) {
+	e := newConnEnv(t)
+	t0 := time.Date(2026, 11, 4, 9, 0, 0, 0, time.UTC)
+	c := e.connect(hello("phone"))
+	c.welcome()
+	c.snapshot()
+	// A delta that cannot be sent (over a frame) must end the connection, not leave it open and silent.
+	tk := ticketAt("T-0001", t0)
+	tk.Title = strings.Repeat("x", link.MaxFrame)
+	e.src.put(tk)
+	e.hub.OnCommit(store.Changes{Tickets: []string{"T-0001"}})
+	if code := c.closed(connWait); code != closeInternal {
+		t.Fatalf("closed with %d, want %d", code, closeInternal)
+	}
+}
+
+func TestSnapshotFailureSendsItsError(t *testing.T) {
+	e := newConnEnv(t)
+	t0 := time.Date(2026, 11, 4, 9, 0, 0, 0, time.UTC)
+	tk := ticketAt("T-0001", t0) // open, so it is never trimmed
+	tk.Title = strings.Repeat("x", link.MaxFrame)
+	e.src.put(tk)
+	c := e.connect(hello("phone"))
+	f := c.next("error", func(f *athenav1.Frame) bool { return f.GetError() != nil })
+	if f.GetError().GetCode() != CodeInternal {
+		t.Fatalf("error %v, want code %s", f.GetError(), CodeInternal)
+	}
+	if code := c.closed(connWait); code != closeInternal {
+		t.Fatalf("closed with %d, want %d", code, closeInternal)
+	}
+}
+
+func TestOversizedDetailKeepsNewestTimeline(t *testing.T) {
+	e := newConnEnv(t)
+	t0 := time.Date(2026, 11, 4, 9, 0, 0, 0, time.UTC)
+	tk := ticketAt("T-0001", t0)
+	text := strings.Repeat("y ", 250) // one 500-rune timeline entry
+	for i := range 4000 {             // about 2 MB of timeline
+		tk.Inputs = append(tk.Inputs, core.Input{ID: fmt.Sprintf("i%04d", i), Kind: core.InputKind("note"), At: t0.Add(time.Duration(i) * time.Second), Text: text})
+	}
+	e.src.put(tk)
+	c := e.connect(hello("phone"))
+	c.welcome()
+	c.snapshot()
+	if r := c.do(watch("w1", "T-0001")); !r.GetOk() {
+		t.Fatalf("watch: %v", r)
+	}
+	f := c.next("detail", func(f *athenav1.Frame) bool { return f.GetDelta().GetTicketDetail() != nil })
+	tl := f.GetDelta().GetTicketDetail().GetTimeline()
+	if len(tl) == 0 || len(tl) >= 4000 {
+		t.Fatalf("%d timeline entries, want some but fewer than 4000", len(tl))
+	}
+	if last := tl[len(tl)-1]; last.GetRefId() != "i3999" {
+		t.Fatalf("newest entry kept = %s, want i3999", last.GetRefId())
+	}
+}
+
+func TestFitDetail(t *testing.T) {
+	td := &athenav1.TicketDetail{Summary: &athenav1.TicketSummary{Id: "T-1", Title: strings.Repeat("x", link.MaxFrame)}}
+	if fitDetail(td) {
+		t.Fatal("fitted a detail whose summary is over a frame")
+	}
+}
+
+func TestCommandOriginCarriesSessionHash(t *testing.T) {
+	e := newConnEnv(t)
+	c := e.connect(hello("phone"))
+	c.welcome()
+	c.do(listPasskeys("c1"))
+	s, _ := e.Auth.Session(e.Request())
+	if got := e.cmd.last().SessionHash; got == "" || got != s.Hash {
+		t.Fatalf("origin session hash %q, want %q", got, s.Hash)
+	}
+}

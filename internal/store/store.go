@@ -115,6 +115,19 @@ var migrations = []string{
 		created_at TEXT NOT NULL,
 		failures INTEGER NOT NULL DEFAULT 0
 	);`,
+	// 5: a push subscription belongs to the web session that made it, so a revoke, logout or expiry ends it. SQLite cannot
+	// add a foreign-key column, so the table is rebuilt; the old rows have no session and are dropped (nothing had
+	// subscribed yet).
+	`DROP TABLE push_subscriptions;
+	CREATE TABLE push_subscriptions (
+		endpoint TEXT PRIMARY KEY,
+		p256dh TEXT NOT NULL,
+		auth TEXT NOT NULL,
+		created_at TEXT NOT NULL,
+		failures INTEGER NOT NULL DEFAULT 0,
+		session_hash BLOB NOT NULL REFERENCES web_sessions(hash) ON DELETE CASCADE
+	);
+	CREATE INDEX push_subscriptions_session ON push_subscriptions (session_hash);`,
 }
 
 const schemaKey = "schema"

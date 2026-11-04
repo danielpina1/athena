@@ -539,7 +539,7 @@ Behaviour (spec §8.2):
 
 **Interfaces:**
 - Produces:
-  - config.json `web`: `{"enabled": false, "listen": ":8443", "host": "", "ips": [], "tls": "ca", "acme": {...}, "pushContact": ""}`. `host` is required when `enabled`. Validation errors name the field.
+  - config.json `web`: `{"enabled": false, "listen": ":8443", "host": "", "ips": [], "tls": "ca", "acme": {...}}` (`pushContact` dropped, ruling R28). `host` is required when `enabled`. Validation errors name the field.
   - `athena web setup --host H [--ip IP]... [--listen ADDR] [--tls ca|acme|off] [--acme-email E --acme-provider P]` writes the `web` part and enables it.
   - `athena web status` prints the URL, the TLS mode, the certificate expiry, the CA fingerprint, the passkey count and the connected clients.
   - `athena web ca` prints the CA fingerprint and the paths of `ca.pem` and the profile.

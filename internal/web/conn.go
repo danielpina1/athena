@@ -73,6 +73,8 @@ type Commander interface {
 type Origin struct {
 	ClientID  string
 	Sensitive bool
+	// SessionHash is the hex SHA-256 of the connection's session cookie (Session.Hash).
+	SessionHash string
 }
 
 // DashboardConfig is what a Dashboard serves from.
@@ -322,7 +324,9 @@ func (c *conn) serve(ctx context.Context) {
 	if needSnapshot {
 		var err error
 		if floor, err = c.sendSnapshot(); err != nil {
-			c.snapshotFailed(err)
+			// The Session is not running yet, so its queued Welcome and Error would never be written.
+			c.writeError(CodeInternal, "no snapshot")
+			c.end(closeInternal, "no snapshot")
 			return
 		}
 	}
@@ -411,14 +415,20 @@ func validClientID(id string) bool {
 
 // refuse answers a bad Hello with an invalid Error, written before any Session exists, and closes.
 func (c *conn) refuse(msg string) {
+	c.writeError(CodeInvalid, msg)
+	_ = c.lc.Close(link.CloseProtocol, "bad hello")
+}
+
+// writeError writes an Error frame straight to the socket, for the time before the Session runs (its queue is not
+// written yet) or once it is done.
+func (c *conn) writeError(code, msg string) {
 	b, err := link.Encode(&athenav1.Frame{Channel: athenav1.Channel_CONTROL,
-		Body: &athenav1.Frame_Error{Error: &athenav1.Error{Code: CodeInvalid, Message: msg}}})
+		Body: &athenav1.Frame_Error{Error: &athenav1.Error{Code: code, Message: msg}}})
 	if err == nil {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		_ = c.lc.Write(ctx, b)
 		cancel()
 	}
-	_ = c.lc.Close(link.CloseProtocol, "bad hello")
 }
 
 // onFrame runs on the Session's reader: it only hands work on.
@@ -591,6 +601,9 @@ func (c *conn) forward(ctx context.Context, floor uint64) {
 				if errors.Is(err, link.ErrBackpressure) {
 					c.d.log.Warn("dashboard: client too far behind; closing", "client", c.clientID)
 					go c.end(closeTryAgain, "too far behind")
+				} else if !errors.Is(err, link.ErrClosed) {
+					c.d.log.Error("dashboard: send delta; closing", "client", c.clientID, "error", err)
+					go c.end(closeInternal, "send failed")
 				}
 				return
 			}
@@ -639,8 +652,31 @@ func (c *conn) sendDetail(td *athenav1.TicketDetail) {
 		return
 	}
 	c.sentDetail[id] = at
-	_ = c.sess.Send(athenav1.Channel_EVENTS, false, &athenav1.Frame{Body: &athenav1.Frame_Delta{Delta: &athenav1.Delta{
-		Change: &athenav1.Delta_TicketDetail{TicketDetail: td}}}})
+	if !fitDetail(td) {
+		c.d.log.Error("dashboard: ticket detail too big for a frame even trimmed", "client", c.clientID, "ticket", id)
+		return
+	}
+	if err := c.sess.Send(athenav1.Channel_EVENTS, false, &athenav1.Frame{Body: &athenav1.Frame_Delta{Delta: &athenav1.Delta{
+		Change: &athenav1.Delta_TicketDetail{TicketDetail: td}}}}); err != nil {
+		c.d.log.Warn("dashboard: send ticket detail", "client", c.clientID, "ticket", id, "error", err)
+	}
+}
+
+// fitDetail makes td fit one frame: while it is too big, it drops the older half of the timeline (oldest first), so
+// the newest entries stay. It reports false when even an empty timeline does not fit.
+func fitDetail(td *athenav1.TicketDetail) bool {
+	size := func() int {
+		return proto.Size(&athenav1.Frame{Channel: athenav1.Channel_EVENTS, Body: &athenav1.Frame_Delta{Delta: &athenav1.Delta{
+			Change: &athenav1.Delta_TicketDetail{TicketDetail: td}}}})
+	}
+	for size() > maxSnapshot {
+		n := len(td.Timeline)
+		if n == 0 {
+			return false
+		}
+		td.Timeline = td.Timeline[n/2:]
+	}
+	return true
 }
 
 // runCommands runs the Commands one at a time, in the order they came. A Command that started finishes even when the
@@ -689,7 +725,7 @@ func (c *conn) handle(ctx context.Context, cmd *athenav1.Command) *athenav1.Comm
 		}
 		res = &athenav1.CommandResult{Ok: true}
 	default:
-		res = c.d.cmd.Do(ctx, Origin{ClientID: c.clientID, Sensitive: c.d.auth.RecentReauth(s)}, cmd)
+		res = c.d.cmd.Do(ctx, Origin{ClientID: c.clientID, Sensitive: c.d.auth.RecentReauth(s), SessionHash: s.Hash}, cmd)
 		if res == nil {
 			res = &athenav1.CommandResult{Code: CodeInternal, Message: "internal error"}
 		}

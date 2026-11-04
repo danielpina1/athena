@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"log/slog"
 	"net/url"
@@ -388,7 +389,7 @@ func (d *Dispatcher) act(o web.Origin, c *athenav1.Command) *athenav1.CommandRes
 		if !o.Sensitive {
 			return proto.Clone(reauthRequired).(*athenav1.CommandResult)
 		}
-		if err := d.pushSubscribe(a.PushSubscribe); err != nil {
+		if err := d.pushSubscribe(o, a.PushSubscribe); err != nil {
 			return d.failure(err)
 		}
 	case *athenav1.Command_PushUnsubscribe:
@@ -412,9 +413,9 @@ func (d *Dispatcher) act(o web.Origin, c *athenav1.Command) *athenav1.CommandRes
 	return ok
 }
 
-// pushSubscribe stores a browser's push subscription after checking it is one a push service can serve: an https
+// pushSubscribe stores a browser's push subscription, tied to the calling session, after checking it is one a push service can serve: an https
 // endpoint and the browser's P-256 key and 16-byte auth secret.
-func (d *Dispatcher) pushSubscribe(p *athenav1.PushSubscribe) error {
+func (d *Dispatcher) pushSubscribe(o web.Origin, p *athenav1.PushSubscribe) error {
 	u, err := url.Parse(p.GetEndpoint())
 	if err != nil || u.Scheme != "https" || u.Host == "" || len(p.GetEndpoint()) > 2048 {
 		return userErrorf("the push endpoint must be an https URL")
@@ -422,7 +423,11 @@ func (d *Dispatcher) pushSubscribe(p *athenav1.PushSubscribe) error {
 	if !web.ValidSubscriptionKeys(p.GetP256Dh(), p.GetAuth()) {
 		return userErrorf("the push subscription keys are not valid")
 	}
-	return d.st.PutPushSubscription(store.PushSubscription{Endpoint: p.GetEndpoint(), P256dh: p.GetP256Dh(), Auth: p.GetAuth(), CreatedAt: time.Now()})
+	hash, err := hex.DecodeString(o.SessionHash)
+	if err != nil || len(hash) == 0 {
+		return userErrorf("push needs a signed-in session")
+	}
+	return d.st.PutPushSubscription(store.PushSubscription{SessionHash: hash, Endpoint: p.GetEndpoint(), P256dh: p.GetP256Dh(), Auth: p.GetAuth(), CreatedAt: time.Now()})
 }
 
 // failure turns an error into a refused result: a UserError's message with its code, anything else internal (its
@@ -546,11 +551,19 @@ func (d *Dispatcher) revokePasskey(id string) (int, error) {
 	return len(sessions), err
 }
 
-// pruneResults drops the Command results older than resultsKept, now and every pruneEvery, until ctx is done.
+// pruneResults drops the Command results older than resultsKept, the expired web sessions and the spent or expired enrollment tokens, now and every pruneEvery, until ctx is done.
 func (d *Dispatcher) pruneResults(ctx context.Context) {
 	prune := func() {
-		if _, err := d.st.PruneCommandResults(time.Now().Add(-resultsKept)); err != nil {
+		now := time.Now()
+		if _, err := d.st.PruneCommandResults(now.Add(-resultsKept)); err != nil {
 			d.log.Warn("prune command results", "error", err)
+		}
+		// A pruned session takes its push subscriptions with it (foreign key cascade).
+		if _, err := d.st.PruneWebSessions(now); err != nil {
+			d.log.Warn("prune web sessions", "error", err)
+		}
+		if _, err := d.st.PruneEnrollTokens(now); err != nil {
+			d.log.Warn("prune enroll tokens", "error", err)
 		}
 	}
 	prune()

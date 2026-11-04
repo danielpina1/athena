@@ -33,6 +33,19 @@ type notifyEnv struct {
 	handled chan *athenav1.TicketSummary
 }
 
+// seedSession stores a passkey and a web session of it, and returns the session's hash: a push subscription needs one.
+func seedSession(t *testing.T, st *store.Store) []byte {
+	t.Helper()
+	if err := st.PutPasskey(store.Passkey{ID: "seed", Name: "seed", Credential: []byte("c"), CreatedAt: t0}); err != nil {
+		t.Fatal(err)
+	}
+	hash := []byte("seed-session-hash")
+	if err := st.PutWebSession(store.WebSession{Hash: hash, CreatedAt: t0, SeenAt: t0, ReauthAt: t0, PasskeyID: "seed"}); err != nil {
+		t.Fatal(err)
+	}
+	return hash
+}
+
 func newNotifyEnv(t *testing.T, seed ...core.Ticket) *notifyEnv {
 	t.Helper()
 	st, err := store.Open(filepath.Join(t.TempDir(), "athena.db"))
@@ -40,7 +53,7 @@ func newNotifyEnv(t *testing.T, seed ...core.Ticket) *notifyEnv {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
-	if err := st.PutPushSubscription(store.PushSubscription{Endpoint: "https://push.test/one", P256dh: "k", Auth: "a", CreatedAt: t0}); err != nil {
+	if err := st.PutPushSubscription(store.PushSubscription{SessionHash: seedSession(t, st), Endpoint: "https://push.test/one", P256dh: "k", Auth: "a", CreatedAt: t0}); err != nil {
 		t.Fatal(err)
 	}
 	e := &notifyEnv{t: t, st: st, handled: make(chan *athenav1.TicketSummary, 64), src: &connSource{tickets: map[string]core.Ticket{}}}
@@ -350,7 +363,7 @@ func TestPushPayloadCopy(t *testing.T) {
 
 func TestOneEffectPerSubscription(t *testing.T) {
 	e := newNotifyEnv(t)
-	if err := e.st.PutPushSubscription(store.PushSubscription{Endpoint: "https://push.test/two", P256dh: "k", Auth: "a", CreatedAt: t0}); err != nil {
+	if err := e.st.PutPushSubscription(store.PushSubscription{SessionHash: []byte("seed-session-hash"), Endpoint: "https://push.test/two", P256dh: "k", Auth: "a", CreatedAt: t0}); err != nil {
 		t.Fatal(err)
 	}
 	e.set(asking("T-12", "Both", t0))
@@ -368,5 +381,20 @@ func TestNoSubscriptionsNoEffects(t *testing.T) {
 	e.set(asking("T-13", "Nobody", t0))
 	if n := len(e.pushes()); n != 0 {
 		t.Fatalf("%d effects without subscriptions", n)
+	}
+}
+
+func TestRevokedPasskeyGetsNoNotification(t *testing.T) {
+	e := newNotifyEnv(t)
+	e.set(asking("T-14", "Before", t0))
+	if n := len(e.pushes()); n != 1 {
+		t.Fatalf("%d effects before the revoke, want 1", n)
+	}
+	if _, err := e.st.DeletePasskey("seed"); err != nil {
+		t.Fatal(err)
+	}
+	e.set(asking("T-15", "After", t0))
+	if n := len(e.pushes()); n != 1 {
+		t.Fatalf("%d effects after the revoke, want still 1", n)
 	}
 }

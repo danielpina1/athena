@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net"
@@ -636,4 +637,120 @@ func TestConcurrentCopiesOfACommandActOnce(t *testing.T) {
 	if len(d.inflight.m) != 0 {
 		t.Fatalf("%d command locks left", len(d.inflight.m))
 	}
+}
+
+// A push subscription belongs to the session that made it: logout and revoke end it, and a fresh login subscribes again.
+func TestPushSubscriptionEndsWithItsSession(t *testing.T) {
+	w := startWeb(t, newStateDir(t))
+	subscribe := func(b *browser, id, endpoint string) {
+		t.Helper()
+		ua, err := ecdh.P256().GenerateKey(rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c := w.connect(b.session(), phoneHello())
+		c.welcome()
+		sub := &athenav1.PushSubscribe{Endpoint: endpoint, P256Dh: base64.RawURLEncoding.EncodeToString(ua.PublicKey().Bytes()),
+			Auth: base64.RawURLEncoding.EncodeToString(make([]byte, 16))}
+		if r := c.do(&athenav1.Command{Id: id, Action: &athenav1.Command_PushSubscribe{PushSubscribe: sub}}); !r.GetOk() {
+			t.Fatalf("subscribe %s = %v", endpoint, r)
+		}
+	}
+	endpoints := func() []string {
+		t.Helper()
+		subs, err := w.d.st.PushSubscriptions()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []string
+		for _, s := range subs {
+			out = append(out, s.Endpoint)
+		}
+		return out
+	}
+	one, two := w.login(), w.login()
+	subscribe(one, "s1", "https://push.test/one")
+	subscribe(two, "s2", "https://push.test/two")
+	if got := endpoints(); len(got) != 2 {
+		t.Fatalf("subscriptions %v", got)
+	}
+
+	one.post("/auth/logout", nil)
+	if got := endpoints(); len(got) != 1 || got[0] != "https://push.test/two" {
+		t.Fatalf("after logout of the first session: %v", got)
+	}
+
+	// A fresh login subscribes the same endpoint again, and it moves to the new session.
+	three := w.login()
+	subscribe(three, "s3", "https://push.test/one")
+	if got := endpoints(); len(got) != 2 {
+		t.Fatalf("after resubscribing: %v", got)
+	}
+
+	// Revoking the passkey ends every session and so every subscription.
+	pks, err := w.d.st.Passkeys()
+	if err != nil || len(pks) != 1 {
+		t.Fatalf("passkeys %v %v", pks, err)
+	}
+	if n, err := w.d.revokePasskey(pks[0].ID); err != nil || n != 2 {
+		t.Fatalf("revoke = %d, %v", n, err)
+	}
+	if got := endpoints(); len(got) != 0 {
+		t.Fatalf("subscriptions survived the revoke: %v", got)
+	}
+}
+
+func TestPruneDropsExpiredSessionsAndTokens(t *testing.T) {
+	w := startWeb(t, newStateDir(t))
+	b := w.login()
+	hash, err := hex.DecodeString(w.d.sessionHashOf(t, b))
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-store.WebSessionAbsolute - time.Hour)
+	if err := w.d.st.PutWebSession(store.WebSession{Hash: []byte("stale"), CreatedAt: old, SeenAt: old, ReauthAt: old, PasskeyID: mustPasskey(t, w.d.st)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.d.st.PutPushSubscription(store.PushSubscription{SessionHash: []byte("stale"), Endpoint: "https://push.test/stale", P256dh: "k", Auth: "a", CreatedAt: old}); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.d.st.PutEnrollToken([]byte("expired"), old); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	w.d.pruneResults(ctx) // prunes once, then sees the cancelled context
+	if _, ok, _ := w.d.st.WebSession([]byte("stale")); ok {
+		t.Fatal("expired session not pruned")
+	}
+	if subs, _ := w.d.st.PushSubscriptions(); len(subs) != 0 {
+		t.Fatalf("a pruned session kept its subscription: %v", subs)
+	}
+	if n, _ := w.d.st.PruneEnrollTokens(time.Now()); n != 0 {
+		t.Fatalf("expired token left for the next prune: %d", n)
+	}
+	if _, ok, _ := w.d.st.WebSession(hash); !ok {
+		t.Fatal("the live session was pruned")
+	}
+}
+
+func mustPasskey(t *testing.T, st *store.Store) string {
+	t.Helper()
+	pks, err := st.Passkeys()
+	if err != nil || len(pks) == 0 {
+		t.Fatalf("passkeys %v %v", pks, err)
+	}
+	return pks[0].ID
+}
+
+// sessionHashOf is the hex hash of the browser's session, read from the store through Auth.
+func (d *Dispatcher) sessionHashOf(t *testing.T, b *browser) string {
+	t.Helper()
+	req, _ := http.NewRequest("GET", "/", nil)
+	req.AddCookie(b.cookies[web.SessionCookie])
+	s, ok := d.auth.Load().Session(req)
+	if !ok {
+		t.Fatal("no session")
+	}
+	return s.Hash
 }

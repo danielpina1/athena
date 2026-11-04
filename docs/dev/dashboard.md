@@ -147,7 +147,10 @@ waiting on you and for Approvals) runs already.
   assertion within the last 5 minutes (signing in counts); otherwise the dashboard answers `reauth_required` and asks
   for the passkey again. Approving a tool call is not sensitive.
 - **A lost device:** `athena web passkeys`, then `athena web revoke <id>` (a prefix of the id is enough). With the
-  server running, the device's open connections close at once; its sessions end either way.
+  server running, the device's open connections close at once; its sessions end either way, and the push
+  subscriptions those sessions made go with them, so the device stops receiving notifications. Logging out, and a
+  session expiring, remove that session's push subscriptions the same way; sign in and subscribe again to get them
+  back.
 - **Headers.** Every response carries a strict Content-Security-Policy (only the server's own scripts and styles, no
   framing), `Strict-Transport-Security` (over TLS), `X-Content-Type-Options: nosniff` and `Referrer-Policy:
   no-referrer`.
@@ -171,11 +174,14 @@ Unknown fields and a `Hello.protocol` other than 1 are refused with error code `
   cursor is still in the server's ring, `Welcome.snapshot_follows` is false and the missed Deltas follow; otherwise a
   `Snapshot` comes first and replaces the client's state. A `Resync` frame asks for a fresh Snapshot at any time.
   `client_id` is 1 to 64 of `[A-Za-z0-9._-]`, stable per device.
-- **Commands are idempotent by id.** Keep every `Command` until its `CommandResult` arrives, and after a reconnect
-  resend each one that has none, with the same `id`: the server answers a repeat from the stored result (kept 24 h)
-  without acting twice. A result with code `reauth_required` is not stored: after the passkey step-up, resend the same
-  command. Result codes are `unauthenticated`, `reauth_required`, `invalid`, `not_found`, `conflict`, `unavailable` and
-  `internal`.
+- **Commands are idempotent by id.** A command id is 1 to 128 bytes (longer or empty is refused `invalid`). Keep every
+  `Command` until its `CommandResult` arrives, and after a reconnect resend each one that has none, with the same
+  `id`: the server answers a repeat from the stored result (kept 24 h) without acting twice. A result is stored once
+  the command acted, whether it succeeded or was refused for its content (`invalid`, `not_found`, `conflict`). Four
+  codes mean nothing was done and are never stored: `reauth_required`, `unauthenticated`, `unavailable` and
+  `internal`. Resend the same command, same `id`, after fixing the cause (the passkey step-up, signing in again, less
+  load, a server fix). Reads (`ListPasskeys`) are not stored either. Result codes are `unauthenticated`,
+  `reauth_required`, `invalid`, `not_found`, `conflict`, `unavailable` and `internal`.
 - **Credit is per connection.** Each connection starts with an implicit STREAM credit of 256 items; send
   `Credit{channel: STREAM, items}` (on CONTROL) as the client consumes items, after every reconnect too, since credit
   does not carry over. Without credit a stream keeps only its position and resumes with a `StreamGap` and the latest
@@ -185,8 +191,17 @@ Unknown fields and a `Hello.protocol` other than 1 are refused with error code `
   current detail at once).
 - **Auth is HTTP.** `POST /auth/register/begin|finish`, `/auth/login/begin|finish`, `/auth/reauth/begin|finish`,
   `/auth/logout` and `GET /auth/session` take and return the WebAuthn JSON (base64url fields); every POST and the
-  upgrade must carry `Origin` equal to the configured origin, or get 403. The connection closes with 4002 when its
-  session ends (revoked, logged out, expired); 1001 means the server is shutting down: reconnect.
+  upgrade must carry `Origin` equal to the configured origin, or get 403.
+- **Close codes.** The server closes a connection with one of these:
+
+  | Code | Meaning | Client action |
+  | --- | --- | --- |
+  | 1001 | The server is shutting down. | Reconnect with the cursor. |
+  | 1011 | The server failed: it could not build or send a Snapshot, or could not send a frame; an `internal` Error usually comes first. | Reconnect with the cursor; report it if it repeats. |
+  | 1013 | The client is too far behind (its queue or unacked frames hit the bound). | Reconnect with the cursor: it gets the missed Deltas, or a Snapshot. |
+  | 4000 | The peer was silent for 45 s (no frame, no `Pong`). | Reconnect. |
+  | 4001 | Protocol violation: a bad or late `Hello`, an undecodable frame (an `invalid` Error is sent first, best effort) or a sequence gap. | Fix the client; do not retry blindly. |
+  | 4002 | The login behind the connection ended (revoked, logged out, expired). | Sign in again, then reconnect and resend commands without a result. |
 - **Push.** `GET /push/key` is the VAPID public key for `pushManager.subscribe`; `PushSubscribe`,
   `PushUnsubscribe` and `SetNotificationPrefs` are commands (sensitive). Report `Visibility{visible}` while the
   dashboard is on screen: no push is sent while a client reported visible in the last 30 s.
