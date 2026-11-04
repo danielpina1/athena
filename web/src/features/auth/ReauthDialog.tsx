@@ -8,7 +8,8 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 // the outbox resends the held command by its own id, or false (Cancel, Esc) so it fails with rollback. The request
 // lives at module level so it does not depend on where the dialog is mounted.
 
-let pending: { promise: Promise<boolean>; settle: (ok: boolean) => void } | null = null;
+let pending: { id: number; promise: Promise<boolean>; settle: (ok: boolean) => void } | null = null;
+let lastId = 0;
 const listeners = new Set<() => void>();
 const emit = () => listeners.forEach((l) => l());
 const subscribe = (l: () => void) => (listeners.add(l), () => void listeners.delete(l));
@@ -19,6 +20,7 @@ export function requestReauth(): Promise<boolean> {
   let settle!: (ok: boolean) => void;
   const promise = new Promise<boolean>((r) => (settle = r));
   pending = {
+    id: ++lastId,
     promise,
     settle: (ok) => {
       if (pending?.promise !== promise) return;
@@ -37,7 +39,18 @@ export function cancelReauth(): void {
 }
 
 export function ReauthDialog() {
-  const open = useSyncExternalStore(subscribe, () => pending !== null);
+  // The request's number: the body is keyed by it, so each request starts with a clean slate (no old error).
+  const id = useSyncExternalStore(subscribe, () => pending?.id ?? 0);
+  return (
+    <Dialog open={id !== 0} onOpenChange={(o) => !o && cancelReauth()}>
+      <DialogContent>
+        <ReauthBody key={id} />
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function ReauthBody() {
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
 
@@ -56,28 +69,26 @@ export function ReauthDialog() {
   };
 
   return (
-    <Dialog open={open} onOpenChange={(o) => !o && !busy && cancelReauth()}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>Confirm it is you</DialogTitle>
-          <DialogDescription>
-            This change is sensitive, so Athena asks for your passkey again before it goes through.
-          </DialogDescription>
-        </DialogHeader>
-        {failed && (
-          <p role="alert" className="text-sm text-danger">
-            Could not confirm with your passkey. Try again.
-          </p>
-        )}
-        <DialogFooter>
-          <Button variant="ghost" disabled={busy} onClick={cancelReauth}>
-            Cancel
-          </Button>
-          <Button variant="accent" disabled={busy} onClick={() => void confirm()}>
-            Confirm with passkey
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+    <>
+      <DialogHeader>
+        <DialogTitle>Confirm it is you</DialogTitle>
+        <DialogDescription>
+          This change is sensitive, so Athena asks for your passkey again before it goes through.
+        </DialogDescription>
+      </DialogHeader>
+      {failed && (
+        <p role="alert" className="text-sm text-danger">
+          Could not confirm with your passkey. Try again.
+        </p>
+      )}
+      <DialogFooter>
+        <Button variant="ghost" disabled={busy} onClick={cancelReauth}>
+          Cancel
+        </Button>
+        <Button variant="accent" disabled={busy} onClick={() => void confirm()}>
+          Confirm with passkey
+        </Button>
+      </DialogFooter>
+    </>
   );
 }

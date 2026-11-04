@@ -75,10 +75,13 @@ test("spent token shows the exact copy", async () => {
   expect(creds.create).not.toHaveBeenCalled();
 });
 
-test("a link with no token says so and sends nothing", async () => {
+test("a page with no token in the fragment is neutral about it and sends nothing", async () => {
   const { calls } = fakeFetch({});
   render(<Enroll onDone={() => {}} />);
-  expect((await screen.findByRole("alert")).textContent).toContain("Run athena web enroll for a new one.");
+  const alert = await screen.findByRole("alert");
+  expect(alert.textContent).toBe("This page needs the link from athena web enroll. Run it to get a new one.");
+  expect(alert.querySelector("code")?.textContent).toBe("athena web enroll");
+  expect(alert.textContent).not.toContain("already used");
   expect(calls).toHaveLength(0);
 });
 
@@ -102,6 +105,9 @@ test("the device name defaults from the user agent", () => {
   expect(deviceNameFromUserAgent("Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X)")).toBe("iPad");
   expect(deviceNameFromUserAgent("Mozilla/5.0 (Linux; Android 14; Pixel 8)")).toBe("Android phone");
   expect(deviceNameFromUserAgent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)")).toBe("Mac");
+  expect(deviceNameFromUserAgent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)", 0)).toBe("Mac");
+  // iPadOS Safari says Macintosh; its touch screen says iPad.
+  expect(deviceNameFromUserAgent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)", 5)).toBe("iPad");
   expect(deviceNameFromUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64)")).toBe("Windows PC");
   expect(deviceNameFromUserAgent("Mozilla/5.0 (X11; Linux x86_64)")).toBe("Linux PC");
   expect(deviceNameFromUserAgent("curl/8")).toBe("This device");

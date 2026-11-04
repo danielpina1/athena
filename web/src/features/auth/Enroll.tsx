@@ -28,10 +28,12 @@ export function forgetEnrollToken(): void {
   held = undefined;
 }
 
-export function deviceNameFromUserAgent(ua: string): string {
+export function deviceNameFromUserAgent(ua: string, touchPoints = 0): string {
   if (/iPhone/.test(ua)) return "iPhone";
   if (/iPad/.test(ua)) return "iPad";
   if (/Android/.test(ua)) return "Android phone";
+  // iPadOS Safari presents itself as a Mac; only a touch screen gives it away.
+  if (/Macintosh/.test(ua) && touchPoints > 1) return "iPad";
   if (/Macintosh|Mac OS X/.test(ua)) return "Mac";
   if (/Windows/.test(ua)) return "Windows PC";
   if (/Linux|X11/.test(ua)) return "Linux PC";
@@ -40,14 +42,14 @@ export function deviceNameFromUserAgent(ua: string): string {
 
 const NEW_LINK = <code className="font-mono">athena web enroll</code>;
 
-type Outcome = "spent" | "enrolled" | "failed";
+type Outcome = "missing" | "spent" | "enrolled" | "failed";
 
 export function Enroll({ onDone }: { onDone: () => void }) {
   // Lazy and idempotent: StrictMode's second render finds the token already held.
   const [token] = useState(takeEnrollToken);
-  const [name, setName] = useState(() => deviceNameFromUserAgent(navigator.userAgent));
+  const [name, setName] = useState(() => deviceNameFromUserAgent(navigator.userAgent, navigator.maxTouchPoints));
   const [busy, setBusy] = useState(false);
-  const [outcome, setOutcome] = useState<Outcome | undefined>(token ? undefined : "spent");
+  const [outcome, setOutcome] = useState<Outcome | undefined>(token ? undefined : "missing");
 
   const create = async () => {
     setBusy(true);
@@ -77,6 +79,11 @@ export function Enroll({ onDone }: { onDone: () => void }) {
             Create passkey
           </Button>
         </>
+      )}
+      {outcome === "missing" && (
+        <p role="alert" className="font-semibold">
+          This page needs the link from {NEW_LINK}. Run it to get a new one.
+        </p>
       )}
       {outcome === "spent" && (
         <p role="alert" className="font-semibold">

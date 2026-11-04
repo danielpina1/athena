@@ -2,14 +2,17 @@ import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { IDBFactory } from "fake-indexeddb";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
-import { createRuntime, SIGNED_OUT_NOTICE } from "@/app/boot";
+import { createRuntime, type Runtime, SIGNED_OUT_NOTICE } from "@/app/boot";
+import { cancelReauth, requestReauth } from "@/features/auth/ReauthDialog";
 import { SessionGate } from "@/app/SessionGate";
 import { ASSERTION, fakeCredentials, fakeFetch } from "@/lib/auth/testkit";
 import { FakeServer } from "@/lib/link/fakeServer";
 import { useAthena } from "@/lib/store/state";
 
+const made: Runtime[] = [];
 beforeEach(() => useAthena.getState().reset());
 afterEach(() => {
+  for (const r of made.splice(0)) r.dispose();
   vi.useRealTimers();
   vi.unstubAllGlobals();
 });
@@ -22,6 +25,7 @@ function setup() {
     WebSocketImpl: server.WebSocket,
     indexedDB: new IDBFactory(),
   });
+  made.push(runtime);
   return { server, runtime };
 }
 
@@ -182,4 +186,100 @@ test("the session is asked once per three failures, and a Welcome starts the cou
   await act(() => vi.advanceTimersByTimeAsync(0));
   expect(checks()).toBe(3);
   expect(screen.getByText("the app")).toBeTruthy();
+});
+
+test("close 4002 keeps a command held for a step-up and resends it after sign-in", async () => {
+  const { server, runtime } = setup();
+  fakeFetch({ "GET /auth/session": { json: { authenticated: true } }, ...signInRoutes });
+  fakeCredentials();
+  const user = userEvent.setup();
+  gate(runtime);
+  await screen.findByText("the app");
+  server.welcome();
+  await waitFor(() => expect(runtime.client.status).toBe("open"));
+  const result = runtime.outbox.submit({ case: "revokePasskey", value: { id: "P-1" } });
+  let settled = false;
+  void result.then(() => (settled = true));
+  await runtime.outbox.settled();
+  const id = server.socket.sent("command")[0].id;
+
+  // The server wants a step-up; the owner has the dialog open when the session ends.
+  act(() => {
+    server.socket.push({ body: { case: "commandResult", value: { id, ok: false, code: "reauth_required" } } }, { durable: true });
+  });
+  await screen.findByRole("dialog", { name: "Confirm it is you" });
+  act(() => server.socket.serverClose(4002));
+  await screen.findByText(SIGNED_OUT_NOTICE);
+  await runtime.outbox.settled();
+
+  // Not failed, and nothing left asking for a step-up.
+  expect(settled).toBe(false);
+  expect(runtime.outbox.pending().map((c) => c.id)).toEqual([id]);
+
+  await user.click(screen.getByRole("button", { name: "Sign in with passkey" }));
+  await screen.findByText("the app");
+  server.welcome();
+  await runtime.outbox.settled();
+  expect(server.socket.sent("command").map((c) => c.id)).toEqual([id]);
+  expect(settled).toBe(false);
+});
+
+test("an explicit sign out leaves no step-up request behind", async () => {
+  const { server, runtime } = setup();
+  fakeFetch({
+    "GET /auth/session": { json: { authenticated: true } },
+    "POST /auth/logout": { json: { authenticated: false } },
+  });
+  gate(runtime);
+  await screen.findByText("the app");
+  server.welcome();
+  const asked = requestReauth();
+  await act(() => runtime.signOut());
+  expect(await asked).toBe(false);
+  cancelReauth();
+});
+
+test("a start-up check that could not reach the server runs again when the network is back", async () => {
+  const { runtime } = setup();
+  let n = 0;
+  const { calls } = fakeFetch({
+    "GET /auth/session": () => {
+      if (n++ === 0) throw new TypeError("network down");
+      return { json: { authenticated: true } };
+    },
+  });
+  gate(runtime);
+  expect(await screen.findByText("Could not reach Athena. Check your connection.")).toBeTruthy();
+  expect(calls).toHaveLength(1);
+
+  act(() => {
+    window.dispatchEvent(new Event("online"));
+  });
+  await screen.findByText("the app");
+  expect(calls).toHaveLength(2);
+});
+
+test("a hidden page does not retry the check, a shown one does", async () => {
+  const { runtime } = setup();
+  let n = 0;
+  const { calls } = fakeFetch({
+    "GET /auth/session": () => {
+      if (n++ === 0) throw new TypeError("network down");
+      return { json: { authenticated: true } };
+    },
+  });
+  gate(runtime);
+  await screen.findByText("Could not reach Athena. Check your connection.");
+  const vis = vi.spyOn(document, "visibilityState", "get");
+  vis.mockReturnValue("hidden");
+  act(() => {
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  expect(calls).toHaveLength(1);
+  vis.mockReturnValue("visible");
+  act(() => {
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await screen.findByText("the app");
+  vis.mockRestore();
 });

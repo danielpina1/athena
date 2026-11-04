@@ -158,6 +158,19 @@ export class Outbox {
   }
 
   /**
+   * The owner was signed out while commands waited for a step-up: they are not failed and no step-up is counted. They
+   * stay, and go out again, by the same id, on the next open (after the next sign-in). Call it before the reauth
+   * handler answers false.
+   */
+  releaseHeld(): void {
+    for (const e of this.entries.values()) {
+      if (!e.held) continue;
+      e.held = false;
+      e.sentOn = 0;
+    }
+  }
+
+  /**
    * Called when a command comes back unauthenticated, once per connection: the commands stay and are sent after the
    * next sign-in.
    */

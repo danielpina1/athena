@@ -1,18 +1,28 @@
-import { act, render, screen } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import { IDBFactory } from "fake-indexeddb";
 import { afterEach, expect, test, vi } from "vitest";
 import { App } from "@/app/App";
-import { createRuntime } from "@/app/boot";
+import { createRuntime, type Runtime } from "@/app/boot";
 import { fakeFetch } from "@/lib/auth/testkit";
 import { FakeServer } from "@/lib/link/fakeServer";
 
+const started: Runtime[] = [];
 afterEach(() => {
+  for (const r of started.splice(0)) r.dispose();
   vi.unstubAllGlobals();
   history.replaceState(null, "", "/");
 });
 
-const runtime = () =>
-  createRuntime({ url: "ws://x/ws", clientId: "abcdefghijklmnop", WebSocketImpl: new FakeServer().WebSocket, indexedDB: new IDBFactory() });
+const runtime = () => {
+  const r = createRuntime({
+    url: "ws://x/ws",
+    clientId: "abcdefghijklmnop",
+    WebSocketImpl: new FakeServer().WebSocket,
+    indexedDB: new IDBFactory(),
+  });
+  started.push(r);
+  return r;
+};
 
 test("a signed-in owner sees the app", async () => {
   fakeFetch({ "GET /auth/session": { json: { authenticated: true } } });
@@ -35,8 +45,8 @@ test("/design and /enroll need no session", async () => {
   expect(fn).not.toHaveBeenCalled();
 
   history.replaceState(null, "", "/design");
-  await act(async () => {
-    render(<App runtime={runtime()} />);
-  });
+  render(<App runtime={runtime()} />);
+  // Rendered, not blank: the kitchen sink's own heading, with no session asked about.
+  expect(await screen.findByRole("heading", { name: "Precision" })).toBeTruthy();
   expect(fn).not.toHaveBeenCalled();
 });

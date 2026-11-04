@@ -77,3 +77,24 @@ test("cancelling the step-up fails the held command, a refused ceremony can be t
   await user.click(screen.getByRole("button", { name: "Cancel" }));
   expect(await second).toBe(false);
 });
+
+test("a new request opens without the last one's error", async () => {
+  bindSession({ outbox: { clear: vi.fn() } });
+  fakeFetch(reauthRoutes);
+  fakeCredentials({
+    get: () => {
+      throw new Error("boom");
+    },
+  });
+  const user = userEvent.setup();
+  render(<ReauthDialog />);
+  const first = requestReauth();
+  await user.click(await screen.findByRole("button", { name: "Confirm with passkey" }));
+  await screen.findByRole("alert");
+  await user.click(screen.getByRole("button", { name: "Cancel" }));
+  expect(await first).toBe(false);
+
+  void requestReauth();
+  await screen.findByRole("dialog", { name: "Confirm it is you" });
+  expect(screen.queryByRole("alert")).toBeNull();
+});

@@ -25,6 +25,8 @@ export type Runtime = {
   checkSession(): Promise<void>;
   /** The owner just signed in: connect afresh with the new session. Queued commands go out on the first open. */
   signedIn(): void;
+  /** Stops the link and the listeners; for tests and teardown. */
+  dispose(): void;
   /** Explicit sign-out: ends the session, forgets the queue and the state. Throws if the server did not take it. */
   signOut(): Promise<void>;
 };
@@ -67,6 +69,8 @@ export function createRuntime(opts: RuntimeOptions): Runtime {
    * everything and no stale epoch or cursor is used) but the outbox is kept: its commands go out after sign-in.
    */
   const leave = (notice?: string) => {
+    // Commands held for a step-up stay (released, not failed) and go out after the next sign-in.
+    outbox.releaseHeld();
     cancelReauth();
     client.stop();
     store.getState().reset();
@@ -111,8 +115,28 @@ export function createRuntime(opts: RuntimeOptions): Runtime {
     setPhase({ kind: "signedIn" });
   };
 
+  // The start-up check failed for want of a network: ask again when the network is back or the page is shown.
   let checked: Promise<void> | undefined;
-  return {
+  let watching = false;
+  const retryCheck = (ev: Event) => {
+    if (ev.type === "visibilitychange" && document.visibilityState !== "visible") return;
+    unwatchOnline();
+    checked = undefined;
+    void runtime.checkSession();
+  };
+  function unwatchOnline() {
+    if (!watching) return;
+    watching = false;
+    window.removeEventListener("online", retryCheck);
+    document.removeEventListener("visibilitychange", retryCheck);
+  }
+  const watchOnline = () => {
+    if (watching) return;
+    watching = true;
+    window.addEventListener("online", retryCheck);
+    document.addEventListener("visibilitychange", retryCheck);
+  };
+  const runtime: Runtime = {
     client,
     outbox,
     store,
@@ -124,6 +148,7 @@ export function createRuntime(opts: RuntimeOptions): Runtime {
           else setPhase({ kind: "signedOut" });
         } catch {
           setPhase({ kind: "signedOut", notice: "Could not reach Athena. Check your connection." });
+          watchOnline();
         }
       })();
       return checked;
@@ -137,10 +162,16 @@ export function createRuntime(opts: RuntimeOptions): Runtime {
         client.start();
         throw e;
       }
+      cancelReauth(); // no stale step-up request survives into the next login
       resetCount();
       setPhase({ kind: "signedOut" });
     },
+    dispose() {
+      client.stop();
+      unwatchOnline();
+    },
   };
+  return runtime;
 }
 
 const CLIENT_ID_KEY = "athena.clientId";

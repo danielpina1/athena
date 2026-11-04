@@ -25,7 +25,7 @@ export const ASSERTION = {
 
 export type Call = { method: string; path: string; body: unknown; credentials?: RequestCredentials };
 export type Reply = { status?: number; json: unknown };
-type Route = Reply | ((call: Call) => Reply);
+type Route = Reply | ((call: Call) => Reply | Promise<Reply>);
 
 /** Replaces global fetch with the routes ("POST /auth/login/begin" and so on); an unlisted route is a test failure. */
 export function fakeFetch(routes: Record<string, Route>) {
@@ -42,7 +42,7 @@ export function fakeFetch(routes: Record<string, Route>) {
     calls.push(call);
     const route = routes[`${method} ${path}`];
     if (!route) throw new Error(`unexpected request ${method} ${path}`);
-    const r = typeof route === "function" ? route(call) : route;
+    const r = typeof route === "function" ? await route(call) : route;
     return new Response(JSON.stringify(r.json), { status: r.status ?? 200, headers: { "Content-Type": "application/json" } });
   });
   vi.stubGlobal("fetch", fn);
@@ -66,9 +66,9 @@ export function fakeCredential(kind: "create" | "get") {
 }
 
 /** Replaces navigator.credentials; each create/get call is recorded with its options. */
-export function fakeCredentials(impl: { create?: () => unknown; get?: () => unknown } = {}) {
+export function fakeCredentials(impl: { create?: () => unknown; get?: (o?: CredentialRequestOptions) => unknown } = {}) {
   const create = vi.fn<(o?: CredentialCreationOptions) => Promise<unknown>>(async () => (impl.create ?? (() => fakeCredential("create")))());
-  const get = vi.fn<(o?: CredentialRequestOptions) => Promise<unknown>>(async () => (impl.get ?? (() => fakeCredential("get")))());
+  const get = vi.fn<(o?: CredentialRequestOptions) => Promise<unknown>>(async (o) => (impl.get ?? (() => fakeCredential("get")))(o));
   Object.defineProperty(navigator, "credentials", { value: { create, get }, configurable: true });
   return { create, get };
 }

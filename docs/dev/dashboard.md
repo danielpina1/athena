@@ -120,8 +120,8 @@ On the server:
 It prints a single-use link, good for 15 minutes (`--ttl` up to 24h), and the same link as a QR code. Scan it with the
 phone's camera (or open the link on the laptop) and create the passkey; the device's passkey manager keeps it
 (iCloud Keychain, Google Password Manager, a security key). The token travels in the link's fragment, which the
-browser never sends to the server or writes to its history, and it is spent the moment the page starts enrolling: a
-failed attempt needs a new link.
+browser never sends to the server; the page replaces the address in place (dropping the fragment) before it makes any
+request, and the token is spent the moment the page starts enrolling: a failed attempt needs a new link.
 
 Then open `https://athena.home.arpa:8443/` and sign in with the passkey. The page says **Signed in. The dashboard
 arrives in plan 4.** and counts your open Tickets live: submit a task with `athena task` and watch the count change.
@@ -236,7 +236,9 @@ embeds (the directory is git-ignored; without a build the server shows "Dashboar
 3. `make web-check` runs typecheck, lint, unit tests, the build and the bundle budget; `make check` includes it.
    `make e2e` will run the browser tests.
 
-Browser enrollment is unavailable until the dashboard gets its enrollment page (plan 4, Task 8).
+Browser enrollment is the dashboard's `/enroll` page: it reads the token from the link's fragment, removes the
+fragment from the address, asks for a device name, creates the passkey (`/auth/register/begin|finish`) and signs in. A
+spent or expired link shows "This link was already used or has expired" and has no retry; run `athena web enroll` again.
 
 The TypeScript types in `web/src/gen/` are generated from `proto/` by `make proto` together with the Go code; commit
 both. Mockups of the design are in `docs/design/mockups/`.
