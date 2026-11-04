@@ -3,6 +3,7 @@ module github.com/danielpina1/athena
 go 1.27.2
 
 require (
+	github.com/coder/websocket v1.8.15
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	google.golang.org/protobuf v1.36.12
 	modernc.org/sqlite v1.61.1
