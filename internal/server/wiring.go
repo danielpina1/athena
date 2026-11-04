@@ -24,6 +24,7 @@ import (
 	"github.com/danielpina1/athena/internal/sources/github"
 	"github.com/danielpina1/athena/internal/store"
 	"github.com/danielpina1/athena/internal/web"
+	"github.com/danielpina1/athena/internal/web/ui"
 )
 
 // The parts `athena server` wires between the store and the node: the GitHub App and Source, the Policy, the node's
@@ -670,7 +671,7 @@ func (w *webEndpoint) start(d *Dispatcher, n *node.Node, fx *effects.Runner, ver
 			notifier.Run(ctx, nil)
 		}()
 	}
-	w.srv = web.NewServer(web.ServerConfig{Auth: auth, Dashboard: w.dash, VAPID: w.vapid, CA: w.tls.CA(), TLS: w.tls.Config(), Log: w.log})
+	w.srv = web.NewServer(web.ServerConfig{Auth: auth, Dashboard: w.dash, VAPID: w.vapid, CA: w.tls.CA(), TLS: w.tls.Config(), UI: ui.FS(), Log: w.log})
 	w.wg.Add(1)
 	go func() {
 		defer w.wg.Done()

@@ -156,7 +156,7 @@ func TestWebE2E(t *testing.T) {
 	if resp, body := get("/ca.mobileconfig"); resp.StatusCode != 200 || !strings.Contains(body, "PayloadContent") {
 		t.Fatalf("mobileconfig = %d", resp.StatusCode)
 	}
-	if resp, body := get("/"); resp.StatusCode != 200 || !strings.Contains(body, "/app.js") {
+	if resp, body := get("/"); resp.StatusCode != 200 || !strings.Contains(body, "Athena") {
 		t.Fatalf("index = %d %q", resp.StatusCode, body)
 	}
 	if resp, body := get("/push/key"); resp.StatusCode != 200 || body != w.ep.vapid.PublicKey() {

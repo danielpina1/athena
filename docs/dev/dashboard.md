@@ -3,7 +3,7 @@
 `athena server` can serve the dashboard over HTTPS for your phone and laptop: you sign in with a passkey, and the page
 follows your Tickets live over one WebSocket. Plan 3 ships the endpoint, the login and push; the page itself is a
 placeholder that signs in and shows a live count of open Tickets, which is enough to prove the whole path from a
-phone. The full dashboard arrives in plan 4.
+phone. Plan 4 replaces it with the React app in `web/`, embedded in the binary.
 
 The endpoint is meant for a private network: your home LAN or, better, the VPN your devices use to reach the server.
 It is off until you run `athena web setup`.
@@ -162,8 +162,8 @@ waiting on you and for Approvals) runs already.
 
 Plan 4's dashboard (and any other client) talks to `/ws` with subprotocol `athena.v1`: one protobuf `Frame`
 (`proto/athena/v1`) per binary WebSocket message, at most 1 MiB, `permessage-deflate` without context takeover.
-Unknown fields and a `Hello.protocol` other than 1 are refused with error code `invalid`. The placeholder in
-`internal/web/assets/app.js` is a minimal working client.
+Unknown fields and a `Hello.protocol` other than 1 are refused with error code `invalid`. The dashboard in `web/`
+is the reference client.
 
 - **Link sessions are per connection.** Each WebSocket is a fresh link session: durable frames are numbered from 1
   in each direction and acked cumulatively (`Frame.ack`; a `Ping` with `at_unix_ms` 0 is a standalone ack). The
@@ -205,3 +205,21 @@ Unknown fields and a `Hello.protocol` other than 1 are refused with error code `
 - **Push.** `GET /push/key` is the VAPID public key for `pushManager.subscribe`; `PushSubscribe`,
   `PushUnsubscribe` and `SetNotificationPrefs` are commands (sensitive). Report `Visibility{visible}` while the
   dashboard is on screen: no push is sent while a client reported visible in the last 30 s.
+
+## Working on the UI
+
+The dashboard is a Vite + React app in `web/`; `make web` builds it into `internal/web/ui/dist/`, which the Go binary
+embeds (the directory is git-ignored; without a build the server shows "Dashboard not built: run make web").
+
+1. `make web` installs the packages (`npm ci`, only when `web/node_modules` is missing) and builds.
+2. For fast iteration, run a server with TLS off on loopback (`athena web setup --tls off --host localhost --listen
+   127.0.0.1:8443`, then `athena server`), and in another terminal `npm --prefix web run dev`. Vite serves the app
+   with hot reload and proxies `/ws`, `/auth`, `/push` and `/api` to `ATHENA_DEV_SERVER` (default
+   `http://127.0.0.1:8443`), rewriting `Origin` to that server's.
+3. `make web-check` runs typecheck, lint, unit tests, the build and the bundle budget; `make check` includes it.
+   `make e2e` will run the browser tests.
+
+Browser enrollment is unavailable until the dashboard gets its enrollment page (plan 4, Task 8).
+
+The TypeScript types in `web/src/gen/` are generated from `proto/` by `make proto` together with the Go code; commit
+both. Mockups of the design are in `docs/design/mockups/`.

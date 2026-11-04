@@ -3,27 +3,25 @@ package web
 import (
 	"context"
 	"crypto/tls"
-	"embed"
 	"encoding/pem"
 	"errors"
 	"io"
+	"io/fs"
 	stdlog "log"
 	"log/slog"
+	"mime"
 	"net"
 	"net/http"
+	"path"
 	"strings"
 	"time"
 
 	"github.com/danielpina1/athena/internal/pki"
+	"github.com/danielpina1/athena/internal/web/ui"
 )
 
-// The dashboard's HTTPS endpoint: the placeholder pages, the login, the WebSocket, the push key, the CA for devices
+// The dashboard's HTTPS endpoint: the single-page app, the login, the WebSocket, the push key, the CA for devices
 // to install and a health check, every response with the same security headers.
-
-// assets are the placeholder pages; plan 4's dashboard replaces them.
-//
-//go:embed assets
-var assets embed.FS
 
 // Security headers of every response.
 const (
@@ -49,6 +47,9 @@ type ServerConfig struct {
 	// loopback only, and leaves Strict-Transport-Security out.
 	TLS *tls.Config
 	Log *slog.Logger
+	// UI is the built dashboard (ui.FS()); tests inject a fstest.MapFS. Without an index.html in it every page is the
+	// "not built" fallback.
+	UI fs.FS
 }
 
 // Server is the dashboard's HTTP server.
@@ -60,32 +61,18 @@ type Server struct {
 
 // NewServer builds the routes:
 //
-//	GET /, /enroll, /app.js   the placeholder pages (passkey login and enrollment, a live count of open Tickets)
 //	GET /ws                   the dashboard connection (Dashboard.ServeConn)
 //	/auth/*                   the login (Auth.Mount)
 //	GET /push/key             the VAPID public key
 //	GET /ca.pem, /ca.mobileconfig   the CA and its Apple profile (mode ca only)
 //	GET /healthz              "ok", for a monitor: nothing else, no session needed
+//	GET /                     everything else: the built single-page app (serveUI)
 func NewServer(cfg ServerConfig) *Server {
 	log := cfg.Log
 	if log == nil {
 		log = slog.Default()
 	}
 	mux := http.NewServeMux()
-	page := func(name, contentType string) http.HandlerFunc {
-		body, err := assets.ReadFile("assets/" + name)
-		if err != nil {
-			panic("web: missing embedded asset " + name) // the embed directive lists them
-		}
-		return func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", contentType)
-			w.Header().Set("Cache-Control", "no-cache")
-			_, _ = w.Write(body)
-		}
-	}
-	mux.HandleFunc("GET /{$}", page("index.html", "text/html; charset=utf-8"))
-	mux.HandleFunc("GET /enroll", page("enroll.html", "text/html; charset=utf-8"))
-	mux.HandleFunc("GET /app.js", page("app.js", "text/javascript; charset=utf-8"))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
@@ -110,6 +97,7 @@ func NewServer(cfg ServerConfig) *Server {
 			_, _ = w.Write(profile)
 		})
 	}
+	mux.Handle("GET /", uiHandler(cfg.UI))
 	h := securityHeaders(mux, cfg.TLS != nil)
 	return &Server{dash: cfg.Dashboard, h: h, srv: &http.Server{
 		Handler:           h,
@@ -119,6 +107,83 @@ func NewServer(cfg ServerConfig) *Server {
 		MaxHeaderBytes:    maxHeaderBytes,
 		ErrorLog:          stdlog.New(serverErrors{log.With("component", "web")}, "", 0),
 	}}
+}
+
+// notBuiltPage is served for every page when the build is absent; it has no script.
+const notBuiltPage = "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>Athena</title></head><body><p>Dashboard not built: run make web</p></body></html>\n"
+
+// uiHandler serves the built single-page app: a file that exists as itself (hashed files under /assets/ cached for a
+// year, everything else revalidated), a path without an extension as index.html (the client-side routes), any other
+// path as 404.
+func uiHandler(fsys fs.FS) http.Handler {
+	built := ui.IsBuilt(fsys)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		name := strings.TrimPrefix(path.Clean("/"+r.URL.Path), "/")
+		// The server's own routes are not client-side routes: an unregistered one (no VAPID key, no CA) is a 404.
+		first, _, _ := strings.Cut(name, "/")
+		if apiRoots[first] {
+			http.NotFound(w, r)
+			return
+		}
+		if !built {
+			if path.Ext(name) != "" {
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.Header().Set("Cache-Control", "no-cache")
+			_, _ = io.WriteString(w, notBuiltPage)
+			return
+		}
+		if name != "" {
+			if st, err := fs.Stat(fsys, name); err == nil && !st.IsDir() {
+				serveUIFile(w, fsys, name, strings.HasPrefix(name, "assets/"))
+				return
+			}
+			if path.Ext(name) != "" {
+				http.NotFound(w, r)
+				return
+			}
+		}
+		serveUIFile(w, fsys, "index.html", false)
+	})
+}
+
+// apiRoots are the first path segments the server's own routes use; the single-page fallback never answers them.
+var apiRoots = map[string]bool{"auth": true, "push": true, "api": true, "ws": true, "healthz": true, "ca.pem": true, "ca.mobileconfig": true}
+
+// uiTypes are the content types of the build's files, fixed so the host's mime database cannot change them.
+var uiTypes = map[string]string{
+	".html":        "text/html; charset=utf-8",
+	".js":          "text/javascript; charset=utf-8",
+	".css":         "text/css; charset=utf-8",
+	".json":        "application/json",
+	".webmanifest": "application/manifest+json",
+	".svg":         "image/svg+xml",
+	".png":         "image/png",
+	".woff2":       "font/woff2",
+}
+
+func serveUIFile(w http.ResponseWriter, fsys fs.FS, name string, immutable bool) {
+	body, err := fs.ReadFile(fsys, name)
+	if err != nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	ct := uiTypes[path.Ext(name)]
+	if ct == "" {
+		ct = mime.TypeByExtension(path.Ext(name))
+	}
+	if ct == "" {
+		ct = "application/octet-stream"
+	}
+	w.Header().Set("Content-Type", ct)
+	if immutable {
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	} else {
+		w.Header().Set("Cache-Control", "no-cache")
+	}
+	_, _ = w.Write(body)
 }
 
 // serverErrors is the http.Server's error log: a failed TLS handshake from whatever reaches the port is noise and goes

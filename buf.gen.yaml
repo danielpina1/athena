@@ -5,3 +5,8 @@ plugins:
     out: internal/pb
     opt:
       - module=github.com/danielpina1/athena/internal/pb
+  - local: web/node_modules/.bin/protoc-gen-es
+    out: web/src/gen
+    opt:
+      - target=ts
+      - import_extension=js
