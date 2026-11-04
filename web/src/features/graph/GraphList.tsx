@@ -69,12 +69,17 @@ export function GraphList({ model, className }: { model: GraphModel; className?:
   const [shown, setShown] = useState(PAGE);
   const ids = useId();
   const { lanes, rows, edgesOf } = useMemo(() => {
+    const push = <T,>(m: Map<string, T[]>, k: string, v: T) => {
+      const list = m.get(k);
+      if (list) list.push(v);
+      else m.set(k, [v]);
+    };
     const byLane = new Map<string, GNode[]>();
-    for (const n of model.nodes) byLane.set(n.lane, [...(byLane.get(n.lane) ?? []), n]);
+    for (const n of model.nodes) push(byLane, n.lane, n);
     const edgesOf = new Map<string, GEdge[]>();
     for (const e of model.edges) {
-      edgesOf.set(e.from, [...(edgesOf.get(e.from) ?? []), e]);
-      edgesOf.set(e.to, [...(edgesOf.get(e.to) ?? []), e]);
+      push(edgesOf, e.from, e);
+      push(edgesOf, e.to, e);
     }
     // Newest first in each lane.
     // `before`: the rows of the lanes above, for the 200-row page.

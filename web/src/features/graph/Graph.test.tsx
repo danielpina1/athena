@@ -84,14 +84,88 @@ describe("Graph", () => {
     expect(screen.getByRole("link", { name: /Refactor auth client, T-1, Working/ })).toBe(node("T-1"));
   });
 
-  test("a long title is cut in the SVG, in full in its title and name", () => {
+  test("a long title is cut in the SVG, in full in its name, and named once", () => {
     renderGraph();
     const n = node("T-4");
     const text = document.querySelector('svg [data-node-text="T-4"]') as unknown as HTMLElement;
     const shown = within(text).getByText(/^Rewrite W+…$/);
     expect(Array.from(shown.textContent ?? "").length).toBeLessThanOrEqual(22);
-    expect(n.querySelector("title")?.textContent).toBe(`${LONG} · T-4`);
     expect(n.getAttribute("aria-label")).toContain(LONG);
+    // No <title> as well: it would read the whole title again as the description.
+    expect(n.querySelector("title")).toBeNull();
+  });
+
+  test("wide titles are clipped to their node", () => {
+    useAthena.getState().reset();
+    load({
+      tickets: [
+        { id: "T-W", title: "W".repeat(40), stage: "working", createdAt: at(0) },
+        { id: "T-CJK", title: "漢字のタイトルはとても長いのでノードからはみ出す", stage: "idle", createdAt: at(60_000) },
+      ],
+    });
+    renderGraph();
+    for (const id of ["T-W", "T-CJK"]) {
+      const g = document.querySelector(`svg [data-node-text="${id}"]`)!;
+      const n = node(id);
+      const box = n.querySelector("rect[data-box]")!;
+      // The text group sits at the node's corner and is clipped to a box no bigger than the node.
+      expect(g.getAttribute("transform")).toBe(`translate(${box.getAttribute("x")} ${box.getAttribute("y")})`);
+      const ref = /^url\(#(.+)\)$/.exec(g.getAttribute("clip-path") ?? "")?.[1];
+      expect(ref, id).toBeTruthy();
+      const clip = document.getElementById(ref!)!;
+      expect(clip.tagName.toLowerCase()).toBe("clippath");
+      const r = clip.querySelector("rect")!;
+      expect(Number(r.getAttribute("x"))).toBeGreaterThanOrEqual(0);
+      expect(Number(r.getAttribute("x")) + Number(r.getAttribute("width"))).toBeLessThanOrEqual(Number(box.getAttribute("width")));
+      expect(Number(r.getAttribute("height"))).toBeLessThanOrEqual(Number(box.getAttribute("height")));
+    }
+  });
+
+  test("the phone starts at the left edge with readable titles and the lane labels in view", () => {
+    const width = Object.getOwnPropertyDescriptor(Element.prototype, "clientWidth");
+    Object.defineProperty(SVGSVGElement.prototype, "clientWidth", { configurable: true, get: () => 375 });
+    try {
+      renderGraph("/graph", "phone");
+      const m = /translate\(([-\d.]+) ([-\d.]+)\) scale\(([\d.]+)\)/.exec(transform() ?? "")!;
+      expect(Number(m[1])).toBe(0);
+      // A 12.5 px title at this zoom is at least 11 px on the screen.
+      expect(12.5 * Number(m[3])).toBeGreaterThanOrEqual(11);
+      // The labels are in a layer that moves only up and down, at the left edge.
+      const labels = document.querySelector("svg [data-lane-labels]")!;
+      expect(labels.closest("[data-viewport]")).toBeNull();
+      expect(labels.getAttribute("transform")).toMatch(/^translate\(0 [-\d.]+\)$/);
+      const texts = [...labels.querySelectorAll("text")];
+      expect(texts.map((t) => t.textContent)).toEqual(["GITHUB · ACME/API", "LOCAL · OPS", "NO REPOSITORY"]);
+      for (const t of texts) expect(Number(t.getAttribute("x"))).toBeLessThan(375);
+    } finally {
+      if (width) Object.defineProperty(SVGSVGElement.prototype, "clientWidth", width);
+      else delete (SVGSVGElement.prototype as { clientWidth?: number }).clientWidth;
+    }
+  });
+
+  test("on the phone a screen reader reads the hidden list, not the picture too", () => {
+    renderGraph("/graph", "phone");
+    const svg = document.querySelector("svg[data-canvas]")!;
+    expect(svg.getAttribute("aria-hidden")).toBe("true");
+    expect(node("T-1").getAttribute("tabindex")).toBe("-1");
+    expect(document.querySelector('[data-hidden-list] [data-list-node="T-1"]')).toBeTruthy();
+  });
+
+  test("on the desktop the nodes are the reading order", () => {
+    renderGraph();
+    expect(document.querySelector("svg[data-canvas]")!.getAttribute("aria-hidden")).toBeNull();
+    expect(node("T-1").getAttribute("tabindex")).toBe("0");
+    expect(document.querySelector("[data-hidden-list]")).toBeNull();
+  });
+
+  test("the phone folds the legend into a disclosure", async () => {
+    renderGraph("/graph", "phone");
+    const toggle = screen.getByText("Legend", { selector: "summary" });
+    const details = toggle.closest("details")!;
+    expect(details.open).toBe(false);
+    await userEvent.click(toggle);
+    expect(details.open).toBe(true);
+    expect(within(details).getByRole("region", { name: "Legend" })).toBeTruthy();
   });
 
   test("orange marks only what needs you, by the Needs you rule", () => {
@@ -143,10 +217,32 @@ describe("Graph", () => {
     expect(where()).toBe("/graph?ticket=T-1");
     const pane = screen.getByRole("complementary", { name: "Ticket" });
     expect(within(pane).getByRole("heading", { name: "Refactor auth client", level: 1 })).toBeTruthy();
-    // The graph stays beside it.
+    // The graph stays beside it, its node marked; the legend steps aside so the graph keeps its width.
     expect(node("T-2")).toBeTruthy();
+    expect(node("T-1").getAttribute("aria-current")).toBe("true");
+    expect(screen.queryByRole("region", { name: "Legend" })).toBeNull();
     await userEvent.click(within(pane).getByRole("button", { name: "Close" }));
     expect(where()).toBe("/graph");
+    // Focus goes back to the node that opened the pane.
+    expect(document.activeElement).toBe(node("T-1"));
+    expect(screen.getByRole("region", { name: "Legend" })).toBeTruthy();
+  });
+
+  test("Esc closes the pane and focus returns to the node, or to the graph when it is gone", async () => {
+    renderGraph();
+    await userEvent.click(node("T-2"));
+    const pane = screen.getByRole("complementary", { name: "Ticket" });
+    await userEvent.click(within(pane).getByRole("button", { name: "Reply" }));
+    await userEvent.keyboard("{Escape}");
+    expect(screen.queryByRole("complementary", { name: "Ticket" })).toBeNull();
+    expect(document.activeElement).toBe(node("T-2"));
+
+    // T-1 is not in "Needs you only": once filtered out, closing its pane focuses the graph.
+    await userEvent.click(node("T-1"));
+    await userEvent.click(screen.getByRole("button", { name: "Needs you only" }));
+    expect(node("T-1")).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(document.activeElement).toBe(document.querySelector("svg[data-canvas]"));
   });
 
   test("a tap on a node navigates to the Ticket on the phone", async () => {

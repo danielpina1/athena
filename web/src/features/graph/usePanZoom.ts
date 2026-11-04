@@ -4,7 +4,8 @@
 // immediate.
 //
 // A press that moved is a drag, not a click: `wasDrag()` tells a node's click handler to ignore it. The pointer is
-// captured only once the press has moved, so a plain click still reaches the node under it.
+// captured only once the press has moved, so a plain click still reaches the node under it. A second finger starts a
+// pinch outright (never a click): the content under the fingers' middle follows it while the spread scales it.
 import { type RefObject, useCallback, useEffect, useRef, useState } from "react";
 import { useShortcut } from "@/app/shortcuts";
 
@@ -28,6 +29,20 @@ export function zoomAt(view: View, factor: number, cx: number, cy: number): View
 }
 
 const easeOut = (t: number) => 1 - (1 - t) ** 3;
+
+/** The lowest start zoom: a 12.5 px title stays at least 11 px on the screen. */
+export const READABLE_ZOOM = 0.88;
+
+/**
+ * Where the graph starts, for a viewport `vw` wide and Tickets reaching `right`: fitted to the width but never below
+ * READABLE_ZOOM, from the left edge. When they still do not fit, the desktop shows the newest (right) end; the phone
+ * keeps the left edge, with the lane labels and the oldest Ticket in full, and the owner pans sideways.
+ */
+export function startView(vw: number, right: number, phone: boolean): View {
+  if (vw <= 0 || right <= 0) return { k: 1, x: 0, y: 0 };
+  const k = Math.min(1, Math.max(READABLE_ZOOM, vw / right));
+  return { k, x: phone || right * k <= vw ? 0 : vw - right * k, y: 0 };
+}
 
 export function usePanZoom(
   ref: RefObject<Element | null>,
@@ -89,7 +104,7 @@ export function usePanZoom(
     if (!el) return;
     const pointers = new Map<number, { x: number; y: number }>();
     let start: { x: number; y: number } | undefined;
-    let pinch: { d: number } | undefined;
+    let pinch: { d: number; cx: number; cy: number } | undefined;
     const local = (e: { clientX: number; clientY: number }) => {
       const r = el.getBoundingClientRect();
       return { x: e.clientX - r.left, y: e.clientY - r.top };
@@ -103,28 +118,38 @@ export function usePanZoom(
       const p = e as PointerEvent;
       if (p.pointerType === "mouse" && p.button !== 0) return;
       pointers.set(p.pointerId, local(p));
-      moved.current = false;
-      start = local(p);
-      if (pointers.size === 2) pinch = { d: spread().d };
+      if (pointers.size === 1) {
+        // One finger or the mouse: a click until it moves past the slop.
+        moved.current = false;
+        start = local(p);
+      } else if (pointers.size === 2) {
+        // A second finger: a pinch, never a click. Both pointers are held from here on.
+        moved.current = true;
+        pinch = spread();
+        for (const id of pointers.keys()) el.setPointerCapture?.(id);
+      }
     };
     const move = (e: Event) => {
       const p = e as PointerEvent;
       const prev = pointers.get(p.pointerId);
       if (!prev) return;
       const at = local(p);
+      pointers.set(p.pointerId, at);
+      if (pinch && pointers.size >= 2) {
+        // The point under the old middle follows the fingers to the new middle, scaled by how far they spread.
+        const s = spread();
+        const v = current.current;
+        const k = clampZoom(pinch.d > 0 ? v.k * (s.d / pinch.d) : v.k);
+        const f = k / v.k;
+        setView({ k, x: s.cx - (pinch.cx - v.x) * f, y: s.cy - (pinch.cy - v.y) * f });
+        pinch = s;
+        return;
+      }
       if (!moved.current && start && Math.hypot(at.x - start.x, at.y - start.y) > SLOP) {
         moved.current = true;
         el.setPointerCapture?.(p.pointerId);
       }
       if (!moved.current) return;
-      if (pointers.size >= 2 && pinch) {
-        pointers.set(p.pointerId, at);
-        const s = spread();
-        if (pinch.d > 0) setView(zoomAt(current.current, s.d / pinch.d, s.cx, s.cy));
-        pinch = { d: s.d };
-        return;
-      }
-      pointers.set(p.pointerId, at);
       const v = current.current;
       setView({ ...v, x: v.x + at.x - prev.x, y: v.y + at.y - prev.y });
     };

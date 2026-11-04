@@ -281,16 +281,26 @@ function edgesOf(
   }
 
   // Follow-up: from the Ticket that started the Thread (its latest accept before the Decision; without one, the
-  // Ticket that owns the Thread, else its oldest subscribed one) to the Ticket the Decision routed to.
-  const byTime = [...decisions].sort((a, b) => ms(a.at) - ms(b.at) || (a.id < b.id ? -1 : 1));
+  // Ticket that owns the Thread, else its oldest subscribed one) to the Ticket the Decision routed to. One pass in
+  // time order (accepts first at the same instant) keeps each Thread's latest accept.
+  const oldest = new Map<string, string>();
+  for (const [key, ids] of subscribed) {
+    const first = order(ids)[0];
+    if (first) oldest.set(key, first);
+  }
+  const byTime = [...decisions].sort(
+    (a, b) =>
+      ms(a.at) - ms(b.at) ||
+      Number(b.kind === "accept") - Number(a.kind === "accept") ||
+      (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+  );
+  const lastAccept = new Map<string, string>();
   for (const d of byTime) {
+    if (at !== undefined && ms(d.at) > at) break;
+    if (d.kind === "accept" && d.thread && d.ticketId) lastAccept.set(d.thread, d.ticketId);
     const to = routedTo(d);
     if (!to || !d.thread || !created.has(to)) continue;
-    const when = ms(d.at);
-    if (at !== undefined && when > at) continue;
-    const started = byTime.filter((p) => p.kind === "accept" && p.thread === d.thread && p.ticketId && ms(p.at) <= when);
-    let from = started.length ? started[started.length - 1].ticketId : "";
-    if (!from) from = owners.get(d.thread) ?? order(subscribed.get(d.thread) ?? [])[0] ?? "";
+    const from = lastAccept.get(d.thread) ?? owners.get(d.thread) ?? oldest.get(d.thread) ?? "";
     if (from && from !== to && created.has(from)) add("follow-up", from, to, d.thread);
   }
 

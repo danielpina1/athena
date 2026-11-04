@@ -126,15 +126,27 @@ test("six Tickets in lanes by repository, opened from the graph and the list, li
       await expect(pane.getByRole("heading", { name: "Fix the flaky auth test", level: 1 })).toBeVisible();
       await expect(node(page, ids[0])).toBeVisible();
       await expectAccessible(page);
+      // Esc closes it and focus is back on the node; Enter opens it again; Close does the same as Esc.
       await page.keyboard.press("Escape");
       await expect(pane).toHaveCount(0);
-      // The keyboard: focus a node and Enter.
-      await node(page, ids[2]).focus();
+      await expect(node(page, ids[3])).toBeFocused();
       await page.keyboard.press("Enter");
-      await expect(page.getByRole("complementary", { name: "Ticket" }).getByRole("heading", { level: 1 })).toHaveText(
-        "Summarize the incidents",
-      );
+      await expect(pane.getByRole("heading", { level: 1 })).toHaveText("Fix the flaky auth test");
+      await pane.getByRole("button", { name: "Close" }).click();
+      await expect(pane).toHaveCount(0);
+      await expect(node(page, ids[3])).toBeFocused();
     } else {
+      // At 375×812 the scrubber and Replay are above the bottom navigation on load, with nothing to scroll.
+      await page.setViewportSize({ width: 375, height: 812 });
+      await page.reload();
+      await expect(node(page, ids[3])).toBeVisible();
+      const replay = await page.getByRole("button", { name: "Replay" }).boundingBox();
+      const nav = await page.getByRole("navigation", { name: "Main" }).boundingBox();
+      expect(replay && nav && replay.y + replay.height <= nav.y, `Replay ${JSON.stringify(replay)} above nav ${JSON.stringify(nav)}`).toBe(true);
+      const scroll = await page.evaluate(() => document.documentElement.scrollHeight - window.innerHeight);
+      expect(scroll).toBeLessThanOrEqual(1);
+      await expect(page).toHaveScreenshot("graph-375-light.png", { mask: volatile(page) });
+
       await node(page, ids[3]).click();
       await expect(page).toHaveURL(new RegExp(`/tickets/${ids[3]}$`));
       await expect(page.getByRole("heading", { name: "Fix the flaky auth test", level: 1 })).toBeVisible();
