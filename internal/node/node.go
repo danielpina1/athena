@@ -102,6 +102,7 @@ var _ core.Executor = (*Node)(nil)
 type Node struct {
 	cfg    Config
 	eng    atomic.Pointer[engineRef]
+	router atomic.Pointer[routerRef]
 	ctx    context.Context
 	cancel context.CancelFunc
 	log    *slog.Logger

@@ -5,6 +5,7 @@ package node
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -53,7 +54,22 @@ const (
 	ruleWrite         = "write-outside-ticket"
 	ruleSessionConfig = "session-config-write"
 	ruleBashPrefix    = "bash-escalate:"
+	ruleRouterTools   = "router-tools"
 )
+
+// routerToolPrefix names the tools of Athena's MCP server, the only server the router session has.
+const routerToolPrefix = "mcp__athena__"
+
+// RouterRules is the router session's only rule: it may call Athena's router tools (mcp__athena__*) and nothing else.
+// The session is started without built-in tools; this denies anything that slips through anyway, with a reason the
+// model reads.
+func RouterRules(tool string) Decision {
+	if strings.HasPrefix(tool, routerToolPrefix) && len(tool) > len(routerToolPrefix) {
+		return allow()
+	}
+	return deny(ruleRouterTools, fmt.Sprintf("the router has only Athena's tools (%s*); %q is not available to it: "+
+		"route, read and reply with those tools, and leave work to the Tickets' workers", routerToolPrefix, tool))
+}
 
 func allow() Decision { return Decision{Verdict: VerdictAllow} }
 

@@ -23,6 +23,10 @@ type HookRequest struct {
 	Event      string `json:"event"`
 	Ticket     string `json:"ticket"`
 	Assignment string `json:"assignment"`
+	// Role is RoleRouter for the router session's hooks, which carry the router start's Token instead of a Ticket and
+	// Assignment; empty for a worker's.
+	Role  string `json:"role,omitempty"`
+	Token string `json:"token,omitempty"`
 	// Input is the raw JSON the hook received on stdin, forwarded verbatim.
 	Input json.RawMessage `json:"input"`
 }
@@ -62,4 +66,26 @@ type PingRequest struct {
 type Response struct {
 	OK    bool   `json:"ok"`
 	Error string `json:"error,omitempty"`
+}
+
+// RoleRouter is the role of the router session: its hooks and tool calls carry the token of the current router start
+// (ATHENA_ROUTER_TOKEN), never Ticket or Assignment ids.
+const RoleRouter = "router"
+
+// OpRouter runs one of the router's tools; `athena mcp --role router` sends it.
+const OpRouter = "router"
+
+// RouterRequest asks the node to run one router tool with its JSON arguments.
+type RouterRequest struct {
+	Op    string          `json:"op"`
+	Token string          `json:"token"`
+	Tool  string          `json:"tool"`
+	Args  json.RawMessage `json:"args,omitempty"`
+}
+
+// RouterResponse is a router tool's JSON result, or the Error that refused the call.
+type RouterResponse struct {
+	OK     bool            `json:"ok"`
+	Result json.RawMessage `json:"result,omitempty"`
+	Error  string          `json:"error,omitempty"`
 }

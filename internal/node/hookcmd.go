@@ -67,6 +67,8 @@ func RunHook(event string, stdin io.Reader, stdout, stderr io.Writer, socket str
 		Event:      event,
 		Ticket:     os.Getenv("ATHENA_TICKET"),
 		Assignment: os.Getenv("ATHENA_ASSIGNMENT"),
+		Role:       os.Getenv("ATHENA_ROLE"),
+		Token:      os.Getenv("ATHENA_ROUTER_TOKEN"),
 		Input:      raw,
 	})
 	if err != nil {

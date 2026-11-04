@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -639,5 +640,17 @@ func TestChildEnvironmentIsAllowlisted(t *testing.T) {
 		if got, ok := env[k]; !ok || got != want {
 			t.Errorf("child %s = %q (present %v), want %q", k, got, ok, want)
 		}
+	}
+}
+
+func TestBuildArgsTools(t *testing.T) {
+	none := ""
+	args := buildArgs(Options{SettingsPath: "s", MCPConfigPath: "m", Tools: &none})
+	i := slices.Index(args, "--tools")
+	if i < 0 || i+1 >= len(args) || args[i+1] != "" {
+		t.Fatalf("args = %q, want --tools \"\"", args)
+	}
+	if slices.Contains(buildArgs(Options{SettingsPath: "s", MCPConfigPath: "m"}), "--tools") {
+		t.Fatal("--tools passed without Options.Tools")
 	}
 }

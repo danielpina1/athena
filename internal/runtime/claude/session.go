@@ -52,6 +52,9 @@ type Options struct {
 	// TranscriptPath, when set, is the file every stdout line is appended to instead of <Dir>/.athena/transcript.jsonl.
 	// Its directory is created 0700 and the file 0600.
 	TranscriptPath string
+	// Tools, when set, is passed as --tools: the built-in tools the session has. A pointer to "" disables every
+	// built-in tool (`--tools ""`, checked against Claude Code 2.1.280: its init lists no tools, MCP tools stay).
+	Tools *string
 }
 
 // buildArgs returns the argument list for o.
@@ -64,6 +67,9 @@ func buildArgs(o Options) []string {
 	args := []string{"-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"}
 	if o.Model != "" {
 		args = append(args, "--model", o.Model)
+	}
+	if o.Tools != nil {
+		args = append(args, "--tools", *o.Tools)
 	}
 	// Always passed: with --setting-sources "" the --settings file is the only
 	// source of hooks, so a session without it would run without Athena's hooks.

@@ -128,3 +128,25 @@ func TestMCPRunsServerForTicket(t *testing.T) {
 		t.Fatalf("RunMCP(%q, %q)", gotTicket, gotSocket)
 	}
 }
+
+func TestMCPRunsRouterServer(t *testing.T) {
+	t.Setenv("ATHENA_SOCKET", "/tmp/athena-test.sock")
+	t.Setenv("ATHENA_ROUTER_TOKEN", "tok")
+	var gotSocket, gotToken string
+	orig := runRouterMCPServer
+	runRouterMCPServer = func(socket, token string) error { gotSocket, gotToken = socket, token; return nil }
+	t.Cleanup(func() { runRouterMCPServer = orig })
+	var out, errb bytes.Buffer
+	if code := run([]string{"mcp", "--role", "router"}, &out, &errb); code != 0 {
+		t.Fatalf("exit code = %d (stderr %q)", code, errb.String())
+	}
+	if gotSocket != "/tmp/athena-test.sock" || gotToken != "tok" {
+		t.Fatalf("RunRouterMCP(%q, %q)", gotSocket, gotToken)
+	}
+	for _, args := range [][]string{{"mcp", "--role", "worker"}, {"mcp", "--role", "router", "--ticket", "T-1"}} {
+		var out, errb bytes.Buffer
+		if code := run(args, &out, &errb); code != 2 {
+			t.Errorf("%v: exit code = %d, want 2", args, code)
+		}
+	}
+}

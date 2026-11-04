@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -121,5 +122,42 @@ func TestWriteMCPConfigShape(t *testing.T) {
 	}
 	if err := WriteMCPConfig(path, "/opt/athena", "/run/athena.sock", "tkt-1", ""); err == nil {
 		t.Fatal("WriteMCPConfig accepted an empty assignment")
+	}
+}
+
+func TestWriteRouterMCPConfigShape(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mcp.json")
+	if err := WriteRouterMCPConfig(path, "/bin/athena", "/tmp/s.sock", "tok"); err != nil {
+		t.Fatal(err)
+	}
+	var cfg struct {
+		MCPServers map[string]struct {
+			Command string            `json:"command"`
+			Args    []string          `json:"args"`
+			Env     map[string]string `json:"env"`
+		} `json:"mcpServers"`
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	s, ok := cfg.MCPServers["athena"]
+	if !ok || len(cfg.MCPServers) != 1 {
+		t.Fatalf("servers = %+v", cfg.MCPServers)
+	}
+	if s.Command != "/bin/athena" || strings.Join(s.Args, " ") != "mcp --role router" {
+		t.Fatalf("server = %+v", s)
+	}
+	if s.Env["ATHENA_SOCKET"] != "/tmp/s.sock" || s.Env["ATHENA_ROUTER_TOKEN"] != "tok" || s.Env["ATHENA_TICKET"] != "" {
+		t.Fatalf("env = %v", s.Env)
+	}
+	if st, _ := os.Stat(path); st.Mode().Perm() != 0o600 {
+		t.Fatalf("mode = %v", st.Mode())
+	}
+	if err := WriteRouterMCPConfig(path, "/bin/athena", "/tmp/s.sock", ""); err == nil {
+		t.Fatal("no token accepted")
 	}
 }

@@ -124,6 +124,13 @@ func (n *Node) handleConn(ctx context.Context, conn net.Conn) {
 			} else {
 				resp = n.handleReport(req)
 			}
+		case OpRouter:
+			var req RouterRequest
+			if err := json.Unmarshal(line, &req); err != nil {
+				resp = RouterResponse{Error: "malformed router request"}
+			} else {
+				resp = n.handleRouter(ctx, req)
+			}
 		case OpPing:
 			resp = Response{OK: true}
 		default:
@@ -139,6 +146,9 @@ func allowed(reason string) HookResponse { return HookResponse{Verdict: VerdictA
 func denied(reason string) HookResponse  { return HookResponse{Verdict: VerdictDeny, Reason: reason} }
 
 func (n *Node) handleHook(ctx context.Context, req HookRequest) HookResponse {
+	if req.Role == RoleRouter {
+		return n.handleRouterHook(req)
+	}
 	start := time.Now()
 	s := n.lookup(req.Ticket, req.Assignment)
 	if req.Event == EventStop {

@@ -512,3 +512,17 @@ func TestBashWritesOutsideTicketDir(t *testing.T) {
 		})
 	}
 }
+
+func TestRouterRulesDenyWorkTools(t *testing.T) {
+	for _, tool := range []string{"Bash", "Write", "Read", "WebFetch", "Task", "mcp__other__x", "mcp__athenax__route", ""} {
+		d := RouterRules(tool)
+		if d.Verdict != VerdictDeny || d.Rule != ruleRouterTools || !strings.Contains(d.Reason, "mcp__athena__") {
+			t.Errorf("RouterRules(%q) = %+v, want a deny naming the router's tools", tool, d)
+		}
+	}
+	for _, tool := range []string{"mcp__athena__route", "mcp__athena__eval_decide"} {
+		if d := RouterRules(tool); d.Verdict != VerdictAllow {
+			t.Errorf("RouterRules(%q) = %+v, want allow", tool, d)
+		}
+	}
+}
