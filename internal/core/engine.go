@@ -168,7 +168,9 @@ func (e *Engine) SubmitOwnerTask(text string, opts TaskOptions) (Ticket, error) 
 			return err
 		}
 		id := fmt.Sprintf("T-%04d", n)
-		trigger := &Trigger{ID: newID(), Source: ownerSource, Actor: OwnerActor, Human: true, At: o.at, Text: text}
+		// The owner's message goes straight to its Ticket, with no routing: record where it reached.
+		trigger := &Trigger{ID: newID(), Source: ownerSource, Actor: OwnerActor, Human: true, At: o.at, Text: text,
+			Disposition: Disposition{Reached: []string{id}}}
 		mandate := Mandate{Strength: "explicit", PolicyVersion: OwnerPolicyVersion, Actor: OwnerActor, Scope: ownerScope}
 		if opts.Repo != "" {
 			// The owner's word is the whole basis: no Source admitted it, so no Source revalidates it.
@@ -479,7 +481,8 @@ func (e *Engine) AddPersonInputWithID(ticketID, inputID, text string) error {
 		if (t.Ended != nil || t.HandedOff()) && !o.revalidates(t) {
 			return userErrorf("the mandate of ticket %s no longer holds; it needs a new accept", ticketID)
 		}
-		trigger := &Trigger{ID: newID(), Source: ownerSource, Actor: OwnerActor, Human: true, At: o.at, Text: text}
+		trigger := &Trigger{ID: newID(), Source: ownerSource, Actor: OwnerActor, Human: true, At: o.at, Text: text,
+			Disposition: Disposition{Reached: []string{ticketID}}}
 		if err := o.tx.PutTrigger(trigger); err != nil {
 			return err
 		}

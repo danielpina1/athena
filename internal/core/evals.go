@@ -1031,7 +1031,8 @@ func (o *op) letGo(t *Ticket, waiting, left []string) error {
 		if err != nil {
 			return err
 		}
-		if tr == nil || !slices.Contains(tr.Disposition.Reached, t.ID) {
+		// A Trigger without a Thread (the owner's) was never fanned out: it keeps where it went.
+		if tr == nil || len(tr.Threads) == 0 || !slices.Contains(tr.Disposition.Reached, t.ID) {
 			continue
 		}
 		tr.Disposition.Reached = without(tr.Disposition.Reached, t.ID)
