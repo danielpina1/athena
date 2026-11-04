@@ -86,6 +86,11 @@ type Config struct {
 	Sandbox *SandboxConfig
 	// Logger receives the node's log lines (default slog.Default()).
 	Logger *slog.Logger
+	// Name and ClaudeVersion are shown in Status; the node does not interpret them.
+	Name, ClaudeVersion string
+	// OnStatus is called, from the node's loop goroutine, whenever the sessions in use or the launches queued change
+	// (see Status). It must not block or call back into the node.
+	OnStatus func()
 }
 
 // EngineCallbacks is the part of *core.Engine the node calls: the Executor callbacks, the Ticket query and Approvals.
@@ -144,6 +149,11 @@ type Node struct {
 
 	// restartDelay is the pause before restart n (1-based) of a crashed session.
 	restartDelay func(n int) time.Duration
+
+	// queued is the number of launches waiting (written by the loop goroutine); statusSig is the last status
+	// OnStatus was told of (loop goroutine only).
+	queued    atomic.Int32
+	statusSig string
 
 	// tokens holds each GitHub Assignment's token, in memory only.
 	tokens *tokenStore
@@ -351,6 +361,7 @@ func (n *Node) loop() {
 				n.schedule(st)
 			}
 		}
+		n.publishStatus(st)
 		if st.shutting && n.liveCount() == 0 {
 			return
 		}

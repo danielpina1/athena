@@ -1,0 +1,636 @@
+package hub
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"log/slog"
+	"sort"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/danielpina1/athena/internal/core"
+	"github.com/danielpina1/athena/internal/node"
+	"github.com/danielpina1/athena/internal/pb/athenav1"
+	"github.com/danielpina1/athena/internal/store"
+)
+
+// fakeSource is a Source over maps.
+type fakeSource struct {
+	mu        sync.Mutex
+	tickets   map[string]core.Ticket
+	approvals map[string]core.Approval
+	triggers  map[string]core.Trigger
+	threads   map[string]core.Thread
+	decisions map[string]core.Decision
+	health    []HealthItem
+	revision  int
+	settings  string
+	node      node.Status
+}
+
+func newFake() *fakeSource {
+	return &fakeSource{tickets: map[string]core.Ticket{}, approvals: map[string]core.Approval{},
+		triggers: map[string]core.Trigger{}, threads: map[string]core.Thread{}, decisions: map[string]core.Decision{},
+		settings: "{}"}
+}
+
+var epoch0 = time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
+
+func (f *fakeSource) put(t core.Ticket) { f.mu.Lock(); f.tickets[t.ID] = t; f.mu.Unlock() }
+
+func (f *fakeSource) Tickets(includeEnded bool) ([]core.Ticket, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []core.Ticket
+	for _, t := range f.tickets {
+		if includeEnded || t.Ended == nil {
+			out = append(out, t)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out, nil
+}
+
+func (f *fakeSource) Ticket(id string) (core.Ticket, core.Stage, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	t, ok := f.tickets[id]
+	if !ok {
+		return core.Ticket{}, core.Stage{}, fmt.Errorf("ticket %s not found", id)
+	}
+	return t, core.TicketStage(&t), nil
+}
+
+func sortedBy[T any](m map[string]T, less func(a, b T) bool, keep func(T) bool, limit int) []T {
+	var out []T
+	for _, v := range m {
+		if keep(v) {
+			out = append(out, v)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return less(out[i], out[j]) })
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out
+}
+
+func (f *fakeSource) PendingApprovals() ([]core.Approval, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return sortedBy(f.approvals, func(a, b core.Approval) bool { return a.ID < b.ID },
+		func(a core.Approval) bool { return a.State == core.ApprovalPending }, 0), nil
+}
+
+func (f *fakeSource) AnsweredApprovals(limit int) ([]core.Approval, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return sortedBy(f.approvals, func(a, b core.Approval) bool { return a.ID > b.ID },
+		func(a core.Approval) bool { return a.State != core.ApprovalPending }, limit), nil
+}
+
+func (f *fakeSource) Approval(id string) (core.Approval, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	a, ok := f.approvals[id]
+	if !ok {
+		return a, fmt.Errorf("approval %s not found", id)
+	}
+	return a, nil
+}
+
+func (f *fakeSource) RecentTriggers(limit int) ([]core.Trigger, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return sortedBy(f.triggers, func(a, b core.Trigger) bool { return a.ID > b.ID }, func(core.Trigger) bool { return true }, limit), nil
+}
+
+func (f *fakeSource) Trigger(id string) (core.Trigger, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	t, ok := f.triggers[id]
+	if !ok {
+		return t, fmt.Errorf("trigger %s not found", id)
+	}
+	return t, nil
+}
+
+func (f *fakeSource) ActiveThreads() ([]core.Thread, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return sortedBy(f.threads, func(a, b core.Thread) bool { return a.Key < b.Key }, func(t core.Thread) bool { return t.Active() }, 0), nil
+}
+
+func (f *fakeSource) RecentThreads(limit int) ([]core.Thread, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return sortedBy(f.threads, func(a, b core.Thread) bool { return a.Key > b.Key }, func(core.Thread) bool { return true }, limit), nil
+}
+
+func (f *fakeSource) Thread(key string) (core.Thread, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	t, ok := f.threads[key]
+	if !ok {
+		return t, fmt.Errorf("thread %s not found", key)
+	}
+	return t, nil
+}
+
+func (f *fakeSource) Decisions(thread string, limit int) ([]core.Decision, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return sortedBy(f.decisions, func(a, b core.Decision) bool { return a.ID > b.ID },
+		func(d core.Decision) bool { return thread == "" || d.Thread == thread }, limit), nil
+}
+
+func (f *fakeSource) Decision(id string) (core.Decision, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	d, ok := f.decisions[id]
+	if !ok {
+		return d, fmt.Errorf("decision %s not found", id)
+	}
+	return d, nil
+}
+
+func (f *fakeSource) Health() []HealthItem {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]HealthItem(nil), f.health...)
+}
+
+func (f *fakeSource) setHealth(items ...HealthItem) { f.mu.Lock(); f.health = items; f.mu.Unlock() }
+
+func (f *fakeSource) Policy() (int, string, string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.revision, "v1", f.settings, nil
+}
+
+func (f *fakeSource) NodeStatus() node.Status { f.mu.Lock(); defer f.mu.Unlock(); return f.node }
+
+func ticket(id string) core.Ticket {
+	return core.Ticket{ID: id, Title: "title " + id, CreatedAt: epoch0, UpdatedAt: epoch0}
+}
+
+func ended(id string, n int) core.Ticket {
+	t := ticket(id)
+	at := epoch0.Add(time.Duration(n) * time.Minute)
+	t.UpdatedAt, t.Ended = at, &core.Ended{At: at, By: core.EndByExecutor, Outcome: core.OutcomeCompleted}
+	return t
+}
+
+func quiet() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
+
+// start returns a running Hub over f.
+func start(t *testing.T, f *fakeSource) *Hub {
+	t.Helper()
+	h := New(f, quiet())
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	h.Start(ctx)
+	return h
+}
+
+func next(t *testing.T, s *Sub) *athenav1.Delta {
+	t.Helper()
+	select {
+	case d, ok := <-s.C():
+		if !ok {
+			t.Fatal("feed closed")
+		}
+		return d
+	case <-time.After(2 * time.Second):
+		t.Fatal("no delta")
+		return nil
+	}
+}
+
+func none(t *testing.T, s *Sub) {
+	t.Helper()
+	select {
+	case d := <-s.C():
+		t.Fatalf("unexpected delta %v", d)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestSnapshotBounds(t *testing.T) {
+	f := newFake()
+	for i := 0; i < 150; i++ {
+		f.put(ended(fmt.Sprintf("E-%03d", i), i))
+	}
+	f.put(ticket("T-1"))
+	f.put(ticket("T-2"))
+	for i := 0; i < 70; i++ {
+		f.mu.Lock()
+		f.approvals[fmt.Sprintf("A-%03d", i)] = core.Approval{ID: fmt.Sprintf("A-%03d", i), State: core.ApprovalApproved}
+		f.mu.Unlock()
+	}
+	f.mu.Lock()
+	f.approvals["P-1"] = core.Approval{ID: "P-1", State: core.ApprovalPending}
+	for i := 0; i < 300; i++ {
+		f.decisions[fmt.Sprintf("D-%03d", i)] = core.Decision{ID: fmt.Sprintf("D-%03d", i), Thread: "x:1"}
+		f.triggers[fmt.Sprintf("R-%03d", i)] = core.Trigger{ID: fmt.Sprintf("R-%03d", i)}
+	}
+	for i := 0; i < 130; i++ {
+		f.threads[fmt.Sprintf("x:%03d", i)] = core.Thread{Key: fmt.Sprintf("x:%03d", i)}
+	}
+	f.threads["x:000a"] = core.Thread{Key: "x:000a", Queued: []string{"R-1"}}
+	f.mu.Unlock()
+	h := New(f, quiet())
+	s, err := h.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s.Tickets) != 102 {
+		t.Errorf("tickets = %d, want 2 open + 100 ended", len(s.Tickets))
+	}
+	ids := map[string]bool{}
+	for _, tk := range s.Tickets {
+		ids[tk.Id] = true
+	}
+	if !ids["T-1"] || !ids["E-149"] || !ids["E-050"] || ids["E-049"] {
+		t.Errorf("wrong tickets kept: T-1=%v E-149=%v E-050=%v E-049=%v", ids["T-1"], ids["E-149"], ids["E-050"], ids["E-049"])
+	}
+	if len(s.Approvals) != 51 {
+		t.Errorf("approvals = %d, want 1 pending + 50 answered", len(s.Approvals))
+	}
+	if len(s.Decisions) != 200 || len(s.Triggers) != 200 {
+		t.Errorf("decisions %d triggers %d, want 200 each", len(s.Decisions), len(s.Triggers))
+	}
+	if len(s.Threads) != 101 {
+		t.Errorf("threads = %d, want the active one plus 100 recent", len(s.Threads))
+	}
+}
+
+func TestDeltaPerCommittedChange(t *testing.T) {
+	f := newFake()
+	f.put(ticket("T-1"))
+	h := start(t, f)
+	sub, _ := h.Subscribe(0, h.Epoch())
+	defer sub.Close()
+	h.OnCommit(store.Changes{Tickets: []string{"T-1"}})
+	d := next(t, sub)
+	if d.Seq != 1 || d.GetTicket().GetId() != "T-1" {
+		t.Fatalf("first delta = %v", d)
+	}
+	f.put(func() core.Ticket { x := ticket("T-1"); x.Title = "renamed"; return x }())
+	h.OnCommit(store.Changes{Tickets: []string{"T-1"}})
+	d = next(t, sub)
+	if d.Seq != 2 || d.GetTicket().GetTitle() != "renamed" {
+		t.Fatalf("second delta = %v", d)
+	}
+	none(t, sub)
+}
+
+func TestDeltaKinds(t *testing.T) {
+	f := newFake()
+	f.mu.Lock()
+	f.approvals["A-1"] = core.Approval{ID: "A-1", State: core.ApprovalPending}
+	f.triggers["R-1"] = core.Trigger{ID: "R-1"}
+	f.threads["x:1"] = core.Thread{Key: "x:1"}
+	f.decisions["D-1"] = core.Decision{ID: "D-1"}
+	f.revision = 3
+	f.mu.Unlock()
+	h := start(t, f)
+	sub, _ := h.Subscribe(0, h.Epoch())
+	h.OnCommit(store.Changes{Approvals: []string{"A-1"}, Triggers: []string{"R-1"}, Threads: []string{"x:1"},
+		Decisions: []string{"D-1"}, Policy: true})
+	got := ""
+	for i := 0; i < 5; i++ {
+		d := next(t, sub)
+		if d.Seq != uint64(i+1) {
+			t.Errorf("seq %d at position %d", d.Seq, i)
+		}
+		got += fmt.Sprintf("%T ", d.Change)
+	}
+	for _, w := range []string{"Approval", "Trigger", "Thread", "Decision", "Policy"} {
+		if !strings.Contains(got, "Delta_"+w+" ") {
+			t.Errorf("no %s delta in %s", w, got)
+		}
+	}
+}
+
+func TestCursorInsideRingResumes(t *testing.T) {
+	f := newFake()
+	h := start(t, f)
+	for i := 1; i <= 5; i++ {
+		f.put(ticket(fmt.Sprintf("T-%d", i)))
+		h.OnCommit(store.Changes{Tickets: []string{fmt.Sprintf("T-%d", i)}})
+	}
+	waitSeq(t, h, 5)
+	sub, need := h.Subscribe(3, h.Epoch())
+	defer sub.Close()
+	if need {
+		t.Fatal("snapshot needed for a cursor inside the ring")
+	}
+	if d := next(t, sub); d.Seq != 4 {
+		t.Errorf("first replayed seq = %d, want 4", d.Seq)
+	}
+	if d := next(t, sub); d.Seq != 5 {
+		t.Errorf("second replayed seq = %d, want 5", d.Seq)
+	}
+	none(t, sub)
+	if _, need := h.Subscribe(5, h.Epoch()); need {
+		t.Error("the current cursor needs no snapshot")
+	}
+}
+
+func waitSeq(t *testing.T, h *Hub, seq uint64) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		h.mu.Lock()
+		got := h.seq
+		h.mu.Unlock()
+		if got >= seq {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("seq never reached %d", seq)
+}
+
+func TestCursorOutsideRingNeedsSnapshot(t *testing.T) {
+	h := New(newFake(), quiet())
+	for i := 0; i < ringDeltas+10; i++ {
+		h.publish(&athenav1.Delta{Change: &athenav1.Delta_Node{Node: &athenav1.NodeStatus{Name: "n"}}})
+	}
+	if len(h.ring) != ringDeltas {
+		t.Fatalf("ring holds %d, want %d", len(h.ring), ringDeltas)
+	}
+	// The ring now starts at seq 11: cursor 10 is the oldest resumable.
+	if _, need := h.Subscribe(9, h.Epoch()); !need {
+		t.Error("cursor 9 is outside the ring")
+	}
+	if sub, need := h.Subscribe(10, h.Epoch()); need {
+		t.Error("cursor 10 is the edge of the ring and resumes")
+	} else {
+		sub.Close()
+	}
+	if _, need := h.Subscribe(h.seq+1, h.Epoch()); !need {
+		t.Error("a cursor ahead of the hub needs a snapshot")
+	}
+}
+
+func TestRingBytesBound(t *testing.T) {
+	h := New(newFake(), quiet())
+	big := strings.Repeat("x", 1<<20)
+	for i := 0; i < 20; i++ {
+		h.publish(&athenav1.Delta{Change: &athenav1.Delta_Node{Node: &athenav1.NodeStatus{Name: big}}})
+	}
+	if h.ringBytes > ringBytes || len(h.ring) >= 20 {
+		t.Errorf("ring keeps %d bytes in %d deltas", h.ringBytes, len(h.ring))
+	}
+}
+
+func TestEpochMismatchNeedsSnapshot(t *testing.T) {
+	h := New(newFake(), quiet())
+	if _, need := h.Subscribe(0, "an-older-process"); !need {
+		t.Error("another epoch must get a snapshot")
+	}
+	if _, need := h.Subscribe(0, ""); !need {
+		t.Error("no epoch must get a snapshot")
+	}
+	if h.Epoch() == New(newFake(), quiet()).Epoch() {
+		t.Error("epochs repeat")
+	}
+}
+
+func TestSlowSubscriberResyncedNotBlocking(t *testing.T) {
+	f := newFake()
+	h := New(f, quiet())
+	slow, _ := h.Subscribe(0, h.Epoch())
+	fast, _ := h.Subscribe(0, h.Epoch())
+	got := make(chan int, 1)
+	go func() {
+		n := 0
+		for range fast.C() {
+			n++
+			if n == subBuffer+50 {
+				break
+			}
+		}
+		got <- n
+	}()
+	done := make(chan struct{})
+	go func() {
+		for i := 0; i < subBuffer+50; i++ {
+			h.publish(&athenav1.Delta{Change: &athenav1.Delta_Node{Node: &athenav1.NodeStatus{Name: "n"}}})
+			time.Sleep(50 * time.Microsecond)
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("publishing blocked on the slow subscriber")
+	}
+	if n := <-got; n != subBuffer+50 {
+		t.Errorf("the fast subscriber got %d deltas, want %d", n, subBuffer+50)
+	}
+	n := 0
+	for range slow.C() {
+		n++
+	}
+	if n != subBuffer {
+		t.Errorf("slow subscriber drained %d deltas before its close, want %d", n, subBuffer)
+	}
+	if !slow.Resync() {
+		t.Error("slow subscriber was closed without resync")
+	}
+	if fast.Resync() {
+		t.Error("the fast subscriber must not be resynced")
+	}
+}
+
+func TestDetailOnlyToWatchers(t *testing.T) {
+	f := newFake()
+	f.put(ticket("T-1"))
+	f.put(ticket("T-2"))
+	h := start(t, f)
+	watcher, _ := h.Subscribe(0, h.Epoch())
+	other, _ := h.Subscribe(0, h.Epoch())
+	watcher.Watch("T-1")
+	h.OnCommit(store.Changes{Tickets: []string{"T-1"}})
+
+	var kinds []string
+	for i := 0; i < 2; i++ {
+		d := next(t, watcher)
+		kinds = append(kinds, fmt.Sprintf("%T", d.Change))
+		if d.GetTicketDetail() != nil && (d.Seq != 0 || d.GetTicketDetail().GetSummary().GetId() != "T-1") {
+			t.Errorf("detail delta = %v", d)
+		}
+	}
+	if kinds[0] != "*athenav1.Delta_Ticket" || kinds[1] != "*athenav1.Delta_TicketDetail" {
+		t.Errorf("watcher got %v", kinds)
+	}
+	if d := next(t, other); d.GetTicket() == nil {
+		t.Errorf("other got %v", d)
+	}
+	none(t, other)
+
+	// A change to a Ticket nobody watches sends no detail, and an unwatched one stops.
+	h.OnCommit(store.Changes{Tickets: []string{"T-2"}})
+	if d := next(t, watcher); d.GetTicket().GetId() != "T-2" {
+		t.Errorf("got %v", d)
+	}
+	none(t, watcher)
+	watcher.Unwatch("T-1")
+	h.OnCommit(store.Changes{Tickets: []string{"T-1"}})
+	next(t, watcher)
+	none(t, watcher)
+}
+
+func TestRoutingRecordsInSnapshot(t *testing.T) {
+	f := newFake()
+	f.mu.Lock()
+	f.decisions["D-1"] = core.Decision{ID: "D-1", Kind: "ignore", Thread: "github:o/r#1", WouldAccept: true,
+		TriggerIDs: []string{"R-1"}, At: epoch0,
+		Reasons: []core.Reason{{Code: "not_addressed", Values: map[string]string{"text": "hi"}}, {Code: "policy_off"}}}
+	f.triggers["R-1"] = core.Trigger{ID: "R-1", Source: "github", Actor: core.ActorRef{ID: "ann"}, Threads: []string{"github:o/r#1"},
+		Text: "hello\nthere", Disposition: core.Disposition{Filtered: "x"}, At: epoch0}
+	f.threads["github:o/r#1"] = core.Thread{Key: "github:o/r#1", Queued: []string{"R-1"}, Decisions: []string{"D-1"},
+		Subscriptions: []core.Subscription{{TicketID: "T-1", Own: true}}}
+	f.mu.Unlock()
+	s, err := New(f, quiet()).Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s.Decisions) != 1 {
+		t.Fatalf("decisions = %v", s.Decisions)
+	}
+	d := s.Decisions[0]
+	if !d.WouldAccept || d.Kind != "ignore" || len(d.Reasons) != 2 || d.Reasons[0].Code != "not_addressed" ||
+		d.Reasons[0].Values["text"] != "hi" || d.DismissedAt != nil || d.Triggers[0] != "R-1" {
+		t.Errorf("decision = %v", d)
+	}
+	if tr := s.Triggers[0]; tr.Text != "hello there" || tr.Outcome != "filtered:x" || tr.Thread != "github:o/r#1" || tr.Actor != "ann" {
+		t.Errorf("trigger = %v", tr)
+	}
+	if th := s.Threads[0]; th.Queued != 1 || th.Decisions != 1 || th.Tickets[0] != "T-1(own)" {
+		t.Errorf("thread = %v", th)
+	}
+}
+
+func TestApprovalInputRedacted(t *testing.T) {
+	f := newFake()
+	f.mu.Lock()
+	f.approvals["A-1"] = core.Approval{ID: "A-1", TicketID: "T-1", State: core.ApprovalPending, Tool: "Bash",
+		Input: []byte(`{"command":"curl -H 'x' https://x.test -d ghs_16C7e42F292c6912E7710c838347Ae178B4a"}`)}
+	f.mu.Unlock()
+	h := start(t, f)
+	snap, err := h.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if in := snap.Approvals[0].InputRedacted; strings.Contains(in, "ghs_") || !strings.Contains(in, "***") {
+		t.Errorf("snapshot input = %q", in)
+	}
+	sub, _ := h.Subscribe(0, h.Epoch())
+	h.OnCommit(store.Changes{Approvals: []string{"A-1"}})
+	if in := next(t, sub).GetApproval().GetInputRedacted(); strings.Contains(in, "ghs_") {
+		t.Errorf("delta input = %q", in)
+	}
+}
+
+func TestCommitOverflowResyncsEverySubscriber(t *testing.T) {
+	f := newFake()
+	f.put(ticket("T-1"))
+	h := New(f, quiet())
+	h.in = make(chan store.Changes, 1)
+	sub, _ := h.Subscribe(0, h.Epoch())
+	h.publish(&athenav1.Delta{Change: &athenav1.Delta_Node{Node: &athenav1.NodeStatus{}}})
+	<-sub.C()
+	// The loop is not running: the first commit fits, the others overflow.
+	for i := 0; i < 3; i++ {
+		h.OnCommit(store.Changes{Tickets: []string{"T-1"}})
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	h.Start(ctx)
+	select {
+	case _, ok := <-sub.C():
+		if ok {
+			t.Fatal("got a delta, want a close")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("subscriber not closed")
+	}
+	if !sub.Resync() {
+		t.Error("closed without resync")
+	}
+	// A cursor from before the loss is refused; the hub works on afterwards.
+	if _, need := h.Subscribe(1, h.Epoch()); !need {
+		t.Error("a cursor from before the loss resumed")
+	}
+	again, need := h.Subscribe(0, "")
+	if !need {
+		t.Fatal("expected snapshot")
+	}
+	h.OnCommit(store.Changes{Tickets: []string{"T-1"}})
+	if d := next(t, again); d.GetTicket() == nil {
+		t.Errorf("got %v", d)
+	}
+}
+
+func TestHealthPublishedOnlyOnChange(t *testing.T) {
+	f := newFake()
+	f.setHealth(HealthItem{Name: "github", OK: true})
+	h := New(f, quiet())
+	h.healthTick = time.Hour
+	h.Start(context.Background())
+	t0 := epoch0
+	h.now = func() time.Time { return t0 }
+	sub, _ := h.Subscribe(0, h.Epoch())
+	h.publishHealth()
+	none(t, sub)
+	f.setHealth(HealthItem{Name: "github", OK: false, Message: "rate limited"})
+	t0 = epoch0.Add(time.Minute)
+	h.publishHealth()
+	d := next(t, sub)
+	it := d.GetHealth().GetItems()[0]
+	if it.Ok || it.Message != "rate limited" || !it.Since.AsTime().Equal(t0) {
+		t.Errorf("health delta = %v", d)
+	}
+	h.publishHealth()
+	none(t, sub)
+	snap, _ := h.Snapshot()
+	if snap.Health.Items[0].Ok {
+		t.Error("snapshot health is stale")
+	}
+}
+
+func TestNodeChangePublished(t *testing.T) {
+	f := newFake()
+	f.node = node.Status{Name: "mac", Slots: 4}
+	h := start(t, f)
+	sub, _ := h.Subscribe(0, h.Epoch())
+	h.NodeChanged()
+	none(t, sub) // unchanged: nothing to say
+	f.mu.Lock()
+	f.node = node.Status{Name: "mac", Slots: 4, SlotsInUse: 1, LiveTicketIDs: []string{"T-1"}, Queued: 2}
+	f.mu.Unlock()
+	h.NodeChanged()
+	n := next(t, sub).GetNode()
+	if n.SlotsInUse != 1 || n.Queued != 2 || n.LiveTicketIds[0] != "T-1" || n.Name != "mac" {
+		t.Errorf("node = %v", n)
+	}
+}
+
+func TestSnapshotCursorAndEpochIsolation(t *testing.T) {
+	f := newFake()
+	f.put(ticket("T-1"))
+	h := start(t, f)
+	h.OnCommit(store.Changes{Tickets: []string{"T-1"}})
+	waitSeq(t, h, 1)
+	s, err := h.Snapshot()
+	if err != nil || s.Cursor != 1 {
+		t.Fatalf("snapshot cursor = %d, %v", s.Cursor, err)
+	}
+}
