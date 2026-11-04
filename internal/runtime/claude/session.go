@@ -373,11 +373,19 @@ func (s *Session) Events() <-chan Event { return s.events }
 // Send writes one user message to the session. A message sent while a turn is
 // running is folded into that turn. After the process has exited it returns an
 // error.
-func (s *Session) Send(text string) error {
-	line, err := json.Marshal(map[string]any{
+func (s *Session) Send(text string) error { return s.SendMessage(text, "") }
+
+// SendMessage is Send with the message's uuid (left out when empty): with --replay-user-messages, the echo of the
+// message carries it back (UserEcho.UUID), so the message is known by it whatever the CLI does to its text.
+func (s *Session) SendMessage(text, uuid string) error {
+	msg := map[string]any{
 		"type":    "user",
 		"message": map[string]any{"role": "user", "content": text},
-	})
+	}
+	if uuid != "" {
+		msg["uuid"] = uuid
+	}
+	line, err := json.Marshal(msg)
 	if err != nil {
 		return err
 	}

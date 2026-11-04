@@ -40,6 +40,22 @@ func (h *harness) receipt(id string) *Receipt {
 	return r
 }
 
+// receiptsOf returns a Ticket's receipts of one purpose.
+func (h *harness) receiptsOf(ticketID, purpose string) []*Receipt {
+	h.t.Helper()
+	var out []*Receipt
+	h.must(h.repos.Tx(func(tx Tx) error {
+		all, err := tx.TicketReceipts(ticketID)
+		for _, r := range all {
+			if r.Purpose == purpose {
+				out = append(out, r)
+			}
+		}
+		return err
+	}))
+	return out
+}
+
 func (h *harness) reply(r ReplyRequest) string {
 	h.t.Helper()
 	id, err := h.eng.Reply(r)
@@ -185,8 +201,11 @@ func TestAttentionOnlyWithAttention(t *testing.T) {
 	eq(t, "the same text in one attention: one receipt",
 		h.reply(ReplyRequest{TicketID: a, Purpose: PurposeAttention, Text: "Which page do you mean?"}), id)
 	eq(t, "one queued", len(h.replyEffects()), 1)
-	via := h.reply(ReplyRequest{TicketID: a, TriggerID: "c:1", Purpose: PurposeAttention, Text: "Which page, exactly?"})
-	eq(t, "to a trigger that reached it", h.receipt(via).Channel.Address["comment"], "c:1")
+	// At most once per question: other wording, even to a Trigger that reached it, is the receipt already queued.
+	eq(t, "other wording of the same question",
+		h.reply(ReplyRequest{TicketID: a, TriggerID: "c:1", Purpose: PurposeAttention, Text: "Which page, exactly?"}), id)
+	eq(t, "still one queued", len(h.replyEffects()), 1)
+	eq(t, "one attention receipt", len(h.receiptsOf(a, PurposeAttention)), 1)
 
 	h.must(h.eng.AddPersonInput(a, "The login page.")) // the person answers: Attention clears
 	eq(t, "cleared", h.ticket(a).Attention == nil, true)

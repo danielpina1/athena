@@ -1,6 +1,7 @@
 package router
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -10,10 +11,13 @@ import (
 
 // The unconfirmed messages: what was written to the router session but may not be in its conversation yet. Claude Code
 // holds a message sent mid-turn until a step takes it in, so a crash or a restart in between would lose it. Each message
-// is kept in kv router.unconfirmed before it is written (so before its effect row and the notices it carries are
-// settled); the session's echo of it (--replay-user-messages, sent when a turn takes the message in) marks it taken; the
-// Result that ends that turn drops what was taken. A message sent after a turn's last step is not echoed before that
-// turn's Result, so it stays. On every start the rest goes again, as one message headed by recoveryNote.
+// is kept in kv router.unconfirmed, with a uuid of its own, before it is written (so before its effect row and the
+// notices it carries are settled); the session's echo of it (--replay-user-messages, sent when a turn takes the message
+// in) carries that uuid and marks it taken, whatever the CLI did to its text; the Result that ends that turn drops what
+// was taken. A message sent after a turn's last step is not echoed before that turn's Result, so it stays. A stop that
+// lets the session exit on its own (the CLI finishes the turn it took the messages into) drops the taken ones too. On
+// every start the rest goes again, as one message headed by recoveryNote: after a crash, a taken message whose turn
+// never ended goes again with the untaken ones.
 
 const (
 	unconfirmedKey = "router.unconfirmed"
@@ -21,11 +25,24 @@ const (
 	maxUnconfirmed = 50
 )
 
-// sentMsg is one unconfirmed message: Text as written, Body without a recovery note (what a resend sends again).
+// sentMsg is one unconfirmed message: Text as written, Body without a recovery note (what a resend sends again), UUID
+// the uuid it was written with (empty for a message kept before uuids, matched by its text).
 type sentMsg struct {
 	Body  string `json:"body"`
 	Text  string `json:"text"`
+	UUID  string `json:"uuid,omitempty"`
 	Taken bool   `json:"taken,omitempty"`
+}
+
+// newUUID returns a random (version 4) UUID.
+func newUUID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		panic(err) // crypto/rand never fails on supported platforms
+	}
+	b[6] = b[6]&0x0f | 0x40
+	b[8] = b[8]&0x3f | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
 // loadUnconfirmed reads the kept messages; the Host must not be running.
@@ -63,20 +80,21 @@ func (h *Host) persist() error {
 	return nil
 }
 
-// sent keeps a message about to be written.
-func (h *Host) sent(text string) error {
+// sent keeps a message about to be written and returns the uuid to write it with.
+func (h *Host) sent(text string) (string, error) {
 	h.unMu.Lock()
 	defer h.unMu.Unlock()
-	h.unconfirmed = append(h.unconfirmed, sentMsg{Body: text, Text: text})
-	return h.persist()
+	id := newUUID()
+	h.unconfirmed = append(h.unconfirmed, sentMsg{Body: text, Text: text, UUID: id})
+	return id, h.persist()
 }
 
-// unsent forgets a message whose write failed (its effect sends it again).
-func (h *Host) unsent(text string) {
+// unsent forgets the message of uuid id, whose write failed (its effect sends it again).
+func (h *Host) unsent(id string) {
 	h.unMu.Lock()
 	defer h.unMu.Unlock()
 	for i := len(h.unconfirmed) - 1; i >= 0; i-- {
-		if m := h.unconfirmed[i]; !m.Taken && m.Text == text {
+		if m := h.unconfirmed[i]; !m.Taken && m.UUID == id {
 			h.unconfirmed = append(h.unconfirmed[:i], h.unconfirmed[i+1:]...)
 			break
 		}
@@ -86,7 +104,9 @@ func (h *Host) unsent(text string) {
 	}
 }
 
-// observe follows a session event: an echo marks the first matching message taken, a Result drops the taken ones.
+// observe follows a session event: an echo marks its message taken, a Result drops the taken ones. An echo is matched
+// by its uuid; only an echo without one (a CLI that does not carry it back) is matched by text, to the first untaken
+// message of that text.
 func (h *Host) observe(ev claude.Event) {
 	switch e := ev.(type) {
 	case claude.Init:
@@ -95,31 +115,38 @@ func (h *Host) observe(ev claude.Event) {
 		h.unMu.Lock()
 		defer h.unMu.Unlock()
 		for i := range h.unconfirmed {
-			if m := &h.unconfirmed[i]; !m.Taken && m.Text == e.Text {
-				m.Taken = true
-				if err := h.persist(); err != nil {
-					h.log.Error("mark a message taken", "error", err)
-				}
-				return
+			m := &h.unconfirmed[i]
+			if m.Taken || (e.UUID != "" && m.UUID != e.UUID) || (e.UUID == "" && m.Text != e.Text) {
+				continue
 			}
+			m.Taken = true
+			if err := h.persist(); err != nil {
+				h.log.Error("mark a message taken", "error", err)
+			}
+			return
 		}
 	case claude.Result:
 		h.keepSession(e.SessionID)
-		h.unMu.Lock()
-		defer h.unMu.Unlock()
-		kept := h.unconfirmed[:0]
-		for _, m := range h.unconfirmed {
-			if !m.Taken {
-				kept = append(kept, m)
-			}
+		h.dropTaken()
+	}
+}
+
+// dropTaken forgets the messages a turn took in: they are in the session's conversation.
+func (h *Host) dropTaken() {
+	h.unMu.Lock()
+	defer h.unMu.Unlock()
+	kept := h.unconfirmed[:0]
+	for _, m := range h.unconfirmed {
+		if !m.Taken {
+			kept = append(kept, m)
 		}
-		if len(kept) == len(h.unconfirmed) {
-			return
-		}
-		h.unconfirmed = kept
-		if err := h.persist(); err != nil {
-			h.log.Error("drop confirmed messages", "error", err)
-		}
+	}
+	if len(kept) == len(h.unconfirmed) {
+		return
+	}
+	h.unconfirmed = kept
+	if err := h.persist(); err != nil {
+		h.log.Error("drop confirmed messages", "error", err)
 	}
 }
 
@@ -148,14 +175,15 @@ func (h *Host) resend(sess *claude.Session) {
 	}
 	body := strings.Join(bodies, "\n")
 	text := recoveryNote + "\n" + body
-	h.unconfirmed = []sentMsg{{Body: body, Text: text}}
+	id := newUUID()
+	h.unconfirmed = []sentMsg{{Body: body, Text: text, UUID: id}}
 	err := h.persist()
 	h.unMu.Unlock()
 	if err != nil {
 		h.log.Error("keep the resend", "error", err)
 	}
 	h.log.Info("resending unconfirmed messages to the router session", "messages", len(bodies))
-	if err := sess.Send(text); err != nil {
+	if err := sess.SendMessage(text, id); err != nil {
 		h.log.Warn("resend to the router session", "error", err)
 	}
 }

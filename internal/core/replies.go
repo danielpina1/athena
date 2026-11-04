@@ -89,7 +89,8 @@ type Receipt struct {
 	// Seq is its place in the queue; QueuedAt is when it was queued.
 	Seq      int       `json:"seq"`
 	QueuedAt time.Time `json:"queuedAt"`
-	// Round names, for a result, the Report round it reports (its Assignment and the Report's time).
+	// Round names, for a result, the Report round it reports (its Assignment and the Report's time), and for attention
+	// the Attention (question) it asks.
 	Round string `json:"round,omitempty"`
 }
 
@@ -108,7 +109,8 @@ func ReceiptID(ticketID, purpose, slot, text string) string {
 //     at most once per Trigger (≤ 100 words); it records the Trigger's Disposition.Acknowledged.
 //   - answer: to a person's message that reached the Ticket; it records Disposition.Acknowledged too.
 //   - result: once per round whose Report is ready or dropped.
-//   - attention: only while the Ticket has an Attention.
+//   - attention: only while the Ticket has an Attention, at most once per Attention: a later request for the same
+//     question, in any wording, returns the first receipt's ID and queues nothing.
 //
 // Other replies are at most 4,000 characters. A refused request returns a *UserError.
 func (e *Engine) Reply(r ReplyRequest) (string, error) {
@@ -183,7 +185,7 @@ func (o *op) reply(r ReplyRequest) (string, error) {
 		}
 	case PurposeAttention:
 		if t.Attention != nil {
-			slot = t.Attention.ID
+			slot, round = t.Attention.ID, t.Attention.ID
 		}
 	}
 	id := ReceiptID(t.ID, r.Purpose, slot, r.Text)
@@ -233,6 +235,11 @@ func (o *op) reply(r ReplyRequest) (string, error) {
 	case PurposeAttention:
 		if t.Attention == nil {
 			return "", userErrorf("ticket %s has no question for a person", t.ID)
+		}
+		// At most once per question: asked again, in any wording (a relay resent after a restart), it is the receipt
+		// already queued, and nothing new goes out.
+		if i := slices.IndexFunc(receipts, func(x *Receipt) bool { return x.Purpose == PurposeAttention && x.Round == round }); i >= 0 {
+			return receipts[i].ID, nil
 		}
 		if asker == nil && t.Attention.TriggerID != "" {
 			if asker, err = o.tx.GetTrigger(t.Attention.TriggerID); err != nil {

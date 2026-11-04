@@ -508,6 +508,43 @@ func TestStartRequiresSettingsAndMCPConfig(t *testing.T) {
 	collect(t, s)
 }
 
+// SendMessage writes the message's uuid; with --replay-user-messages the echo carries it back.
+func TestSendMessageUUIDEchoed(t *testing.T) {
+	stdinLog := filepath.Join(t.TempDir(), "stdin.log")
+	s, err := Start(context.Background(), withStubs(t, Options{
+		Binary: fakeBinary(t), Dir: t.TempDir(), Model: "haiku", ReplayUserMessages: true,
+		Env: []string{"ATHENA_FAKE_STDIN_LOG=" + stdinLog},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SendMessage("hello", "0b9f3c3e-2f43-4c1e-9d1a-1f2e3d4c5b6a"); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.After(20 * time.Second)
+	for {
+		select {
+		case ev, ok := <-s.Events():
+			if !ok {
+				t.Fatal("events closed before the echo")
+			}
+			if e, ok := ev.(UserEcho); ok {
+				if e != (UserEcho{Text: "hello", UUID: "0b9f3c3e-2f43-4c1e-9d1a-1f2e3d4c5b6a"}) {
+					t.Fatalf("echo = %+v", e)
+				}
+				_ = s.Close()
+				raw, _ := os.ReadFile(stdinLog)
+				if !strings.Contains(string(raw), `"uuid":"0b9f3c3e-2f43-4c1e-9d1a-1f2e3d4c5b6a"`) {
+					t.Fatalf("stdin = %s, want the uuid", raw)
+				}
+				return
+			}
+		case <-deadline:
+			t.Fatal("no echo")
+		}
+	}
+}
+
 func TestCloseDoesNotHangOnBlockedSend(t *testing.T) {
 	s, err := Start(context.Background(), withStubs(t, Options{
 		Binary:     fakeBinary(t),

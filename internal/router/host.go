@@ -353,6 +353,11 @@ func (h *Host) runOnce(ctx context.Context, crashes *int) string {
 		}
 	}
 	err = sess.Wait()
+	if h.isStopped() && !sess.Killed() {
+		// A stop closed the session's input and it exited on its own: the CLI finished the turn it took the messages
+		// into, so they are in the conversation and the next start does not send them again.
+		h.dropTaken()
+	}
 	h.clearSession(sess)
 	cause := "exited"
 	if err != nil {
@@ -448,11 +453,12 @@ func (h *Host) deliver(ctx context.Context, text string) error {
 	b.WriteString(text)
 	msg := b.String()
 	// Kept before it is written, so its row and the notices it carries can be settled once it is.
-	if err := h.sent(msg); err != nil {
+	id, err := h.sent(msg)
+	if err != nil {
 		return err
 	}
-	if err := sess.Send(msg); err != nil {
-		h.unsent(msg)
+	if err := sess.SendMessage(msg, id); err != nil {
+		h.unsent(id)
 		return fmt.Errorf("router: send: %w", err)
 	}
 	for _, n := range held {

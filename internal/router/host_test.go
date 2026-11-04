@@ -538,6 +538,7 @@ func count(msgs []string, sub string) int {
 func TestUnconfirmedSurviveRestart(t *testing.T) {
 	e := newEnv(t)
 	t.Setenv("ATHENA_FAKE_FIXTURE", noResultFixture(t))
+	t.Setenv("ATHENA_FAKE_NO_ECHO", "1") // never taken into a turn
 	tk := e.accept("github:issuecomment:1", "github:o/r#1")
 	e.start()
 	e.must(e.eng.FileReport(tk.ID, core.ReportInput{State: core.ReportBlocked, Summary: "need the deploy key"}))
@@ -561,11 +562,68 @@ func TestUnconfirmedSurviveRestart(t *testing.T) {
 	}
 }
 
+// An echo is matched by the uuid its message was sent with, not by its text: the CLI may reshape what it echoes, and
+// another message's echo never takes a message of the same text.
+func TestEchoMatchedByUUID(t *testing.T) {
+	e := newEnv(t)
+	u1, err := e.host.sent("m1")
+	e.must(err)
+	u2, err := e.host.sent("m2")
+	e.must(err)
+	if u1 == "" || u2 == "" || u1 == u2 {
+		t.Fatalf("uuids %q %q, want two distinct", u1, u2)
+	}
+	e.host.observe(claude.UserEcho{Text: "m1 as the CLI reshaped it", UUID: u1})
+	e.host.observe(claude.UserEcho{Text: "m2", UUID: "another-message"})
+	e.host.observe(claude.Result{SessionID: "s"})
+	if got := e.host.pendingTexts(); !slices.Equal(got, []string{"m2"}) {
+		t.Fatalf("unconfirmed = %q, want m1 taken by its uuid and m2 kept", got)
+	}
+}
+
+// A restart that is no crash sends again nothing the session already echoed: an echo in another shape still takes its
+// message by uuid, and an echoed message whose turn the stop let finish is in the conversation.
+func TestRestartResendsNothingEchoed(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		fixture func(*testing.T) string
+	}{
+		{"turn ended", func(t *testing.T) string { return claudeFixture(t, "simple-turn.jsonl") }},
+		{"turn open at the stop", noResultFixture},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEnv(t)
+			t.Setenv("ATHENA_FAKE_FIXTURE", tc.fixture(t))
+			t.Setenv("ATHENA_FAKE_ECHO_BLOCKS", "1")
+			tk := e.accept("github:issuecomment:1", "github:o/r#1")
+			e.start()
+			e.must(e.eng.FileReport(tk.ID, core.ReportInput{State: core.ReportBlocked, Summary: "need the deploy key"}))
+			e.eventually("the relay taken", func() bool {
+				if count(e.messages(), "need the deploy key") != 1 {
+					return false
+				}
+				e.host.unMu.Lock()
+				defer e.host.unMu.Unlock()
+				return len(e.host.unconfirmed) == 0 || (len(e.host.unconfirmed) == 1 && e.host.unconfirmed[0].Taken)
+			})
+			e.restart()
+			e.eventually("the new session", func() bool { return len(e.invocations()) == 2 })
+			time.Sleep(300 * time.Millisecond)
+			if msgs := e.messages(); len(msgs) != 1 {
+				t.Fatalf("messages = %q, want nothing resent", msgs)
+			}
+			if got := e.host.pendingTexts(); len(got) != 0 {
+				t.Fatalf("unconfirmed after the restart = %q", got)
+			}
+		})
+	}
+}
+
 func TestResultClearsOnlyTakenMessages(t *testing.T) {
 	e := newEnv(t)
 	e.host.sent("m1")
 	e.host.sent("m2")
-	e.host.observe(claude.UserEcho{Text: "m1"})
+	e.host.observe(claude.UserEcho{Text: "m1"}) // an echo without a uuid falls back to its text
 	e.host.observe(claude.Result{SessionID: "s"})
 	if got := e.host.pendingTexts(); !slices.Equal(got, []string{"m2"}) {
 		t.Fatalf("unconfirmed = %q, want m2 kept: it was not taken before the Result", got)
