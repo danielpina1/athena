@@ -50,6 +50,8 @@ type tokenStore struct {
 
 	mu   sync.Mutex
 	held map[string]*heldToken // by Assignment ID
+	// dead holds the Assignments whose token was dropped: none is fetched for them until revive.
+	dead map[string]bool
 }
 
 // heldToken is one Assignment's token; its own lock serializes fetches, so concurrent requests fetch once.
@@ -62,7 +64,7 @@ type heldToken struct {
 }
 
 func newTokenStore(c Credentials) *tokenStore {
-	return &tokenStore{creds: c, now: time.Now, held: map[string]*heldToken{}}
+	return &tokenStore{creds: c, now: time.Now, held: map[string]*heldToken{}, dead: map[string]bool{}}
 }
 
 // token returns the Assignment's token for repo, fetching one when it holds none, holds one for another repository,
@@ -72,6 +74,10 @@ func (ts *tokenStore) token(ctx context.Context, assignmentID, repo string) (str
 		return "", errors.New("this node has no GitHub credentials")
 	}
 	ts.mu.Lock()
+	if ts.dead[assignmentID] {
+		ts.mu.Unlock()
+		return "", errors.New("the assignment has ended")
+	}
 	h := ts.held[assignmentID]
 	if h == nil {
 		h = &heldToken{}
@@ -110,11 +116,12 @@ func (ts *tokenStore) token(ctx context.Context, assignmentID, repo string) (str
 	return v, nil
 }
 
-// drop forgets the Assignment's token; a later request for it is refused.
+// drop forgets the Assignment's token; later requests for it are refused until revive.
 func (ts *tokenStore) drop(assignmentID string) {
 	ts.mu.Lock()
 	h := ts.held[assignmentID]
 	delete(ts.held, assignmentID)
+	ts.dead[assignmentID] = true
 	ts.mu.Unlock()
 	if h == nil {
 		return
@@ -122,6 +129,13 @@ func (ts *tokenStore) drop(assignmentID string) {
 	h.mu.Lock()
 	h.value, h.dropped = "", true
 	h.mu.Unlock()
+}
+
+// revive lets a new session of an Assignment whose token was dropped hold one again.
+func (ts *tokenStore) revive(assignmentID string) {
+	ts.mu.Lock()
+	delete(ts.dead, assignmentID)
+	ts.mu.Unlock()
 }
 
 // holds reports whether the store keeps a token for the Assignment.
@@ -147,6 +161,8 @@ const OpCredential = "credential"
 const (
 	CredentialGit = "git"
 	CredentialGh  = "gh"
+	// CredentialNode is the node's own git on a clone, by the nonce of that one call.
+	CredentialNode = "node"
 )
 
 // CredentialRequest asks for the token of the session of Ticket and Assignment. A git request carries git's
@@ -159,6 +175,8 @@ type CredentialRequest struct {
 	Protocol   string `json:"protocol,omitempty"`
 	Host       string `json:"host,omitempty"`
 	Path       string `json:"path,omitempty"`
+	// Nonce names the node's own git call (CredentialNode).
+	Nonce string `json:"nonce,omitempty"`
 }
 
 // CredentialResponse carries the token, the repository and the session's directory, or the Error that refused it.
@@ -172,9 +190,12 @@ type CredentialResponse struct {
 
 // handleCredential serves the token of a live session's own repository, and nothing else.
 func (n *Node) handleCredential(ctx context.Context, req CredentialRequest) CredentialResponse {
+	if req.Purpose == CredentialNode {
+		return n.handleNodeCredential(req)
+	}
 	s := n.lookup(req.Ticket, req.Assignment)
-	if s == nil {
-		n.log.Warn("credential request from an unknown session", "ticket", req.Ticket, "assignment", req.Assignment)
+	if s == nil || s.over() {
+		n.log.Warn("credential request from an unknown or ended session", "ticket", req.Ticket, "assignment", req.Assignment)
 		return CredentialResponse{Error: denyNoSession}
 	}
 	repo := s.t.Repo
@@ -198,6 +219,22 @@ func (n *Node) handleCredential(ctx context.Context, req CredentialRequest) Cred
 	}
 	s.log.Info("credential served", "purpose", req.Purpose)
 	return CredentialResponse{OK: true, Token: tok, Repo: repo, Dir: s.place.workDir}
+}
+
+// handleNodeCredential answers the helper of one of the node's own git calls, by its nonce, for that call's
+// repository on https://github.com only.
+func (n *Node) handleNodeCredential(req CredentialRequest) CredentialResponse {
+	v, ok := n.grants.Load(req.Nonce)
+	if req.Nonce == "" || !ok {
+		n.log.Warn("node credential request with an unknown nonce")
+		return CredentialResponse{Error: "unknown or expired nonce"}
+	}
+	g := v.(nodeGrant)
+	if !strings.EqualFold(req.Protocol, "https") || !strings.EqualFold(req.Host, githubHost) || !samePath(req.Path, g.repo) {
+		n.log.Warn("node credential refused: not the clone's repository", "repo", g.repo, "protocol", req.Protocol, "host", req.Host)
+		return CredentialResponse{Error: "credentials are only for https://" + githubHost + "/" + g.repo}
+	}
+	return CredentialResponse{OK: true, Token: string(g.token), Repo: g.repo}
 }
 
 // samePath reports whether git's credential path names repo: owner/name or owner/name.git, any case.
@@ -248,6 +285,10 @@ func (n *Node) githubEnv(s *session) []string {
 		{"credential.helper", ""}, // the owner's helpers would answer with the owner's own credentials
 		{"credential.helper", "!" + shellQuote(n.cfg.AthenaBin) + " git-credential"},
 		{"credential.useHttpPath", "true"},
+		// The owner's global insteadOf (such as git@github.com:) would push over SSH as the owner: the longer
+		// identity rewrite of the repository's URL wins, and SSH is off.
+		{"url." + githubTarget(s.t.Repo) + ".insteadOf", cloneURL(s.t.Repo)},
+		{"protocol.ssh.allow", "never"},
 	})
 }
 

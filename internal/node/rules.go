@@ -324,7 +324,7 @@ func credentialRule(ctx RuleContext, tool string, in map[string]any) (Decision, 
 // tokenEnvRe names the variables that carry or fetch a GitHub or git token, or show one in a trace; a Bash command that
 // names one is denied. None of them is set in a session; naming one is an attempt to supply or reveal a token.
 var tokenEnvRe = regexp.MustCompile(`\b(?:GH_TOKEN|GH_ENTERPRISE_TOKEN|GITHUB_ENTERPRISE_TOKEN|GIT_ASKPASS|SSH_ASKPASS|` +
-	`GIT_TRACE_REDACT|ATHENA_STATE|` + cloneTokenEnv + `)\b`)
+	`GIT_TRACE_REDACT|ATHENA_STATE)\b`)
 
 // globStem is the longest leading part of a glob pattern without wildcards.
 func globStem(pat string) string {

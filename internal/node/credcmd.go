@@ -27,12 +27,17 @@ const (
 // commands of the session's choosing with the token in their environment (alias, extension, config).
 var ghRefused = map[string]bool{"auth": true, "alias": true, "extension": true, "ext": true, "config": true}
 
-// RunGitCredential implements `athena git-credential <get|store|erase>`, git's credential helper in GitHub sessions.
+// RunGitCredential implements `athena git-credential [--node <nonce>] <get|store|erase>`, git's credential helper in
+// GitHub sessions and, with --node, of the node's own clone and fetch.
 // get reads git's request from stdin and prints username=x-access-token and the token when the node serves it for
 // that request; otherwise it prints nothing, so git fails to authenticate. store and erase do nothing. It always
 // exits 0, as git expects of a helper.
 func RunGitCredential(args []string, stdin io.Reader, stdout, stderr io.Writer, env []string) int {
 	getenv := envLookup(env)
+	nonce := ""
+	if len(args) >= 2 && args[0] == "--node" {
+		nonce, args = args[1], args[2:]
+	}
 	op := ""
 	if len(args) > 0 {
 		op = args[0]
@@ -51,11 +56,15 @@ func RunGitCredential(args []string, stdin io.Reader, stdout, stderr io.Writer, 
 	if op != "get" {
 		return 0
 	}
-	var resp CredentialResponse
-	err := callNode(getenv("ATHENA_SOCKET"), CredentialRequest{
+	creq := CredentialRequest{
 		Op: OpCredential, Ticket: getenv("ATHENA_TICKET"), Assignment: getenv("ATHENA_ASSIGNMENT"),
 		Purpose: CredentialGit, Protocol: req["protocol"], Host: req["host"], Path: req["path"],
-	}, &resp)
+	}
+	if nonce != "" {
+		creq.Ticket, creq.Assignment, creq.Purpose, creq.Nonce = "", "", CredentialNode, nonce
+	}
+	var resp CredentialResponse
+	err := callNode(getenv("ATHENA_SOCKET"), creq, &resp)
 	switch {
 	case err != nil:
 		fmt.Fprintf(stderr, "athena git-credential: the athena node is unreachable: %v\n", err)

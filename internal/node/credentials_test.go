@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -310,13 +311,17 @@ func TestWorkerEnvHasNoToken(t *testing.T) {
 		"GIT_AUTHOR_EMAIL":           botEmail,
 		"GIT_COMMITTER_NAME":         botLogin,
 		"GIT_COMMITTER_EMAIL":        botEmail,
-		"GIT_CONFIG_COUNT":           "3",
+		"GIT_CONFIG_COUNT":           "5",
 		"GIT_CONFIG_KEY_0":           "credential.helper",
 		"GIT_CONFIG_VALUE_0":         "",
 		"GIT_CONFIG_KEY_1":           "credential.helper",
 		"GIT_CONFIG_VALUE_1":         "!'" + h.cfg.AthenaBin + "' git-credential",
 		"GIT_CONFIG_KEY_2":           "credential.useHttpPath",
 		"GIT_CONFIG_VALUE_2":         "true",
+		"GIT_CONFIG_KEY_3":           "url." + githubTarget("o/r") + ".insteadOf",
+		"GIT_CONFIG_VALUE_3":         "https://github.com/o/r.git",
+		"GIT_CONFIG_KEY_4":           "protocol.ssh.allow",
+		"GIT_CONFIG_VALUE_4":         "never",
 		"ATHENA_DIR":                 dir,
 	} {
 		if got, ok := env[k]; !ok || got != want {
@@ -326,7 +331,7 @@ func TestWorkerEnvHasNoToken(t *testing.T) {
 	if p := env["PATH"]; !strings.HasPrefix(p, filepath.Join(h.cfg.StateDir, ShimsDir)+string(os.PathListSeparator)) {
 		t.Errorf("PATH = %q, want the shims first", p)
 	}
-	for _, k := range []string{"GH_TOKEN", "GITHUB_TOKEN", cloneTokenEnv} {
+	for _, k := range []string{"GH_TOKEN", "GITHUB_TOKEN", "ATHENA_NODE_GIT_TOKEN"} {
 		if _, ok := env[k]; ok {
 			t.Errorf("env has %s", k)
 		}
@@ -592,5 +597,139 @@ func TestThreadArg(t *testing.T) {
 		if got, err := ThreadArg(in, ""); err == nil {
 			t.Errorf("ThreadArg(%q) = %q, want an error", in, got)
 		}
+	}
+}
+
+// A credential request made after the runner dropped its token, while the session is still registered, mints nothing.
+func TestTokenNotMintedAfterDrop(t *testing.T) {
+	type result struct {
+		resp CredentialResponse
+		held bool
+	}
+	got := make(chan result, 1)
+	var h *ghHarness
+	h = newGHHarness(t, &fakeCreds{}, nil)
+	h.n.afterDrop = func(s *session) {
+		var r CredentialResponse
+		_ = callNode(h.cfg.SocketPath, CredentialRequest{Op: OpCredential, Ticket: s.t.ID, Assignment: s.a.ID, Purpose: CredentialGh}, &r)
+		got <- result{r, h.n.tokens.holds(s.a.ID)}
+	}
+	tk, _ := h.accept("github:issuecomment:1", "o/r", 12, "")
+	calls := h.creds.calls.Load()
+	if err := h.eng.StopTicket(tk.ID, "enough"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case r := <-got:
+		if r.resp.OK || r.resp.Token != "" || r.held {
+			t.Fatalf("a request after the drop got %+v (held %v)", r.resp, r.held)
+		}
+	case <-time.After(waitTimeout):
+		t.Fatal("the drop hook never ran")
+	}
+	if n := h.creds.calls.Load(); n != calls {
+		t.Fatalf("a token was minted after the drop (%d calls, want %d)", n, calls)
+	}
+}
+
+func TestTokenStoreTombstone(t *testing.T) {
+	creds := &fakeCreds{}
+	ts := newTokenStore(creds)
+	ctx := context.Background()
+	if _, err := ts.token(ctx, "a1", "o/r"); err != nil {
+		t.Fatal(err)
+	}
+	ts.drop("a1")
+	if _, err := ts.token(ctx, "a1", "o/r"); err == nil || creds.calls.Load() != 1 {
+		t.Fatalf("token after drop: %v (%d calls)", err, creds.calls.Load())
+	}
+	ts.revive("a1") // a new session of the same Assignment
+	if _, err := ts.token(ctx, "a1", "o/r"); err != nil {
+		t.Fatalf("token after revive: %v", err)
+	}
+}
+
+// R24: the node's own git gets no token in its environment or arguments; its helper asks the node with a nonce.
+func TestNodeGitHasNoTokenInEnvOrArgs(t *testing.T) {
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapDir := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "git.log")
+	wrapper := "#!/bin/sh\n{ printf 'ARGS:'; printf ' %s' \"$@\"; echo; env; } >> " + logPath + "\nexec " + realGit + " \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(wrapDir, "git"), []byte(wrapper), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", wrapDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	h := newGHHarness(t, &fakeCreds{}, nil)
+	h.accept("github:issuecomment:1", "o/r", 12, "")
+	b, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(b)
+	if !strings.Contains(log, "ARGS: ") || !strings.Contains(log, "clone") {
+		t.Fatalf("the wrapper saw no node git:\n%.2000s", log)
+	}
+	if strings.Contains(log, fakeToken) {
+		t.Fatal("a node git process had the token in its environment or arguments")
+	}
+	if !strings.Contains(log, "git-credential --node ") {
+		t.Errorf("the node's git has no athena helper:\n%.2000s", log)
+	}
+}
+
+// The node's helper answers only github.com, for its own call's repository, by a live nonce; git consults it only for
+// https://github.com.
+func TestCloneHelperRefusesOtherHost(t *testing.T) {
+	h := newGHHarness(t, &fakeCreds{}, nil)
+	nonce, revoke := h.n.grantNode("o/r", fakeToken)
+	helper := func(nonce, req string) string {
+		var out bytes.Buffer
+		env := []string{"ATHENA_SOCKET=" + h.cfg.SocketPath}
+		RunGitCredential([]string{"--node", nonce, "get"}, strings.NewReader(req), &out, io.Discard, env)
+		return out.String()
+	}
+	if got := helper(nonce, "protocol=https\nhost=github.com\npath=o/r.git\n"); got != "username=x-access-token\npassword="+fakeToken+"\n" {
+		t.Fatalf("own repository: %q", got)
+	}
+	for _, req := range []string{
+		"protocol=https\nhost=evil.example\npath=o/r.git\n",
+		"protocol=https\nhost=github.com\npath=o/s.git\n",
+		"protocol=https\nhost=github.com\n",
+		"protocol=http\nhost=github.com\npath=o/r.git\n",
+	} {
+		if got := helper(nonce, req); got != "" {
+			t.Errorf("request %q answered %q", req, got)
+		}
+	}
+	if got := helper("not-a-nonce", "protocol=https\nhost=github.com\npath=o/r.git\n"); got != "" {
+		t.Errorf("a made-up nonce got %q", got)
+	}
+	revoke()
+	if got := helper(nonce, "protocol=https\nhost=github.com\npath=o/r.git\n"); got != "" {
+		t.Errorf("a revoked nonce got %q", got)
+	}
+	// git asks the node's helper only for https://github.com: a helper that would answer anything is never asked
+	// for another host.
+	leaky := filepath.Join(t.TempDir(), "leaky")
+	if err := os.WriteFile(leaky, []byte("#!/bin/sh\nprintf 'username=x\\npassword=LEAKED\\n'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	clone := t.TempDir()
+	git(t, clone, "init", "-q")
+	fill := func(req string) string {
+		cmd := exec.Command("git", "-C", clone, "credential", "fill")
+		cmd.Env = cloneGitEnv(clone, "o/r", &nodeAuth{bin: leaky, socket: h.cfg.SocketPath, nonce: "n"})
+		cmd.Stdin = strings.NewReader(req)
+		out, _ := cmd.CombinedOutput()
+		return string(out)
+	}
+	if out := fill("protocol=https\nhost=evil.example\npath=o/r.git\n\n"); strings.Contains(out, "LEAKED") {
+		t.Errorf("the node's helper was asked for another host:\n%s", out)
+	}
+	if out := fill("protocol=https\nhost=github.com\npath=o/r.git\n\n"); !strings.Contains(out, "password=LEAKED") {
+		t.Errorf("the node's helper is not asked for github.com, so the test proves nothing:\n%s", out)
 	}
 }

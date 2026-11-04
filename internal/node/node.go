@@ -136,6 +136,10 @@ type Node struct {
 
 	// tokens holds each GitHub Assignment's token, in memory only.
 	tokens *tokenStore
+	// afterDrop, when set (tests), runs on a runner right after it dropped its Assignment's token.
+	afterDrop func(s *session)
+	// grants holds the nonces of the node's own git calls on a clone (repos.go): nonce -> nodeGrant.
+	grants sync.Map
 
 	// Metric handles; nil without Config.Metrics.
 	reg        *metrics.Registry
@@ -513,6 +517,21 @@ type session struct {
 	reports int
 	// githubVars are the ATHENA_GITHUB_* execution variables of a GitHub Ticket, set before the session starts.
 	githubVars []string
+	// ended is set once the session's runner is done, before it leaves the registry.
+	ended bool
+}
+
+func (s *session) markEnded() {
+	s.mu.Lock()
+	s.ended = true
+	s.mu.Unlock()
+}
+
+// over reports whether the session was stopped or its runner is done.
+func (s *session) over() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.stopped || s.ended
 }
 
 func (n *Node) newSession(t core.Ticket, a core.Assignment, p placement) *session {
@@ -707,7 +726,15 @@ func (n *Node) run(s *session) {
 	defer n.runners.Done()
 	defer n.post(message{kind: msgEnded, s: s})
 	// The token lives as long as the Assignment's runner: a stop, a failure or a crash give-up drops it.
-	defer n.tokens.drop(s.a.ID)
+	// A new session of an Assignment whose earlier session dropped its token may hold one again.
+	n.tokens.revive(s.a.ID)
+	defer func() {
+		s.markEnded()
+		n.tokens.drop(s.a.ID)
+		if n.afterDrop != nil {
+			n.afterDrop(s)
+		}
+	}()
 	r := &runner{n: n, s: s, eng: n.engine(), log: s.log, sent: map[string]bool{}, started: s.a.State == core.AssignmentRunning}
 	r.run()
 	if s.endedTicket() {
@@ -1233,14 +1260,17 @@ func renderInputs(t core.Ticket, ids []string, trigger func(id string) (core.Tri
 		case core.InputNote:
 			fmt.Fprintf(&b, "[input %s: note]\nNote: %s\n\n", in.ID, in.Text)
 		default:
+			var tr core.Trigger
+			found := false
 			if in.TriggerID != "" && trigger != nil {
-				if tr, ok := trigger(in.TriggerID); ok && len(tr.Threads) > 0 {
+				if tr, found = trigger(in.TriggerID); found && len(tr.Threads) > 0 {
 					b.WriteString(inputCard(*in, tr))
 					continue
 				}
 			}
+			// Only the owner's own Inputs say so: a Trigger of the owner Source, or a person Input without a Trigger.
 			from := "message"
-			if in.Human {
+			if in.Human && (in.TriggerID == "" || (found && tr.Source == core.OwnerActor.Source)) {
 				from = "message from the owner"
 			}
 			fmt.Fprintf(&b, "[input %s: %s]\n%s\n\n", in.ID, from, in.Text)
@@ -1377,7 +1407,7 @@ func (n *Node) prepare(s *session) error {
 		if err := os.MkdirAll(filepath.Dir(p.workDir), 0o700); err != nil {
 			return err
 		}
-		if err := ensureWorktree(p.repo, p.workDir, branchName(s.t), "HEAD"); err != nil {
+		if err := ensureWorktree(p.repo, p.workDir, branchName(s.t), "HEAD", nil); err != nil {
 			return err
 		}
 	case p.dirKey != "":
@@ -1404,7 +1434,8 @@ func (n *Node) prepare(s *session) error {
 
 // ensureWorktree creates dir as a worktree of repo on branch, from base for a new branch (without tracking it); an
 // existing dir is reused (a resumed Ticket).
-func ensureWorktree(repo, dir, branch, base string) error {
+func ensureWorktree(repo, dir, branch, base string, env []string) error {
+	gitOut := func(dir string, args ...string) (string, error) { return gitIn(dir, env, args...) }
 	if st, err := os.Stat(dir); err == nil {
 		if !st.IsDir() {
 			return fmt.Errorf("%s exists and is not a directory", dir)
@@ -1437,10 +1468,13 @@ func cleanupWorktree(p placement, t core.Ticket, log *slog.Logger) {
 	if _, err := os.Stat(p.workDir); err != nil {
 		return
 	}
+	var env []string
 	if p.github != "" {
-		// The clone is shared: no fetch or worktree add of another Ticket runs meanwhile.
+		// The clone is shared: no fetch or worktree add of another Ticket runs meanwhile, and its config is not trusted.
 		defer lockRepo(p.repo)()
+		env = cloneGitEnv(p.repo, p.github, nil)
 	}
+	gitOut := func(dir string, args ...string) (string, error) { return gitIn(dir, env, args...) }
 	dirty, err := gitOut(p.workDir, "status", "--porcelain")
 	if err != nil {
 		log.Warn("keeping worktree: cannot read its status", "dir", p.workDir, "error", err)
@@ -1469,9 +1503,15 @@ func cleanupWorktree(p placement, t core.Ticket, log *slog.Logger) {
 }
 
 // gitOut runs git in dir and returns its trimmed stdout.
-func gitOut(dir string, args ...string) (string, error) {
+func gitOut(dir string, args ...string) (string, error) { return gitIn(dir, nil, args...) }
+
+// gitIn runs git in dir with env (the node's, if nil) and returns its trimmed stdout.
+func gitIn(dir string, env []string, args ...string) (string, error) {
 	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	if env == nil {
+		env = os.Environ()
+	}
+	cmd.Env = append(env, "GIT_TERMINAL_PROMPT=0")
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()

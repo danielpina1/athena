@@ -1408,9 +1408,31 @@ func TestTriggerInputCard(t *testing.T) {
 	if strings.Index(got, "[input i1") > strings.Index(got, "[input i5") {
 		t.Error("inputs out of order")
 	}
-	// Without a way to read Triggers, a Trigger Input is plain text.
-	if plain := renderInputs(tk, []string{"i1"}, nil); !strings.HasPrefix(plain, "[input i1: message from the owner]\nplease fix the typo") {
+	// Without a way to read Triggers, a Trigger Input is plain text, and not the owner's.
+	if plain := renderInputs(tk, []string{"i1"}, nil); !strings.HasPrefix(plain, "[input i1: message]\nplease fix the typo") {
 		t.Errorf("plain rendering = %q", plain)
+	}
+}
+
+// R24 M2: only the owner's own Inputs say they are from the owner when an Input is not a card.
+func TestInputLabelFallback(t *testing.T) {
+	triggers := map[string]core.Trigger{
+		"owner-1":  {ID: "owner-1", Source: core.OwnerActor.Source, Human: true},
+		"slack:1":  {ID: "slack:1", Source: "slack", Human: true},
+		"github:1": {ID: "github:1", Source: "github", Human: true, Threads: []string{"github:o/r#1"}},
+	}
+	lookup := func(id string) (core.Trigger, bool) { tr, ok := triggers[id]; return tr, ok }
+	tk := core.Ticket{Inputs: []core.Input{
+		{ID: "a", Kind: core.InputTrigger, TriggerID: "owner-1", Text: "t", Human: true},
+		{ID: "b", Kind: core.InputTrigger, TriggerID: "slack:1", Text: "t", Human: true},
+		{ID: "c", Kind: core.InputTrigger, TriggerID: "missing", Text: "t", Human: true},
+		{ID: "d", Kind: core.InputText, Text: "t", Human: true},
+	}}
+	for id, want := range map[string]string{"a": "message from the owner", "b": "message", "c": "message", "d": "message from the owner"} {
+		got := renderInputs(tk, []string{id}, lookup)
+		if !strings.HasPrefix(got, "[input "+id+": "+want+"]\n") {
+			t.Errorf("input %s: %q, want label %q", id, got, want)
+		}
 	}
 }
 
