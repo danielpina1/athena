@@ -321,3 +321,29 @@ func TestOwnerMessageNeedsNoAckOrAnswer(t *testing.T) {
 	}
 	eq(t, "no reply queued", len(h.replyEffects()), before)
 }
+
+// A hand-back of the owner's message would drop it: an owner Trigger has no Thread to queue it on. It is refused.
+func TestOwnerMessageCannotBeHandedBack(t *testing.T) {
+	h := newEvals(t)
+	a := h.sourced("c:1")
+	h.must(h.eng.AddPersonInput(a, "Also redo the billing page."))
+	tk := h.ticket(a)
+	owner := tk.Inputs[len(tk.Inputs)-1].TriggerID
+	queued, err := h.eng.Handback(a, owner, "beyond this ticket")
+	wantUserError(t, "hand-back of the owner's message", err)
+	if err != nil && !strings.Contains(err.Error(), "messages from the owner can't be handed back") {
+		t.Errorf("refusal = %q", err)
+	}
+	if queued {
+		t.Error("the owner's message was queued")
+	}
+	var tr *Trigger
+	h.must(h.repos.Tx(func(tx Tx) error {
+		var err error
+		tr, err = tx.GetTrigger(owner)
+		return err
+	}))
+	if _, back := tr.Disposition.HandedBack[a]; back {
+		t.Error("the refused hand-back was recorded")
+	}
+}
