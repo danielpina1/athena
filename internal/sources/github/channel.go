@@ -84,14 +84,15 @@ func (s *Source) Link(ch core.ChannelRef) string {
 
 // Send posts text, with the receipt's hidden marker, as a reply in the review thread (comment_id) or as a comment on
 // the issue or pull request. A reply whose review comment is gone goes to the conversation instead. It answers Gone
-// when the issue or pull request is deleted or locked; any other failure is an error to retry. On a retry (attempt
+// when the issue or pull request is deleted or locked, a refusal (sources.ErrRefused) for a permanent failure, and
+// any other failure is an error to retry. On a retry (attempt
 // above zero) the earlier send may have reached GitHub, so the comments of the conversation since the message was
 // queued are read first and a comment of the App with the marker counts as sent.
 func (s *Source) Send(ctx context.Context, ch core.ChannelRef, req sources.SendRequest) (sources.SendResult, error) {
 	receiptID, text := req.ReceiptID, req.Text
 	t, err := s.parseTarget(ch)
 	if err != nil {
-		return "", err
+		return "", refusal(err)
 	}
 	c := s.client()
 	if c == nil {
@@ -103,7 +104,7 @@ func (s *Source) Send(ctx context.Context, ch core.ChannelRef, req sources.SendR
 			if goneErr(err) {
 				return sources.Gone, nil
 			}
-			return "", fmt.Errorf("github: check for an earlier send: %w", err)
+			return "", refusal(fmt.Errorf("github: check for an earlier send: %w", err))
 		}
 		if found {
 			return sources.Sent, nil
@@ -128,12 +129,22 @@ func (s *Source) Send(ctx context.Context, ch core.ChannelRef, req sources.SendR
 	return gone(err)
 }
 
-// gone is the outcome of a failed post: Gone for a target that can never receive it, else the error.
+// gone is the outcome of a failed post: Gone for a target that can never receive it, else the error (a refusal when
+// it is permanent).
 func gone(err error) (sources.SendResult, error) {
 	if goneErr(err) {
 		return sources.Gone, nil
 	}
-	return "", err
+	return "", refusal(err)
+}
+
+// refusal marks a permanent failure (ErrPermanent: a 403 such as a missing App permission, a 422, an invalid address)
+// as sources.ErrRefused, which the Outbox drops instead of retrying; any other error is returned as it is.
+func refusal(err error) error {
+	if errors.Is(err, ErrPermanent) {
+		return fmt.Errorf("%w: %w", err, sources.ErrRefused)
+	}
+	return err
 }
 
 func goneErr(err error) bool { return errors.Is(err, ErrGone) }

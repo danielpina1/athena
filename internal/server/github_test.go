@@ -679,3 +679,30 @@ func TestReceiveAllAdmitsUnaddressed(t *testing.T) {
 		return false
 	})
 }
+
+// A reply the Channel refused for good (a missing App permission, say) is dropped, and health shows it for a day.
+func TestHealthShowsRefusedReplies(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "athena.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	c := &control{st: st}
+	if h := c.health(); len(h.Effects) != 0 {
+		t.Fatalf("effects = %v, want none", h.Effects)
+	}
+	at := time.Now()
+	for i, id := range []string{"r1", "r2"} {
+		r := &core.Receipt{ID: id, TicketID: "T-0001", Purpose: core.PurposeAttention, Text: "Which page?",
+			Conversation: "github:o/r#3", State: core.ReceiptDropped, DroppedReason: core.DropRefused, DroppedAt: &at,
+			LastError: "github: POST /repos/o/r/issues/3/comments: 403 Resource not accessible by integration", Seq: i + 1}
+		if err := st.Tx(func(tx *store.Tx) error { return tx.PutReceipt(r) }); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := c.health().Effects[core.EffectReply]
+	if !strings.Contains(got, "r2") || !strings.Contains(got, "github:o/r#3") || !strings.Contains(got, "403 Resource not accessible") ||
+		!strings.Contains(got, "1 more") {
+		t.Fatalf("reply health = %q, want the latest refusal and the count", got)
+	}
+}

@@ -41,6 +41,11 @@ func (tx *Tx) PutReceipt(r *core.Receipt) error {
 	return nil
 }
 
+// ReceiptsInState returns the reply receipts in a state (waiting, sent or dropped), in queue order (Seq).
+func (tx *Tx) ReceiptsInState(state string) ([]*core.Receipt, error) {
+	return tx.receipts(`SELECT doc FROM receipts WHERE state = ?`, state)
+}
+
 // TicketReceipts returns a Ticket's reply receipts, in queue order (Seq).
 func (tx *Tx) TicketReceipts(ticketID string) ([]*core.Receipt, error) {
 	return tx.receipts(`SELECT doc FROM receipts WHERE ticket_id = ?`, ticketID)

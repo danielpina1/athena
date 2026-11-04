@@ -5,7 +5,9 @@ package outbox
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 	"unicode/utf8"
 
@@ -38,7 +40,8 @@ var Options = effects.Options{Concurrency: 1, Backoff: effects.Backoff{First: 5 
 //   - drops it (channelGone) when the Source no longer listens to the conversation, or noChannel when the Source has
 //     no Channel;
 //   - otherwise records the send as started (Started), then sends it: sent settles it, gone drops it (channelGone)
-//     for good, and a failure counts an attempt (Attempts) on the receipt and is returned for the runner to back off.
+//     for good, a refusal (sources.ErrRefused) drops it (refused) with the failure in LastError, and any other failure
+//     counts an attempt (Attempts) on the receipt and is returned for the runner to back off.
 //
 // A receipt that is missing, sent or dropped needs nothing.
 func Handler(reg *sources.Registry, st *store.Store) effects.Handler {
@@ -94,6 +97,12 @@ func Handler(reg *sources.Registry, st *store.Store) effects.Handler {
 		}
 		res, err := ch.Send(ctx, r.Channel, sources.SendRequest{ReceiptID: r.ID, Attempt: started, QueuedAt: r.QueuedAt, Text: r.Text})
 		if err != nil {
+			if ctx.Err() == nil && errors.Is(err, sources.ErrRefused) {
+				// Retrying cannot get past it: drop it with the reason, where health shows it (Refused).
+				slog.Warn("outbox: reply refused for good; dropped", "receipt", id, "ticket", r.TicketID,
+					"conversation", r.Conversation, "error", redact.String(err.Error()))
+				return refused(st, id, err)
+			}
 			if ctx.Err() == nil {
 				if ferr := failed(st, id, err); ferr != nil {
 					return fmt.Errorf("outbox: reply %s: %w (recording it: %v)", id, err, ferr)
@@ -145,6 +154,37 @@ func settle(st *store.Store, id, state, reason string) error {
 		}
 		return tx.PutReceipt(r)
 	})
+}
+
+// refused drops a waiting receipt the Channel refused for good, counting the failed send and keeping why.
+func refused(st *store.Store, id string, sendErr error) error {
+	return st.Tx(func(tx *store.Tx) error {
+		r, err := tx.GetReceipt(id)
+		if err != nil || r == nil || r.State != core.ReceiptWaiting {
+			return err
+		}
+		at := st.Now()
+		r.Attempts++
+		r.LastError = truncate(redact.String(sendErr.Error()), lastErrorMax)
+		r.State, r.DroppedAt, r.DroppedReason = core.ReceiptDropped, &at, core.DropRefused
+		return tx.PutReceipt(r)
+	})
+}
+
+// Refused returns the receipts dropped as refused since since, oldest first: messages that never went out and need a
+// person (a missing App permission, say).
+func Refused(st *store.Store, since time.Time) ([]*core.Receipt, error) {
+	var out []*core.Receipt
+	err := st.Tx(func(tx *store.Tx) error {
+		dropped, err := tx.ReceiptsInState(core.ReceiptDropped)
+		for _, r := range dropped {
+			if r.DroppedReason == core.DropRefused && r.DroppedAt != nil && !r.DroppedAt.Before(since) {
+				out = append(out, r)
+			}
+		}
+		return err
+	})
+	return out, err
 }
 
 // failed counts a failed send on a waiting receipt.

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/danielpina1/athena/internal/core"
+	"github.com/danielpina1/athena/internal/outbox"
 	"github.com/danielpina1/athena/internal/policy"
 	"github.com/danielpina1/athena/internal/router"
 	"github.com/danielpina1/athena/internal/sources/github"
@@ -51,6 +52,9 @@ type RouterHealth struct {
 	Error   string `json:"error,omitempty"`
 }
 
+// refusedShown is how long health shows a reply its Channel refused.
+const refusedShown = 24 * time.Hour
+
 func (c *control) health() HealthView {
 	h := HealthView{Effects: map[string]string{}, Router: RouterHealth{State: "off"}}
 	if c.gh != nil {
@@ -68,6 +72,19 @@ func (c *control) health() HealthView {
 	if c.fx != nil {
 		for kind, err := range c.fx.Health() {
 			h.Effects[kind] = err.Error()
+		}
+	}
+	if _, failing := h.Effects[core.EffectReply]; !failing && c.st != nil {
+		// A reply the Channel refused for good is dropped, not retried: it shows here for a day.
+		if refused, err := outbox.Refused(c.st, time.Now().Add(-refusedShown)); err != nil {
+			h.Effects[core.EffectReply] = err.Error()
+		} else if n := len(refused); n > 0 {
+			r := refused[n-1]
+			msg := fmt.Sprintf("reply %s to %s was refused and dropped: %s", r.ID, r.Conversation, r.LastError)
+			if n > 1 {
+				msg += fmt.Sprintf(" (and %d more)", n-1)
+			}
+			h.Effects[core.EffectReply] = msg
 		}
 	}
 	if c.host != nil {

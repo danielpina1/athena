@@ -43,6 +43,9 @@ const (
 	DropChannelGone = "channelGone"
 	// DropNoChannel: the Source has no Channel to send through.
 	DropNoChannel = "noChannel"
+	// DropRefused: the Channel refused the message for good, such as a missing permission or an invalid address; the
+	// receipt's LastError says why.
+	DropRefused = "refused"
 )
 
 const (

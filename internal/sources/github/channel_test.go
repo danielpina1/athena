@@ -251,6 +251,10 @@ func TestServerErrorRetriable(t *testing.T) {
 			if c.class != nil && !errors.Is(err, c.class) {
 				t.Fatalf("err = %v, want class %v", err, c.class)
 			}
+			// A permanent failure is a refusal for the Outbox, which drops the message; anything else is retried.
+			if refused := errors.Is(err, sources.ErrRefused); refused != (c.class == ErrPermanent) {
+				t.Fatalf("err = %v: refused %v", err, refused)
+			}
 		})
 	}
 }
@@ -395,8 +399,8 @@ func TestSendRefusesBadAddresses(t *testing.T) {
 		{Source: SourceName, Thread: "", Address: map[string]string{"repo": "o/r", "number": "5"}},
 		{Source: "feishu", Thread: "feishu:c", Address: map[string]string{"repo": "o/r", "number": "5"}},
 	} {
-		if res, err := s.Send(context.Background(), ch, req("rcpt", 0, "Hi.")); err == nil {
-			t.Errorf("Send(%v) = %v, nil", ch, res)
+		if res, err := s.Send(context.Background(), ch, req("rcpt", 0, "Hi.")); err == nil || !errors.Is(err, sources.ErrRefused) {
+			t.Errorf("Send(%v) = %v, %v; want a refusal", ch, res, err)
 		}
 	}
 	if len(f.reqs()) != 0 {

@@ -4,6 +4,7 @@ package sources
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"time"
@@ -46,8 +47,14 @@ type SendRequest struct {
 	Text     string
 }
 
+// ErrRefused marks a Send error the same message will never get past although its conversation is still there, such as
+// a missing permission, a validation error or an address that is not the conversation's: the message is dropped with
+// the failure, not retried. Test for it with errors.Is.
+var ErrRefused = errors.New("the channel refuses this message for good")
+
 // Channel is the optional part of a Source that writes to its conversations. Send returns an error for a failure that
-// may pass, Gone for one that never will. A retry (Attempt above zero) must not duplicate the message.
+// may pass, Gone for a conversation that can never receive the message, and an error that wraps ErrRefused for a
+// message it never will. A retry (Attempt above zero) must not duplicate the message.
 type Channel interface {
 	Send(ctx context.Context, ch core.ChannelRef, req SendRequest) (SendResult, error)
 	// Link is the URL a person opens to see the Channel.

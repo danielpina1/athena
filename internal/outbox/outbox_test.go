@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"reflect"
 	"sync"
@@ -33,6 +34,7 @@ type fakeSource struct {
 	deaf   map[string]bool
 	fails  map[string]int
 	gone   map[string]bool
+	refuse map[string]bool
 	sent   []string // texts, in send order
 	tries  int
 	calls  []sendCall // every Send, in order
@@ -47,7 +49,7 @@ type sendCall struct {
 }
 
 func newFakeSource() *fakeSource {
-	return &fakeSource{deaf: map[string]bool{}, fails: map[string]int{}, gone: map[string]bool{}}
+	return &fakeSource{deaf: map[string]bool{}, fails: map[string]int{}, gone: map[string]bool{}, refuse: map[string]bool{}}
 }
 
 func (s *fakeSource) Name() string { return "github" }
@@ -77,6 +79,9 @@ func (s *fakeSource) Send(_ context.Context, ch core.ChannelRef, req sources.Sen
 	}
 	if s.gone[text] {
 		return sources.Gone, nil
+	}
+	if s.refuse[text] {
+		return "", fmt.Errorf("403 Resource not accessible by integration: %w", sources.ErrRefused)
 	}
 	s.sent = append(s.sent, text)
 	return sources.Sent, nil
@@ -222,6 +227,30 @@ func TestOutboxGoneDropsNotRetried(t *testing.T) {
 	f.queue("n", "T-0001", issue, "Later.")
 	must(t, "later goes", f.run("n"))
 	must(t, "unknown receipt: nothing to do", f.run("nope"))
+}
+
+// A failure the same send will never get past (a missing App permission, a validation error, an address that is not
+// the conversation's) drops the receipt with its reason and the failure, instead of retrying it forever; Refused lists
+// it for health.
+func TestOutboxRefusedDropsWithReason(t *testing.T) {
+	f := newFixture(t)
+	f.queue("m", "T-0001", issue, "Hello.")
+	f.src.refuse["Hello."] = true
+	must(t, "a refusal settles", f.run("m"))
+	r := f.receipt("m")
+	eq(t, "dropped", [2]string{r.State, r.DroppedReason}, [2]string{core.ReceiptDropped, core.DropRefused})
+	eq(t, "the failure kept", r.LastError, "403 Resource not accessible by integration: "+sources.ErrRefused.Error())
+	eq(t, "counted", r.Attempts, 1)
+	must(t, "again: nothing to do", f.run("m"))
+	eq(t, "one try", f.src.tries, 1)
+	got, err := Refused(f.st, time.Time{})
+	must(t, "refused", err)
+	if len(got) != 1 || got[0].ID != "m" {
+		t.Fatalf("refused = %+v, want m", got)
+	}
+	if got, _ := Refused(f.st, time.Now().Add(time.Hour)); len(got) != 0 {
+		t.Fatalf("refused since later = %+v, want none", got)
+	}
 }
 
 // Messages of other Tickets, and of no Ticket, do not wait for a failing one.
