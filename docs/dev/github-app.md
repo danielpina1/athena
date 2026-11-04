@@ -211,7 +211,7 @@ change). `athena github setup` keeps this part when it rewrites the file.
     "required": false,
     "allowedDomains": ["proxy.golang.org", "sum.golang.org", "registry.npmjs.org"],
     "allowWrite": ["/Users/you/Library/Caches/go-build", "/Users/you/go/pkg/mod"],
-    "weakerNetworkIsolation": false,
+    "weakerNetworkIsolation": true,
     "caFile": ""
   }
 }
@@ -223,18 +223,18 @@ change). `athena github setup` keeps this part when it rewrites the file.
 | `required` | `true` makes a worker fail to start when the sandbox cannot start (on Linux: `bubblewrap` or `socat` missing). By default Claude Code warns and runs the commands **unsandboxed**; set it once the sandbox works on your machine. |
 | `allowedDomains` | Hosts reachable besides GitHub: package registries and module proxies your projects' builds and tests download from. `*.example.com` matches the subdomains. |
 | `allowWrite` | Absolute paths writable besides the Ticket's directory, such as build and module caches in your home directory (`go build` writes `~/Library/Caches/go-build` on macOS, `~/.cache/go-build` on Linux). |
-| `weakerNetworkIsolation` | macOS: lets commands reach the `trustd` service. `gh` (and other Go programs) need it to verify GitHub's certificate behind a TLS-inspecting proxy whose CA is in the keychain. It opens a path out of the sandbox through that service. |
+| `weakerNetworkIsolation` | macOS only. Unset: on. Lets commands reach the `trustd` service, which `gh` (and every other Go program) verifies each TLS certificate through; without it a worker's `gh pr create` fails with `x509: OSStatus -26276` on every Mac, proxy or not (`git` is unaffected: it reads a CA file). The trade-off: it opens a path out of the sandbox through `trustd`. `false` turns it off, and workers then cannot open pull requests. The server log shows the effective value at start. |
 | `caFile` | Absolute path to a PEM bundle that workers' git, curl and OpenSSL verify TLS with (`SSL_CERT_FILE`, `GIT_SSL_CAINFO`, `CURL_CA_BUNDLE`). Inside the sandbox git and curl cannot use the keychain, so behind a TLS-inspecting proxy they need the proxy's CA in a file. |
 
 **Behind a TLS-inspecting proxy** (a corporate secure web gateway that re-signs HTTPS with its own CA), a sandboxed
-worker's `git push` fails with `SSL certificate problem: unable to get local issuer certificate` and `gh` cannot
-verify GitHub either. Export the system roots plus the proxy's CA into one bundle your user can read, and set both
-fields:
+worker's `git push` fails with `SSL certificate problem: unable to get local issuer certificate`. Export the system
+roots plus the proxy's CA into one bundle your user can read, and set `caFile` (`gh` finds the proxy's CA in the
+keychain through `trustd`, so leave `weakerNetworkIsolation` on):
 
     { cat /etc/ssl/cert.pem; security find-certificate -a -p -c "<the CA's name>" /Library/Keychains/System.keychain; } \
         > ~/.athena/ca.pem
 
-    "sandbox": {"caFile": "/Users/you/.athena/ca.pem", "weakerNetworkIsolation": true}
+    "sandbox": {"caFile": "/Users/you/.athena/ca.pem"}
 
 **On Linux** the sandbox needs `bubblewrap` and `socat` installed. Linux cannot allow one Unix socket by path, so for
 workers to reach the node socket Athena lets their commands connect to **any** Unix socket (the Docker socket or an
@@ -287,8 +287,10 @@ SSH agent, if one is reachable); macOS allows the node socket alone.
   **Configure**), or fix the `--repo` spelling.
 - Nothing happens after a mention: `athena status` (is the source healthy?), `athena triggers`, `athena decisions`.
   In `observe` mode, "would accept" on an inferred candidate is the whole answer.
-- A worker's `git push` fails with `SSL certificate problem`: a TLS-inspecting proxy; set `caFile` and
-  `weakerNetworkIsolation` (section 5).
+- A worker's `git push` fails with `SSL certificate problem`: a TLS-inspecting proxy; set `caFile` (section 5).
+- A worker's `gh` fails with `x509: OSStatus -26276` (macOS): the sandbox blocks `trustd`, which `gh` verifies TLS
+  through. `weakerNetworkIsolation` is on by default; check the config does not set it to `false` (the server's
+  "claude code sandbox is on for workers" line shows the effective value) (section 5).
 - A worker's build or test fails with `Operation not permitted` or `CONNECT tunnel failed, response 403`: the sandbox
   refused a write or a host; add the cache path to `allowWrite` or the host to `allowedDomains` (section 5).
 - A mention must name the App's slug as a whole word (`@athena-yourname`), outside quoted lines. The App's own comments
@@ -305,7 +307,7 @@ pull request: point it only at a repository you do not mind changing.
 
 It needs `claude` and `gh` (logged in as you, since the issue must come from you and not from the App) on `PATH`.
 The worker runs sandboxed, as by default; behind a TLS-inspecting proxy add `ATHENA_LIVE_SANDBOX_CA_FILE=<bundle>`
-(section 5), which the test puts in `caFile` with `weakerNetworkIsolation`.
+(section 5), which the test puts in `caFile` (with `weakerNetworkIsolation`, already on by default on macOS).
 The server runs in a fresh temp state dir, configured from these variables; your own `~/.athena` is not used.
 
     ATHENA_LIVE_GITHUB=1 ATHENA_LIVE_REPO=yourlogin/sandbox \
