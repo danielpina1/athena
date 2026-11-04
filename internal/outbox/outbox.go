@@ -37,8 +37,8 @@ var Options = effects.Options{Concurrency: 1, Backoff: effects.Backoff{First: 5 
 //     three times;
 //   - drops it (channelGone) when the Source no longer listens to the conversation, or noChannel when the Source has
 //     no Channel;
-//   - otherwise sends it: sent settles it, gone drops it (channelGone) for good, and a failure counts an attempt on
-//     the receipt and is returned for the runner to back off.
+//   - otherwise records the send as started (Started), then sends it: sent settles it, gone drops it (channelGone)
+//     for good, and a failure counts an attempt (Attempts) on the receipt and is returned for the runner to back off.
 //
 // A receipt that is missing, sent or dropped needs nothing.
 func Handler(reg *sources.Registry, st *store.Store) effects.Handler {
@@ -83,7 +83,16 @@ func Handler(reg *sources.Registry, st *store.Store) effects.Handler {
 		if !ok {
 			return settle(st, id, core.ReceiptDropped, core.DropNoChannel)
 		}
-		res, err := ch.Send(ctx, r.Channel, r.ID, r.Attempts, r.Text)
+		// Record the send as started before making it: if the process dies after the Channel sent the message but before
+		// it is settled, the re-run is known to be a retry and the Channel checks before posting again.
+		started, err := begun(st, id)
+		if err != nil {
+			return fmt.Errorf("outbox: reply %s: %w", id, err)
+		}
+		if started < 0 {
+			return nil // settled meanwhile
+		}
+		res, err := ch.Send(ctx, r.Channel, sources.SendRequest{ReceiptID: r.ID, Attempt: started, QueuedAt: r.QueuedAt, Text: r.Text})
 		if err != nil {
 			if ctx.Err() == nil {
 				if ferr := failed(st, id, err); ferr != nil {
@@ -100,6 +109,23 @@ func Handler(reg *sources.Registry, st *store.Store) effects.Handler {
 		}
 		return fmt.Errorf("outbox: reply %s: source %s answered %q", id, r.Channel.Source, res)
 	}
+}
+
+// begun counts a send as started on a waiting receipt and returns how many were started before it, or -1 when the
+// receipt is no longer waiting. Started is separate from Attempts, which counts only failed sends and is what holds a
+// later message back, so a failed send is counted once in each and a lost settle counts in Started alone.
+func begun(st *store.Store, id string) (before int, _ error) {
+	before = -1
+	err := st.Tx(func(tx *store.Tx) error {
+		r, err := tx.GetReceipt(id)
+		if err != nil || r == nil || r.State != core.ReceiptWaiting {
+			return err
+		}
+		before = r.Started
+		r.Started++
+		return tx.PutReceipt(r)
+	})
+	return before, err
 }
 
 // settle records that a waiting receipt was sent or dropped, with the reason.

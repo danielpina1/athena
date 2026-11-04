@@ -16,6 +16,11 @@ import (
 	"github.com/danielpina1/athena/internal/store"
 )
 
+// queuedAt is when the fixture's receipts were queued.
+var queuedAt = time.Date(2026, 11, 3, 10, 0, 0, 0, time.UTC)
+
+const q = "2026-11-03T10:00:00Z"
+
 const (
 	issue = "github:o/r#1"
 	pull  = "github:o/r#2"
@@ -24,19 +29,21 @@ const (
 // fakeSource is a Source with a Channel: it listens to every Thread but the deaf ones, and fails each message's
 // first fails[text] sends.
 type fakeSource struct {
-	mu    sync.Mutex
-	deaf  map[string]bool
-	fails map[string]int
-	gone  map[string]bool
-	sent  []string // texts, in send order
-	tries int
-	calls []sendCall // every Send, in order
+	mu     sync.Mutex
+	deaf   map[string]bool
+	fails  map[string]int
+	gone   map[string]bool
+	sent   []string // texts, in send order
+	tries  int
+	calls  []sendCall // every Send, in order
+	before func()     // runs at the start of Send, without the lock
 }
 
 // sendCall is what the Outbox passed to one Send.
 type sendCall struct {
-	ID      string
-	Attempt int
+	ID       string
+	Attempt  int
+	QueuedAt string // RFC 3339, UTC
 }
 
 func newFakeSource() *fakeSource {
@@ -55,11 +62,15 @@ func (s *fakeSource) Link(ch core.ChannelRef) string {
 	return "https://github.com/" + ch.Thread
 }
 
-func (s *fakeSource) Send(_ context.Context, ch core.ChannelRef, receiptID string, attempt int, text string) (sources.SendResult, error) {
+func (s *fakeSource) Send(_ context.Context, ch core.ChannelRef, req sources.SendRequest) (sources.SendResult, error) {
+	text := req.Text
+	if s.before != nil {
+		s.before()
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.tries++
-	s.calls = append(s.calls, sendCall{receiptID, attempt})
+	s.calls = append(s.calls, sendCall{req.ReceiptID, req.Attempt, req.QueuedAt.UTC().Format(time.RFC3339)})
 	if s.fails[text] > 0 {
 		s.fails[text]--
 		return "", errors.New("502 bad gateway")
@@ -108,7 +119,7 @@ func (f *fixture) queue(id, ticket, conversation, text string) []byte {
 	f.seq++
 	r := &core.Receipt{ID: id, TicketID: ticket, Purpose: core.PurposeAnswer, Text: text,
 		Channel: core.ChannelRef{Source: "github", Thread: conversation}, Conversation: conversation,
-		State: core.ReceiptWaiting, Seq: f.seq, QueuedAt: time.Now()}
+		State: core.ReceiptWaiting, Seq: f.seq, QueuedAt: queuedAt}
 	if err := f.st.Tx(func(tx *store.Tx) error { return tx.PutReceipt(r) }); err != nil {
 		f.t.Fatal(err)
 	}
@@ -173,8 +184,11 @@ func TestOutboxOrderPerConversation(t *testing.T) {
 	eq(t, "result never tried", f.src.tries, 2)
 	must(t, "ack goes out", f.run("ack"))
 	must(t, "then the result", f.run("result"))
-	// The Channel gets the receipt's id and the failed attempts so far, to keep a retry from duplicating the message.
-	eq(t, "id and attempt reach the Channel", f.src.calls, []sendCall{{"ack", 0}, {"ack", 1}, {"ack", 2}, {"result", 0}})
+	// The Channel gets the receipt's id, the sends started before this one and the queued time, to keep a retry from
+	// duplicating the message.
+	eq(t, "id, attempt and queued time reach the Channel", f.src.calls, []sendCall{{"ack", 0, q}, {"ack", 1, q}, {"ack", 2, q}, {"result", 0, q}})
+	// Started counts every send begun; Attempts only the failed ones, which is what holds a later message back.
+	eq(t, "ack started and failed", [2]int{f.receipt("ack").Started, f.receipt("ack").Attempts}, [2]int{3, 2})
 	eq(t, "in order", f.src.sentTexts(), []string{"On it.", "Done."})
 	ack := f.receipt("ack")
 	eq(t, "ack sent", ack.State, core.ReceiptSent)
@@ -288,4 +302,37 @@ func TestEngineReplyGoesOut(t *testing.T) {
 	}
 	eq(t, "sent", f.receipt(id).State, core.ReceiptSent)
 	eq(t, "through the channel", f.src.sentTexts(), []string{"Fixed."})
+}
+
+// R20: a send is recorded as started before it is made. A run that dies after the Channel sent the message but before
+// the receipt was settled leaves the receipt waiting; its re-run is a retry (attempt above zero), so the Channel
+// checks for the message instead of posting it again.
+func TestOutboxRerunAfterLostSettleIsARetry(t *testing.T) {
+	f := newFixture(t)
+	f.queue("m", "T-0001", issue, "Hello.")
+	must(t, "sent", f.run("m"))
+	eq(t, "sent", f.receipt("m").State, core.ReceiptSent)
+	// The crash: the send happened, the settle did not.
+	must(t, "undo the settle", f.st.Tx(func(tx *store.Tx) error {
+		r, err := tx.GetReceipt("m")
+		if err != nil {
+			return err
+		}
+		r.State, r.SentAt = core.ReceiptWaiting, nil
+		return tx.PutReceipt(r)
+	}))
+	eq(t, "the lost settle is no failure", f.receipt("m").Attempts, 0)
+	must(t, "re-run", f.run("m"))
+	eq(t, "first send is attempt 0, the re-run is attempt 1", f.src.calls, []sendCall{{"m", 0, q}, {"m", 1, q}})
+	eq(t, "settled", f.receipt("m").State, core.ReceiptSent)
+}
+
+// The started mark is written before Send: a Send that never returns (the process dies) still leaves it behind.
+func TestOutboxRecordsTheStartBeforeSending(t *testing.T) {
+	f := newFixture(t)
+	f.queue("m", "T-0001", issue, "Hello.")
+	started := -1
+	f.src.before = func() { started = f.receipt("m").Started }
+	must(t, "sent", f.run("m"))
+	eq(t, "started was already 1 inside Send", started, 1)
 }

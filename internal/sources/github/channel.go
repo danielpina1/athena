@@ -20,7 +20,8 @@ import (
 // is {repo (full_name), number, comment_id?}; comment_id is the top comment of a review thread.
 
 const (
-	// dedupeWindow is how far back a retry looks for the message it may already have posted.
+	// dedupeWindow is how far back a retry looks for the message it may already have posted when it does not know
+	// when the message was queued.
 	dedupeWindow = time.Hour
 	// maxBodyRunes keeps a comment under GitHub's 65,536-character limit, which would otherwise answer 422 forever.
 	maxBodyRunes = 60000
@@ -38,7 +39,8 @@ type target struct {
 
 func (t target) path() string { return "/repos/" + strings.ToLower(t.repo) }
 
-// parseTarget reads and checks a Channel address: the repository must be a configured one, the numbers positive.
+// parseTarget reads and checks a Channel address: the repository must be a configured one, the numbers positive, and
+// the address must be the one of the Thread the Channel is for.
 func (s *Source) parseTarget(ch core.ChannelRef) (target, error) {
 	bad := func(why string) (target, error) {
 		return target{}, fmt.Errorf("github: channel address %v: %s: %w", ch.Address, why, ErrPermanent)
@@ -60,6 +62,9 @@ func (s *Source) parseTarget(ch core.ChannelRef) (target, error) {
 			return bad("comment_id is not a positive integer")
 		}
 	}
+	if ThreadKey(repo, n) != ch.Thread {
+		return bad("repo and number are not those of the Thread " + ch.Thread)
+	}
 	return t, nil
 }
 
@@ -80,9 +85,10 @@ func (s *Source) Link(ch core.ChannelRef) string {
 // Send posts text, with the receipt's hidden marker, as a reply in the review thread (comment_id) or as a comment on
 // the issue or pull request. A reply whose review comment is gone goes to the conversation instead. It answers Gone
 // when the issue or pull request is deleted or locked; any other failure is an error to retry. On a retry (attempt
-// above zero) the earlier send may have reached GitHub, so recent comments of the conversation are read first and a
-// comment of the App with the marker counts as sent.
-func (s *Source) Send(ctx context.Context, ch core.ChannelRef, receiptID string, attempt int, text string) (sources.SendResult, error) {
+// above zero) the earlier send may have reached GitHub, so the comments of the conversation since the message was
+// queued are read first and a comment of the App with the marker counts as sent.
+func (s *Source) Send(ctx context.Context, ch core.ChannelRef, req sources.SendRequest) (sources.SendResult, error) {
+	receiptID, text := req.ReceiptID, req.Text
 	t, err := s.parseTarget(ch)
 	if err != nil {
 		return "", err
@@ -91,8 +97,8 @@ func (s *Source) Send(ctx context.Context, ch core.ChannelRef, receiptID string,
 	if c == nil {
 		return "", errors.New("github: no client")
 	}
-	if attempt > 0 && receiptID != "" {
-		found, err := s.alreadySent(ctx, t, receiptID)
+	if req.Attempt > 0 && receiptID != "" {
+		found, err := s.alreadySent(ctx, t, receiptID, req.QueuedAt)
 		if err != nil {
 			if goneErr(err) {
 				return sources.Gone, nil
@@ -143,15 +149,19 @@ func commentBody(text, receiptID string) string {
 	return text + "\n\n" + receiptMarker(receiptID)
 }
 
-// alreadySent reports whether the App has already posted the receipt's marker in the conversation within the dedupe
-// window: in its issue comments, and, for a review reply (which may have fallen back to a plain comment), in the pull
+// alreadySent reports whether the App has posted the receipt's marker in the conversation since the message was queued
+// (an hour ago when that is not known): in its issue comments, and, for a review reply (which may have fallen back to a plain comment), in the pull
 // request's review comments too.
-func (s *Source) alreadySent(ctx context.Context, t target, receiptID string) (bool, error) {
+func (s *Source) alreadySent(ctx context.Context, t target, receiptID string, queuedAt time.Time) (bool, error) {
 	login, id, err := s.identity(ctx)
 	if err != nil {
 		return false, err
 	}
-	since := url.Values{"since": {s.now().Add(-dedupeWindow).UTC().Format(time.RFC3339)}, "per_page": {strconv.Itoa(pageSize)}}.Encode()
+	from := queuedAt
+	if from.IsZero() {
+		from = s.now().Add(-dedupeWindow)
+	}
+	since := url.Values{"since": {from.UTC().Truncate(time.Second).Format(time.RFC3339)}, "per_page": {strconv.Itoa(pageSize)}}.Encode()
 	paths := []string{fmt.Sprintf("%s/issues/%d/comments?%s", t.path(), t.n, since)}
 	if t.commentID != 0 {
 		paths = append([]string{fmt.Sprintf("%s/pulls/%d/comments?%s", t.path(), t.n, since)}, paths...)

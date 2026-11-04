@@ -6,6 +6,7 @@ import (
 	"context"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/danielpina1/athena/internal/core"
 )
@@ -33,12 +34,22 @@ const (
 	Gone SendResult = "gone"
 )
 
+// SendRequest is a message for a Channel to send.
+type SendRequest struct {
+	// ReceiptID is the message's stable ID, to make the send idempotent.
+	ReceiptID string
+	// Attempt counts the sends started before this one (zero for the first). A send may fail after the remote service
+	// received it, and the process may die after it did, so above zero the message may already be there.
+	Attempt int
+	// QueuedAt is when the message was queued: it cannot have been sent before.
+	QueuedAt time.Time
+	Text     string
+}
+
 // Channel is the optional part of a Source that writes to its conversations. Send returns an error for a failure that
-// may pass, Gone for one that never will. A send may fail after the remote service received it, so a retry must not
-// duplicate the message: receiptID is the message's stable ID, to make the send idempotent, and attempt counts the
-// failed sends before this one (zero for the first).
+// may pass, Gone for one that never will. A retry (Attempt above zero) must not duplicate the message.
 type Channel interface {
-	Send(ctx context.Context, ch core.ChannelRef, receiptID string, attempt int, text string) (SendResult, error)
+	Send(ctx context.Context, ch core.ChannelRef, req SendRequest) (SendResult, error)
 	// Link is the URL a person opens to see the Channel.
 	Link(ch core.ChannelRef) string
 }

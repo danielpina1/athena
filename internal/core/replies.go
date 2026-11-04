@@ -77,6 +77,9 @@ type Receipt struct {
 	Conversation string `json:"conversation"`
 	// State is waiting, sent or dropped.
 	State string `json:"state"`
+	// Started counts the sends begun, recorded before each is made so a send that died unrecorded is known to have
+	// begun; Attempts counts only the failed ones.
+	Started int `json:"started,omitempty"`
 	// Attempts counts the failed sends.
 	Attempts      int        `json:"attempts,omitempty"`
 	LastError     string     `json:"lastError,omitempty"`

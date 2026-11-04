@@ -119,6 +119,13 @@ func addr(repo string, n int, commentID string) core.ChannelRef {
 	return core.ChannelRef{Source: SourceName, Thread: ThreadKey(repo, n), Address: a}
 }
 
+// queuedAt is when the receipts of these tests were queued: half an hour before the fake clock's now.
+func queuedAt() time.Time { return newClock().now().Add(-30 * time.Minute) }
+
+func req(receiptID string, attempt int, text string) sources.SendRequest {
+	return sources.SendRequest{ReceiptID: receiptID, Attempt: attempt, QueuedAt: queuedAt(), Text: text}
+}
+
 const (
 	issueComments = "/repos/o/r/issues/5/comments"
 	reviewReplies = "/repos/o/r/pulls/5/comments/77/replies"
@@ -129,7 +136,7 @@ func TestSendIssueComment(t *testing.T) {
 	f := newChFake(t)
 	f.route("POST", issueComments, reply(201, `{"id":1}`))
 	s := f.source()
-	res, err := s.Send(context.Background(), addr("O/r", 5, ""), "rcpt-1", 0, "Hello there.")
+	res, err := s.Send(context.Background(), addr("O/r", 5, ""), req("rcpt-1", 0, "Hello there."))
 	if err != nil || res != sources.Sent {
 		t.Fatalf("Send = %v, %v", res, err)
 	}
@@ -151,7 +158,7 @@ func TestSendIssueComment(t *testing.T) {
 func TestReplyToReviewComment(t *testing.T) {
 	f := newChFake(t)
 	f.route("POST", reviewReplies, reply(201, `{"id":2}`))
-	res, err := f.source().Send(context.Background(), addr("o/r", 5, "77"), "rcpt-2", 0, "Renamed.")
+	res, err := f.source().Send(context.Background(), addr("o/r", 5, "77"), req("rcpt-2", 0, "Renamed."))
 	if err != nil || res != sources.Sent {
 		t.Fatalf("Send = %v, %v", res, err)
 	}
@@ -165,7 +172,7 @@ func TestDeletedReviewCommentFallsBack(t *testing.T) {
 	f := newChFake(t)
 	f.route("POST", reviewReplies, reply(404, `{"message":"Not Found"}`))
 	f.route("POST", issueComments, reply(201, `{"id":3}`))
-	res, err := f.source().Send(context.Background(), addr("o/r", 5, "77"), "rcpt-3", 0, "Renamed.")
+	res, err := f.source().Send(context.Background(), addr("o/r", 5, "77"), req("rcpt-3", 0, "Renamed."))
 	if err != nil || res != sources.Sent {
 		t.Fatalf("Send = %v, %v", res, err)
 	}
@@ -180,7 +187,7 @@ func TestDeletedReviewCommentFallsBack(t *testing.T) {
 
 func TestDeletedPullRequestIsGone(t *testing.T) {
 	f := newChFake(t) // both posts answer 404
-	res, err := f.source().Send(context.Background(), addr("o/r", 5, "77"), "rcpt", 0, "Hi.")
+	res, err := f.source().Send(context.Background(), addr("o/r", 5, "77"), req("rcpt", 0, "Hi."))
 	if err != nil || res != sources.Gone {
 		t.Fatalf("Send = %v, %v", res, err)
 	}
@@ -189,7 +196,7 @@ func TestDeletedPullRequestIsGone(t *testing.T) {
 	}
 	f = newChFake(t)
 	f.route("POST", issueComments, reply(410, `{"message":"This issue was deleted"}`))
-	if res, err := f.source().Send(context.Background(), addr("o/r", 5, ""), "rcpt", 0, "Hi."); err != nil || res != sources.Gone {
+	if res, err := f.source().Send(context.Background(), addr("o/r", 5, ""), req("rcpt", 0, "Hi.")); err != nil || res != sources.Gone {
 		t.Fatalf("410: Send = %v, %v", res, err)
 	}
 }
@@ -209,7 +216,7 @@ func TestLockedIsGone(t *testing.T) {
 			f.route("POST", issueComments, reply(c.status, c.body))
 			f.route("POST", reviewReplies, reply(c.status, c.body))
 			for _, ch := range []core.ChannelRef{addr("o/r", 5, ""), addr("o/r", 5, "77")} {
-				res, err := f.source().Send(context.Background(), ch, "rcpt", 0, "Hi.")
+				res, err := f.source().Send(context.Background(), ch, req("rcpt", 0, "Hi."))
 				if err != nil || res != sources.Gone {
 					t.Fatalf("Send(%v) = %v, %v", ch.Address, res, err)
 				}
@@ -237,7 +244,7 @@ func TestServerErrorRetriable(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			f := newChFake(t)
 			f.route("POST", issueComments, reply(c.status, c.body))
-			res, err := f.source().Send(context.Background(), addr("o/r", 5, ""), "rcpt", 0, "Hi.")
+			res, err := f.source().Send(context.Background(), addr("o/r", 5, ""), req("rcpt", 0, "Hi."))
 			if err == nil || res == sources.Gone || res == sources.Sent {
 				t.Fatalf("Send = %v, %v; want an error", res, err)
 			}
@@ -255,7 +262,7 @@ func TestRetryFindsMarkerNoPost(t *testing.T) {
 		{"id":1,"user":{"login":"alice","id":11},"body":"quoting %s"},
 		{"id":2,"user":{"login":"athena-bot[bot]","id":4242,"type":"Bot"},"body":"Done.\n\n%s"}]`, marker, marker)))
 	f.route("POST", issueComments, reply(201, `{}`))
-	res, err := f.source().Send(context.Background(), addr("o/r", 5, ""), "rcpt-9", 2, "Done.")
+	res, err := f.source().Send(context.Background(), addr("o/r", 5, ""), req("rcpt-9", 2, "Done."))
 	if err != nil || res != sources.Sent {
 		t.Fatalf("Send = %v, %v", res, err)
 	}
@@ -269,9 +276,29 @@ func TestRetryFindsMarkerNoPost(t *testing.T) {
 			got = r
 		}
 	}
+	// R20: the check reads from the time the receipt was queued, not from an hour ago.
 	since, err := time.Parse(time.RFC3339, got.Query.Get("since"))
-	if err != nil || !since.Equal(f.clk.now().Add(-time.Hour)) {
-		t.Fatalf("since = %q (now %s)", got.Query.Get("since"), f.clk.now())
+	if err != nil || !since.Equal(queuedAt()) {
+		t.Fatalf("since = %q, want the queued time %s", got.Query.Get("since"), queuedAt().Format(time.RFC3339))
+	}
+}
+
+// With no queued time the check falls back to the last hour.
+func TestRetryWithoutQueuedTimeLooksBackAnHour(t *testing.T) {
+	f := newChFake(t)
+	f.route("GET", issueComments, reply(200, `[]`))
+	f.route("POST", issueComments, reply(201, `{}`))
+	r := req("rcpt", 1, "Hi.")
+	r.QueuedAt = time.Time{}
+	if res, err := f.source().Send(context.Background(), addr("o/r", 5, ""), r); err != nil || res != sources.Sent {
+		t.Fatalf("Send = %v, %v", res, err)
+	}
+	for _, q := range f.reqs() {
+		if q.Method == "GET" && q.Path == issueComments {
+			if since, _ := time.Parse(time.RFC3339, q.Query.Get("since")); !since.Equal(f.clk.now().Add(-time.Hour)) {
+				t.Fatalf("since = %q", q.Query.Get("since"))
+			}
+		}
 	}
 }
 
@@ -283,7 +310,7 @@ func TestRetryWithoutOwnMarkerPosts(t *testing.T) {
 		{"id":1,"user":{"login":"alice","id":11},"body":"%s"},
 		{"id":2,"user":{"login":"athena-bot[bot]","id":4242},"body":"Other.\n\n<!-- athena:receipt:rcpt-8 -->"}]`, marker)))
 	f.route("POST", issueComments, reply(201, `{}`))
-	res, err := f.source().Send(context.Background(), addr("o/r", 5, ""), "rcpt-9", 1, "Done.")
+	res, err := f.source().Send(context.Background(), addr("o/r", 5, ""), req("rcpt-9", 1, "Done."))
 	if err != nil || res != sources.Sent || len(f.posts()) != 1 {
 		t.Fatalf("Send = %v, %v; posts %v", res, err, f.posts())
 	}
@@ -297,7 +324,7 @@ func TestRetryChecksReviewRepliesAndTheFallback(t *testing.T) {
 	f.route("GET", reviewList, reply(200, fmt.Sprintf(`[{"id":78,%s,"body":"Renamed.\n\n%s"}]`, bot, marker)))
 	f.route("GET", issueComments, reply(200, `[]`))
 	f.route("POST", reviewReplies, reply(201, `{}`))
-	if res, err := f.source().Send(context.Background(), addr("o/r", 5, "77"), "rcpt-4", 1, "Renamed."); err != nil || res != sources.Sent {
+	if res, err := f.source().Send(context.Background(), addr("o/r", 5, "77"), req("rcpt-4", 1, "Renamed.")); err != nil || res != sources.Sent {
 		t.Fatalf("Send = %v, %v", res, err)
 	}
 	if len(f.posts()) != 0 {
@@ -308,7 +335,7 @@ func TestRetryChecksReviewRepliesAndTheFallback(t *testing.T) {
 	f.route("GET", reviewList, reply(200, `[]`))
 	f.route("GET", issueComments, reply(200, fmt.Sprintf(`[{"id":9,%s,"body":"Renamed.\n\n%s"}]`, bot, marker)))
 	f.route("POST", reviewReplies, reply(201, `{}`))
-	if res, err := f.source().Send(context.Background(), addr("o/r", 5, "77"), "rcpt-4", 1, "Renamed."); err != nil || res != sources.Sent {
+	if res, err := f.source().Send(context.Background(), addr("o/r", 5, "77"), req("rcpt-4", 1, "Renamed.")); err != nil || res != sources.Sent {
 		t.Fatalf("Send = %v, %v", res, err)
 	}
 	if len(f.posts()) != 0 {
@@ -320,18 +347,18 @@ func TestRetryListingFailureIsRetriedNotPosted(t *testing.T) {
 	f := newChFake(t)
 	f.route("GET", issueComments, reply(502, `{"message":"Bad Gateway"}`))
 	f.route("POST", issueComments, reply(201, `{}`))
-	res, err := f.source().Send(context.Background(), addr("o/r", 5, ""), "rcpt", 1, "Hi.")
+	res, err := f.source().Send(context.Background(), addr("o/r", 5, ""), req("rcpt", 1, "Hi."))
 	if err == nil || res == sources.Sent || len(f.posts()) != 0 {
 		t.Fatalf("Send = %v, %v; posts %v", res, err, f.posts())
 	}
 	// A listing the conversation's deletion fails with 410 ends the message; a 404 lets the post decide.
 	f = newChFake(t)
 	f.route("GET", issueComments, reply(410, `{"message":"gone"}`))
-	if res, err := f.source().Send(context.Background(), addr("o/r", 5, ""), "rcpt", 1, "Hi."); err != nil || res != sources.Gone {
+	if res, err := f.source().Send(context.Background(), addr("o/r", 5, ""), req("rcpt", 1, "Hi.")); err != nil || res != sources.Gone {
 		t.Fatalf("410 listing: Send = %v, %v", res, err)
 	}
 	f = newChFake(t) // the listing and the post both answer 404
-	if res, err := f.source().Send(context.Background(), addr("o/r", 5, ""), "rcpt", 1, "Hi."); err != nil || res != sources.Gone {
+	if res, err := f.source().Send(context.Background(), addr("o/r", 5, ""), req("rcpt", 1, "Hi.")); err != nil || res != sources.Gone {
 		t.Fatalf("404 listing: Send = %v, %v", res, err)
 	}
 }
@@ -347,7 +374,7 @@ func TestRetryPagesTheListing(t *testing.T) {
 		w.Header().Set("Link", fmt.Sprintf(`<%s%s?page=2>; rel="next"`, f.srv.URL, issueComments))
 		fmt.Fprint(w, `[{"id":1,"user":{"login":"alice","id":11},"body":"hi"}]`)
 	})
-	if res, err := f.source().Send(context.Background(), addr("o/r", 5, ""), "rcpt-p", 1, "x"); err != nil || res != sources.Sent || len(f.posts()) != 0 {
+	if res, err := f.source().Send(context.Background(), addr("o/r", 5, ""), req("rcpt-p", 1, "x")); err != nil || res != sources.Sent || len(f.posts()) != 0 {
 		t.Fatalf("Send = %v, %v; posts %v", res, err, f.posts())
 	}
 }
@@ -362,9 +389,13 @@ func TestSendRefusesBadAddresses(t *testing.T) {
 		{Source: SourceName, Thread: "github:o/r#5", Address: map[string]string{"repo": "o/r/../x", "number": "5"}},
 		{Source: SourceName, Thread: "github:o/r#5", Address: map[string]string{"repo": "o/r", "number": "5", "comment_id": "7/../x"}},
 		{Source: SourceName, Thread: "github:x/y#5", Address: map[string]string{"repo": "x/y", "number": "5"}}, // not configured
+		// R21: the address must match the Thread it is sent for.
+		{Source: SourceName, Thread: "github:o/r#6", Address: map[string]string{"repo": "o/r", "number": "5"}},
+		{Source: SourceName, Thread: "github:o/r#5", Address: map[string]string{"repo": "o/r", "number": "6"}},
+		{Source: SourceName, Thread: "", Address: map[string]string{"repo": "o/r", "number": "5"}},
 		{Source: "feishu", Thread: "feishu:c", Address: map[string]string{"repo": "o/r", "number": "5"}},
 	} {
-		if res, err := s.Send(context.Background(), ch, "rcpt", 0, "Hi."); err == nil {
+		if res, err := s.Send(context.Background(), ch, req("rcpt", 0, "Hi.")); err == nil {
 			t.Errorf("Send(%v) = %v, nil", ch, res)
 		}
 	}
@@ -377,7 +408,7 @@ func TestSendCutsAnOversizedBody(t *testing.T) {
 	f := newChFake(t)
 	f.route("POST", issueComments, reply(201, `{}`))
 	long := strings.Repeat("é", 70000)
-	if res, err := f.source().Send(context.Background(), addr("o/r", 5, ""), "rcpt", 0, long); err != nil || res != sources.Sent {
+	if res, err := f.source().Send(context.Background(), addr("o/r", 5, ""), req("rcpt", 0, long)); err != nil || res != sources.Sent {
 		t.Fatalf("Send = %v, %v", res, err)
 	}
 	body := f.posts()[0].Body["body"].(string)
