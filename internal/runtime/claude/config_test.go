@@ -43,6 +43,8 @@ func TestWriteSettingsShape(t *testing.T) {
 			"Stop":              hookEntry("/opt/athena/bin/athena hook Stop", 30),
 			"SessionStart":      hookEntry("/opt/athena/bin/athena hook SessionStart", 30),
 		},
+		"attribution":         map[string]any{"commit": "", "pr": "", "sessionUrl": false},
+		"includeCoAuthoredBy": false,
 	}
 	if got := readJSON(t, path); !reflect.DeepEqual(got, want) {
 		gb, _ := json.MarshalIndent(got, "", " ")
@@ -232,5 +234,22 @@ func TestWriteSettingsEnv(t *testing.T) {
 	}
 	if err := WriteSettingsWith(path, "athena", "/s", 0, nil, "NOEQUALS"); err == nil {
 		t.Fatal("want an error for an env entry without =")
+	}
+}
+
+// Every settings file hides Claude Code's attribution: no Co-Authored-By trailer on commits, no "Generated with" line
+// or session link in pull requests, in both the current form and the deprecated one.
+func TestWriteSettingsHidesAttribution(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	if err := WriteSettingsWith(path, "/bin/athena", "/run/a.sock", 0, &Sandbox{}, "A=b"); err != nil {
+		t.Fatal(err)
+	}
+	got := readJSON(t, path).(map[string]any)
+	want := map[string]any{"commit": "", "pr": "", "sessionUrl": false}
+	if !reflect.DeepEqual(got["attribution"], want) {
+		t.Errorf("attribution = %v, want %v", got["attribution"], want)
+	}
+	if v, ok := got["includeCoAuthoredBy"]; !ok || v != false {
+		t.Errorf("includeCoAuthoredBy = %v (set %v), want false", v, ok)
 	}
 }
