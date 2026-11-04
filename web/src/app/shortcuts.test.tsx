@@ -1,6 +1,6 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
-import { CHORD_MS, useShortcut } from "@/app/shortcuts";
+import { CHORD_MS, isApple, modKeyLabel, useShortcut } from "@/app/shortcuts";
 
 afterEach(() => vi.useRealTimers());
 
@@ -73,4 +73,46 @@ test("a chord waits at most 1 s for its second key", () => {
   fireEvent.keyDown(screen.getByLabelText("field"), { key: "a" });
   fireEvent.keyDown(document.body, { key: "n" });
   expect(go).toHaveBeenCalledTimes(1);
+});
+
+test("a held key is not a chord", () => {
+  const graph = vi.fn();
+  const move = vi.fn();
+  function Keys() {
+    useShortcut("g g", graph);
+    useShortcut("j", move);
+    return null;
+  }
+  render(<Keys />);
+  // Holding g: one press, then the keyboard's auto-repeat.
+  fireEvent.keyDown(document.body, { key: "g" });
+  fireEvent.keyDown(document.body, { key: "g", repeat: true });
+  fireEvent.keyDown(document.body, { key: "g", repeat: true });
+  expect(graph).not.toHaveBeenCalled();
+  fireEvent.keyDown(document.body, { key: "j", repeat: true });
+  expect(move).not.toHaveBeenCalled();
+  // Two separate presses are.
+  fireEvent.keyDown(document.body, { key: "g" });
+  fireEvent.keyDown(document.body, { key: "g" });
+  expect(graph).toHaveBeenCalledTimes(1);
+});
+
+test("the palette key is ⌘K on Apple platforms and Ctrl K elsewhere, and both open it", () => {
+  expect(isApple("MacIntel")).toBe(true);
+  expect(isApple("iPhone")).toBe(true);
+  expect(isApple("Win32")).toBe(false);
+  expect(isApple("Linux x86_64")).toBe(false);
+  expect(modKeyLabel("K", true)).toBe("⌘K");
+  expect(modKeyLabel("K", false)).toBe("Ctrl K");
+
+  const open = vi.fn();
+  function Keys() {
+    useShortcut("mod+k", open);
+    return null;
+  }
+  render(<Keys />);
+  fireEvent.keyDown(document.body, { key: "k", metaKey: true });
+  fireEvent.keyDown(document.body, { key: "k", ctrlKey: true });
+  fireEvent.keyDown(document.body, { key: "k" });
+  expect(open).toHaveBeenCalledTimes(2);
 });

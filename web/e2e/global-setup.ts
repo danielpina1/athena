@@ -1,4 +1,4 @@
-// Builds the dashboard and the binaries, then runs one `athena server` for every spec: a temp state dir (under /tmp,
+// Builds the dashboard and the binaries (into bin/e2e, never bin/athena), then runs one `athena server` for every spec: a temp state dir (under /tmp,
 // so the Unix socket paths stay short) whose config.json turns the dashboard on at http://localhost:<free port> with
 // TLS off and no GitHub source, and fakeclaude as the runtime (`athena server --claude`). fakeclaude replays
 // ATHENA_FAKE_FIXTURE, a turn that never ends, so every Ticket's session stays live, and logs each session's
@@ -21,11 +21,13 @@ function freePort(): Promise<number> {
   });
 }
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 async function waitUntil(what: string, ok: () => Promise<boolean>, ms = 30_000) {
   const deadline = Date.now() + ms;
   while (Date.now() < deadline) {
     if (await ok().catch(() => false)) return;
-    await new Promise((r) => setTimeout(r, 100));
+    await sleep(100);
   }
   throw new Error(`e2e setup: timed out waiting for ${what}`);
 }
@@ -60,19 +62,33 @@ export default async function globalSetup() {
     stdio: ["ignore", log, log],
   });
   const exited = new Promise<void>((resolve) => server.once("exit", () => resolve()));
-  await waitUntil("the dashboard", async () => (await fetch(`${url}/auth/session`)).ok);
+  /** Stops the server: SIGTERM, then SIGKILL if it has not exited in 10 s; resolves once it has exited. */
+  const stopServer = async () => {
+    if (server.exitCode === null && server.signalCode === null) {
+      server.kill("SIGTERM");
+      const stopped = await Promise.race([exited.then(() => true), sleep(10_000).then(() => false)]);
+      if (!stopped) {
+        server.kill("SIGKILL");
+        await exited;
+      }
+    }
+    closeSync(log);
+    if (!process.env.ATHENA_E2E_KEEP) rmSync(state, { recursive: true, force: true });
+  };
 
-  // The enrollment path works and its link has the shape the harness parses.
-  const out = execFileSync(join(BIN, "athena"), ["web", "enroll", "--state-dir", state], { encoding: "utf8" });
-  if (!ENROLL_LINK.test(out)) throw new Error("e2e setup: athena web enroll printed no enroll link");
+  try {
+    await waitUntil("the dashboard", async () => (await fetch(`${url}/auth/session`)).ok);
+    // The enrollment path works and its link has the shape the harness parses.
+    const out = execFileSync(join(BIN, "athena"), ["web", "enroll", "--state-dir", state], { encoding: "utf8" });
+    if (!ENROLL_LINK.test(out)) throw new Error("e2e setup: athena web enroll printed no enroll link");
+  } catch (e) {
+    // No teardown runs after a failed setup: the server must not outlive it.
+    await stopServer();
+    throw e;
+  }
 
   process.env.ATHENA_E2E_URL = url;
   process.env.ATHENA_E2E_STATE = state;
 
-  return async () => {
-    server.kill("SIGTERM");
-    await Promise.race([exited, new Promise((r) => setTimeout(r, 10_000))]);
-    closeSync(log);
-    if (!process.env.ATHENA_E2E_KEEP) rmSync(state, { recursive: true, force: true });
-  };
+  return stopServer;
 }

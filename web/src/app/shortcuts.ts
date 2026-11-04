@@ -1,13 +1,24 @@
 // Keyboard shortcuts: one keydown listener on the window and a registry of what is mounted. A key spec is one or more
 // combos separated by spaces ("g n" is a chord: g, then n within CHORD_MS); a combo is optional modifiers and a key
-// ("mod+k" is ⌘K on the Mac and Ctrl K elsewhere, "mod+Enter", "Escape", "?"). Letters and symbols match the
-// character typed, so "?" needs no "shift+".
+// ("mod+k", "mod+Enter", "Escape", "?"). "mod" is ⌘ or Ctrl, either one on every platform, so ⌘K and Ctrl K both
+// open the palette; the hints show the platform's own (modKeyLabel). Letters and symbols match the character typed,
+// so "?" needs no "shift+".
 //
 // Single-key shortcuts never fire while the owner types: an event from an input, a textarea, a select or editable
-// content is ignored, except Esc and ⌘⏎. While a modal dialog is open only Esc reaches the registry (the dialog
-// handles the rest itself), so "g n" cannot navigate the page behind the shortcut list.
+// content is ignored, except Esc and ⌘⏎. A held key's auto-repeat fires nothing. While a modal dialog is open only Esc
+// reaches the registry (the dialog handles the rest itself), so "g n" cannot navigate the page behind the list.
 import { useEffect, useRef } from "react";
 import { topModal } from "@/ui/primitives/dialog";
+
+/** Whether this is a Mac, iPhone or iPad, whose modifier is ⌘ (an iPad reports itself as a Mac). */
+export function isApple(platform: string = navigator.platform || navigator.userAgent): boolean {
+  return /Mac|iPhone|iPad|iPod/.test(platform);
+}
+
+/** How a "mod+<key>" shortcut is written on this platform: ⌘K on Apple's, Ctrl K elsewhere. */
+export function modKeyLabel(key: string, apple: boolean = isApple()): string {
+  return apple ? `⌘${key}` : `Ctrl ${key}`;
+}
 
 /** How long the second key of a chord may wait for the first. */
 export const CHORD_MS = 1000;
@@ -108,6 +119,8 @@ function onKeyDown(e: KeyboardEvent) {
   if (e.isComposing) return;
   const combo = comboOf(e);
   if (!combo) return;
+  // A held key's auto-repeat is not a press: holding g is not "g g", and it ends a chord in progress.
+  if (e.repeat) return resetChord();
   if (topModal() && combo !== "escape") return resetChord();
   if (fromTyping(e.target) && !WHILE_TYPING.has(combo)) return resetChord();
 

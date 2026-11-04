@@ -6,6 +6,7 @@ import {
   CornerDownLeftIcon,
   EyeIcon,
   HashIcon,
+  type LucideIcon,
   OctagonXIcon,
   PauseIcon,
   PlusIcon,
@@ -76,6 +77,18 @@ function useResults(search: string): Results {
 type Step = { kind: "root" } | { kind: "reply"; id: string } | { kind: "stop"; id: string };
 const ROOT: Step = { kind: "root" };
 
+type PaletteAction = { key: string; label: string; icon: LucideIcon; run: () => void };
+
+/** The actions whose label or key holds every word of q, ignoring case; all of them for an empty q. */
+function keep(q: string, list: PaletteAction[]): PaletteAction[] {
+  const words = q.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return list;
+  return list.filter((a) => {
+    const text = `${a.label} ${a.key}`.toLowerCase();
+    return words.every((w) => text.includes(w));
+  });
+}
+
 /** Says how a command went: a short confirmation, or the error in plain words. */
 async function report(done: string, failed: string, result: Promise<CommandResult>) {
   const r = await result;
@@ -115,6 +128,60 @@ export function Palette({ open, onOpenChange }: { open: boolean; onOpenChange: (
     }
   };
 
+  /** What can be done to the open Ticket: Reply and Stop take a second step; Retry and Interrupt when they apply. */
+  const ticketActionsFor = (t: TicketSummary): PaletteAction[] => {
+    const now = (done: string, failed: string, send: (id: string) => Promise<CommandResult>) => () => {
+      void report(done, failed, send(t.id));
+      setOpen(false);
+    };
+    const list: PaletteAction[] = [
+      { key: `reply ${t.id}`, label: `Reply to ${t.id}`, icon: CornerDownLeftIcon, run: () => toStep({ kind: "reply", id: t.id }) },
+    ];
+    if (t.stage !== "ended") {
+      list.push({ key: `stop ${t.id}`, label: `Stop ${t.id}`, icon: OctagonXIcon, run: () => toStep({ kind: "stop", id: t.id }) });
+    }
+    if (t.canRetry) {
+      list.push({ key: `retry ${t.id}`, label: `Retry ${t.id}`, icon: RotateCcwIcon, run: now("Retrying", "Not retried", retry) });
+    }
+    if (t.stage === "working") {
+      list.push({
+        key: `interrupt ${t.id}`,
+        label: `Interrupt ${t.id}`,
+        icon: PauseIcon,
+        run: now("Interrupted", "Not interrupted", interrupt),
+      });
+    }
+    list.push({ key: `watch session ${t.id}`, label: "Watch session", icon: EyeIcon, run: () => go(`/tickets/${t.id}?tab=session`) });
+    return list;
+  };
+
+  // Everything is filtered here, not by cmdk: its fuzzy filter would hide (and not count) a result found another way,
+  // a GitHub URL for a Thread key say, and show "Nothing matches." beside it.
+  const q = step.kind === "root" ? search : "";
+  const ticketActions = keep(q, ticket ? ticketActionsFor(ticket) : []);
+  const goTo = keep(
+    q,
+    NAV.filter((n) => n.to !== "/new").map((n) => ({
+      key: `go ${n.label}`,
+      label: n.label,
+      icon: n.icon,
+      run: () => go(n.to),
+    })),
+  );
+  const actions = keep(q, [
+    { key: "new task", label: "New task", icon: PlusIcon, run: () => go("/new") },
+    {
+      key: "toggle theme",
+      label: resolved === "dark" ? "Switch to the light theme" : "Switch to the dark theme",
+      icon: SunMoonIcon,
+      run: () => {
+        setTheme(resolved === "dark" ? "light" : "dark");
+        setOpen(false);
+      },
+    },
+  ]);
+  const visible = [...ticketActions, ...results.tickets, ...results.triggers, ...results.threads, ...goTo, ...actions];
+
   const placeholder =
     step.kind === "reply"
       ? `Reply to ${step.id}…`
@@ -126,7 +193,7 @@ export function Palette({ open, onOpenChange }: { open: boolean; onOpenChange: (
     <CommandDialog
       open={open}
       onOpenChange={setOpen}
-      commandProps={{ shouldFilter: step.kind === "root", loop: true, label: "Command palette" }}
+      commandProps={{ shouldFilter: false, loop: true, label: "Command palette" }}
     >
       <CommandInput value={search} onValueChange={setSearch} placeholder={placeholder} onKeyDown={onKeyDown} />
       <CommandList>
@@ -165,53 +232,21 @@ export function Palette({ open, onOpenChange }: { open: boolean; onOpenChange: (
         )}
         {step.kind === "root" && (
           <>
-            <CommandEmpty>Nothing matches.</CommandEmpty>
+            {visible.length === 0 && <CommandEmpty>Nothing matches.</CommandEmpty>}
             {ticket && (
               <CommandGroup heading={ticket.id}>
-                <CommandItem value={`reply ${ticket.id}`} onSelect={() => toStep({ kind: "reply", id: ticket.id })}>
-                  <CornerDownLeftIcon aria-hidden />
-                  {`Reply to ${ticket.id}`}
-                </CommandItem>
-                {ticket.stage !== "ended" && (
-                  <CommandItem value={`stop ${ticket.id}`} onSelect={() => toStep({ kind: "stop", id: ticket.id })}>
-                    <OctagonXIcon aria-hidden />
-                    {`Stop ${ticket.id}`}
+                {ticketActions.map((a) => (
+                  <CommandItem key={a.key} value={a.key} onSelect={a.run}>
+                    <a.icon aria-hidden />
+                    {a.label}
                   </CommandItem>
-                )}
-                {ticket.canRetry && (
-                  <CommandItem
-                    value={`retry ${ticket.id}`}
-                    onSelect={() => {
-                      void report("Retrying", "Not retried", retry(ticket.id));
-                      setOpen(false);
-                    }}
-                  >
-                    <RotateCcwIcon aria-hidden />
-                    {`Retry ${ticket.id}`}
-                  </CommandItem>
-                )}
-                {ticket.stage === "working" && (
-                  <CommandItem
-                    value={`interrupt ${ticket.id}`}
-                    onSelect={() => {
-                      void report("Interrupted", "Not interrupted", interrupt(ticket.id));
-                      setOpen(false);
-                    }}
-                  >
-                    <PauseIcon aria-hidden />
-                    {`Interrupt ${ticket.id}`}
-                  </CommandItem>
-                )}
-                <CommandItem value={`watch session ${ticket.id}`} onSelect={() => go(`/tickets/${ticket.id}?tab=session`)}>
-                  <EyeIcon aria-hidden />
-                  Watch session
-                </CommandItem>
+                ))}
               </CommandGroup>
             )}
             {results.tickets.length > 0 && (
-              <CommandGroup heading="Tickets" forceMount>
+              <CommandGroup heading="Tickets">
                 {results.tickets.map((t) => (
-                  <CommandItem key={t.id} value={`ticket ${t.id}`} forceMount onSelect={() => go(`/tickets/${t.id}`)}>
+                  <CommandItem key={t.id} value={`ticket ${t.id}`} onSelect={() => go(`/tickets/${t.id}`)}>
                     <TicketIcon aria-hidden />
                     <Mono className="shrink-0 text-current">{t.id}</Mono>
                     <span className="min-w-0 truncate">{t.title}</span>
@@ -220,12 +255,11 @@ export function Palette({ open, onOpenChange }: { open: boolean; onOpenChange: (
               </CommandGroup>
             )}
             {results.triggers.length > 0 && (
-              <CommandGroup heading="Triggers" forceMount>
+              <CommandGroup heading="Triggers">
                 {results.triggers.map((t) => (
                   <CommandItem
                     key={t.id}
                     value={`trigger ${t.id}`}
-                    forceMount
                     onSelect={() => go(`/routing?${new URLSearchParams({ tab: "triggers", trigger: t.id })}`)}
                   >
                     <ZapIcon aria-hidden />
@@ -235,12 +269,11 @@ export function Palette({ open, onOpenChange }: { open: boolean; onOpenChange: (
               </CommandGroup>
             )}
             {results.threads.length > 0 && (
-              <CommandGroup heading="Threads" forceMount>
+              <CommandGroup heading="Threads">
                 {results.threads.map((t) => (
                   <CommandItem
                     key={t.key}
                     value={`thread ${t.key}`}
-                    forceMount
                     onSelect={() => go(`/routing?${new URLSearchParams({ tab: "threads", thread: t.key })}`)}
                   >
                     <HashIcon aria-hidden />
@@ -249,30 +282,26 @@ export function Palette({ open, onOpenChange }: { open: boolean; onOpenChange: (
                 ))}
               </CommandGroup>
             )}
-            <CommandGroup heading="Go to">
-              {NAV.filter((n) => n.to !== "/new").map((n) => (
-                <CommandItem key={n.to} value={`go ${n.label}`} onSelect={() => go(n.to)}>
-                  <n.icon aria-hidden />
-                  {n.label}
-                </CommandItem>
-              ))}
-            </CommandGroup>
-            <CommandGroup heading="Actions">
-              <CommandItem value="new task" onSelect={() => go("/new")}>
-                <PlusIcon aria-hidden />
-                New task
-              </CommandItem>
-              <CommandItem
-                value="toggle theme"
-                onSelect={() => {
-                  setTheme(resolved === "dark" ? "light" : "dark");
-                  setOpen(false);
-                }}
-              >
-                <SunMoonIcon aria-hidden />
-                {resolved === "dark" ? "Switch to the light theme" : "Switch to the dark theme"}
-              </CommandItem>
-            </CommandGroup>
+            {goTo.length > 0 && (
+              <CommandGroup heading="Go to">
+                {goTo.map((a) => (
+                  <CommandItem key={a.key} value={a.key} onSelect={a.run}>
+                    <a.icon aria-hidden />
+                    {a.label}
+                  </CommandItem>
+                ))}
+              </CommandGroup>
+            )}
+            {actions.length > 0 && (
+              <CommandGroup heading="Actions">
+                {actions.map((a) => (
+                  <CommandItem key={a.key} value={a.key} onSelect={a.run}>
+                    <a.icon aria-hidden />
+                    {a.label}
+                  </CommandItem>
+                ))}
+              </CommandGroup>
+            )}
           </>
         )}
       </CommandList>

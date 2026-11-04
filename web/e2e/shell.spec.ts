@@ -15,6 +15,10 @@ test("the shell renders, light and dark", async ({ page }, testInfo) => {
     await expect(page.locator('main [data-pane="list"]')).toBeVisible();
     await expect(page.locator('main [data-pane="detail"]')).toBeVisible();
     await expect(page.getByRole("region", { name: "Today" })).toBeVisible();
+    // The sidebar is 240 px and the list pane 400 px; the detail pane takes the rest.
+    expect((await page.locator("aside").boundingBox())?.width).toBe(240);
+    expect((await page.locator('main [data-pane="list"]').boundingBox())?.width).toBe(400);
+    expect((await page.locator('main [data-pane="detail"]').boundingBox())?.width).toBe(1440 - 240 - 400);
   } else {
     await expect(nav.getByRole("link")).toHaveCount(5);
     await expect(page.getByRole("region", { name: "Today" })).toHaveCount(0);
@@ -49,4 +53,21 @@ test("an unknown path shows the 404 in the shell", async ({ page }) => {
   await expectShell(page);
   await expect(page.getByRole("heading", { name: "Page not found" })).toBeVisible();
   await expectAccessible(page);
+});
+
+test("no horizontal scroll at 320 px", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "phone", "one narrow phone is enough");
+  await page.setViewportSize({ width: 320, height: 640 });
+  await signedInPage(page);
+  for (const path of ["/", "/tickets", "/tickets/T-9999", "/new", "/graph", "/settings", "/routing", "/nodes", "/nowhere"]) {
+    await page.goto(path);
+    await expectShell(page);
+    await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
+    const { scrollWidth, clientWidth } = await page.evaluate(() => ({
+      scrollWidth: document.documentElement.scrollWidth,
+      clientWidth: document.documentElement.clientWidth,
+    }));
+    expect(scrollWidth, `${path} scrolls sideways`).toBeLessThanOrEqual(clientWidth);
+    await expectAccessible(page);
+  }
 });

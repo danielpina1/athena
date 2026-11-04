@@ -3,6 +3,10 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
-export const BIN = join(ROOT, "bin");
+/**
+ * The e2e builds of athena, fakeclaude and sessionctl (git-ignored). Never bin/athena: the owner's real server must
+ * not pick up a work-in-progress build (ruling R39).
+ */
+export const BIN = join(ROOT, "bin", "e2e");
 /** The link `athena web enroll` prints. */
 export const ENROLL_LINK = /http:\/\/localhost:\d+\/enroll#\S+/;

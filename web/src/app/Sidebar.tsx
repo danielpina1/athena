@@ -3,6 +3,7 @@
 import { NavLink } from "react-router";
 import { ConnectionDot, type LinkSource } from "@/app/ConnectionBanner";
 import { NAV, type NavItem, useNavCount } from "@/app/routes";
+import { modKeyLabel } from "@/app/shortcuts";
 import { selectCounts } from "@/lib/store/selectors";
 import { useAthena } from "@/lib/store/state";
 import { Kbd } from "@/ui/athena/Kbd";
@@ -117,7 +118,7 @@ export function Sidebar({ link, onOpenPalette }: { link: LinkSource; onOpenPalet
           className="inline-flex h-8 items-center rounded-xs px-1 hover:bg-surface-2"
         >
           <span className="sr-only">Command palette</span>
-          <Kbd>⌘K</Kbd>
+          <Kbd>{modKeyLabel("K")}</Kbd>
         </button>
       </div>
       <nav aria-label="Main" className="px-2 py-2">

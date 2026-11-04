@@ -80,6 +80,28 @@ test("palette offers the selected Ticket's actions and goes to any route", async
   expect(where()).toBe("/routing");
 });
 
+test("results by title, Trigger text or GitHub URL never say nothing matches", async () => {
+  const user = userEvent.setup();
+  renderAt("/");
+  await user.keyboard("{Meta>}k{/Meta}");
+  const input = await screen.findByRole("combobox");
+
+  await user.type(input, "flaky");
+  expect(await screen.findByRole("option", { name: /Fix flaky auth test/ })).toBeTruthy();
+  expect(screen.getByRole("option", { name: /please look at the flaky login/ })).toBeTruthy();
+  expect(screen.queryByText("Nothing matches.")).toBeNull();
+
+  await user.clear(input);
+  await user.type(input, "https://github.com/o/r/pull/13");
+  expect(await screen.findByRole("option", { name: /github:o\/r#13/ })).toBeTruthy();
+  expect(screen.queryByText("Nothing matches.")).toBeNull();
+
+  await user.clear(input);
+  await user.type(input, "zzzz");
+  expect(screen.getByText("Nothing matches.")).toBeTruthy();
+  expect(screen.queryAllByRole("option")).toEqual([]);
+});
+
 test("thread queries", () => {
   expect(threadQuery("https://github.com/Owner/Name/pull/7")).toBe("github:owner/name#7");
   expect(threadQuery("github.com/owner/name/issues/8")).toBe("github:owner/name#8");
