@@ -209,22 +209,32 @@
   }
 
   /*
-   * Radix injects these rules from <style> elements, which the CSP (style-src 'self') blocks; the same rules
-   * live here so scroll locking and hidden native scrollbars still work.
+   * Modals are native <dialog> elements; while one is open the page behind it does not scroll. Nothing injects a
+   * scroll lock at runtime: the CSP (style-src 'self') refuses <style> elements.
    */
-  body[data-scroll-locked] {
-    overflow: hidden !important;
+  body:has(dialog[open]) {
+    overflow: hidden;
     overscroll-behavior: contain;
   }
-  [data-radix-scroll-area-viewport],
-  [data-radix-select-viewport] {
-    scrollbar-width: none;
-    -ms-overflow-style: none;
-    -webkit-overflow-scrolling: touch;
+
+  /* Precision scrollbars: thin, a --muted thumb on no track. scrollbar-color inherits; the width does not. */
+  html {
+    scrollbar-color: var(--muted) transparent;
   }
-  [data-radix-scroll-area-viewport]::-webkit-scrollbar,
-  [data-radix-select-viewport]::-webkit-scrollbar {
-    display: none;
+  [data-slot="scroll-area"] {
+    scrollbar-width: thin;
+  }
+  [data-slot="scroll-area"]::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  [data-slot="scroll-area"]::-webkit-scrollbar-thumb {
+    border: 2px solid transparent;
+    border-radius: 4px;
+    background: var(--muted) padding-box;
+  }
+  [data-slot="scroll-area"]::-webkit-scrollbar-track {
+    background: transparent;
   }
 }
 

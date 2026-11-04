@@ -4,7 +4,10 @@ import type { ComponentProps } from "react";
 import { cn } from "@/ui/cn";
 import { usePortalContainer } from "@/ui/primitives/portal";
 
-export const DropdownMenu = Menu.Root;
+// Non-modal: a modal Radix menu mounts react-remove-scroll, which injects a <style> element the CSP forbids.
+export function DropdownMenu(props: Omit<ComponentProps<typeof Menu.Root>, "modal">) {
+  return <Menu.Root modal={false} {...props} />;
+}
 export const DropdownMenuTrigger = Menu.Trigger;
 export const DropdownMenuGroup = Menu.Group;
 export const DropdownMenuRadioGroup = Menu.RadioGroup;

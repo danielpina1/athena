@@ -1,5 +1,5 @@
 // /design: the Precision kitchen sink. Every primitive renders here in every state, light and dark side by side, so
-// a change to a token or a component is checked in one place. Dev-only; App.tsx registers it.
+// a change to a token or a component is checked in one place. Shipped as a lazy, unlinked route (App.tsx).
 import { BellIcon, CopyIcon, MoreHorizontalIcon, TerminalIcon } from "lucide-react";
 import { type ReactNode, useMemo, useState } from "react";
 import { Card } from "@/ui/athena/Card";
@@ -49,15 +49,7 @@ import { Input } from "@/ui/primitives/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/ui/primitives/popover";
 import { PortalContainer } from "@/ui/primitives/portal";
 import { ScrollArea } from "@/ui/primitives/scroll-area";
-import {
-  Select,
-  SelectContent,
-  SelectGroup,
-  SelectItem,
-  SelectLabel,
-  SelectTrigger,
-  SelectValue,
-} from "@/ui/primitives/select";
+import { Select } from "@/ui/primitives/select";
 import {
   Sheet,
   SheetClose,
@@ -392,29 +384,22 @@ function Fields() {
         <Textarea aria-label="Task" placeholder="Describe the task. Athena picks a node and a runtime." />
       </Row>
       <Row label="select">
-        <Select defaultValue="claude">
-          <SelectTrigger aria-label="Runtime" className="lg:w-56">
-            <SelectValue placeholder="Runtime" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectGroup>
-              <SelectLabel>runtime</SelectLabel>
-              <SelectItem value="claude">Claude Code</SelectItem>
-              <SelectItem value="codex">Codex</SelectItem>
-              <SelectItem value="local" disabled>
-                Local model (no node has one)
-              </SelectItem>
-            </SelectGroup>
-          </SelectContent>
+        <Select aria-label="Runtime" defaultValue="claude" className="w-full lg:w-56">
+          <optgroup label="Runtime">
+            <option value="claude">Claude Code</option>
+            <option value="codex">Codex</option>
+            <option value="local" disabled>
+              Local model (no node has one)
+            </option>
+          </optgroup>
         </Select>
-        <Select>
-          <SelectTrigger aria-label="Node" className="lg:w-56">
-            <SelectValue placeholder="Any node" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="mac-studio">mac-studio</SelectItem>
-            <SelectItem value="linux-gpu">linux-gpu</SelectItem>
-          </SelectContent>
+        <Select aria-label="Node" defaultValue="" className="w-full lg:w-56">
+          <option value="">Any node</option>
+          <option value="mac-studio">mac-studio</option>
+          <option value="linux-gpu">linux-gpu</option>
+        </Select>
+        <Select aria-label="Model" defaultValue="sonnet" disabled className="w-full lg:w-56">
+          <option value="sonnet">sonnet</option>
         </Select>
       </Row>
     </Section>

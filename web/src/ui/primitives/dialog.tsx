@@ -1,55 +1,194 @@
-import * as DialogPrimitive from "@radix-ui/react-dialog";
+import { Slot } from "@radix-ui/react-slot";
 import { XIcon } from "lucide-react";
-import type { ComponentProps } from "react";
+import {
+  type ComponentProps,
+  createContext,
+  type ReactNode,
+  useCallback,
+  useContext,
+  useEffect,
+  useId,
+  useRef,
+  useState,
+} from "react";
 import { cn } from "@/ui/cn";
-import { usePortalContainer } from "@/ui/primitives/portal";
+import { PortalContainer } from "@/ui/primitives/portal";
 
-export const Dialog = DialogPrimitive.Root;
-export const DialogTrigger = DialogPrimitive.Trigger;
-export const DialogClose = DialogPrimitive.Close;
+// Modal dialogs on the native <dialog> element and showModal(): the browser gives the top layer, the inert
+// background, focus on open and Esc. Nothing is injected into the document (the CSP forbids <style> elements, which
+// Radix's scroll lock adds); tokens.css locks page scroll with `body:has(dialog[open])`. Focus returns to the
+// element that opened the dialog when it closes.
 
-export function DialogOverlay({ className, ...props }: ComponentProps<typeof DialogPrimitive.Overlay>) {
+type DialogState = {
+  open: boolean;
+  setOpen: (open: boolean) => void;
+  titleId: string;
+  descriptionId: string;
+};
+
+const DialogContext = createContext<DialogState | null>(null);
+
+function useDialog(part: string): DialogState {
+  const ctx = useContext(DialogContext);
+  if (!ctx) throw new Error(`${part} must be inside <Dialog> or <Sheet>`);
+  return ctx;
+}
+
+export function Dialog({
+  open: controlled,
+  defaultOpen = false,
+  onOpenChange,
+  children,
+}: {
+  open?: boolean;
+  defaultOpen?: boolean;
+  onOpenChange?: (open: boolean) => void;
+  children: ReactNode;
+}) {
+  const [uncontrolled, setUncontrolled] = useState(defaultOpen);
+  const open = controlled ?? uncontrolled;
+  const setOpen = useCallback(
+    (next: boolean) => {
+      if (controlled === undefined) setUncontrolled(next);
+      onOpenChange?.(next);
+    },
+    [controlled, onOpenChange],
+  );
+  const titleId = useId();
+  const descriptionId = useId();
   return (
-    <DialogPrimitive.Overlay
-      data-slot="dialog-overlay"
-      className={cn(
-        "fixed inset-0 z-50 bg-stage/80",
-        "data-[state=open]:animate-fade-in data-[state=closed]:animate-fade-out",
-        className,
-      )}
+    <DialogContext.Provider value={{ open, setOpen, titleId, descriptionId }}>{children}</DialogContext.Provider>
+  );
+}
+
+export function DialogTrigger({ asChild, onClick, ...props }: ComponentProps<"button"> & { asChild?: boolean }) {
+  const { open, setOpen } = useDialog("DialogTrigger");
+  const Comp = asChild ? Slot : "button";
+  return (
+    <Comp
+      type={asChild ? undefined : "button"}
+      aria-haspopup="dialog"
+      aria-expanded={open}
+      onClick={(e: React.MouseEvent<HTMLButtonElement>) => {
+        onClick?.(e);
+        if (!e.defaultPrevented) setOpen(true);
+      }}
       {...props}
     />
   );
 }
 
-export function DialogContent({
+export function DialogClose({ asChild, onClick, ...props }: ComponentProps<"button"> & { asChild?: boolean }) {
+  const { setOpen } = useDialog("DialogClose");
+  const Comp = asChild ? Slot : "button";
+  return (
+    <Comp
+      type={asChild ? undefined : "button"}
+      onClick={(e: React.MouseEvent<HTMLButtonElement>) => {
+        onClick?.(e);
+        if (!e.defaultPrevented) setOpen(false);
+      }}
+      {...props}
+    />
+  );
+}
+
+export type ModalProps = Omit<ComponentProps<"dialog">, "open"> & {
+  closeLabel?: string;
+  /** Hide the corner close button (Esc and the backdrop still close). */
+  hideClose?: boolean;
+  /** Classes for the padded inner box; the <dialog> itself only frames it. */
+  bodyClassName?: string;
+};
+
+/** The shared modal surface behind DialogContent and SheetContent. */
+export function Modal({
   className,
+  bodyClassName,
   children,
   closeLabel = "Close",
+  hideClose = false,
   ...props
-}: ComponentProps<typeof DialogPrimitive.Content> & { closeLabel?: string }) {
+}: ModalProps) {
+  const { open, setOpen, titleId, descriptionId } = useDialog("DialogContent");
+  const ref = useRef<HTMLDialogElement | null>(null);
+  const opener = useRef<HTMLElement | null>(null);
+  const [el, setEl] = useState<HTMLDialogElement | null>(null);
+  const attach = useCallback((node: HTMLDialogElement | null) => {
+    ref.current = node;
+    setEl(node);
+  }, []);
+
+  useEffect(() => {
+    const dialog = ref.current;
+    if (!dialog) return;
+    if (open && !dialog.open) {
+      opener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      dialog.showModal();
+      // showModal focuses the first focusable element; a child marked data-autofocus (a search field) wins.
+      dialog.querySelector<HTMLElement>("[data-autofocus]")?.focus();
+    } else if (!open && dialog.open) {
+      dialog.close();
+    }
+  }, [open]);
+
+  // Closed by any path (Esc, the backdrop, a Close button, the owner's state): give focus back to the opener.
+  useEffect(() => {
+    if (open) return;
+    const target = opener.current;
+    opener.current = null;
+    if (target?.isConnected) target.focus();
+  }, [open]);
+
   return (
-    <DialogPrimitive.Portal container={usePortalContainer()}>
-      <DialogOverlay />
-      <DialogPrimitive.Content
-        data-slot="dialog-content"
-        className={cn(
-          "fixed top-1/2 left-1/2 z-50 grid max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] max-w-lg -translate-x-1/2 -translate-y-1/2",
-          "gap-4 overflow-y-auto rounded-md border border-line bg-surface p-6 text-text",
-          "data-[state=open]:animate-pop-in data-[state=closed]:animate-pop-out",
-          className,
+    <dialog
+      ref={attach}
+      aria-labelledby={titleId}
+      aria-describedby={descriptionId}
+      onCancel={(e) => {
+        e.preventDefault();
+        setOpen(false);
+      }}
+      // The browser can close a modal on its own (a repeated Esc); keep the state in step.
+      onClose={() => {
+        if (open) setOpen(false);
+      }}
+      // A click on the dialog element itself, not its box, is a click on the backdrop.
+      onClick={(e) => {
+        if (e.target === e.currentTarget) setOpen(false);
+      }}
+      className={cn(
+        "border border-line bg-surface p-0 text-text backdrop:bg-stage/80",
+        "open:animate-pop-in backdrop:animate-fade-in",
+        className,
+      )}
+      {...props}
+    >
+      {/* Overlays opened inside the dialog (a tooltip, a menu) portal into it, so they share its top layer. */}
+      <PortalContainer.Provider value={el}>
+        {open && <div className={cn("relative", bodyClassName)}>{children}</div>}
+        {open && !hideClose && (
+          <button
+            type="button"
+            onClick={() => setOpen(false)}
+            aria-label={closeLabel}
+            className="absolute top-2 right-2 inline-flex size-11 items-center justify-center rounded-md text-muted hover:bg-surface-2 hover:text-text lg:size-8"
+          >
+            <XIcon className="size-4" aria-hidden />
+          </button>
         )}
-        {...props}
-      >
-        {children}
-        <DialogPrimitive.Close
-          className="absolute top-3 right-3 inline-flex size-11 items-center justify-center rounded-md text-muted hover:bg-surface-2 hover:text-text lg:size-8"
-          aria-label={closeLabel}
-        >
-          <XIcon className="size-4" aria-hidden />
-        </DialogPrimitive.Close>
-      </DialogPrimitive.Content>
-    </DialogPrimitive.Portal>
+      </PortalContainer.Provider>
+    </dialog>
+  );
+}
+
+export function DialogContent({ className, bodyClassName, ...props }: ModalProps) {
+  return (
+    <Modal
+      className={cn("m-auto max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] max-w-lg overflow-y-auto rounded-md", className)}
+      bodyClassName={cn("grid gap-4 p-6", bodyClassName)}
+      {...props}
+    />
   );
 }
 
@@ -67,10 +206,12 @@ export function DialogFooter({ className, ...props }: ComponentProps<"div">) {
   );
 }
 
-export function DialogTitle({ className, ...props }: ComponentProps<typeof DialogPrimitive.Title>) {
-  return <DialogPrimitive.Title className={cn("text-lg font-semibold break-words", className)} {...props} />;
+export function DialogTitle({ className, ...props }: ComponentProps<"h2">) {
+  const { titleId } = useDialog("DialogTitle");
+  return <h2 id={titleId} className={cn("text-lg font-semibold break-words", className)} {...props} />;
 }
 
-export function DialogDescription({ className, ...props }: ComponentProps<typeof DialogPrimitive.Description>) {
-  return <DialogPrimitive.Description className={cn("text-sm text-muted", className)} {...props} />;
+export function DialogDescription({ className, ...props }: ComponentProps<"p">) {
+  const { descriptionId } = useDialog("DialogDescription");
+  return <p id={descriptionId} className={cn("text-sm text-muted", className)} {...props} />;
 }

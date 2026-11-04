@@ -22,7 +22,7 @@ export function CommandDialog({
 }: ComponentProps<typeof Dialog> & { title?: string; description?: string }) {
   return (
     <Dialog {...props}>
-      <DialogContent className="top-[12dvh] max-w-xl translate-y-0 gap-0 overflow-hidden p-0 [&>button:last-child]:hidden">
+      <DialogContent hideClose className="mt-[12dvh] mb-auto max-w-xl overflow-hidden" bodyClassName="block gap-0 p-0">
         <DialogTitle className="sr-only">{title}</DialogTitle>
         <DialogDescription className="sr-only">{description}</DialogDescription>
         <Command>{children}</Command>
@@ -37,6 +37,7 @@ export function CommandInput({ className, ...props }: ComponentProps<typeof Comm
       <SearchIcon className="size-4 shrink-0 text-muted" aria-hidden />
       <CommandPrimitive.Input
         data-slot="command-input"
+        data-autofocus
         className={cn(
           "h-12 w-full min-w-0 bg-transparent text-body text-text outline-none placeholder:text-muted",
           className,

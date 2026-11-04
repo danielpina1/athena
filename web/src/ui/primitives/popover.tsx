@@ -3,7 +3,10 @@ import type { ComponentProps } from "react";
 import { cn } from "@/ui/cn";
 import { usePortalContainer } from "@/ui/primitives/portal";
 
-export const Popover = PopoverPrimitive.Root;
+// Non-modal: a modal Radix popover mounts react-remove-scroll, which injects a <style> element the CSP forbids.
+export function Popover(props: Omit<ComponentProps<typeof PopoverPrimitive.Root>, "modal">) {
+  return <PopoverPrimitive.Root modal={false} {...props} />;
+}
 export const PopoverTrigger = PopoverPrimitive.Trigger;
 export const PopoverAnchor = PopoverPrimitive.Anchor;
 
