@@ -12,7 +12,7 @@ import * as actions from "@/lib/commands/actions";
 import { Outbox } from "@/lib/commands/outbox";
 import { FakeServer } from "@/lib/link/fakeServer";
 import { useAthena } from "@/lib/store/state";
-import { __resetPushForTest, disablePush, enablePush, pushState } from "./push";
+import { __resetPushForTest, disablePush, enablePush, onPushError, pushPending, pushState } from "./push";
 
 // The server's VAPID public key as GET /push/key sends it: base64url of an uncompressed P-256 point (65 bytes).
 const KEY_BYTES = Uint8Array.from({ length: 65 }, (_, i) => (i === 0 ? 4 : i));
@@ -133,12 +133,36 @@ describe("enablePush", () => {
     expect(sent).toEqual([]);
   });
 
-  test("a server that refuses the subscription fails with its sentence", async () => {
+  test("offline, enablePush resolves once queued and stays pending until the server answers", async () => {
     keyFetch();
-    const done = enablePush();
+    // No answer comes (offline, the outbox holds the command): enablePush must not wait for one.
+    const errors: string[] = [];
+    onPushError((m) => errors.push(m));
+    expect(await enablePush()).toBe("on");
+    expect(pushPending()).toBe(true);
+
+    // The server refuses it later: off again, and the owner is told why.
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     outbox.onResult(create(CommandResultSchema, { id: sent[0].id, ok: false, code: "unavailable" }));
-    await expect(done).rejects.toThrow(actions.errorMessage("unavailable"));
+    await vi.waitFor(() => expect(pushPending()).toBe(false));
+    expect(pushState()).toBe("off");
+    expect(errors).toEqual([actions.errorMessage("unavailable")]);
+  });
+
+  test("a refused PushUnsubscribe is told too", async () => {
+    keyFetch();
+    const on = enablePush();
+    await answerAll();
+    await on;
+    sent.length = 0;
+    const errors: string[] = [];
+    onPushError((m) => errors.push(m));
+    expect(await disablePush()).toBe("off");
+    expect(pushPending()).toBe(true);
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    outbox.onResult(create(CommandResultSchema, { id: sent[0].id, ok: false, code: "internal" }));
+    await vi.waitFor(() => expect(errors).toEqual([actions.errorMessage("internal")]));
+    expect(pushPending()).toBe(false);
     expect(pushState()).toBe("off");
   });
 

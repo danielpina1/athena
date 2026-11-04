@@ -1,5 +1,5 @@
 import { create, type MessageInitShape } from "@bufbuild/protobuf";
-import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
@@ -131,4 +131,35 @@ test("? opens the shortcut list", () => {
   fireEvent.keyDown(document.body, { key: "?" });
   const list = screen.getByRole("dialog", { name: "Keyboard shortcuts" });
   expect(list.textContent).toContain("Go to Needs you");
+});
+
+test("lists say waiting before the first snapshot", async () => {
+  // The installed app opened offline: no Snapshot has arrived, so nothing may claim "nothing" or "0".
+  renderShell("/", 1440);
+  const waits = () => screen.queryAllByText("Waiting for the server.").length;
+  expect(screen.queryByText("Nothing needs you.")).toBeNull();
+  expect(screen.queryByText(/0 need you/)).toBeNull();
+  expect(screen.getByRole("region", { name: "Today" }).textContent).not.toMatch(/\d/);
+  expect(waits()).toBeGreaterThanOrEqual(3); // Needs you, the sidebar's node and today
+  cleanup();
+
+  renderShell("/tickets", 1440);
+  expect(screen.queryByText("No Tickets yet.")).toBeNull();
+  expect(screen.queryByText(/^0 Tickets$/)).toBeNull();
+  expect(within(screen.getByRole("region", { name: "Tickets" })).getByText("Waiting for the server.")).toBeTruthy();
+  cleanup();
+
+  renderShell("/routing", 1440);
+  const tabs = screen.getByRole("tablist", { name: "Routing records" });
+  expect(tabs.textContent).not.toMatch(/\d/);
+  expect(screen.queryByText("No Triggers yet.")).toBeNull();
+  expect(within(screen.getByRole("region", { name: "Routing" })).getByText("Waiting for the server.")).toBeTruthy();
+  cleanup();
+
+  // The first Snapshot, even an empty one, is the truth.
+  load({});
+  renderShell("/", 1440);
+  expect(screen.getByText("Nothing needs you.")).toBeTruthy();
+  expect(screen.getByText(/0 need you/)).toBeTruthy();
+  expect(screen.queryByText("Waiting for the server.")).toBeNull();
 });

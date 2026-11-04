@@ -7,10 +7,11 @@
 import { timestampMs, type Timestamp } from "@bufbuild/protobuf/wkt";
 import { useMemo, useRef, useState } from "react";
 import type { ApprovalView, TicketSummary } from "@/gen/athena/v1/state_pb";
-import { selectCounts, selectNeedsYou, type NeedsYouItem } from "@/lib/store/selectors";
+import { selectCounts, selectNeedsYou, selectSynced, type NeedsYouItem } from "@/lib/store/selectors";
 import { useAthena } from "@/lib/store/state";
 import { useShortcut } from "@/app/shortcuts";
 import { EmptyState } from "@/ui/athena/EmptyState";
+import { Waiting } from "@/ui/athena/Waiting";
 import { Button } from "@/ui/primitives/button";
 import { AnswerCard } from "./AnswerCard";
 import { ApprovalCard } from "./ApprovalCard";
@@ -62,6 +63,7 @@ export function NeedsYou() {
   const tickets = useAthena((s) => s.tickets);
   const counts = useAthena((s) => selectCounts(s));
   const node = useAthena((s) => s.node);
+  const synced = useAthena(selectSynced);
   const [shown, setShown] = useState(PAGE);
   const list = useRef<HTMLUListElement>(null);
 
@@ -86,9 +88,11 @@ export function NeedsYou() {
     <section className="grid min-w-0 content-start gap-4 p-4 lg:max-w-3xl lg:p-6">
       <div className="grid gap-1">
         <h1 className="text-xl font-semibold break-words">Needs you</h1>
-        <p className="font-mono text-xs text-muted">{header}</p>
+        {synced && <p className="font-mono text-xs text-muted">{header}</p>}
       </div>
-      {items.length === 0 ? (
+      {!synced ? (
+        <Waiting className="border-t border-line py-8" />
+      ) : items.length === 0 ? (
         <EmptyState
           title="Nothing needs you."
           description={`Today: ${counts.working} working, ${counts.endedToday} ended, ${counts.mergedToday} merged.`}

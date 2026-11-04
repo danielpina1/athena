@@ -165,3 +165,8 @@ export function selectCounts(s: Slice, now: number = Date.now()): Counts {
 export function selectAnswering(s: Pick<AthenaData, "answering">, approvalId: string): boolean | undefined {
   return s.answering.get(approvalId);
 }
+
+/** Whether the first Snapshot has arrived: until then counts and lists are unknown, not zero or empty. */
+export function selectSynced(s: Pick<AthenaData, "synced">): boolean {
+  return s.synced;
+}

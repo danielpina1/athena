@@ -4,9 +4,10 @@ import { NavLink } from "react-router";
 import { ConnectionDot, type LinkSource } from "@/app/ConnectionBanner";
 import { NAV, type NavItem, useNavCount } from "@/app/routes";
 import { modKeyLabel } from "@/app/shortcuts";
-import { selectCounts } from "@/lib/store/selectors";
+import { selectCounts, selectSynced } from "@/lib/store/selectors";
 import { useAthena } from "@/lib/store/state";
 import { Kbd } from "@/ui/athena/Kbd";
+import { Waiting } from "@/ui/athena/Waiting";
 import { cn } from "@/ui/cn";
 
 /** A count that needs the owner: orange fill, ink text. Hidden at zero. */
@@ -44,6 +45,7 @@ const label = "px-4 pt-4 pb-1 font-mono text-xs tracking-wider text-muted upperc
 
 function NodeCard() {
   const node = useAthena((s) => s.node);
+  const synced = useAthena(selectSynced);
   return (
     <section aria-labelledby="sidebar-node" className="grid gap-1">
       <h2 id="sidebar-node" className={label}>
@@ -75,8 +77,10 @@ function NodeCard() {
             </dd>
           </dl>
         </div>
-      ) : (
+      ) : synced ? (
         <p className="px-4 text-sm text-muted">Waiting for the node.</p>
+      ) : (
+        <Waiting className="px-4" />
       )}
     </section>
   );
@@ -85,21 +89,26 @@ function NodeCard() {
 function Today() {
   const merged = useAthena((s) => selectCounts(s).mergedToday);
   const open = useAthena((s) => selectCounts(s).open);
+  const synced = useAthena(selectSynced);
   return (
     <section aria-labelledby="sidebar-today" className="grid gap-1 border-t border-line-soft pb-4">
       <h2 id="sidebar-today" className={label}>
         Today
       </h2>
-      <dl className="grid grid-cols-[1fr_auto] gap-x-2 px-4 font-mono text-xs text-muted">
-        <dt>Merged</dt>
-        <dd data-testid="merged" className="tabular-nums">
-          {merged}
-        </dd>
-        <dt>Open</dt>
-        <dd data-testid="open" className="tabular-nums">
-          {open}
-        </dd>
-      </dl>
+      {!synced ? (
+        <Waiting className="px-4" />
+      ) : (
+        <dl className="grid grid-cols-[1fr_auto] gap-x-2 px-4 font-mono text-xs text-muted">
+          <dt>Merged</dt>
+          <dd data-testid="merged" className="tabular-nums">
+            {merged}
+          </dd>
+          <dt>Open</dt>
+          <dd data-testid="open" className="tabular-nums">
+            {open}
+          </dd>
+        </dl>
+      )}
     </section>
   );
 }

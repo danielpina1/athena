@@ -95,3 +95,63 @@ test("check asks the browser to look for a new sw.js", async () => {
   updates.check();
   await vi.waitFor(() => expect(reg.update).toHaveBeenCalledTimes(1));
 });
+
+test("another tab's Reload reloads this one", async () => {
+  // Two tabs of the app: each has its own container, and they share the registration and its workers.
+  const reg = new FakeRegistration();
+  const tab = () =>
+    Object.assign(new EventTarget(), { controller: {}, register: vi.fn(async () => reg) }) as unknown as ServiceWorkerContainer &
+      EventTarget;
+  const [a, b] = [tab(), tab()];
+  const [reloadA, reloadB] = [vi.fn(), vi.fn()];
+  const updatesA = watchUpdates(a, reloadA);
+  const updatesB = watchUpdates(b, reloadB);
+  await Promise.resolve();
+  await Promise.resolve();
+  const w = reg.found();
+  reg.installing = null;
+  reg.waiting = w;
+  w.become("installed");
+  expect(updatesA.ready() && updatesB.ready()).toBe(true);
+
+  // A taps Reload: the worker activates and takes control of both tabs, and both load the new app.
+  updatesA.apply();
+  expect(w.postMessage).toHaveBeenCalledWith({ type: "SKIP_WAITING" });
+  w.become("activated");
+  a.dispatchEvent(new Event("controllerchange"));
+  b.dispatchEvent(new Event("controllerchange"));
+  expect(reloadA).toHaveBeenCalledTimes(1);
+  expect(reloadB).toHaveBeenCalledTimes(1);
+
+  // A further controllerchange never reloads a tab twice.
+  b.dispatchEvent(new Event("controllerchange"));
+  expect(reloadB).toHaveBeenCalledTimes(1);
+});
+
+test("Reload with the waiting worker already active (or gone) reloads at once", async () => {
+  const { reg, container } = fakeContainer(true);
+  const reload = vi.fn();
+  const updates = watchUpdates(container, reload);
+  await Promise.resolve();
+  await Promise.resolve();
+  const w = reg.found();
+  w.become("installed");
+  expect(updates.ready()).toBe(true);
+  // Another tab activated it, but this tab missed the controllerchange.
+  w.become("activated");
+  updates.apply();
+  expect(w.postMessage).not.toHaveBeenCalled();
+  expect(reload).toHaveBeenCalledTimes(1);
+});
+
+test("a waiting worker that turns redundant takes the banner away", async () => {
+  const { reg, container } = fakeContainer(true);
+  const updates = watchUpdates(container, vi.fn());
+  await Promise.resolve();
+  await Promise.resolve();
+  const w = reg.found();
+  w.become("installed");
+  expect(updates.ready()).toBe(true);
+  w.become("redundant");
+  expect(updates.ready()).toBe(false);
+});

@@ -23,6 +23,11 @@ import type {
 import type { LinkClient } from "@/lib/link/client";
 
 export type AthenaData = {
+  /**
+   * Whether a Snapshot has arrived since the start or the last reset. Until then the lists are not empty, they are
+   * unknown: views say "Waiting for the server." rather than "nothing" or "0" (the installed app opened offline).
+   */
+  synced: boolean;
   /** The epoch of the Welcome whose Snapshot the state came from. */
   epoch: string;
   /** The highest Delta seq applied, or the Snapshot's cursor. */
@@ -80,6 +85,7 @@ export type AthenaState = AthenaData & {
 
 function empty(): AthenaData {
   return {
+    synced: false,
     epoch: "",
     cursor: 0n,
     tickets: new Map(),
@@ -222,6 +228,7 @@ export const useAthena = create<AthenaState>()((set, get) => ({
       ({ approvals, tickets } = answered(approvals, tickets, id, approve));
     }
     set({
+      synced: true,
       epoch: epoch ?? get().epoch,
       cursor: s.cursor,
       tickets,

@@ -85,21 +85,35 @@ self.addEventListener("push", (e) => {
     // unreadable: a push must still show something
   }
   const tag = typeof msg.tag === "string" ? msg.tag : "";
-  const options: NotificationOptions = {
+  // renotify is not in TypeScript's lib yet; Safari ignores it.
+  const options: NotificationOptions & { renotify?: boolean } = {
     body: typeof msg.body === "string" ? msg.body : "",
     data: { url: tag ? `/tickets/${encodeURIComponent(tag)}` : "/" },
     icon: "/icons/icon-192.png",
   };
-  if (tag) options.tag = tag;
+  if (tag) {
+    // A later push for the same Ticket replaces the earlier one, with sound and vibration again.
+    options.tag = tag;
+    options.renotify = true;
+  }
   e.waitUntil(self.registration.showNotification(typeof msg.title === "string" && msg.title ? msg.title : "Athena", options));
 });
 
 self.addEventListener("notificationclick", (e) => {
   e.notification.close();
-  const want = (e.notification.data as { url?: unknown } | null)?.url;
-  const url = typeof want === "string" && want.startsWith("/") ? want : "/";
-  e.waitUntil(openApp(url));
+  e.waitUntil(openApp(sameOrigin((e.notification.data as { url?: unknown } | null)?.url)));
 });
+
+/** want's path if it is a URL of this origin ("//host", "/\host" and other origins' URLs are not), else "/". */
+function sameOrigin(want: unknown): string {
+  if (typeof want !== "string") return "/";
+  try {
+    const u = new URL(want, self.location.origin);
+    return u.origin === self.location.origin ? u.pathname + u.search + u.hash : "/";
+  } catch {
+    return "/";
+  }
+}
 
 /** Focuses an open window of the app (the focused one, else a visible one, else any) and takes it to url, or opens one. */
 async function openApp(url: string): Promise<void> {

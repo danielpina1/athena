@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, test } from "vitest";
 import { DeltaSchema, SnapshotSchema, type Delta } from "@/gen/athena/v1/state_pb";
 import type { MessageInitShape } from "@bufbuild/protobuf";
 import { useAthena } from "./state";
-import { selectCounts, selectNeedsYou, selectTickets } from "./selectors";
+import { selectCounts, selectNeedsYou, selectSynced, selectTickets } from "./selectors";
 
 const snap = (init: MessageInitShape<typeof SnapshotSchema>) => create(SnapshotSchema, init);
 const delta = (init: MessageInitShape<typeof DeltaSchema>) => create(DeltaSchema, init);
@@ -162,4 +162,16 @@ describe("useAthena", () => {
     expect(st().cursor).toBe(500n);
     expect(selectNeedsYou(st())).toHaveLength(250);
   });
+});
+
+test("synced after a Snapshot, not before and not after reset", () => {
+  useAthena.getState().reset();
+  expect(selectSynced(useAthena.getState())).toBe(false);
+  // A Delta alone (seq 0, a watched detail) is not the state: still not synced.
+  useAthena.getState().applyDelta(create(DeltaSchema, { seq: 0n }));
+  expect(selectSynced(useAthena.getState())).toBe(false);
+  useAthena.getState().applySnapshot(create(SnapshotSchema, { cursor: 1n }), "e1");
+  expect(selectSynced(useAthena.getState())).toBe(true);
+  useAthena.getState().reset();
+  expect(selectSynced(useAthena.getState())).toBe(false);
 });

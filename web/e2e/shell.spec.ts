@@ -74,3 +74,18 @@ test("no horizontal scroll at 320 px", async ({ page }, testInfo) => {
     await expectAccessible(page);
   }
 });
+
+test("a test can sign in on two screens and both stay signed in", async ({ page, browser, baseURL }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop", "a harness check: one width is enough");
+  await signedInPage(page);
+  const other = await browser.newContext({ baseURL });
+  try {
+    const second = await signedInPage(await other.newPage());
+    await expectShell(second);
+    // The first screen's passkey was kept: its session still works after a reload.
+    await page.reload();
+    await expectShell(page);
+  } finally {
+    await other.close();
+  }
+});

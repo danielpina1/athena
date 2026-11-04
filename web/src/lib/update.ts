@@ -1,8 +1,8 @@
 // The service worker's registration and the app's updates. After a server update an open tab keeps running the old
 // app: the new worker installs and waits, the app says "A new version is ready — Reload", and the tap sends the
-// waiting worker SKIP_WAITING; when it takes control the page reloads into the new app. The browser looks for a new
-// sw.js on navigations; the app also asks after every reconnect (a server update restarts the server, so the link
-// drops and comes back), never on a timer.
+// waiting worker SKIP_WAITING; when it takes control, every tab that showed the banner reloads into the new app. The
+// browser looks for a new sw.js on navigations; the app also asks after every reconnect (a server update restarts the
+// server, so the link drops and comes back), never on a timer.
 
 export type Updates = {
   /** Whether a new version is waiting. */
@@ -19,23 +19,34 @@ export type Updates = {
 export function watchUpdates(container: ServiceWorkerContainer, reload: () => void): Updates {
   let waiting: ServiceWorker | null = null;
   let applying = false;
+  let reloading = false;
   const listeners = new Set<() => void>();
   const setWaiting = (w: ServiceWorker | null) => {
     waiting = w;
     for (const l of [...listeners]) l();
   };
-  // A worker that installs while another controls the page is an update; the very first install is not.
+  /** One reload per page, whatever fires it: no loop of controllerchange and apply. */
+  const reloadOnce = () => {
+    if (reloading) return;
+    reloading = true;
+    reload();
+  };
+  // A worker that installs while another controls the page is an update; the very first install is not. One that
+  // turns redundant (a newer build replaced it before activating) is no longer offered.
   const follow = (w: ServiceWorker | null) => {
     if (!w) return;
     const settle = () => {
       if (w.state === "installed" && container.controller) setWaiting(w);
+      else if (w.state === "redundant" && waiting === w) setWaiting(null);
     };
     w.addEventListener("statechange", settle);
     settle();
   };
-  // Only the takeover the owner asked for reloads: the first install's clients.claim() changes the controller too.
+  // A takeover reloads every tab that knew of the update, the one that tapped Reload or any other: the new worker
+  // deleted the old build's cache, so an old page would miss its lazy chunks. The first install's clients.claim()
+  // changes the controller too, with no update known: that does not reload.
   container.addEventListener("controllerchange", () => {
-    if (applying) reload();
+    if (applying || waiting) reloadOnce();
   });
 
   const registered = container.register("/sw.js", { scope: "/" }).then((reg) => {
@@ -53,8 +64,9 @@ export function watchUpdates(container: ServiceWorkerContainer, reload: () => vo
       return () => listeners.delete(cb);
     },
     apply() {
-      if (!waiting) {
-        reload();
+      // Gone, or already activated by another tab (this one missed or is past the controllerchange): just reload.
+      if (!waiting || waiting.state !== "installed") {
+        reloadOnce();
         return;
       }
       applying = true;

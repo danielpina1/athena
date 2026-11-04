@@ -119,7 +119,7 @@ async function installed() {
 
 test("sw push shows title and tag and opens the ticket on click", async () => {
   // Plan 3's notification JSON (internal/web/notify.go).
-  const payload = { title: "Athena", body: "Fix the login needs approval", url: "/t/T-7", tag: "T-7" };
+  const payload = { title: "Athena", body: "Fix the login needs approval", url: "/tickets/T-7", tag: "T-7" };
   await dispatch("push", { data: { json: () => payload } });
   expect(scope.registration.showNotification).toHaveBeenCalledWith(
     "Athena",
@@ -234,4 +234,27 @@ test("sw never caches ws auth api", async () => {
   }
   expect(JSON.stringify([...caches.store.get("athena-v2")!.entries()])).toBe(before);
   expect(network).not.toHaveBeenCalled();
+});
+
+test("sw renotifies a replaced Ticket notification", async () => {
+  await dispatch("push", { data: { json: () => ({ title: "Athena", body: "a", tag: "T-7" }) } });
+  expect(scope.registration.showNotification.mock.calls[0][1]).toMatchObject({ tag: "T-7", renotify: true });
+  // No tag: nothing to replace, so no renotify (a browser refuses renotify without a tag).
+  await dispatch("push", { data: { json: () => ({ title: "Athena", body: "b" }) } });
+  expect(scope.registration.showNotification.mock.calls[1][1]).not.toHaveProperty("renotify");
+});
+
+test("sw opens only same-origin urls from a notification", async () => {
+  const close = vi.fn();
+  for (const [want, opened] of [
+    ["//evil.example/x", "/"],
+    ["/\\evil.example", "/"],
+    ["https://evil.example/tickets/T-1", "/"],
+    [`${ORIGIN}/tickets/T-1?tab=session`, "/tickets/T-1?tab=session"],
+    ["/tickets/T-1", "/tickets/T-1"],
+  ]) {
+    scope.clients.openWindow.mockClear();
+    await dispatch("notificationclick", { notification: { data: { url: want }, close } });
+    expect(scope.clients.openWindow, want).toHaveBeenCalledWith(opened);
+  }
 });

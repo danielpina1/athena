@@ -1,9 +1,9 @@
 /// <reference types="vitest/config" />
-import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig, type Plugin } from "vite";
+import { type BundleLike, precacheBuild } from "./src/swBuild";
 
 const devServer = process.env.ATHENA_DEV_SERVER ?? "http://localhost:8443";
 const origin = new URL(devServer).origin;
@@ -15,25 +15,23 @@ const src = (p: string) => fileURLToPath(new URL(p, import.meta.url));
 
 /**
  * Writes the precache list into the service worker (src/sw.ts reads it as __ATHENA_BUILD__): every hashed file of
- * this build under assets/, the lazy chunks included, and a version made from that list, which names the worker's
- * cache. A new build therefore changes sw.js, and the browser installs the new worker beside the old one.
+ * this build under assets/, the lazy chunks included, and a version made from that list and index.html, which names
+ * the worker's cache (src/swBuild.ts). A new build therefore changes sw.js, and the browser installs the new worker
+ * beside the old one. It runs last, once index.html is in the bundle.
  */
 function precachePlugin(): Plugin {
   const token = "__ATHENA_BUILD__";
   return {
     name: "athena-precache",
     apply: "build",
+    enforce: "post",
     generateBundle(_, bundle) {
       const sw = bundle["sw.js"];
       if (!sw || sw.type !== "chunk") return this.error("precache: the build has no sw.js chunk");
       if (!sw.code.includes(token)) return this.error(`precache: sw.js does not read ${token}`);
       if (sw.imports.length > 0 || sw.exports.length > 0) return this.error("precache: sw.js must not import or export");
-      const assets = Object.keys(bundle)
-        .filter((f) => f.startsWith("assets/"))
-        .sort()
-        .map((f) => "/" + f);
-      const version = createHash("sha256").update(assets.join("\n")).digest("hex").slice(0, 12);
-      sw.code = sw.code.replaceAll(token, JSON.stringify({ version, assets }));
+      const build = precacheBuild(bundle as unknown as BundleLike);
+      sw.code = sw.code.replaceAll(token, JSON.stringify(build));
     },
   };
 }

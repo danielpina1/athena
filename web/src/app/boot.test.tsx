@@ -313,3 +313,50 @@ test("the installed app started offline shows the shell, then checks the session
     delete (navigator as { serviceWorker?: unknown }).serviceWorker;
   }
 });
+
+test("leaving the offline shell for sign-in cleans up as any sign-out does", async () => {
+  Object.defineProperty(navigator, "serviceWorker", { configurable: true, value: { controller: {} } });
+  try {
+    const { runtime } = setup();
+    let n = 0;
+    fakeFetch({
+      "GET /auth/session": () => {
+        if (n++ === 0) throw new TypeError("network down");
+        return { json: { authenticated: false } };
+      },
+    });
+    gate(runtime);
+    await screen.findByText("the app");
+    // A step-up asked for in the shell must not outlive it.
+    const asked = requestReauth();
+    act(() => {
+      window.dispatchEvent(new Event("online"));
+    });
+    expect(await screen.findByText(SIGNED_OUT_NOTICE)).toBeTruthy();
+    expect(await asked).toBe(false);
+  } finally {
+    delete (navigator as { serviceWorker?: unknown }).serviceWorker;
+  }
+});
+
+test("a server error on the start-up check is not taken for an offline start", async () => {
+  Object.defineProperty(navigator, "serviceWorker", { configurable: true, value: { controller: {} } });
+  try {
+    const { server, runtime } = setup();
+    let n = 0;
+    fakeFetch({
+      "GET /auth/session": () => (n++ === 0 ? { status: 502, json: { code: "internal" } } : { json: { authenticated: true } }),
+    });
+    gate(runtime);
+    expect(await screen.findByText("Athena's server had an error. Try again in a moment.")).toBeTruthy();
+    expect(screen.queryByText("the app")).toBeNull();
+    expect(server.sockets).toHaveLength(0);
+    // Asked again when the page is shown or the network comes back.
+    act(() => {
+      window.dispatchEvent(new Event("online"));
+    });
+    await screen.findByText("the app");
+  } finally {
+    delete (navigator as { serviceWorker?: unknown }).serviceWorker;
+  }
+});

@@ -5,12 +5,13 @@ import { useMemo, useRef, useState } from "react";
 import { Link } from "react-router";
 import type { TicketSummary } from "@/gen/athena/v1/state_pb";
 import { useShortcut } from "@/app/shortcuts";
-import { selectTickets } from "@/lib/store/selectors";
+import { selectSynced, selectTickets } from "@/lib/store/selectors";
 import { useAthena } from "@/lib/store/state";
 import { EmptyState } from "@/ui/athena/EmptyState";
 import { Mono } from "@/ui/athena/Mono";
 import { RelativeTime } from "@/ui/athena/RelativeTime";
 import { StageBadge } from "@/ui/athena/StageBadge";
+import { Waiting } from "@/ui/athena/Waiting";
 import { cn } from "@/ui/cn";
 import { Button } from "@/ui/primitives/button";
 import { Filters, filterSearch, hasFilters, readFilters, useFilterParams } from "./Filters";
@@ -55,6 +56,7 @@ export function TicketList({ selectedId }: { selectedId?: string }) {
   const { sp, clear } = params;
   const filter = readFilters(sp);
   const tickets = useAthena((s) => s.tickets);
+  const synced = useAthena(selectSynced);
   const repos = useAthena((s) => s.repos);
   const needsYouIds = useAthena((s) => selectTickets(s, { stage: "needsYou" }));
   const rows = useAthena((s) => selectTickets(s, filter));
@@ -86,11 +88,13 @@ export function TicketList({ selectedId }: { selectedId?: string }) {
       <div className="sticky top-0 z-10 grid gap-3 border-b border-line bg-bg p-4">
         <div className="flex items-baseline justify-between gap-2">
           <h1 className="text-xl font-semibold">Tickets</h1>
-          <Mono>{`${rows.length} ${rows.length === 1 ? "Ticket" : "Tickets"}`}</Mono>
+          {synced && <Mono>{`${rows.length} ${rows.length === 1 ? "Ticket" : "Tickets"}`}</Mono>}
         </div>
         <Filters params={params} repos={repos} models={models} searchRef={search} />
       </div>
-      {total === 0 ? (
+      {!synced ? (
+        <Waiting className="px-4 py-8" />
+      ) : total === 0 ? (
         <div className="px-4">
           <EmptyState
             title="No Tickets yet."

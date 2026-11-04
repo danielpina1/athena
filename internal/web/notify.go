@@ -333,7 +333,7 @@ func (n *Notifier) notify(t *athenav1.TicketSummary, action string) {
 		Body  string `json:"body"`
 		URL   string `json:"url"`
 		Tag   string `json:"tag"`
-	}{"Athena", title + " " + phrase, "/t/" + t.GetId(), t.GetId()})
+	}{"Athena", title + " " + phrase, "/tickets/" + t.GetId(), t.GetId()})
 	// One effect per subscription, so a failing push service is retried alone.
 	jobs := make(map[string][]byte, len(subs))
 	for _, s := range subs {

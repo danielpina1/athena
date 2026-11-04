@@ -3,8 +3,9 @@
 //   - test: Playwright's, with baseURL set to the shared server, a `session` fixture (below), and a page that fails
 //     the test when the browser reports a Content Security Policy violation.
 //   - signedInPage(page): a CDP virtual authenticator (ctap2, internal, resident key, user verification), then the
-//     real enrollment (a fresh `athena web enroll` link, after revoking the earlier tests' passkeys) and sign-in with
-//     that passkey. Both screens are checked with axe on the way.
+//     real enrollment (a fresh `athena web enroll` link, after revoking the passkeys of earlier tests; the running
+//     test's own are kept, so it may sign in more than once) and sign-in with that passkey. Both screens are checked
+//     with axe on the way.
 //   - athena(...args): the CLI against the shared state dir, e.g. athena("task", "Deploy it") → its stdout.
 //   - expectAccessible(page): axe on the current screen; any serious or critical violation fails.
 //   - session.requestApproval(ticket, tool, input) and session.report(ticket, state, text, question?): act as the
@@ -87,20 +88,27 @@ export async function expectShell(page: Page): Promise<void> {
   await expect(page.locator('[data-status="open"]').first()).toBeAttached();
 }
 
-/**
- * Revokes every enrolled passkey. The server lists them all in a new passkey's excludeCredentials, and Chromium
- * refuses a creation once that list is past 64 (the 66th enrollment on one server failed), while every
- * signedInPage enrolls one. The specs run one at a time and none signs in twice, so the passkeys there belong to
- * tests that have finished.
- */
-async function revokeEarlierPasskeys(): Promise<void> {
-  const ids = (await athena("web", "passkeys"))
+/** The passkeys the running test enrolled: kept, so a test can sign in more than once (two screens, say). */
+const ownPasskeys = new Set<string>();
+
+async function passkeyIds(): Promise<string[]> {
+  return (await athena("web", "passkeys"))
     .split("\n")
     .slice(1)
     .map((line) => line.split(/\s+/)[0])
     .filter((id) => /^[A-Za-z0-9_-]{16,}$/.test(id));
-  // "--" first: a base64url id can start with "-", which would read as a flag.
-  for (const id of ids) await run(join(BIN, "athena"), ["web", "revoke", "--state-dir", env("ATHENA_E2E_STATE"), "--", id]);
+}
+
+/**
+ * Revokes the passkeys earlier tests enrolled, keeping the running test's own. The server lists every passkey in a
+ * new one's excludeCredentials, and Chromium refuses a creation once that list is past 64 (the 66th enrollment on
+ * one server failed), while every signedInPage enrolls one. The specs run one at a time (one worker), so a passkey
+ * that is not the running test's belongs to a test that has finished.
+ */
+async function revokeEarlierPasskeys(): Promise<void> {
+  for (const id of await passkeyIds()) {
+    if (!ownPasskeys.has(id)) await athena("web", "revoke", id);
+  }
 }
 
 /**
@@ -109,6 +117,7 @@ async function revokeEarlierPasskeys(): Promise<void> {
  */
 export async function signedInPage(page: Page): Promise<Page> {
   await revokeEarlierPasskeys();
+  const before = new Set(await passkeyIds());
   const cdp = await page.context().newCDPSession(page);
   await cdp.send("WebAuthn.enable");
   const { authenticatorId } = await cdp.send("WebAuthn.addVirtualAuthenticator", {
@@ -128,6 +137,7 @@ export async function signedInPage(page: Page): Promise<Page> {
   await expectAccessible(page);
   await create.click();
   await expect(page).toHaveURL(/\/$/);
+  for (const id of await passkeyIds()) if (!before.has(id)) ownPasskeys.add(id);
 
   // Sign in with the new passkey: start from no session, as a returning owner does. With presence simulated the
   // authenticator would answer the sign-in page's passkey autofill on its own, so the owner's touch is held back
@@ -189,10 +199,18 @@ function sessionctl(args: string[], children: Set<ChildProcess>): Promise<string
   });
 }
 
-export const test = base.extend<{ session: Session }>({
+export const test = base.extend<{ session: Session; ownPasskeysReset: void }>({
   baseURL: async ({}, use) => {
     await use(env("ATHENA_E2E_URL"));
   },
+  // Each test starts owning no passkey: the next signedInPage revokes the previous test's.
+  ownPasskeysReset: [
+    async ({}, use) => {
+      ownPasskeys.clear();
+      await use();
+    },
+    { auto: true },
+  ],
   page: async ({ page }, use) => {
     const violations: string[] = [];
     page.on("console", (m) => {

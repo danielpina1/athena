@@ -255,7 +255,9 @@ test("a record the URL names is the selected row", () => {
 });
 
 test("empty states on a server without GitHub", () => {
+  // An empty Snapshot (not no Snapshot at all, which waits for the server).
   useAthena.getState().reset();
+  load({});
   const { unmount } = renderRouting();
   expect(tabLabels()).toEqual(["Triggers 0", "Threads 0", "Decisions 0"]);
   expect(screen.getByText("No Triggers yet.")).toBeTruthy();
@@ -396,6 +398,7 @@ test("each tab says what it shows, and the empty states say what will appear", (
     unmount();
   }
   useAthena.getState().reset();
+  load({});
   const empties: Array<[string, RegExp]> = [
     ["/routing", /Nothing has arrived yet\. Messages you send and GitHub mentions of the App show up here\./],
     ["/routing?tab=threads", /No GitHub issue or pull request is followed yet/],

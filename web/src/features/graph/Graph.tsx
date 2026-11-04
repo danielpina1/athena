@@ -17,9 +17,10 @@ import { Link, useNavigate } from "react-router";
 import { useLayout, useMediaQuery } from "@/app/Panes";
 import { ticketRoute } from "@/app/search";
 import { useShortcut } from "@/app/shortcuts";
-import { selectNeedsYou } from "@/lib/store/selectors";
+import { selectNeedsYou, selectSynced } from "@/lib/store/selectors";
 import { useAthena } from "@/lib/store/state";
 import { EmptyState } from "@/ui/athena/EmptyState";
+import { Waiting } from "@/ui/athena/Waiting";
 import { Button } from "@/ui/primitives/button";
 import { topModal } from "@/ui/primitives/dialog";
 import { ToggleGroup, ToggleGroupItem } from "@/ui/primitives/toggle-group";
@@ -63,6 +64,7 @@ export function Graph() {
   const reducedMotion = useMediaQuery(REDUCED_MOTION);
 
   const tickets = useAthena((s) => s.tickets);
+  const synced = useAthena(selectSynced);
   const threads = useAthena((s) => s.threads);
   const decisions = useAthena((s) => s.decisions);
   const repos = useAthena((s) => s.repos);
@@ -174,21 +176,22 @@ export function Graph() {
     </div>
   );
 
-  const empty =
-    tickets.size === 0 ? (
-      <EmptyState
-        className="mx-4 lg:mx-6"
-        title="No Tickets yet"
-        description="Start a task and it shows here, in its repository's lane."
-        action={
-          <Button asChild>
-            <Link to="/new">New task</Link>
-          </Button>
-        }
-      />
-    ) : model.nodes.length === 0 ? (
-      <EmptyState className="mx-4 lg:mx-6" title="Nothing needs you" description="Tickets waiting on you show here." />
-    ) : null;
+  const empty = !synced ? (
+    <Waiting className="mx-4 border-t border-line py-8 lg:mx-6" />
+  ) : tickets.size === 0 ? (
+    <EmptyState
+      className="mx-4 lg:mx-6"
+      title="No Tickets yet"
+      description="Start a task and it shows here, in its repository's lane."
+      action={
+        <Button asChild>
+          <Link to="/new">New task</Link>
+        </Button>
+      }
+    />
+  ) : model.nodes.length === 0 ? (
+    <EmptyState className="mx-4 lg:mx-6" title="Nothing needs you" description="Tickets waiting on you show here." />
+  ) : null;
 
   const scrubber = (
     <Scrubber

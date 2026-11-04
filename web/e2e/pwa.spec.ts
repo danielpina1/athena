@@ -51,6 +51,9 @@ test("offline reload shows the shell with the unreachable banner", async ({ page
   await expect(page.getByRole("heading", { name: "Tickets", level: 1 }).first()).toBeVisible();
   await page.goto("/");
   await expect(page.getByText("Control server unreachable — retrying")).toBeVisible();
+  // No Snapshot yet: nothing claims "nothing" or "0".
+  await expect(page.getByText("Waiting for the server.").first()).toBeVisible();
+  await expect(page.getByText("Nothing needs you.")).toHaveCount(0);
   await expectAccessible(page);
   await page.evaluate(() => document.fonts.ready);
   await expect(page).toHaveScreenshot("offline-light.png");
@@ -59,6 +62,8 @@ test("offline reload shows the shell with the unreachable banner", async ({ page
   await context.setOffline(false);
   await expectShell(page);
   await expect(page.getByText("Control server unreachable — retrying")).toHaveCount(0);
+  await expect(page.getByText("Nothing needs you.")).toBeVisible();
+  await expect(page.getByText("Waiting for the server.")).toHaveCount(0);
 });
 
 /** The service worker's registration id, from CDP. */
@@ -100,7 +105,7 @@ test("a push shows a notification", async ({ baseURL }, testInfo) => {
       await cdp.send("ServiceWorker.deliverPushMessage", {
         origin: new URL(page.url()).origin,
         registrationId: id,
-        data: JSON.stringify({ title: "Athena", body, url: "/t/T-9", tag: "T-9" }),
+        data: JSON.stringify({ title: "Athena", body, url: "/tickets/T-9", tag: "T-9" }),
       });
     }
     await expect

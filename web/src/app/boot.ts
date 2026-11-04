@@ -3,7 +3,7 @@
 // build their own with createRuntime. Nothing here touches React: SessionGate renders from `gate`.
 import { createStore, type StoreApi } from "zustand/vanilla";
 import { cancelReauth, requestReauth } from "@/features/auth/ReauthDialog";
-import { getSession, bindSession, signOut as endSession } from "@/lib/auth/session";
+import { AuthError, getSession, bindSession, signOut as endSession } from "@/lib/auth/session";
 import { setOutbox } from "@/lib/commands/actions";
 import { connectOutbox, linkSender, Outbox } from "@/lib/commands/outbox";
 import { LinkClient } from "@/lib/link/client";
@@ -17,6 +17,7 @@ import { toast } from "@/ui/primitives/toast";
 export type Phase = { kind: "checking" } | { kind: "signedOut"; notice?: string } | { kind: "signedIn" };
 
 export const SIGNED_OUT_NOTICE = "You were signed out on this device.";
+export const SERVER_ERROR_NOTICE = "Athena's server had an error. Try again in a moment.";
 /** Link attempts that fail before a Welcome, in a row, after which the session is checked. */
 export const FAILURES_BEFORE_CHECK = 3;
 
@@ -121,7 +122,7 @@ export function createRuntime(opts: RuntimeOptions): Runtime {
     void resubscribePush();
   };
 
-  // The start-up check failed for want of a network: ask again when the network is back or the page is shown.
+  // The start-up check failed (no network, or a server error): ask again when the network is back or the page is shown.
   let checked: Promise<void> | undefined;
   let watching = false;
   const retryCheck = (ev: Event) => {
@@ -153,14 +154,19 @@ export function createRuntime(opts: RuntimeOptions): Runtime {
           if ((await getSession()).signedIn) {
             // Already showing the offline shell: its link is running and reconnects on its own.
             if (phase() !== "signedIn") connect();
+          } else if (phase() === "signedIn") {
+            leave(SIGNED_OUT_NOTICE); // the offline shell, and the session ended meanwhile
           } else {
-            client.stop();
             setPhase({ kind: "signedOut" });
           }
-        } catch {
-          // The installed app's cached shell (the service worker served this page): the app, with the link's
-          // "unreachable" banner, until the server answers. Otherwise sign-in says the server could not be reached.
-          if (navigator.serviceWorker?.controller) {
+        } catch (e) {
+          if (e instanceof AuthError) {
+            // The server answered, with an error (a 5xx, or a proxy's): not an offline start.
+            if (phase() === "signedIn") leave(SERVER_ERROR_NOTICE);
+            else setPhase({ kind: "signedOut", notice: SERVER_ERROR_NOTICE });
+          } else if (navigator.serviceWorker?.controller) {
+            // No network, in the installed app (the service worker served this page from its cache): the app, with
+            // the link's "unreachable" banner, until the server answers.
             if (phase() !== "signedIn") connect();
           } else {
             setPhase({ kind: "signedOut", notice: "Could not reach Athena. Check your connection." });

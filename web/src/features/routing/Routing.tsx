@@ -1,9 +1,12 @@
 // The Routing screen: how incoming work was routed. Triggers (what arrived and what became of it), Threads (the
 // conversations Athena follows) and Decisions (what Eval decided). The filters of each tab live in the URL, and a tab's
-// count is the length of the list it shows after its filters. /routing?tab=threads&thread=<key> opens one record.
+// count is the length of the list it shows after its filters; before the first Snapshot there is no count, only
+// "Waiting for the server.". /routing?tab=threads&thread=<key> opens one record.
 import { useMemo } from "react";
+import { selectSynced } from "@/lib/store/selectors";
 import { useAthena } from "@/lib/store/state";
 import { Mono } from "@/ui/athena/Mono";
+import { Waiting } from "@/ui/athena/Waiting";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/ui/primitives/tabs";
 import { useFilterParams } from "../tickets/Filters";
 import { Decisions, selectDecisions } from "./Decisions";
@@ -26,6 +29,7 @@ export function Routing() {
   const triggers = useAthena((s) => s.triggers);
   const threads = useAthena((s) => s.threads);
   const decisions = useAthena((s) => s.decisions);
+  const synced = useAthena(selectSynced);
 
   const triggerRows = useMemo(
     () => selectTriggers(triggers, { outcome: sp.get("outcome") ?? "", q: sp.get("tq") ?? "" }),
@@ -45,29 +49,41 @@ export function Routing() {
       <Tabs value={tab} onValueChange={(v) => set("tab", v)}>
         <TabsList aria-label="Routing records" className="px-2">
           <TabsTrigger value="triggers">
-            Triggers <Mono>{triggerRows.length}</Mono>
+            Triggers {synced && <Mono>{triggerRows.length}</Mono>}
           </TabsTrigger>
           <TabsTrigger value="threads">
-            Threads <Mono>{threadRows.length}</Mono>
+            Threads {synced && <Mono>{threadRows.length}</Mono>}
           </TabsTrigger>
           <TabsTrigger value="decisions">
-            Decisions <Mono>{decisionRows.length}</Mono>
+            Decisions {synced && <Mono>{decisionRows.length}</Mono>}
           </TabsTrigger>
         </TabsList>
         <TabsContent value="triggers" className="pt-0">
-          <Triggers
-            params={params}
-            rows={triggerRows}
-            total={triggers.size}
-            selected={sp.get("trigger") ?? undefined}
-            again={(t) => canReevaluate(t, { threads, judged })}
-          />
+          {synced ? (
+            <Triggers
+              params={params}
+              rows={triggerRows}
+              total={triggers.size}
+              selected={sp.get("trigger") ?? undefined}
+              again={(t) => canReevaluate(t, { threads, judged })}
+            />
+          ) : (
+            <Waiting className="px-4 py-8" />
+          )}
         </TabsContent>
         <TabsContent value="threads" className="pt-0">
-          <Threads params={params} rows={threadRows} total={threads.size} selected={sp.get("thread") ?? undefined} />
+          {synced ? (
+            <Threads params={params} rows={threadRows} total={threads.size} selected={sp.get("thread") ?? undefined} />
+          ) : (
+            <Waiting className="px-4 py-8" />
+          )}
         </TabsContent>
         <TabsContent value="decisions" className="pt-0">
-          <Decisions params={params} rows={decisionRows} total={decisions.size} />
+          {synced ? (
+            <Decisions params={params} rows={decisionRows} total={decisions.size} />
+          ) : (
+            <Waiting className="px-4 py-8" />
+          )}
         </TabsContent>
       </Tabs>
     </section>

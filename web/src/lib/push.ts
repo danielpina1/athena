@@ -2,6 +2,7 @@
 // is made with the server's VAPID key (GET /push/key) and given to the server with PushSubscribe; plan 3 ties it to
 // the web session, so after every sign-in the app sends the existing one again (resubscribePush), quietly: it never
 // asks for permission and never subscribes a device the owner turned off.
+import type { CommandResult } from "@/gen/athena/v1/commands_pb";
 import * as actions from "@/lib/commands/actions";
 
 export type PushState = "unsupported" | "denied" | "off" | "on";
@@ -16,7 +17,10 @@ export class PushError extends Error {
 
 /** Whether this device holds a subscription the server was given; unknown (false) until enable or resubscribe. */
 let subscribed = false;
+/** Commands of enable/disable whose result has not come yet (offline, the outbox holds them until the link opens). */
+let pendingCount = 0;
 const listeners = new Set<() => void>();
+const errorListeners = new Set<(message: string) => void>();
 
 function changed(on: boolean): PushState {
   subscribed = on;
@@ -43,10 +47,34 @@ export function pushState(): PushState {
   return subscribed && Notification.permission === "granted" ? "on" : "off";
 }
 
-/** Calls cb whenever pushState may have changed; returns the unsubscribe. */
+/** Calls cb whenever pushState or pushPending may have changed; returns the unsubscribe. */
 export function onPushState(cb: () => void): () => void {
   listeners.add(cb);
   return () => listeners.delete(cb);
+}
+
+/** Whether the server has yet to confirm the last change (it is told as soon as the link is open). */
+export function pushPending(): boolean {
+  return pendingCount > 0;
+}
+
+/** Calls cb with the sentence to show when the server refuses a change made here; returns the unsubscribe. */
+export function onPushError(cb: (message: string) => void): () => void {
+  errorListeners.add(cb);
+  return () => errorListeners.delete(cb);
+}
+
+/** Follows a command's result without waiting for it: a refusal runs undo and is told to onPushError. */
+function settleLater(result: Promise<CommandResult>, undo: () => void): void {
+  pendingCount++;
+  void result.then((r) => {
+    pendingCount--;
+    if (!r.ok) {
+      undo();
+      for (const l of [...errorListeners]) l(actions.errorMessage(r.code));
+    }
+    changed(subscribed);
+  });
 }
 
 /** The service worker's registration, once it is active; none in the dev server, which registers no worker. */
@@ -79,15 +107,11 @@ function sameKey(a: ArrayBuffer | null | undefined, b: Uint8Array): boolean {
   return x.length === b.length && x.every((v, i) => v === b[i]);
 }
 
-async function tellServer(sub: PushSubscription): Promise<void> {
-  const r = await actions.pushSubscribe(sub.toJSON());
-  if (!r.ok) throw new PushError(actions.errorMessage(r.code));
-}
-
 /**
  * Asks for permission, subscribes with the server's key (replacing a subscription made with an older key) and gives
- * the subscription to the server. Resolves with the new state; a refused permission resolves "denied" or "off".
- * Throws PushError with the sentence to show when it cannot finish.
+ * the subscription to the server. Resolves with the new state once the PushSubscribe is queued, without waiting for
+ * the server (pushPending until it answers; a refusal turns it off and is told to onPushError). A refused permission
+ * resolves "denied" or "off". Throws PushError with the sentence to show when it cannot finish here.
  */
 export async function enablePush(): Promise<PushState> {
   if (!supported()) return "unsupported";
@@ -105,18 +129,21 @@ export async function enablePush(): Promise<PushState> {
   } catch {
     throw new PushError("This browser would not subscribe to notifications. Try again later.");
   }
-  await tellServer(sub);
+  settleLater(actions.pushSubscribe(sub.toJSON()), () => (subscribed = false));
   return changed(true);
 }
 
-/** Unsubscribes this device and tells the server; resolves with the new state. */
+/**
+ * Unsubscribes this device and tells the server; resolves with the new state once the PushUnsubscribe is queued.
+ * This device is off either way; a refusal is told to onPushError (the server keeps the endpoint until its push
+ * service reports it gone).
+ */
 export async function disablePush(): Promise<PushState> {
   if (!supported()) return "unsupported";
   const sub = await (await registration())?.pushManager.getSubscription();
   if (sub) {
     await sub.unsubscribe();
-    // The outbox delivers it even if the link is down now; a push service refusing the gone endpoint drops it too.
-    await actions.pushUnsubscribe(sub.endpoint);
+    settleLater(actions.pushUnsubscribe(sub.endpoint), () => {});
   }
   return changed(false);
 }
@@ -140,5 +167,7 @@ export async function resubscribePush(): Promise<void> {
 /** Forgets what this module knows; tests only. */
 export function __resetPushForTest(): void {
   subscribed = false;
+  pendingCount = 0;
   listeners.clear();
+  errorListeners.clear();
 }

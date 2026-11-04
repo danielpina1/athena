@@ -473,3 +473,10 @@ describe("GraphList", () => {
     expect(document.querySelectorAll("[data-list-node]")).toHaveLength(250);
   });
 });
+
+test("graph says waiting before the first snapshot", () => {
+  useAthena.getState().reset();
+  renderGraph();
+  expect(screen.getByText("Waiting for the server.")).toBeTruthy();
+  expect(screen.queryByText("No Tickets yet")).toBeNull();
+});

@@ -25,7 +25,7 @@ import { PinnedSessions } from "@/features/session/PinnedSessions";
 import { NotificationsControl } from "@/features/settings/NotificationsControl";
 import { TicketDetail } from "@/features/tickets/TicketDetail";
 import { TicketList } from "@/features/tickets/TicketList";
-import { selectCounts } from "@/lib/store/selectors";
+import { selectCounts, selectSynced } from "@/lib/store/selectors";
 import { useAthena } from "@/lib/store/state";
 import { EmptyState } from "@/ui/athena/EmptyState";
 
@@ -52,7 +52,9 @@ export const NAV: readonly NavItem[] = [
 /** The count a nav item shows: the Needs you list's length (approvals answered here leave it at once, R30). */
 export function useNavCount(item: NavItem): number {
   const needsYou = useAthena((s) => selectCounts(s).needsYou);
-  return item.to === "/" ? needsYou : 0;
+  const synced = useAthena(selectSynced);
+  // Before the first Snapshot the count is unknown: no badge rather than a false one.
+  return item.to === "/" && synced ? needsYou : 0;
 }
 
 /** The nav item a path belongs to, if any. */

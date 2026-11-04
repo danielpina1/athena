@@ -1,8 +1,16 @@
 // Settings › Notifications: Web Push on this device, On or Off. Task 17's Settings screen takes it over.
-import { useState, useSyncExternalStore } from "react";
-import { disablePush, enablePush, onPushState, pushState, type PushState } from "@/lib/push";
+import { useEffect, useState, useSyncExternalStore } from "react";
+import { disablePush, enablePush, onPushError, onPushState, pushPending, pushState, type PushState } from "@/lib/push";
 import { toast } from "@/ui/primitives/toast";
 import { ToggleGroup, ToggleGroupItem } from "@/ui/primitives/toggle-group";
+
+const NOT_CHANGED = "Notifications not changed";
+
+/** While the server has yet to hear of the change (offline: the outbox sends it once Athena is reachable). */
+const PENDING: Partial<Record<PushState, string>> = {
+  on: "On for this device; Athena is told when it is reachable.",
+  off: "Off for this device; Athena is told when it is reachable.",
+};
 
 const HINT: Record<PushState, string> = {
   on: "This device is told when a Ticket needs you and no Athena screen is open.",
@@ -13,7 +21,10 @@ const HINT: Record<PushState, string> = {
 
 export function NotificationsControl() {
   const state = useSyncExternalStore(onPushState, pushState);
+  const pending = useSyncExternalStore(onPushState, pushPending);
   const [busy, setBusy] = useState(false);
+  // The server refused a change after the control had let go of it.
+  useEffect(() => onPushError((description) => toast({ title: NOT_CHANGED, description, tone: "danger" })), []);
   const fixed = state === "denied" || state === "unsupported";
 
   const set = async (want: "on" | "off") => {
@@ -22,7 +33,7 @@ export function NotificationsControl() {
     try {
       await (want === "on" ? enablePush() : disablePush());
     } catch (e) {
-      toast({ title: "Notifications not changed", description: e instanceof Error ? e.message : String(e), tone: "danger" });
+      toast({ title: NOT_CHANGED, description: e instanceof Error ? e.message : String(e), tone: "danger" });
     } finally {
       setBusy(false);
     }
@@ -35,7 +46,7 @@ export function NotificationsControl() {
       </h2>
       <div className="grid justify-items-start gap-2">
         <p id="settings-notifications-hint" className="max-w-prose min-w-0 text-sm text-muted">
-          {HINT[state]}
+          {(pending && PENDING[state]) || HINT[state]}
         </p>
         <ToggleGroup
           type="single"
