@@ -319,6 +319,9 @@ type policyCache struct {
 	cur    policy.Settings
 	rev    int
 	pol    core.Policy
+	// unchecked is set while GitHub is configured and its startup check has not passed: the defaults do not know the
+	// installation's account yet. While nobody saved settings, the Engine then has no Policy (see policy).
+	unchecked bool
 }
 
 func newPolicyCache(st *store.Store, allowed []string, scope core.SourceScope, timeout time.Duration) (*policyCache, error) {
@@ -337,10 +340,15 @@ func (c *policyCache) set(s policy.Settings, rev int) {
 	c.mu.Unlock()
 }
 
-// policy is the Engine's Policy getter.
+// policy is the Engine's Policy getter. While nobody saved settings and the startup check has not passed, the defaults
+// cannot know the installation's account and would allow nobody: there is no Policy then, so the Engine evaluates
+// nothing and decides nothing (R36), and queued Triggers wait for the check instead of being recorded ignored.
 func (c *policyCache) policy() core.Policy {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+	if c.rev == 0 && c.unchecked {
+		return nil
+	}
 	return c.pol
 }
 
@@ -365,13 +373,28 @@ func (c *policyCache) allow(allowed []string, tell tellFunc) error {
 	defer c.saveMu.Unlock()
 	c.store = policy.NewStore(c.st, policy.Defaults(allowed))
 	s, rev, err := c.store.Current()
-	if err != nil || rev != 0 {
+	if err != nil {
 		return err
 	}
+	if rev != 0 {
+		c.mu.Lock()
+		c.unchecked = false
+		c.mu.Unlock()
+		return nil
+	}
 	old, _ := c.current()
-	c.set(s, 0)
+	c.mu.Lock()
+	c.cur, c.rev, c.pol, c.unchecked = s, 0, policy.New(s, c.scope, c.timeout), false
+	c.mu.Unlock()
 	_, err = tell(old, s)
 	return err
+}
+
+// awaitCheck marks the defaults as not knowing the installation's account until allow is called (see policy).
+func (c *policyCache) awaitCheck() {
+	c.mu.Lock()
+	c.unchecked = true
+	c.mu.Unlock()
 }
 
 // policyChangeKey is the kv key of a settings change saved but not yet told to the Engine.

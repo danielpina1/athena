@@ -706,3 +706,46 @@ func TestHealthShowsRefusedReplies(t *testing.T) {
 		t.Fatalf("reply health = %q, want the latest refusal and the count", got)
 	}
 }
+
+// Minor 4 (R36): while no Policy is saved and the startup check has not passed, nobody is known to be allowed, so
+// nothing is gated: a Trigger queued before the boot waits instead of being recorded ignored, and it is evaluated
+// once the check passes, with the installation's account allowed.
+func TestNoGatingBeforeTheCheckPasses(t *testing.T) {
+	newFakeEnv(t, openTurnFixture(t))
+	fastEvaluate(t)
+	fastCheckRetry(t)
+	g := newFakeGitHub(t)
+	dir := newStateDir(t)
+	g.configure(t, dir, 600)
+	tr := mention("github:issuecomment:9", 3, time.Now())
+	tr.Actor.ID = "o" // the installation's account: allowed by the default Policy once the check knows it
+	offlineWith(t, dir, time.Now, func(e *core.Engine, _ *store.Store) {
+		if _, err := e.Receive(tr); err != nil {
+			t.Fatal(err)
+		}
+	})
+	g.down.Store(true)
+	s := startServer(t, dir)
+	time.Sleep(400 * time.Millisecond) // several evaluation ticks
+	var list []DecisionView
+	s.ok(Request{Op: OpDecisions}, &list)
+	if len(list) != 0 {
+		t.Fatalf("decisions before the check passed = %+v, want none", list)
+	}
+	thread := github.ThreadKey(fakeRepo, 3)
+	g.down.Store(false)
+	eventually(t, "the trigger evaluated once the check passed", func() bool {
+		for _, th := range s.threads() {
+			if th.Key == thread && th.Eval != nil {
+				return true
+			}
+		}
+		return false
+	})
+	s.ok(Request{Op: OpDecisions}, &list)
+	for _, d := range list {
+		if d.Kind == core.DecisionIgnore {
+			t.Fatalf("decisions = %+v: the trigger was ignored", list)
+		}
+	}
+}

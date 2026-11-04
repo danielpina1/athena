@@ -154,6 +154,9 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	if err != nil {
 		return err
 	}
+	if _, ok := gh.checked(); gh != nil && !ok {
+		pc.awaitCheck()
+	}
 
 	ncfg := cfg.Node
 	ncfg.Metrics = reg
