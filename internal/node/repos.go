@@ -75,30 +75,60 @@ const mirrorConfig = "[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n
 // not read; objects/ and refs/ hold data, and hooks never run (core.hooksPath).
 var mirrorStray = []string{".git", "commondir", "gitdir", "config.worktree", "remotes", "branches"}
 
-// sanitizeMirror rewrites a mirror's config to mirrorConfig, atomically, and removes mirrorStray.
-func sanitizeMirror(mirror string) error {
+// unknownHead is the branch a mirror's HEAD names before GitHub said which is the default: a valid, unborn branch.
+const unknownHead = "athena-unknown"
+
+// sanitizeMirror rewrites a mirror's config to mirrorConfig and its HEAD to name branch (the default branch GitHub
+// advertised, or unknownHead before it is known), atomically, and removes mirrorStray. Neither file is ever read to
+// choose a worktree's base: that comes from GitHub's advertisement (syncMirror).
+func sanitizeMirror(mirror, branch string) error {
 	for _, name := range mirrorStray {
 		if err := os.RemoveAll(filepath.Join(mirror, name)); err != nil {
 			return err
 		}
 	}
+	if branch == "" {
+		branch = unknownHead
+	}
+	if err := writeFileAtomic(filepath.Join(mirror, "HEAD"), "ref: refs/heads/"+branch+"\n"); err != nil {
+		return err
+	}
 	return writeFileAtomic(filepath.Join(mirror, "config"), mirrorConfig)
 }
 
-// mirrorGit runs git on a mirror: its config is made the node's first, and the repository is named by GIT_DIR, so no
-// discovery (a planted .git) chooses another.
-func mirrorGit(ctx context.Context, mirror string, env []string, args ...string) (string, error) {
-	if err := sanitizeMirror(mirror); err != nil {
+// mirrorGit runs git on a mirror: its config and HEAD are made the node's first, and the repository is named by
+// GIT_DIR, so no discovery (a planted .git) chooses another.
+func mirrorGit(ctx context.Context, mirror, branch string, env []string, args ...string) (string, error) {
+	if err := sanitizeMirror(mirror, branch); err != nil {
 		return "", fmt.Errorf("reset the mirror's config: %w", err)
 	}
 	return runGit(ctx, "", append(env, "GIT_DIR="+mirror), args...)
 }
 
-// writeFileAtomic replaces path with body (0600) through a rename, which also replaces a symlink rather than follow it.
-func writeFileAtomic(path, body string) error {
-	tmp := path + ".athena-tmp"
-	_ = os.Remove(tmp)
-	if err := os.WriteFile(tmp, []byte(body), 0o600); err != nil {
+// writeFileAtomic replaces path with body (0600): it writes a new temporary file beside it (O_EXCL, a random name, so
+// nothing planted is followed), syncs it and renames it over path, which replaces a symlink there rather than follow it.
+func writeFileAtomic(path, body string) (err error) {
+	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".athena-*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer func() {
+		if err != nil {
+			_ = f.Close()
+			_ = os.Remove(tmp)
+		}
+	}()
+	if _, err = f.WriteString(body); err != nil {
+		return err
+	}
+	if err = f.Sync(); err != nil {
+		return err
+	}
+	if err = f.Chmod(0o600); err != nil {
+		return err
+	}
+	if err = f.Close(); err != nil {
 		return err
 	}
 	return os.Rename(tmp, path)
@@ -218,10 +248,10 @@ func (n *Node) grantNode(repo, tok string) (nonce string, revoke func()) {
 }
 
 // EnsureClone brings the node's copies of repo (owner/name) up to date and returns the worktrees' clone, the remote's
-// default branch and base, the commit the mirror's default branch names, which new worktrees start from. It clones or
-// fetches the mirror from GitHub with tok, through the node's credential helper (tok is never in a config, a URL, an
-// argument or an environment), then clones or fetches the clone from the mirror with no credential at all, and checks
-// the clone has base: a fetch a worker redirected fails the launch rather than set its base.
+// default branch and base, the commit GitHub advertises for it, which new worktrees start from. It asks GitHub for its
+// HEAD and fetches the mirror from it with tok, through the node's credential helper (tok is never in a config, a
+// URL, an argument or an environment), then clones or fetches the clone from the mirror with no credential at all, and
+// checks the clone has base: a fetch a worker redirected fails the launch rather than set its base.
 func (n *Node) EnsureClone(ctx context.Context, repo, tok string) (clone, defaultBranch, base string, err error) {
 	if _, _, err := splitRepo(repo); err != nil {
 		return "", "", "", err
@@ -243,18 +273,9 @@ func (n *Node) EnsureClone(ctx context.Context, repo, tok string) (clone, defaul
 	if err := writeSystemConfig(clone, mirror, mirror); err != nil {
 		return "", "", "", err
 	}
-	if err := n.syncMirror(ctx, mirror, repo, tok); err != nil {
-		return "", "", "", err
-	}
-	// The mirror is the node's own: its HEAD names the default branch, and its ref the base.
-	menv := mirrorGitEnv(mirror, repo, nil)
-	defaultBranch, err = mirrorGit(ctx, mirror, menv, "symbolic-ref", "--quiet", "--short", "HEAD")
-	if err != nil || defaultBranch == "" {
-		return "", "", "", fmt.Errorf("cannot tell the default branch of %s: %v", repo, err)
-	}
-	base, err = mirrorGit(ctx, mirror, menv, "rev-parse", "--verify", "refs/heads/"+defaultBranch+"^{commit}")
+	defaultBranch, base, err = n.syncMirror(ctx, mirror, repo, tok)
 	if err != nil {
-		return "", "", "", fmt.Errorf("the mirror of %s has no %s: %w", repo, defaultBranch, err)
+		return "", "", "", err
 	}
 	env := cloneGitEnv(clone, repo)
 	if _, err := os.Stat(filepath.Join(clone, ".git")); err != nil {
@@ -267,7 +288,7 @@ func (n *Node) EnsureClone(ctx context.Context, repo, tok string) (clone, defaul
 		return "", "", "", fmt.Errorf("fetch %s from its mirror: %w", repo, err)
 	}
 	if _, err := runGit(ctx, clone, env, "cat-file", "-e", base+"^{commit}"); err != nil {
-		return "", "", "", fmt.Errorf("the clone of %s lacks the mirror's %s commit %s after its fetch: %w", repo, defaultBranch, base, err)
+		return "", "", "", fmt.Errorf("the clone of %s lacks the %s commit %s GitHub advertised, after its fetch: %w", repo, defaultBranch, base, err)
 	}
 	// Fetches come from the mirror; a worker's git push goes to GitHub, with its session's own token.
 	if _, err := runGit(ctx, clone, env, "config", "remote.origin.url", mirror); err != nil {
@@ -282,27 +303,75 @@ func (n *Node) EnsureClone(ctx context.Context, repo, tok string) (clone, defaul
 	return clone, defaultBranch, base, nil
 }
 
-// syncMirror clones the mirror from GitHub the first time and fetches it otherwise, with the token through a nonce
-// valid for that one git call.
-func (n *Node) syncMirror(ctx context.Context, mirror, repo, tok string) error {
+// syncMirror brings the mirror up to date with GitHub and returns the default branch and its commit as GitHub
+// advertised them: one token-bearing call asks for HEAD (ls-remote --symref), a second fetches the branches and that
+// exact commit, each with its own single-use nonce. Nothing in the mirror's files is read to choose them.
+func (n *Node) syncMirror(ctx context.Context, mirror, repo, tok string) (branch, sha string, err error) {
+	if _, err := os.Stat(filepath.Join(mirror, "HEAD")); err != nil {
+		// No mirror yet, or one that died half-way: start over with an empty one.
+		_ = os.RemoveAll(mirror)
+		if _, err := runGit(ctx, "", mirrorGitEnv(mirror, repo, nil), "init", "--quiet", "--bare", "--template=", mirror); err != nil {
+			_ = os.RemoveAll(mirror)
+			return "", "", fmt.Errorf("make the mirror of %s: %w", repo, err)
+		}
+	}
+	out, err := n.tokenGit(ctx, mirror, repo, tok, "", "ls-remote", "--symref", cloneURL(repo), "HEAD")
+	if err != nil {
+		return "", "", fmt.Errorf("ask %s for its default branch: %w", repo, err)
+	}
+	if branch, sha, err = parseRemoteHead(ctx, out); err != nil {
+		return "", "", fmt.Errorf("%s: %w", repo, err)
+	}
+	if _, err := n.tokenGit(ctx, mirror, repo, tok, branch, "fetch", "--quiet", "--prune", cloneURL(repo),
+		"+refs/heads/*:refs/heads/*", sha); err != nil {
+		return "", "", fmt.Errorf("fetch %s: %w", repo, err)
+	}
+	if n.afterMirrorFetch != nil {
+		n.afterMirrorFetch(mirror)
+	}
+	if _, err := mirrorGit(ctx, mirror, branch, mirrorGitEnv(mirror, repo, nil), "cat-file", "-e", sha+"^{commit}"); err != nil {
+		return "", "", fmt.Errorf("the mirror of %s lacks the %s commit %s GitHub advertised: %w", repo, branch, sha, err)
+	}
+	if err := sanitizeMirror(mirror, branch); err != nil {
+		return "", "", err
+	}
+	return branch, sha, os.Chmod(mirror, 0o700)
+}
+
+// tokenGit runs one token-bearing git call on a mirror, with a nonce of its own, revoked when the call returns.
+func (n *Node) tokenGit(ctx context.Context, mirror, repo, tok, branch string, args ...string) (string, error) {
 	nonce, revoke := n.grantNode(repo, tok)
 	defer revoke()
-	env := mirrorGitEnv(mirror, repo, &nodeAuth{bin: n.cfg.AthenaBin, socket: n.cfg.SocketPath, nonce: nonce})
-	if _, err := os.Stat(filepath.Join(mirror, "HEAD")); err != nil {
-		// A clone that died half-way leaves a directory without a usable repository: start over.
-		_ = os.RemoveAll(mirror)
-		if _, err := runGit(ctx, "", env, "clone", "--bare", "--quiet", cloneURL(repo), mirror); err != nil {
-			_ = os.RemoveAll(mirror)
-			return fmt.Errorf("clone %s: %w", repo, err)
+	return mirrorGit(ctx, mirror, branch, mirrorGitEnv(mirror, repo, &nodeAuth{bin: n.cfg.AthenaBin, socket: n.cfg.SocketPath, nonce: nonce}), args...)
+}
+
+// shaRe is a full object name, SHA-1 or SHA-256.
+var shaRe = regexp.MustCompile(`^(?:[0-9a-f]{40}|[0-9a-f]{64})$`)
+
+// parseRemoteHead reads `git ls-remote --symref <url> HEAD`: the branch HEAD names and its commit. The branch must be
+// a valid branch name (git check-ref-format), as it goes into the mirror's HEAD and a refspec.
+func parseRemoteHead(ctx context.Context, out string) (branch, sha string, err error) {
+	for _, line := range strings.Split(out, "\n") {
+		ref, name, ok := strings.Cut(line, "\t")
+		if !ok || name != "HEAD" {
+			continue
 		}
-	} else if _, err := mirrorGit(ctx, mirror, env, "fetch", "--quiet", "--prune", cloneURL(repo), "+refs/heads/*:refs/heads/*"); err != nil {
-		return fmt.Errorf("fetch %s: %w", repo, err)
+		if b, isSym := strings.CutPrefix(ref, "ref: refs/heads/"); isSym {
+			branch = b
+		} else if shaRe.MatchString(ref) {
+			sha = ref
+		}
 	}
-	revoke()
-	if err := sanitizeMirror(mirror); err != nil {
-		return err
+	if branch == "" || sha == "" {
+		return "", "", fmt.Errorf("the remote advertises no default branch and commit for HEAD")
 	}
-	return os.Chmod(mirror, 0o700)
+	if strings.ContainsAny(branch, " \t\r\n\\") || strings.HasPrefix(branch, "-") {
+		return "", "", fmt.Errorf("the remote's default branch %q is not a branch name", branch)
+	}
+	if _, err := runGit(ctx, "", nodeGitBaseEnv(), "check-ref-format", "refs/heads/"+branch); err != nil {
+		return "", "", fmt.Errorf("the remote's default branch %q is not a branch name", branch)
+	}
+	return branch, sha, nil
 }
 
 // withGitConfig appends git config entries to env through GIT_CONFIG_COUNT/KEY_n/VALUE_n, after the entries env

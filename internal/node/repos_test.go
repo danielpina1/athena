@@ -585,3 +585,97 @@ func TestWorktreeBaseFromMirror(t *testing.T) {
 		}
 	}
 }
+
+// R28: the base of a new worktree is what GitHub advertises, never what the mirror's files say: a planted HEAD naming
+// another branch, or a loose refs/heads/<default> written after the fetch, leave it alone.
+func TestMirrorBaseFromRemoteAdvertisement(t *testing.T) {
+	root, work := fakeGitHub(t, "o/r")
+	n := testNode(t)
+	ctx := context.Background()
+	if _, _, _, err := n.EnsureClone(ctx, "o/r", fakeToken); err != nil {
+		t.Fatal(err)
+	}
+	mirror := MirrorDir(n.cfg.StateDir, "o/r")
+	// A worker pushes its own branch to GitHub and points the mirror's HEAD at it.
+	git(t, work, "checkout", "-q", "-b", "side")
+	git(t, work, "commit", "-q", "--allow-empty", "-m", "worker code")
+	git(t, work, "push", "-q", "origin", "side")
+	workerSHA := git(t, work, "rev-parse", "HEAD")
+	git(t, work, "checkout", "-q", "trunk")
+	git(t, work, "commit", "-q", "--allow-empty", "-m", "real later")
+	git(t, work, "push", "-q", "origin", "trunk")
+	want := git(t, filepath.Join(root, "o", "r.git"), "rev-parse", "refs/heads/trunk")
+	if err := os.WriteFile(filepath.Join(mirror, "HEAD"), []byte("ref: refs/heads/side\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, def, base, err := n.EnsureClone(ctx, "o/r", fakeToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if def != "trunk" || base != want {
+		t.Fatalf("planted HEAD: default %q base %s; want trunk %s (worker's %s)", def, base, want, workerSHA)
+	}
+	if b, _ := os.ReadFile(filepath.Join(mirror, "HEAD")); string(b) != "ref: refs/heads/trunk\n" {
+		t.Fatalf("mirror HEAD = %q, want it set from the advertisement", b)
+	}
+
+	// A loose ref written between the fetch and anything that would read it.
+	n.afterMirrorFetch = func(m string) {
+		if err := os.WriteFile(filepath.Join(m, "refs", "heads", "trunk"), []byte(workerSHA+"\n"), 0o600); err != nil {
+			t.Error(err)
+		}
+	}
+	_, def, base, err = n.EnsureClone(ctx, "o/r", fakeToken)
+	n.afterMirrorFetch = nil
+	if err != nil {
+		t.Fatal(err)
+	}
+	if def != "trunk" || base != want {
+		t.Fatalf("planted loose ref: default %q base %s; want trunk %s (worker's %s)", def, base, want, workerSHA)
+	}
+}
+
+// writeFileAtomic writes through a fresh temporary file: a symlink planted at any name it might use, or at the
+// destination, is not followed, and a planted directory does not stop it.
+func TestWriteFileAtomicDoesNotFollowSymlinks(t *testing.T) {
+	dir := t.TempDir()
+	outside := t.TempDir()
+	dst := filepath.Join(dir, "config")
+	var victims []string
+	for i, name := range []string{"config", "config.athena-tmp", "config.tmp", "config~", ".config.tmp"} {
+		v := filepath.Join(outside, "victim"+strconv.Itoa(i))
+		victims = append(victims, v)
+		if err := os.Symlink(v, filepath.Join(dir, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writeFileAtomic(dst, mirrorConfig); err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range victims {
+		if _, err := os.Lstat(v); !os.IsNotExist(err) {
+			t.Errorf("a planted symlink was followed: %s exists (%v)", v, err)
+		}
+	}
+	st, err := os.Lstat(dst)
+	if err != nil || !st.Mode().IsRegular() || st.Mode().Perm() != 0o600 {
+		t.Fatalf("destination: %v %v, want a regular 0600 file", err, st)
+	}
+	if b, _ := os.ReadFile(dst); string(b) != mirrorConfig {
+		t.Fatalf("destination = %q", b)
+	}
+	// A directory where a fixed temporary name would go.
+	d2 := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(d2, "config.athena-tmp", "x"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeFileAtomic(filepath.Join(d2, "config"), "x"); err != nil {
+		t.Fatalf("a planted directory stopped the write: %v", err)
+	}
+	ents, _ := os.ReadDir(dir)
+	for _, e := range ents {
+		if strings.HasPrefix(e.Name(), "config.athena-") && e.Name() != "config.athena-tmp" {
+			t.Errorf("a temporary file was left behind: %s", e.Name())
+		}
+	}
+}

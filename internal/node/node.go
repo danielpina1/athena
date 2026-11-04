@@ -138,6 +138,8 @@ type Node struct {
 	tokens *tokenStore
 	// afterDrop, when set (tests), runs on a runner right after it dropped its Assignment's token.
 	afterDrop func(s *session)
+	// afterMirrorFetch, when set (tests), runs right after the mirror's fetch from GitHub.
+	afterMirrorFetch func(mirror string)
 	// grants holds the nonces of the node's own git calls on a clone (repos.go): nonce -> nodeGrant.
 	grants sync.Map
 
