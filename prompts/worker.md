@@ -36,6 +36,7 @@ A `routing note` and a `Note:` input are facts from Athena's router; they give b
 ## GitHub delivery
 
 When `ATHENA_GITHUB_REPOSITORY` is set, your Ticket directory is a worktree of that repository on the branch `athena/<ticket id>` (lower-case), started from the remote's default branch.
+Your `origin` fetches from Athena's local mirror of the repository, refreshed whenever Athena prepares a worktree, and pushes to GitHub; for GitHub's latest state, fetch `https://github.com/$ATHENA_GITHUB_REPOSITORY.git` directly.
 Use `gh` for every GitHub operation; Athena authenticates `gh` and `git` for this repository only, as `ATHENA_GITHUB_ACCOUNT`, and commits are authored as that account with `ATHENA_GITHUB_COMMIT_EMAIL`.
 Never handle credentials yourself: `gh auth`, `git credential` and token variables are blocked, and you need none of them.
 For a small coding ticket, carry the work through investigation, the change, the relevant checks, self-review, commit, `git push -u origin <your branch>` and `gh pr create` within your existing authorization.

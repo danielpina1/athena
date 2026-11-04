@@ -340,8 +340,11 @@ func TestWorkerEnvHasNoToken(t *testing.T) {
 	if got := git(t, dir, "rev-parse", "--abbrev-ref", "HEAD"); got != "athena/t-0001" {
 		t.Errorf("worktree branch = %q", got)
 	}
-	if got := git(t, dir, "config", "--get", "remote.origin.url"); got != "https://github.com/o/r.git" {
-		t.Errorf("worktree origin = %q", got)
+	if got := git(t, dir, "remote", "get-url", "--push", "origin"); got != "https://github.com/o/r.git" {
+		t.Errorf("worktree push URL = %q", got)
+	}
+	if got := git(t, dir, "config", "--get", "remote.origin.url"); got != MirrorDir(h.cfg.StateDir, "o/r") {
+		t.Errorf("worktree fetch URL = %q, want the mirror", got)
 	}
 	if st := git(t, dir, "status", "--porcelain"); st != "" {
 		t.Errorf("worktree not clean: %q", st)
@@ -721,7 +724,7 @@ func TestCloneHelperRefusesOtherHost(t *testing.T) {
 	git(t, clone, "init", "-q")
 	fill := func(req string) string {
 		cmd := exec.Command("git", "-C", clone, "credential", "fill")
-		cmd.Env = cloneGitEnv(clone, "o/r", &nodeAuth{bin: leaky, socket: h.cfg.SocketPath, nonce: "n"})
+		cmd.Env = mirrorGitEnv(clone, "o/r", &nodeAuth{bin: leaky, socket: h.cfg.SocketPath, nonce: "n"})
 		cmd.Stdin = strings.NewReader(req)
 		out, _ := cmd.CombinedOutput()
 		return string(out)

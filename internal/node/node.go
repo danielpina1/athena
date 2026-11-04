@@ -1472,7 +1472,7 @@ func cleanupWorktree(p placement, t core.Ticket, log *slog.Logger) {
 	if p.github != "" {
 		// The clone is shared: no fetch or worktree add of another Ticket runs meanwhile, and its config is not trusted.
 		defer lockRepo(p.repo)()
-		env = cloneGitEnv(p.repo, p.github, nil)
+		env = cloneGitEnv(p.repo, p.github)
 	}
 	gitOut := func(dir string, args ...string) (string, error) { return gitIn(dir, env, args...) }
 	dirty, err := gitOut(p.workDir, "status", "--porcelain")

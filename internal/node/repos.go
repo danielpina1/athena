@@ -9,21 +9,25 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 )
 
-// GitHub repositories on a node: one clone per repository under <stateDir>/repos/<owner>/<name> (lower-case), shared
-// by the worktrees of every Ticket that works in it. The clone's remote is the plain https URL; the token reaches git
-// only through a credential helper, never in a URL, an argument, a file or an environment.
+// GitHub repositories on a node, in two parts (ruling R26):
 //
-// The clone's config and hooks are shared with the worktrees, so a worker can write them. The node's own git on a
-// clone therefore trusts none of it: every call runs with command-scope config that disables hooks and fsmonitor, allows
-// only the https transport and verifies TLS, and fetches by explicit URL and refspec, never by the remote's name. A
-// node-owned system config file (read before every other) maps the clone URL to itself, which beats any insteadOf a
-// worker or the owner's global config adds, however long. Only the clone and fetch get a credential helper, scoped to
-// https://github.com, and it answers from the node's memory through the socket with a one-call nonce.
+//   - The mirror, <stateDir>/mirrors/<owner>/<name>.git (lower-case, bare, 0700), is the node's alone: no worktree is
+//     ever attached to it, so no worker git writes its config or hooks. It is the only repository the token is used
+//     for. Its git reads no global config, only a node-written system file (which maps the clone URL to itself, beating
+//     any insteadOf), and runs with command-scope config that disables hooks and fsmonitor, allows only https, verifies
+//     TLS and pins the proxy and curl's resolve list. It fetches by explicit URL and refspec, with a credential helper
+//     scoped to https://github.com that answers from the node's memory through the socket with a one-call nonce: the
+//     token is never in a URL, an argument, a file or an environment.
+//   - The clone, <stateDir>/repos/<owner>/<name>, is what the Tickets' worktrees hang off, so its config and hooks are
+//     the workers' to write. Its origin is the mirror's path and its push URL the GitHub URL (a worker pushes with its
+//     session's own scoped token). The node fetches it from the mirror over the file protocol only, with no credential
+//     helper and no token, hooks and fsmonitor off: whatever a worker plants there reaches only that local fetch.
 
 const githubHost = "github.com"
 
@@ -53,13 +57,19 @@ func CloneDir(stateDir, repo string) string {
 	return filepath.Join(stateDir, "repos", owner, name)
 }
 
+// MirrorDir is the node-only bare mirror of a repository: <stateDir>/mirrors/<owner>/<name>.git, lower-case.
+func MirrorDir(stateDir, repo string) string {
+	owner, name, _ := strings.Cut(strings.ToLower(repo), "/")
+	return filepath.Join(stateDir, "mirrors", owner, name+".git")
+}
+
 // cloneURL is a repository's remote: the https URL, lower-case, without credentials.
 func cloneURL(repo string) string {
 	return "https://" + githubHost + "/" + strings.ToLower(repo) + ".git"
 }
 
-// systemConfig is the node-owned git system config of a clone's git, beside the clone.
-func systemConfig(clone string) string { return clone + ".gitconfig" }
+// systemConfig is the node-owned git system config of a mirror's git, beside the mirror.
+func systemConfig(mirror string) string { return mirror + ".gitconfig" }
 
 // repoLocks serializes the git work on one clone (clone, fetch, worktree add and remove) across Tickets.
 var repoLocks sync.Map // clone dir -> *sync.Mutex
@@ -76,32 +86,51 @@ type nodeAuth struct {
 	bin, socket, nonce string
 }
 
-// nodeGitEnvNames are the variables of the node's environment its git keeps: what finds the owner's git config, the
-// network proxies and the CA files. Nothing else of the server's environment reaches a process a clone may start.
-var (
-	nodeGitEnvNames = map[string]bool{"PATH": true, "HOME": true, "USER": true, "LOGNAME": true, "TMPDIR": true, "LANG": true,
-		"XDG_CONFIG_HOME": true, "HTTP_PROXY": true, "HTTPS_PROXY": true, "NO_PROXY": true, "ALL_PROXY": true, "http_proxy": true,
-		"https_proxy": true, "no_proxy": true, "all_proxy": true, "SSL_CERT_FILE": true, "SSL_CERT_DIR": true}
-)
+// nodeGitEnvNames are the variables of the node's environment its git keeps: the user's identity and locale, the
+// proxies and the CA files. Nothing else of the server's environment reaches a process a node git may start.
+var nodeGitEnvNames = map[string]bool{"PATH": true, "HOME": true, "USER": true, "LOGNAME": true, "TMPDIR": true, "LANG": true,
+	"XDG_CONFIG_HOME": true, "HTTP_PROXY": true, "HTTPS_PROXY": true, "NO_PROXY": true, "ALL_PROXY": true, "http_proxy": true,
+	"https_proxy": true, "no_proxy": true, "all_proxy": true, "SSL_CERT_FILE": true, "SSL_CERT_DIR": true}
 
-// cloneGitEnv is the environment of the node's git on a clone of repo: the hardening above, and with auth a credential
-// helper for https://github.com.
-func cloneGitEnv(clone, repo string, auth *nodeAuth) []string {
+func nodeGitBaseEnv() []string {
 	var env []string
 	for _, kv := range os.Environ() {
 		if name, _, _ := strings.Cut(kv, "="); nodeGitEnvNames[name] || strings.HasPrefix(name, "LC_") {
 			env = append(env, kv)
 		}
 	}
-	env = append(env, "GIT_CONFIG_SYSTEM="+systemConfig(clone), "GIT_TERMINAL_PROMPT=0")
-	cfg := [][2]string{
-		{"core.hooksPath", os.DevNull}, {"core.fsmonitor", "false"},
+	return append(env, "GIT_TERMINAL_PROMPT=0")
+}
+
+// noHooks are the command-scope settings of every node git: no hook and no fsmonitor of anyone's runs.
+var noHooks = [][2]string{{"core.hooksPath", os.DevNull}, {"core.fsmonitor", "false"}}
+
+// envProxy is the proxy the node's own environment names for https, or "".
+func envProxy() string {
+	for _, v := range []string{"HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"} {
+		if p := os.Getenv(v); p != "" {
+			return p
+		}
+	}
+	return ""
+}
+
+// mirrorGitEnv is the environment of the node's git on a mirror of repo: no global config, the node's system file,
+// the hardening above, and with auth the credential helper for https://github.com.
+func mirrorGitEnv(mirror, repo string, auth *nodeAuth) []string {
+	env := append(nodeGitBaseEnv(), "GIT_CONFIG_SYSTEM="+systemConfig(mirror), "GIT_CONFIG_GLOBAL="+os.DevNull)
+	u := cloneURL(repo)
+	// The proxy is pinned to the node's own (none, or its environment's): an http.proxy in a config file never applies.
+	proxy := envProxy()
+	cfg := append(slices.Clone(noHooks), [][2]string{
 		{"protocol.allow", "never"}, {"protocol.https.allow", "always"}, {"protocol.http.allow", "never"},
 		{"protocol.file.allow", "never"}, {"protocol.git.allow", "never"}, {"protocol.ssh.allow", "never"},
 		{"protocol.ext.allow", "never"},
-		{"http.sslVerify", "true"}, {"http." + cloneURL(repo) + ".sslVerify", "true"},
-		{"credential.helper", ""}, // no helper of the owner's or a worker's answers for the node
-	}
+		{"http.sslVerify", "true"}, {"http." + u + ".sslVerify", "true"},
+		{"http.proxy", proxy}, {"http." + u + ".proxy", proxy},
+		{"http.curloptResolve", ""}, {"http." + u + ".curloptResolve", ""},
+		{"credential.helper", ""}, // no helper of anyone else answers for the node
+	}...)
 	if auth != nil {
 		env = append(env, "ATHENA_SOCKET="+auth.socket)
 		cfg = append(cfg,
@@ -112,16 +141,26 @@ func cloneGitEnv(clone, repo string, auth *nodeAuth) []string {
 	return withGitConfig(env, append(cfg, nodeGitExtra...))
 }
 
-// writeSystemConfig writes a clone's system config: the clone URL rewritten to githubTarget, which is the URL itself
+// cloneGitEnv is the environment of the node's git on the worktrees' clone: no system config, no credential helper and
+// no token, only the file protocol (the mirror), hooks and fsmonitor off. The owner's global config still applies (the
+// checkout of a worktree needs its filters).
+func cloneGitEnv(clone, repo string) []string {
+	env := append(nodeGitBaseEnv(), "GIT_CONFIG_NOSYSTEM=1")
+	return withGitConfig(env, append(slices.Clone(noHooks), [][2]string{
+		{"protocol.allow", "never"}, {"protocol.file.allow", "always"}, {"credential.helper", ""},
+	}...))
+}
+
+// writeSystemConfig writes a mirror's system config: the clone URL rewritten to githubTarget, which is the URL itself
 // outside tests. Being read first, it wins over every insteadOf of the same length in later config.
-func writeSystemConfig(clone, repo string) error {
+func writeSystemConfig(mirror, repo string) error {
 	q := func(s string) string { return strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(s) }
 	body := fmt.Sprintf("[url \"%s\"]\n\tinsteadOf = %s\n", q(githubTarget(repo)), cloneURL(repo))
-	tmp := systemConfig(clone) + ".tmp"
+	tmp := systemConfig(mirror) + ".tmp"
 	if err := os.WriteFile(tmp, []byte(body), 0o600); err != nil {
 		return err
 	}
-	return os.Rename(tmp, systemConfig(clone))
+	return os.Rename(tmp, systemConfig(mirror))
 }
 
 // nodeGrant is a token the node's helper may fetch, for one repository, while one git call runs.
@@ -141,62 +180,76 @@ func (n *Node) grantNode(repo, tok string) (nonce string, revoke func()) {
 	return nonce, func() { n.grants.Delete(nonce) }
 }
 
-// EnsureClone makes sure the node has a clone of repo (owner/name) at CloneDir, cloning it the first time and
-// fetching it otherwise, and returns its directory and the remote's default branch. tok authenticates the clone and
-// the fetch through the node's credential helper; it is never in the clone's config, a URL, an argument or an
-// environment.
-func (n *Node) EnsureClone(ctx context.Context, repo, tok string) (dir, defaultBranch string, err error) {
+// EnsureClone brings the node's copies of repo (owner/name) up to date and returns the worktrees' clone and the
+// remote's default branch: it clones or fetches the mirror from GitHub with tok, through the node's credential helper
+// (tok is never in a config, a URL, an argument or an environment), then clones or fetches the clone from the mirror
+// with no credential at all.
+func (n *Node) EnsureClone(ctx context.Context, repo, tok string) (clone, defaultBranch string, err error) {
 	if _, _, err := splitRepo(repo); err != nil {
 		return "", "", err
 	}
 	if n.cfg.StateDir == "" {
 		return "", "", fmt.Errorf("no state directory for repository clones")
 	}
-	dir = CloneDir(n.cfg.StateDir, repo)
-	unlock := lockRepo(dir)
+	mirror, clone := MirrorDir(n.cfg.StateDir, repo), CloneDir(n.cfg.StateDir, repo)
+	unlock := lockRepo(clone)
 	defer unlock()
-	if err := os.MkdirAll(filepath.Dir(dir), 0o700); err != nil {
-		return "", "", err
-	}
-	if err := writeSystemConfig(dir, repo); err != nil {
-		return "", "", err
-	}
-	nonce, revoke := n.grantNode(repo, tok)
-	defer revoke()
-	env := cloneGitEnv(dir, repo, &nodeAuth{bin: n.cfg.AthenaBin, socket: n.cfg.SocketPath, nonce: nonce})
-	if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
-		// A clone that died half-way leaves a directory without a usable repository: start over.
-		_ = os.RemoveAll(dir)
-		if _, err := runGit(ctx, "", env, "clone", "--quiet", cloneURL(repo), dir); err != nil {
-			_ = os.RemoveAll(dir)
-			return "", "", fmt.Errorf("clone %s: %w", repo, err)
+	for _, d := range []string{filepath.Dir(mirror), filepath.Dir(clone)} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			return "", "", err
 		}
-	} else if _, err := runGit(ctx, dir, env, "fetch", "--quiet", "--prune", cloneURL(repo), "+refs/heads/*:refs/remotes/origin/*"); err != nil {
-		return "", "", fmt.Errorf("fetch %s: %w", repo, err)
 	}
-	revoke()
-	if err := os.Chmod(dir, 0o700); err != nil {
+	if err := writeSystemConfig(mirror, repo); err != nil {
 		return "", "", err
 	}
-	defaultBranch, err = cloneDefaultBranch(ctx, dir, cloneGitEnv(dir, repo, nil))
-	if err != nil {
+	if err := n.syncMirror(ctx, mirror, repo, tok); err != nil {
 		return "", "", err
 	}
-	return dir, defaultBranch, nil
+	// The mirror is the node's own: its HEAD, not the clone's, names the default branch.
+	defaultBranch, err = runGit(ctx, mirror, mirrorGitEnv(mirror, repo, nil), "symbolic-ref", "--quiet", "--short", "HEAD")
+	if err != nil || defaultBranch == "" {
+		return "", "", fmt.Errorf("cannot tell the default branch of %s: %v", repo, err)
+	}
+	env := cloneGitEnv(clone, repo)
+	if _, err := os.Stat(filepath.Join(clone, ".git")); err != nil {
+		_ = os.RemoveAll(clone)
+		if _, err := runGit(ctx, "", env, "clone", "--quiet", mirror, clone); err != nil {
+			_ = os.RemoveAll(clone)
+			return "", "", fmt.Errorf("clone %s from its mirror: %w", repo, err)
+		}
+	} else if _, err := runGit(ctx, clone, env, "fetch", "--quiet", "--prune", mirror, "+refs/heads/*:refs/remotes/origin/*"); err != nil {
+		return "", "", fmt.Errorf("fetch %s from its mirror: %w", repo, err)
+	}
+	// Fetches come from the mirror; a worker's git push goes to GitHub, with its session's own token.
+	if _, err := runGit(ctx, clone, env, "config", "remote.origin.url", mirror); err != nil {
+		return "", "", err
+	}
+	if _, err := runGit(ctx, clone, env, "config", "remote.origin.pushurl", cloneURL(repo)); err != nil {
+		return "", "", err
+	}
+	if err := os.Chmod(clone, 0o700); err != nil {
+		return "", "", err
+	}
+	return clone, defaultBranch, nil
 }
 
-// cloneDefaultBranch is the remote's default branch: what origin/HEAD names, else the branch the clone checked out.
-func cloneDefaultBranch(ctx context.Context, dir string, env []string) (string, error) {
-	if ref, err := runGit(ctx, dir, env, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"); err == nil {
-		if b, ok := strings.CutPrefix(ref, "origin/"); ok && b != "" {
-			return b, nil
+// syncMirror clones the mirror from GitHub the first time and fetches it otherwise, with the token through a nonce
+// valid for that one git call.
+func (n *Node) syncMirror(ctx context.Context, mirror, repo, tok string) error {
+	nonce, revoke := n.grantNode(repo, tok)
+	defer revoke()
+	env := mirrorGitEnv(mirror, repo, &nodeAuth{bin: n.cfg.AthenaBin, socket: n.cfg.SocketPath, nonce: nonce})
+	if _, err := os.Stat(filepath.Join(mirror, "HEAD")); err != nil {
+		// A clone that died half-way leaves a directory without a usable repository: start over.
+		_ = os.RemoveAll(mirror)
+		if _, err := runGit(ctx, "", env, "clone", "--bare", "--quiet", cloneURL(repo), mirror); err != nil {
+			_ = os.RemoveAll(mirror)
+			return fmt.Errorf("clone %s: %w", repo, err)
 		}
+	} else if _, err := runGit(ctx, mirror, env, "fetch", "--quiet", "--prune", cloneURL(repo), "+refs/heads/*:refs/heads/*"); err != nil {
+		return fmt.Errorf("fetch %s: %w", repo, err)
 	}
-	b, err := runGit(ctx, dir, env, "symbolic-ref", "--quiet", "--short", "HEAD")
-	if err != nil || b == "" {
-		return "", fmt.Errorf("cannot tell the default branch of %s: %v", dir, err)
-	}
-	return b, nil
+	return os.Chmod(mirror, 0o700)
 }
 
 // withGitConfig appends git config entries to env through GIT_CONFIG_COUNT/KEY_n/VALUE_n, after the entries env
@@ -261,5 +314,5 @@ func (n *Node) prepareGitHub(s *session) error {
 	}
 	unlock := lockRepo(clone)
 	defer unlock()
-	return ensureWorktree(clone, p.workDir, branchName(s.t), "origin/"+def, cloneGitEnv(clone, p.github, nil))
+	return ensureWorktree(clone, p.workDir, branchName(s.t), "origin/"+def, cloneGitEnv(clone, p.github))
 }
