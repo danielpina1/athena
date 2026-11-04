@@ -157,19 +157,19 @@ func (a *Auth) revoked(hashes []string) {
 	}
 }
 
-// RevokePasskey deletes a passkey and every session it opened, and reports the ended sessions to the OnRevoke
-// callbacks. A passkey that does not exist is not an error.
-func (a *Auth) RevokePasskey(id string) error {
+// RevokePasskey deletes a passkey and every session it opened, reports the ended sessions to the OnRevoke callbacks
+// and returns how many ended. A passkey that does not exist is not an error.
+func (a *Auth) RevokePasskey(id string) (ended int, err error) {
 	sessions, err := a.st.DeletePasskey(id)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	hashes := make([]string, len(sessions))
 	for i, h := range sessions {
 		hashes[i] = hex.EncodeToString(h)
 	}
 	a.revoked(hashes)
-	return nil
+	return len(hashes), nil
 }
 
 // --- enrollment tokens ---

@@ -254,6 +254,29 @@ func (n *Node) Stop(t core.Ticket, a core.Assignment, reason string) {
 	n.post(message{kind: msgStop, t: t, a: a, reason: reason})
 }
 
+// ErrNoSession is an Interrupt of a Ticket that has no session process running.
+var ErrNoSession = errors.New("node: no live session")
+
+// Interrupt asks the Ticket's running session to abandon its current turn; the process stays for the next Input. A
+// Ticket without a running process is ErrNoSession.
+func (n *Node) Interrupt(ticketID string) error {
+	s := n.liveSession(ticketID)
+	if s == nil {
+		return ErrNoSession
+	}
+	p := s.process()
+	if p == nil {
+		return ErrNoSession
+	}
+	if err := p.InterruptTurn(); err != nil {
+		if errors.Is(err, claude.ErrExited) || s.over() { // the process is ending
+			return ErrNoSession
+		}
+		return err
+	}
+	return nil
+}
+
 // Close stops every session without reporting anything (their Assignments stay running, to be resumed by the next
 // node) and waits for them. Queued launches are dropped.
 func (n *Node) Close() error {
@@ -574,6 +597,20 @@ type session struct {
 	// a queued launch put off for them falls due. Both are fixed at creation.
 	credAttempt int
 	notBefore   time.Time
+	// proc is the session's running process, nil between processes and after the last.
+	proc *claude.Session
+}
+
+func (s *session) setProcess(p *claude.Session) {
+	s.mu.Lock()
+	s.proc = p
+	s.mu.Unlock()
+}
+
+func (s *session) process() *claude.Session {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.proc
 }
 
 // noteHandoff records the state of the Report the session just filed: ready on a Ticket that stays open hands off.
@@ -927,6 +964,8 @@ func (r *runner) run() {
 // drains the events and closes the process.
 func (r *runner) drive(sess *claude.Session, recovering bool) (crashed bool, cause string) {
 	s := r.s
+	s.setProcess(sess)
+	defer s.setProcess(nil)
 	events := sess.Events()
 	r.initSeen = false
 	r.send = sess.Send

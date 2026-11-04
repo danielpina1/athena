@@ -11,18 +11,10 @@ import (
 	"log/slog"
 	"net"
 	"os"
-	"path/filepath"
-	"slices"
-	"strings"
 	"time"
 
 	"github.com/danielpina1/athena/internal/core"
-	"github.com/danielpina1/athena/internal/effects"
-	"github.com/danielpina1/athena/internal/metrics"
 	"github.com/danielpina1/athena/internal/node"
-	"github.com/danielpina1/athena/internal/policy"
-	"github.com/danielpina1/athena/internal/router"
-	"github.com/danielpina1/athena/internal/store"
 )
 
 // The control socket speaks JSON lines: one request line per connection, answered by one response line, except logs,
@@ -51,6 +43,8 @@ const (
 	OpUnsubscribe = "unsubscribe"
 	OpPolicyShow  = "policy.show"
 	OpPolicySet   = "policy.set"
+	// OpWebRevoke revokes a passkey (ID) inside the server, so its open dashboard connections close.
+	OpWebRevoke = "web.revoke"
 )
 
 // Request is one control request; Op says which of its fields count.
@@ -141,23 +135,8 @@ const (
 	logsPollInterval  = 200 * time.Millisecond
 )
 
-// control serves the control socket.
-type control struct {
-	stateDir string
-	eng      *core.Engine
-	workRoot string
-	model    string
-	log      *slog.Logger
-	reg      *metrics.Registry
-	st       *store.Store
-	fx       *effects.Runner
-	// gh is nil without GitHub in the configuration; host is nil without a router.
-	gh     *gitHub
-	host   *router.Host
-	policy *policyCache
-	// onPolicyChange, when set (tests), runs before the Engine hears of a Policy change; an error refuses it.
-	onPolicyChange func(from, to policy.Settings) error
-}
+// control is the Dispatcher as the control socket sees it: this file frames its JSON lines, dispatch.go acts.
+type control = Dispatcher
 
 // serveConn answers one connection; ctx ends with the server.
 func (c *control) serveConn(ctx context.Context, conn net.Conn) {
@@ -195,7 +174,7 @@ func (c *control) serveConn(ctx context.Context, conn net.Conn) {
 		}
 		return
 	}
-	data, err := c.handle(req)
+	data, err := c.handleRequest(req)
 	if err != nil {
 		_ = send(errorResponse(err, c.log, req))
 		return
@@ -220,123 +199,6 @@ func userErrorf(format string, args ...any) error {
 	return &core.UserError{Msg: fmt.Sprintf(format, args...)}
 }
 
-func (c *control) handle(req Request) (any, error) {
-	switch req.Op {
-	case OpPing:
-		return nil, nil
-	case OpSubmit:
-		// A relative directory would resolve against the server's working directory, not the client's.
-		dir := req.Dir
-		if dir != "" {
-			if !filepath.IsAbs(dir) {
-				return nil, userErrorf("directory %s must be an absolute path", dir)
-			}
-			dir = filepath.Clean(dir)
-		}
-		repo := req.Repo
-		if repo != "" {
-			if c.gh == nil || !c.gh.running() {
-				return nil, userErrorf("github is not running: a task on a repository needs it (see athena status)")
-			}
-			name, ok := c.gh.cfg.repo(repo)
-			if !ok {
-				return nil, userErrorf("repository %s is not configured (configured: %s)", repo, strings.Join(c.gh.cfg.Repos, ", "))
-			}
-			repo = name
-		}
-		t, err := c.eng.SubmitOwnerTask(req.Text, core.TaskOptions{Dir: dir, Model: req.Model, Repo: repo})
-		if err != nil {
-			return nil, err
-		}
-		return map[string]string{"id": t.ID}, nil
-	case OpTickets:
-		list, err := c.eng.Tickets(req.All)
-		if err != nil {
-			return nil, err
-		}
-		slices.SortStableFunc(list, func(a, b core.Ticket) int { return a.CreatedAt.Compare(b.CreatedAt) })
-		out := make([]TicketSummary, 0, len(list))
-		for i := range list {
-			out = append(out, summary(&list[i]))
-		}
-		return out, nil
-	case OpTicket:
-		return c.detail(req.ID)
-	case OpReply:
-		return nil, c.eng.AddPersonInput(req.ID, req.Text)
-	case OpStop:
-		return nil, c.eng.StopTicket(req.ID, req.Reason)
-	case OpRetry:
-		return nil, c.eng.RetryTicket(req.ID)
-	case OpApprovals:
-		list, err := c.eng.PendingApprovals()
-		if err != nil {
-			return nil, err
-		}
-		out := make([]ApprovalView, 0, len(list))
-		for _, a := range list {
-			out = append(out, approvalView(a))
-		}
-		return out, nil
-	case OpAnswer:
-		return nil, c.eng.AnswerApproval(req.ID, req.Approve, req.Note)
-	case OpMetrics:
-		window, err := parseWindow(req.Window)
-		if err != nil {
-			return nil, err
-		}
-		return c.reg.Snapshot(window), nil
-	case OpHealth:
-		return c.health(), nil
-	case OpTriggers:
-		list, err := c.st.Triggers(canonicalThread(req.Thread), listLimit)
-		if err != nil {
-			return nil, err
-		}
-		out := make([]TriggerView, 0, len(list))
-		for i := range list {
-			out = append(out, triggerView(&list[i]))
-		}
-		return out, nil
-	case OpThreads:
-		list, err := c.st.Threads()
-		if err != nil {
-			return nil, err
-		}
-		out := make([]ThreadView, 0, len(list))
-		for i := range list {
-			out = append(out, threadView(&list[i]))
-		}
-		return out, nil
-	case OpDecisions:
-		list, err := c.eng.Decisions(canonicalThread(req.Thread), listLimit)
-		if err != nil {
-			return nil, err
-		}
-		out := make([]DecisionView, 0, len(list))
-		for i := range list {
-			out = append(out, decisionView(&list[i]))
-		}
-		return out, nil
-	case OpReevaluate:
-		return nil, c.eng.Reevaluate(req.ID)
-	case OpDismiss:
-		return nil, c.eng.Dismiss(req.ID)
-	case OpUnsubscribe:
-		thread := canonicalThread(req.Thread)
-		if _, err := c.eng.Thread(thread); err != nil {
-			return nil, err
-		}
-		return nil, c.eng.Unsubscribe(thread)
-	case OpPolicyShow:
-		return c.policyShow()
-	case OpPolicySet:
-		return c.policySet(req.Policy)
-	default:
-		return nil, userErrorf("unknown op %q", req.Op)
-	}
-}
-
 // parseWindow turns a metrics window name into its duration: 0 is since start.
 func parseWindow(name string) (time.Duration, error) {
 	switch name {
@@ -356,44 +218,6 @@ func summary(t *core.Ticket) TicketSummary {
 
 func approvalView(a core.Approval) ApprovalView {
 	return ApprovalView{ID: a.ID, TicketID: a.TicketID, Tool: a.Tool, Summary: a.Summary, Rule: a.Rule, CreatedAt: a.CreatedAt}
-}
-
-func (c *control) detail(id string) (TicketDetail, error) {
-	t, _, err := c.eng.Ticket(id)
-	if err != nil {
-		return TicketDetail{}, err
-	}
-	d := TicketDetail{TicketSummary: summary(&t), Ended: t.Ended, Assignments: t.Assignments, Undelivered: len(t.Undelivered),
-		Stats: t.Stats, Repo: t.Repo}
-	if d.Assignments == nil {
-		d.Assignments = []core.Assignment{}
-	}
-	if t.Attention != nil {
-		d.Question = t.Attention.Question
-	}
-	if x := t.Execution; x != nil {
-		d.SourceDir, d.Runtime, d.Model = x.Directory, x.Runtime, x.Model
-	}
-	if d.Model == "" {
-		d.Model = c.model
-	}
-	if wd, err := node.WorkingDir(c.workRoot, t); err == nil {
-		d.Dir = wd
-	}
-	if t.PendingApproval != "" {
-		list, err := c.eng.PendingApprovals()
-		if err != nil {
-			return TicketDetail{}, err
-		}
-		for _, a := range list {
-			if a.ID == t.PendingApproval {
-				v := approvalView(a)
-				d.Approval = &v
-				break
-			}
-		}
-	}
-	return d, nil
 }
 
 // logs streams a Ticket's transcript, one rendered event per response line. With Follow it keeps tailing the

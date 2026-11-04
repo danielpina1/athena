@@ -311,7 +311,8 @@ var (
 // its transactions, where the settings store cannot be read (transactions do not nest): the cache is filled at
 // startup and replaced by each save, outside any transaction.
 type policyCache struct {
-	st      *store.Store
+	st *store.Store
+	// store is replaced by allow (under saveMu and mu).
 	store   *policy.Store
 	scope   core.SourceScope
 	timeout time.Duration
@@ -361,6 +362,15 @@ func (c *policyCache) settings() (policy.Settings, error) {
 	return c.cur, nil
 }
 
+// saved reads the current settings and revision from the store: unlike current, it sees a save as soon as it
+// commits, before the cache is replaced.
+func (c *policyCache) saved() (policy.Settings, int, error) {
+	c.mu.RLock()
+	st := c.store
+	c.mu.RUnlock()
+	return st.Current()
+}
+
 // current returns the settings and their revision.
 func (c *policyCache) current() (policy.Settings, int) {
 	c.mu.RLock()
@@ -373,7 +383,9 @@ func (c *policyCache) current() (policy.Settings, int) {
 func (c *policyCache) allow(allowed []string, tell tellFunc) error {
 	c.saveMu.Lock()
 	defer c.saveMu.Unlock()
+	c.mu.Lock()
 	c.store = policy.NewStore(c.st, policy.Defaults(allowed))
+	c.mu.Unlock()
 	s, rev, err := c.store.Current()
 	if err != nil {
 		return err
@@ -412,16 +424,21 @@ type pendingChange struct {
 // tellFunc tells the Engine of a settings change and returns the notices it sent.
 type tellFunc func(from, to policy.Settings) (map[string]string, error)
 
-// change saves s as the next revision, makes it current and tells the Engine, all under one lock, so each change is
-// told from the revision it replaced. The change is recorded in kv before the save and cleared once told: a crash or a
-// failed tell leaves it there, and the next change (or the next start, resume) tells it first.
-func (c *policyCache) change(s policy.Settings, origin string, tell tellFunc) (rev int, cur policy.Settings, notices map[string]string, err error) {
+// change saves s as the revision after base (-1: the current one), makes it current and tells the Engine, all under
+// one lock, so each change is told from the revision it replaced; a base that is not current is ErrStaleRevision. The
+// change is recorded in kv before the save and cleared once told: a crash or a failed tell leaves it there, and the
+// next change (or the next start, resume) tells it first.
+func (c *policyCache) change(s policy.Settings, base int, origin string, tell tellFunc) (rev int, cur policy.Settings, notices map[string]string, err error) {
 	c.saveMu.Lock()
 	defer c.saveMu.Unlock()
 	if err := c.resumeLocked(tell); err != nil {
 		return 0, cur, nil, fmt.Errorf("policy: tell the previous change: %w", err)
 	}
-	old, base := c.current()
+	old, current := c.current()
+	if base >= 0 && base != current {
+		return 0, cur, nil, policy.ErrStaleRevision
+	}
+	base = current
 	if err := c.writePending(&pendingChange{From: old, To: s, Revision: base + 1}); err != nil {
 		return 0, cur, nil, err
 	}

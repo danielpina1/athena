@@ -199,3 +199,28 @@ func TestWebPasskeysStripsControlCharacters(t *testing.T) {
 		t.Fatalf("%q", out)
 	}
 }
+
+func TestWebRevokeThroughRunningServer(t *testing.T) {
+	dir := startServer(t)
+	st, err := store.Open(filepath.Join(dir, server.DBFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	t0 := time.Now()
+	if err := st.PutPasskey(store.Passkey{ID: "CCCCphone", Name: "phone", Credential: []byte("{}"), CreatedAt: t0}); err != nil {
+		t.Fatal(err)
+	}
+	for _, h := range []string{"h1", "h2"} {
+		if err := st.PutWebSession(store.WebSession{Hash: []byte(h), CreatedAt: t0, SeenAt: t0, PasskeyID: "CCCCphone"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	code, out, errs := runWeb(dir, "revoke", "CCCC")
+	if code != 0 || !strings.Contains(out, `revoked "phone" and ended 2 session(s)`) {
+		t.Fatalf("revoke: %d %q %s", code, out, errs)
+	}
+	if _, ok, _ := st.Passkey("CCCCphone"); ok {
+		t.Fatal("passkey survived")
+	}
+}

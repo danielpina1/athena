@@ -240,7 +240,7 @@ func TestRevokedPasskeyKillsSessions(t *testing.T) {
 	var mu sync.Mutex
 	var got []string
 	e.Auth.OnRevoke(func(h []string) { mu.Lock(); got = append(got, h...); mu.Unlock() })
-	if err := e.Auth.RevokePasskey(a.CredentialID()); err != nil {
+	if _, err := e.Auth.RevokePasskey(a.CredentialID()); err != nil {
 		t.Fatal(err)
 	}
 	if len(got) != 1 || got[0] != s.Hash {
@@ -393,7 +393,7 @@ func TestRevokeBetweenVerificationAndSessionLeavesNoSession(t *testing.T) {
 	a := NewSoftAuthenticator(t, testOrigin, testRPID)
 	e.Enroll(a, "phone")
 	e.Auth.afterLoginVerified = func() {
-		if err := e.Auth.RevokePasskey(a.CredentialID()); err != nil {
+		if _, err := e.Auth.RevokePasskey(a.CredentialID()); err != nil {
 			t.Error(err)
 		}
 	}
@@ -424,7 +424,7 @@ func TestRevokeReportsEverySessionItDeleted(t *testing.T) {
 	}
 	var got []string
 	e.Auth.OnRevoke(func(h []string) { got = append(got, h...) })
-	if err := e.Auth.RevokePasskey(a.CredentialID()); err != nil {
+	if _, err := e.Auth.RevokePasskey(a.CredentialID()); err != nil {
 		t.Fatal(err)
 	}
 	if len(got) != 3 {

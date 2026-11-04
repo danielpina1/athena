@@ -313,6 +313,12 @@ func decodeSettings(raw json.RawMessage) (policy.Settings, error) {
 // policySet validates and saves a settings document as a cli revision, then tells the Engine (tell), atomically with
 // the save and retried if the tell fails (policyCache.change).
 func (c *control) policySet(raw json.RawMessage) (PolicySetResult, error) {
+	return c.setPolicy(raw, -1, policy.OriginCLI)
+}
+
+// setPolicy is policySet from an origin, on top of base (the revision the settings were edited from; -1 is the
+// current one): a base that is no longer current is refused, as stale.
+func (c *control) setPolicy(raw json.RawMessage, base int, origin string) (PolicySetResult, error) {
 	if len(bytes.TrimSpace(raw)) == 0 {
 		return PolicySetResult{}, userErrorf("policy set needs a settings document")
 	}
@@ -323,7 +329,7 @@ func (c *control) policySet(raw json.RawMessage) (PolicySetResult, error) {
 	if err := policy.Validate(s); err != nil {
 		return PolicySetResult{}, userErrorf("%v", err)
 	}
-	rev, cur, notices, err := c.policy.change(s, policy.OriginCLI, c.tell)
+	rev, cur, notices, err := c.policy.change(s, base, origin, c.tell)
 	if errors.Is(err, policy.ErrStaleRevision) {
 		return PolicySetResult{}, userErrorf(staleSettings)
 	}
@@ -336,6 +342,6 @@ func (c *control) policySet(raw json.RawMessage) (PolicySetResult, error) {
 		out.Notified = append(out.Notified, id)
 	}
 	sort.Strings(out.Notified)
-	c.log.Info("policy saved", "revision", rev, "version", version, "origin", policy.OriginCLI, "notified", len(notices))
+	c.log.Info("policy saved", "revision", rev, "version", version, "origin", origin, "notified", len(notices))
 	return out, nil
 }

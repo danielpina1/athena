@@ -1,0 +1,467 @@
+package server
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+	"path/filepath"
+	"slices"
+	"strings"
+	"sync/atomic"
+	"time"
+
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
+
+	"github.com/danielpina1/athena/internal/core"
+	"github.com/danielpina1/athena/internal/effects"
+	"github.com/danielpina1/athena/internal/metrics"
+	"github.com/danielpina1/athena/internal/node"
+	"github.com/danielpina1/athena/internal/pb/athenav1"
+	"github.com/danielpina1/athena/internal/policy"
+	"github.com/danielpina1/athena/internal/router"
+	"github.com/danielpina1/athena/internal/store"
+	"github.com/danielpina1/athena/internal/web"
+)
+
+// The owner's actions, whichever way they come: a control socket request (handleRequest, framed by control.go) or a
+// dashboard Command (Do). Both reach the same methods, so the CLI and the dashboard act alike.
+
+const (
+	// resultsKept is how long a Command's result answers its resend; pruneEvery is how often older ones go.
+	resultsKept  = 24 * time.Hour
+	pruneEvery   = time.Hour
+	maxCommandID = 128
+)
+
+// Dispatcher carries out the owner's actions; it implements web.Commander.
+type Dispatcher struct {
+	stateDir string
+	eng      *core.Engine
+	workRoot string
+	model    string
+	log      *slog.Logger
+	reg      *metrics.Registry
+	st       *store.Store
+	fx       *effects.Runner
+	// gh is nil without GitHub in the configuration; host is nil without a router.
+	gh     *gitHub
+	host   *router.Host
+	policy *policyCache
+	// node interrupts sessions; nil (tests) answers unavailable.
+	node *node.Node
+	// auth ends the open connections of a revoked passkey; until SetAuth (no web server) revoking works on the store.
+	auth atomic.Pointer[web.Auth]
+	// onPolicyChange, when set (tests), runs before the Engine hears of a Policy change; an error refuses it.
+	onPolicyChange func(from, to policy.Settings) error
+}
+
+var _ web.Commander = (*Dispatcher)(nil)
+
+// SetAuth gives the Dispatcher the web server's login, so a revoked passkey's connections close.
+func (d *Dispatcher) SetAuth(a *web.Auth) { d.auth.Store(a) }
+
+// --- control socket requests ---
+
+func (d *Dispatcher) handleRequest(req Request) (any, error) {
+	switch req.Op {
+	case OpPing:
+		return nil, nil
+	case OpSubmit:
+		t, err := d.submit(req.Text, req.Dir, req.Model, req.Repo, "")
+		if err != nil {
+			return nil, err
+		}
+		return map[string]string{"id": t.ID}, nil
+	case OpTickets:
+		list, err := d.eng.Tickets(req.All)
+		if err != nil {
+			return nil, err
+		}
+		slices.SortStableFunc(list, func(a, b core.Ticket) int { return a.CreatedAt.Compare(b.CreatedAt) })
+		out := make([]TicketSummary, 0, len(list))
+		for i := range list {
+			out = append(out, summary(&list[i]))
+		}
+		return out, nil
+	case OpTicket:
+		return d.detail(req.ID)
+	case OpReply:
+		return nil, d.eng.AddPersonInput(req.ID, req.Text)
+	case OpStop:
+		return nil, d.eng.StopTicket(req.ID, req.Reason)
+	case OpRetry:
+		return nil, d.eng.RetryTicket(req.ID)
+	case OpApprovals:
+		list, err := d.eng.PendingApprovals()
+		if err != nil {
+			return nil, err
+		}
+		out := make([]ApprovalView, 0, len(list))
+		for _, a := range list {
+			out = append(out, approvalView(a))
+		}
+		return out, nil
+	case OpAnswer:
+		return nil, d.eng.AnswerApproval(req.ID, req.Approve, req.Note)
+	case OpMetrics:
+		window, err := parseWindow(req.Window)
+		if err != nil {
+			return nil, err
+		}
+		return d.reg.Snapshot(window), nil
+	case OpHealth:
+		return d.health(), nil
+	case OpTriggers:
+		list, err := d.st.Triggers(canonicalThread(req.Thread), listLimit)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]TriggerView, 0, len(list))
+		for i := range list {
+			out = append(out, triggerView(&list[i]))
+		}
+		return out, nil
+	case OpThreads:
+		list, err := d.st.Threads()
+		if err != nil {
+			return nil, err
+		}
+		out := make([]ThreadView, 0, len(list))
+		for i := range list {
+			out = append(out, threadView(&list[i]))
+		}
+		return out, nil
+	case OpDecisions:
+		list, err := d.eng.Decisions(canonicalThread(req.Thread), listLimit)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]DecisionView, 0, len(list))
+		for i := range list {
+			out = append(out, decisionView(&list[i]))
+		}
+		return out, nil
+	case OpReevaluate:
+		return nil, d.eng.Reevaluate(req.ID)
+	case OpDismiss:
+		return nil, d.eng.Dismiss(req.ID)
+	case OpUnsubscribe:
+		return nil, d.unsubscribe(req.Thread)
+	case OpPolicyShow:
+		return d.policyShow()
+	case OpPolicySet:
+		return d.policySet(req.Policy)
+	case OpWebRevoke:
+		n, err := d.revokePasskey(req.ID)
+		if err != nil {
+			return nil, err
+		}
+		return WebRevokeResult{Sessions: n}, nil
+	default:
+		return nil, userErrorf("unknown op %q", req.Op)
+	}
+}
+
+func (c *Dispatcher) detail(id string) (TicketDetail, error) {
+	t, _, err := c.eng.Ticket(id)
+	if err != nil {
+		return TicketDetail{}, err
+	}
+	d := TicketDetail{TicketSummary: summary(&t), Ended: t.Ended, Assignments: t.Assignments, Undelivered: len(t.Undelivered),
+		Stats: t.Stats, Repo: t.Repo}
+	if d.Assignments == nil {
+		d.Assignments = []core.Assignment{}
+	}
+	if t.Attention != nil {
+		d.Question = t.Attention.Question
+	}
+	if x := t.Execution; x != nil {
+		d.SourceDir, d.Runtime, d.Model = x.Directory, x.Runtime, x.Model
+	}
+	if d.Model == "" {
+		d.Model = c.model
+	}
+	if wd, err := node.WorkingDir(c.workRoot, t); err == nil {
+		d.Dir = wd
+	}
+	if t.PendingApproval != "" {
+		list, err := c.eng.PendingApprovals()
+		if err != nil {
+			return TicketDetail{}, err
+		}
+		for _, a := range list {
+			if a.ID == t.PendingApproval {
+				v := approvalView(a)
+				d.Approval = &v
+				break
+			}
+		}
+	}
+	return d, nil
+}
+
+// --- dashboard commands ---
+
+// Do carries out a dashboard's Command once: a (client, command id) with a stored result gets that result without
+// acting again; otherwise the result is stored after acting. Results that say nothing was done (reauth_required,
+// unauthenticated, unavailable, internal) are not stored, so the same Command can be sent again once that changes;
+// reads (ListPasskeys) are not stored either.
+func (d *Dispatcher) Do(_ context.Context, o web.Origin, c *athenav1.Command) *athenav1.CommandResult {
+	id := c.GetId()
+	switch {
+	case id == "" || len(id) > maxCommandID:
+		return &athenav1.CommandResult{Id: id, Code: web.CodeInvalid, Message: "a command id is 1 to 128 bytes"}
+	case o.ClientID == "":
+		return &athenav1.CommandResult{Id: id, Code: web.CodeInvalid, Message: "a command needs a client id"}
+	case c.GetAction() == nil:
+		return &athenav1.CommandResult{Id: id, Code: web.CodeInvalid, Message: "a command needs an action"}
+	}
+	if _, read := c.GetAction().(*athenav1.Command_ListPasskeys); read {
+		res := d.act(o, c)
+		res.Id = id
+		return res
+	}
+	if raw, ok, err := d.st.CommandResult(o.ClientID, id); err != nil {
+		d.log.Error("command result", "client", o.ClientID, "command", id, "error", err)
+		return &athenav1.CommandResult{Id: id, Code: web.CodeInternal, Message: "internal error"}
+	} else if ok {
+		return d.decodeResult(id, raw)
+	}
+	res := d.act(o, c)
+	res.Id = id
+	switch res.GetCode() {
+	case web.CodeReauthRequired, web.CodeUnauthenticated, web.CodeUnavailable, web.CodeInternal:
+		return res
+	}
+	raw, err := proto.Marshal(res)
+	if err != nil {
+		d.log.Error("encode command result", "command", id, "error", err)
+		return res
+	}
+	stored, err := d.st.PutCommandResult(o.ClientID, id, raw, time.Now())
+	if err != nil {
+		d.log.Error("store command result", "client", o.ClientID, "command", id, "error", err)
+		return res
+	}
+	return d.decodeResult(id, stored) // the first result stored, if a copy of the Command ran meanwhile
+}
+
+func (d *Dispatcher) decodeResult(id string, raw []byte) *athenav1.CommandResult {
+	res := &athenav1.CommandResult{}
+	if err := proto.Unmarshal(raw, res); err != nil {
+		d.log.Error("decode command result", "command", id, "error", err)
+		return &athenav1.CommandResult{Id: id, Code: web.CodeInternal, Message: "internal error"}
+	}
+	res.Id = id
+	return res
+}
+
+// requestID names a Command across clients: client ids hold no ':' (web.Dashboard checks), so the pair is unique.
+func requestID(o web.Origin, c *athenav1.Command) string { return o.ClientID + ":" + c.GetId() }
+
+var reauthRequired = &athenav1.CommandResult{Code: web.CodeReauthRequired,
+	Message: "this needs a passkey confirmation from the last 5 minutes"}
+
+func (d *Dispatcher) act(o web.Origin, c *athenav1.Command) *athenav1.CommandResult {
+	ok := &athenav1.CommandResult{Ok: true}
+	switch a := c.GetAction().(type) {
+	case *athenav1.Command_SubmitTask:
+		s := a.SubmitTask
+		t, err := d.submit(s.GetText(), s.GetDir(), s.GetModel(), s.GetRepo(), requestID(o, c))
+		if err != nil {
+			return d.failure(err)
+		}
+		return &athenav1.CommandResult{Ok: true, Result: &athenav1.CommandResult_TicketId{TicketId: t.ID}}
+	case *athenav1.Command_Reply:
+		if err := d.eng.AddPersonInputWithID(a.Reply.GetTicketId(), requestID(o, c), a.Reply.GetText()); err != nil {
+			return d.failure(err)
+		}
+	case *athenav1.Command_Stop:
+		if err := d.eng.StopTicket(a.Stop.GetTicketId(), a.Stop.GetReason()); err != nil {
+			return d.failure(err)
+		}
+	case *athenav1.Command_Retry:
+		if err := d.eng.RetryTicket(a.Retry.GetTicketId()); err != nil {
+			return d.failure(err)
+		}
+	case *athenav1.Command_Interrupt:
+		if err := d.interrupt(a.Interrupt.GetTicketId()); err != nil {
+			return d.failure(err)
+		}
+	case *athenav1.Command_AnswerApproval:
+		aa := a.AnswerApproval
+		if err := d.eng.AnswerApproval(aa.GetApprovalId(), aa.GetApprove(), aa.GetNote()); err != nil {
+			return d.failure(err)
+		}
+	case *athenav1.Command_Reevaluate:
+		if err := d.eng.Reevaluate(a.Reevaluate.GetTriggerId()); err != nil {
+			return d.failure(err)
+		}
+	case *athenav1.Command_Dismiss:
+		if err := d.eng.Dismiss(a.Dismiss.GetDecisionId()); err != nil {
+			return d.failure(err)
+		}
+	case *athenav1.Command_Unsubscribe:
+		if err := d.unsubscribe(a.Unsubscribe.GetThread()); err != nil {
+			return d.failure(err)
+		}
+	case *athenav1.Command_SetPolicy:
+		if !o.Sensitive {
+			return proto.Clone(reauthRequired).(*athenav1.CommandResult)
+		}
+		res, err := d.setPolicy([]byte(a.SetPolicy.GetSettingsJson()), int(a.SetPolicy.GetBaseRevision()), policy.OriginWeb)
+		if err != nil {
+			return d.failure(err)
+		}
+		return &athenav1.CommandResult{Ok: true, Result: &athenav1.CommandResult_PolicyRevision{PolicyRevision: uint32(res.Revision)}}
+	case *athenav1.Command_ListPasskeys:
+		list, err := d.passkeys()
+		if err != nil {
+			return d.failure(err)
+		}
+		return &athenav1.CommandResult{Ok: true, Result: &athenav1.CommandResult_Passkeys{Passkeys: list}}
+	case *athenav1.Command_RevokePasskey:
+		if !o.Sensitive {
+			return proto.Clone(reauthRequired).(*athenav1.CommandResult)
+		}
+		if _, err := d.revokePasskey(a.RevokePasskey.GetId()); err != nil {
+			return d.failure(err)
+		}
+	case *athenav1.Command_PushSubscribe, *athenav1.Command_PushUnsubscribe, *athenav1.Command_SetNotificationPrefs:
+		if !o.Sensitive {
+			return proto.Clone(reauthRequired).(*athenav1.CommandResult)
+		}
+		return &athenav1.CommandResult{Code: web.CodeUnavailable, Message: "push notifications are not available yet"}
+	default:
+		// WatchTicket, UnwatchTicket and Visibility belong to the connection, which answers them itself.
+		return &athenav1.CommandResult{Code: web.CodeInvalid, Message: "not a command the server carries out"}
+	}
+	return ok
+}
+
+// failure turns an error into a refused result: a UserError's message with its code, anything else internal (its
+// detail goes only to the log).
+func (d *Dispatcher) failure(err error) *athenav1.CommandResult {
+	var ue *core.UserError
+	switch {
+	case errors.As(err, &ue):
+		code := web.CodeInvalid
+		switch {
+		case strings.HasSuffix(ue.Msg, " not found"):
+			code = web.CodeNotFound
+		case ue.Msg == staleSettings:
+			code = web.CodeConflict
+		}
+		return &athenav1.CommandResult{Code: code, Message: ue.Msg}
+	case errors.Is(err, node.ErrNoSession):
+		return &athenav1.CommandResult{Code: web.CodeUnavailable, Message: "the ticket has no session running"}
+	}
+	d.log.Error("command failed", "error", err)
+	return &athenav1.CommandResult{Code: web.CodeInternal, Message: "internal error"}
+}
+
+// --- the actions ---
+
+// submit records an owner task. A relative directory would resolve against the server's working directory, not the
+// client's; a repository must be one GitHub serves. A requestID seen before returns the Ticket it created.
+func (d *Dispatcher) submit(text, dir, model, repo, requestID string) (core.Ticket, error) {
+	if dir != "" {
+		if !filepath.IsAbs(dir) {
+			return core.Ticket{}, userErrorf("directory %s must be an absolute path", dir)
+		}
+		dir = filepath.Clean(dir)
+	}
+	if repo != "" {
+		if d.gh == nil || !d.gh.running() {
+			return core.Ticket{}, userErrorf("github is not running: a task on a repository needs it (see athena status)")
+		}
+		name, ok := d.gh.cfg.repo(repo)
+		if !ok {
+			return core.Ticket{}, userErrorf("repository %s is not configured (configured: %s)", repo, strings.Join(d.gh.cfg.Repos, ", "))
+		}
+		repo = name
+	}
+	t, err := d.eng.SubmitOwnerTask(text, core.TaskOptions{Dir: dir, Model: model, Repo: repo, RequestID: requestID})
+	if errors.Is(err, core.ErrDuplicate) {
+		return t, nil
+	}
+	return t, err
+}
+
+func (d *Dispatcher) unsubscribe(thread string) error {
+	thread = canonicalThread(thread)
+	if _, err := d.eng.Thread(thread); err != nil {
+		return err
+	}
+	return d.eng.Unsubscribe(thread)
+}
+
+// interrupt abandons the running turn of a Ticket's session; a Ticket without a running session is node.ErrNoSession.
+func (d *Dispatcher) interrupt(ticketID string) error {
+	if _, _, err := d.eng.Ticket(ticketID); err != nil {
+		return err
+	}
+	if d.node == nil {
+		return node.ErrNoSession
+	}
+	return d.node.Interrupt(ticketID)
+}
+
+func (d *Dispatcher) passkeys() (*athenav1.PasskeyList, error) {
+	list, err := d.st.Passkeys()
+	if err != nil {
+		return nil, err
+	}
+	out := &athenav1.PasskeyList{}
+	for _, p := range list {
+		v := &athenav1.Passkey{Id: p.ID, Name: p.Name, CreatedAt: timestamppb.New(p.CreatedAt)}
+		if !p.LastUsedAt.IsZero() {
+			v.LastUsedAt = timestamppb.New(p.LastUsedAt)
+		}
+		out.Passkeys = append(out.Passkeys, v)
+	}
+	return out, nil
+}
+
+// WebRevokeResult answers web.revoke: how many sessions the revoked passkey had.
+type WebRevokeResult struct {
+	Sessions int `json:"sessions"`
+}
+
+// revokePasskey deletes a passkey and its sessions; with the web server's login set, their connections close.
+func (d *Dispatcher) revokePasskey(id string) (int, error) {
+	if id == "" {
+		return 0, userErrorf("revoke needs a passkey id")
+	}
+	if _, found, err := d.st.Passkey(id); err != nil {
+		return 0, err
+	} else if !found {
+		return 0, userErrorf("passkey %s not found", id)
+	}
+	if a := d.auth.Load(); a != nil {
+		return a.RevokePasskey(id)
+	}
+	sessions, err := d.st.DeletePasskey(id)
+	return len(sessions), err
+}
+
+// pruneResults drops the Command results older than resultsKept, now and every pruneEvery, until ctx is done.
+func (d *Dispatcher) pruneResults(ctx context.Context) {
+	prune := func() {
+		if _, err := d.st.PruneCommandResults(time.Now().Add(-resultsKept)); err != nil {
+			d.log.Warn("prune command results", "error", err)
+		}
+	}
+	prune()
+	t := time.NewTicker(pruneEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			prune()
+		}
+	}
+}

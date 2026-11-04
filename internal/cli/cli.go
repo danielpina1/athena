@@ -606,6 +606,11 @@ func call(stateDir string, req server.Request, out any) error {
 		return err
 	}
 	defer conn.Close()
+	return exchange(conn, req, out)
+}
+
+// exchange is call on a connection already dialed.
+func exchange(conn net.Conn, req server.Request, out any) error {
 	if err := send(conn, req); err != nil {
 		return err
 	}

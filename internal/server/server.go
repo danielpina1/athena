@@ -63,6 +63,9 @@ type Config struct {
 	Version string
 	// HTTPClient reaches GitHub (default: a client with a 30 s timeout); its transport is wrapped for the metrics.
 	HTTPClient *http.Client
+
+	// dispatcherReady, when set (tests), is called with the Dispatcher before the control socket serves.
+	dispatcherReady func(*Dispatcher)
 }
 
 // Run serves until ctx is done, then shuts down: it stops accepting control connections, stops the Sources (and
@@ -318,13 +321,21 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	logger.Info("athena server started", "stateDir", stateDir, "pid", os.Getpid())
 
 	c := &control{stateDir: stateDir, eng: eng, workRoot: ncfg.WorkRoot, model: ncfg.Model, log: logger, reg: reg,
-		st: st, fx: fx, gh: gh, host: host, policy: pc}
+		st: st, fx: fx, gh: gh, host: host, policy: pc, node: n}
 	if err := c.resumePolicyChange(); err != nil {
 		logger.Error("startup: tell the pending policy change", "error", err)
+	}
+	if cfg.dispatcherReady != nil {
+		cfg.dispatcherReady(c)
 	}
 	ctrlCtx, ctrlCancel := context.WithCancel(context.Background())
 	defer ctrlCancel()
 	var conns sync.WaitGroup
+	conns.Add(1)
+	go func() {
+		defer conns.Done()
+		c.pruneResults(ctrlCtx)
+	}()
 	acceptDone := make(chan struct{})
 	go func() {
 		defer close(acceptDone)

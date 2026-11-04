@@ -33,7 +33,8 @@ func safeText(s string) string {
 
 // web runs `athena web enroll|passkeys|revoke`. They work on the store directly (SQLite lets them run beside the
 // server), like `athena github setup` works on the configuration: an enrollment token is just a row, and the server
-// reads it when the browser presents it. (`setup`, `status` and `ca` are not here yet.)
+// reads it when the browser presents it. Revoke goes through a running server, so it closes the passkey's open
+// connections. (`setup`, `status` and `ca` are not here yet.)
 func (c *command) web(args []string) int {
 	if len(args) == 0 {
 		c.fs.Usage()
@@ -202,10 +203,26 @@ func (c *command) webRevoke(args []string) int {
 		return c.fail(fmt.Errorf("athena web revoke: %q matches %d passkeys; give more of the id", pos[0], len(match)))
 	}
 	p := match[0]
-	sessions, err := st.DeletePasskey(p.ID)
+	ended, err := c.revokePasskey(st, p.ID)
 	if err != nil {
 		return c.fail(err)
 	}
-	fmt.Fprintf(c.stdout, "revoked %q and ended %d session(s)\n", safeText(p.Name), len(sessions))
+	fmt.Fprintf(c.stdout, "revoked %q and ended %d session(s)\n", safeText(p.Name), ended)
 	return 0
+}
+
+// revokePasskey revokes through the running server (web.revoke), which also closes the passkey's open dashboard
+// connections; with no server answering it deletes from the store, where nothing is open to close.
+func (c *command) revokePasskey(st *store.Store, id string) (int, error) {
+	conn, err := dial(c.stateDir)
+	if err != nil {
+		sessions, err := st.DeletePasskey(id)
+		return len(sessions), err
+	}
+	defer conn.Close()
+	var out server.WebRevokeResult
+	if err := exchange(conn, server.Request{Op: server.OpWebRevoke, ID: id}, &out); err != nil {
+		return 0, err
+	}
+	return out.Sessions, nil
 }

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/danielpina1/athena/internal/core"
 )
@@ -148,6 +149,50 @@ func (tx *Tx) PendingApprovals() ([]*core.Approval, error) {
 		}
 		return out[i].ID < out[j].ID
 	})
+	return out, nil
+}
+
+// AnsweredApprovals returns the Approvals no longer pending (answered or expired), the most recently answered first;
+// limit <= 0 returns all. It reads in a transaction of its own. The table keeps no answer column, so the rows are
+// sorted here by the document's own times (one without an answer time by its creation).
+func (s *Store) AnsweredApprovals(limit int) (out []core.Approval, err error) {
+	err = s.Tx(func(tx *Tx) error {
+		rows, err := tx.sql.Query(`SELECT doc FROM approvals WHERE state != ?`, core.ApprovalPending)
+		if err != nil {
+			return fmt.Errorf("store: answered approvals: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var doc string
+			if err := rows.Scan(&doc); err != nil {
+				return fmt.Errorf("store: answered approvals: %w", err)
+			}
+			a, err := decodeApproval(doc)
+			if err != nil {
+				return err
+			}
+			out = append(out, *a)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+	answered := func(a *core.Approval) time.Time {
+		if a.AnsweredAt != nil {
+			return *a.AnsweredAt
+		}
+		return a.CreatedAt
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if ti, tj := answered(&out[i]), answered(&out[j]); !ti.Equal(tj) {
+			return ti.After(tj)
+		}
+		return out[i].ID > out[j].ID
+	})
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
 	return out, nil
 }
 

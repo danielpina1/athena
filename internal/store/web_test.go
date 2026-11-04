@@ -326,3 +326,38 @@ func TestPushSubscriptions(t *testing.T) {
 		t.Fatalf("subscription survived delete: %+v", list)
 	}
 }
+
+func TestAnsweredApprovalsNewestFirst(t *testing.T) {
+	s, _ := openTemp(t)
+	at := func(m int) *time.Time { x := t0.Add(time.Duration(m) * time.Minute); return &x }
+	err := s.Tx(func(tx *Tx) error {
+		for _, a := range []*core.Approval{
+			{ID: "a1", TicketID: "T-0001", State: core.ApprovalApproved, CreatedAt: t0, AnsweredAt: at(5)},
+			{ID: "a2", TicketID: "T-0001", State: core.ApprovalPending, CreatedAt: t0.Add(time.Hour)},
+			{ID: "a3", TicketID: "T-0002", State: core.ApprovalDenied, CreatedAt: t0, AnsweredAt: at(9)},
+			{ID: "a4", TicketID: "T-0002", State: core.ApprovalExpired, CreatedAt: t0.Add(7 * time.Minute)},
+		} {
+			if err := tx.PutApproval(a); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.AnsweredApprovals(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, a := range got {
+		ids = append(ids, a.ID)
+	}
+	if !slices.Equal(ids, []string{"a3", "a4", "a1"}) {
+		t.Fatalf("answered = %v, want a3 a4 a1 (pending left out)", ids)
+	}
+	if got, _ := s.AnsweredApprovals(2); len(got) != 2 || got[0].ID != "a3" {
+		t.Fatalf("limit 2 = %v", got)
+	}
+}

@@ -56,6 +56,8 @@ const (
 	OriginCLI    = "cli"
 	OriginRouter = "router"
 	OriginSync   = "sync"
+	// OriginWeb is the owner's dashboard.
+	OriginWeb = "web"
 )
 
 // settingsBlock is the name of the Policy's block in the settings table.
@@ -329,12 +331,12 @@ func (s *Store) Current() (Settings, int, error) {
 }
 
 // Save validates cur and stores it as the revision after baseRevision (0 when nothing was saved), recording the
-// origin (cli, router or sync). A baseRevision that is not the current one is refused with ErrStaleRevision.
+// origin (cli, router, sync or web). A baseRevision that is not the current one is refused with ErrStaleRevision.
 func (s *Store) Save(cur Settings, baseRevision int, origin string) (int, error) {
 	switch origin {
-	case OriginCLI, OriginRouter, OriginSync:
+	case OriginCLI, OriginRouter, OriginSync, OriginWeb:
 	default:
-		return 0, fmt.Errorf("policy: origin %q is not cli, router or sync", origin)
+		return 0, fmt.Errorf("policy: origin %q is not cli, router, sync or web", origin)
 	}
 	if err := Validate(cur); err != nil {
 		return 0, err
