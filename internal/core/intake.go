@@ -117,10 +117,12 @@ func (o *op) receive(t *Trigger) error {
 				if !t.Human || s.Context || r.ticket.Ended.By == EndByHuman {
 					continue
 				}
-				if reached[s.TicketID] == nil && !o.revalidates(r.ticket) {
-					refused[s.TicketID] = true // the Mandate is revoked: the message reaches no Ticket
-					continue
-				}
+			}
+			if (r.ticket.Ended != nil || r.ticket.HandedOff()) && reached[s.TicketID] == nil && !o.revalidates(r.ticket) {
+				// The message would resume the Ticket's work (an ended Ticket, or one whose worker handed off and
+				// waits with no process for its pull request), but the Mandate is revoked: it reaches no Ticket.
+				refused[s.TicketID] = true
+				continue
 			}
 			r.context = r.context && s.Context
 			if reached[s.TicketID] == nil {

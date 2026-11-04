@@ -859,3 +859,22 @@ func TestGitHubLaunchFailsOnPermanentCredentialError(t *testing.T) {
 		t.Fatalf("token asked %d times, want 1", n)
 	}
 }
+
+// Minor 5: a GitHub launch that waits for its credentials holds no slot: another Ticket starts meanwhile.
+func TestLaunchWaitingForCredentialsHoldsNoSlot(t *testing.T) {
+	creds := &fakeCreds{}
+	creds.noIdentity.Store(true)
+	h := newGHHarness(t, creds, func(c *Config) { c.Slots = 1; c.CredentialRetry = 20 * time.Millisecond })
+	id := h.acceptOnly("github:issuecomment:1", "o/r", 12)
+	time.Sleep(100 * time.Millisecond)
+	owner := h.submit("Owner work", "")
+	h.running(owner.ID)
+	if tk, _ := h.ticket(id); tk.LatestAssignment().State != core.AssignmentPending || tk.LatestAssignment().Report != nil {
+		t.Fatalf("waiting launch = %+v, want it pending with no report", tk.LatestAssignment())
+	}
+	if err := h.eng.StopTicket(owner.ID, "enough"); err != nil {
+		t.Fatal(err)
+	}
+	creds.noIdentity.Store(false)
+	h.running(id)
+}

@@ -373,9 +373,10 @@ func expirePendingApprovals(eng *core.Engine, log *slog.Logger) {
 
 // recoverAssignments starts again, of every open Ticket, a pending latest Assignment and a running one that was
 // interrupted: mid-work (no turn of its worker ended idle), sent an Input after its turn last ended, or with Inputs
-// still waiting, unless it waits for a person after a failed or blocked report. The node resumes a running one's session with a recovery note and sends it the Inputs that still
-// wait (Ticket.Undelivered). A running Assignment idle since its last turn keeps its Session without a process: the
-// node resumes it, with the recovery note, when its next Input arrives.
+// still waiting, unless it waits for a person after a failed or blocked report. The node resumes a running one's
+// session with a recovery note and sends it the Inputs that still wait (Ticket.Undelivered). A running Assignment idle
+// since its last turn (one whose worker handed off included) keeps its Session without a process: the node resumes
+// it, with the resume note, when its next Input arrives.
 func recoverAssignments(eng *core.Engine, n *node.Node, log *slog.Logger) {
 	tickets, err := eng.Tickets(false)
 	if err != nil {

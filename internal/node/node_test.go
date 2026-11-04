@@ -1455,3 +1455,80 @@ func TestFirstMessageInputsReadAfterReport(t *testing.T) {
 		return tk.Inputs[0].ReadAt != nil
 	})
 }
+
+// starts returns how many sessions of the Ticket fakeclaude started, and the arguments of the last one.
+func (h *harness) starts(ticketID string) (int, []string) {
+	n, last := 0, []string(nil)
+	for _, inv := range h.invocations() {
+		if inv.Env["ATHENA_TICKET"] == ticketID {
+			n++
+			last = inv.Args
+		}
+	}
+	return n, last
+}
+
+// I1 (R34): a ready report of a Ticket that waits for its pull request hands the work off: once that turn ends, the
+// session's process ends and its slot is free, so another Ticket starts while the Assignment keeps running with its
+// session. A review comment on the pull request later resumes the same session (--resume) through the normal queue.
+func TestReadyHandoffFreesTheSlotAndAFollowUpResumes(t *testing.T) {
+	hold := filepath.Join(t.TempDir(), "turn-may-end")
+	t.Setenv("ATHENA_FAKE_HOLD_RESULT", hold)
+	h := newHarness(t, func(c *Config) { c.Slots = 1 })
+	a := h.submit("Open a pull request", "")
+	_, aa := h.running(a.ID)
+	pull := "github:o/r#7"
+	if err := h.eng.BindThread(a.ID, pull, true); err != nil {
+		t.Fatal(err)
+	}
+	if r := h.report(a.ID, aa.ID, core.ReportReady, "opened #7"); !r.OK {
+		t.Fatalf("ready report = %+v", r)
+	}
+	b := h.submit("Second task", "")
+	h.never("second ticket started while the first turn runs", 200*time.Millisecond, func() bool {
+		return h.assignmentState(b.ID) != core.AssignmentPending
+	})
+	if err := os.WriteFile(hold, nil, 0o600); err != nil { // the ready turn ends
+		t.Fatal(err)
+	}
+	_, ba := h.running(b.ID)
+	tk, st := h.ticket(a.ID)
+	if tk.Ended != nil || tk.LatestAssignment().ID != aa.ID || tk.LatestAssignment().State != core.AssignmentRunning ||
+		tk.LatestAssignment().SessionID != fixtureSessionID || st != (core.Stage{Stage: "person", Action: "review"}) {
+		t.Fatalf("handed-off ticket: ended %v, assignment %+v, stage %+v; want it open, waiting for review, its "+
+			"assignment running with its session", tk.Ended, tk.LatestAssignment(), st)
+	}
+	if s := h.n.liveSession(a.ID); s != nil {
+		t.Fatal("the handed-off ticket still holds a session")
+	}
+
+	// A person's review comment on the pull request: the first Ticket resumes once the slot is free again.
+	review := core.Trigger{ID: "github:review:1", Source: "github", Kind: core.KindMessage, Human: true,
+		Actor: core.ActorRef{Source: "github", ID: "alice"}, Threads: []string{pull}, At: time.Now(),
+		Text: "please rename the flag (review-c4d1)"}
+	if _, err := h.eng.Receive(review); err != nil {
+		t.Fatal(err)
+	}
+	h.never("the follow-up resumed while the slot is taken", 200*time.Millisecond, func() bool {
+		n, _ := h.starts(a.ID)
+		return n > 1
+	})
+	if r := h.report(b.ID, ba.ID, core.ReportReady, "done"); !r.OK {
+		t.Fatalf("second report = %+v", r)
+	}
+	h.eventually("the first ticket resumed", func() bool { n, _ := h.starts(a.ID); return n == 2 })
+	_, args := h.starts(a.ID)
+	if id, ok := argValue(args, "--resume"); !ok || id != fixtureSessionID {
+		t.Fatalf("resumed with %v, want --resume %s", args, fixtureSessionID)
+	}
+	h.eventually("the review delivered", func() bool {
+		tk, _ := h.ticket(a.ID)
+		return len(tk.Undelivered) == 0 && strings.Contains(h.stdin(), "review-c4d1")
+	})
+	if strings.Count(h.stdin(), resumeNote) != 1 || strings.Contains(h.stdin(), recoveryNote) {
+		t.Fatalf("stdin = %q, want the resume note once and no crash note", h.stdin())
+	}
+	if tk, _ := h.ticket(a.ID); tk.LatestAssignment().ID != aa.ID {
+		t.Fatalf("assignment %s, want the same one resumed", tk.LatestAssignment().ID)
+	}
+}

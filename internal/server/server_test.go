@@ -28,6 +28,7 @@ const (
 	fixtureSessionID = "27abadfa-c58f-4e97-aaf3-64a8fdaff179"
 	waitTimeout      = 10 * time.Second
 	recoveryText     = "previous process ended unexpectedly"
+	resumeText       = "session was paused while it waited"
 )
 
 var (
@@ -623,11 +624,15 @@ func TestRestartKeepsIdleAssignmentUntilInput(t *testing.T) {
 	if rid, ok := argValue(fake.invocations(t)[1], "--resume"); !ok || rid != fixtureSessionID {
 		t.Fatalf("second start args = %v, want --resume %s", fake.invocations(t)[1], fixtureSessionID)
 	}
-	eventually(t, "reply sent after the recovery note", func() bool {
+	// Its last turn ended idle: it was paused, not interrupted, so the resume note opens the message, not the crash note.
+	eventually(t, "reply sent after the resume note", func() bool {
 		in := fake.stdin(t)
-		i := strings.LastIndex(in, recoveryText)
+		i := strings.LastIndex(in, resumeText)
 		return i >= 0 && strings.Contains(in[i:], "blue-7c6d")
 	})
+	if strings.Contains(fake.stdin(t), recoveryText) {
+		t.Fatalf("stdin = %q: an idle assignment resumed with the crash note", fake.stdin(t))
+	}
 	if got := s.running(id); got.ID != a.ID {
 		t.Fatalf("running assignment = %s, want %s (the same, resumed)", got.ID, a.ID)
 	}

@@ -38,6 +38,9 @@ const (
 	// recoveryNote opens the first message of a session resumed after its process ended without a Stop.
 	recoveryNote   = "Your previous process ended unexpectedly; continue the task."
 	recoveryAdvice = " Check your directory and git history before repeating any outside action."
+	// resumeNote opens the first message of a session resumed after it was paused with nothing to do: a handoff (a
+	// ready report that waits for its pull request), or a turn that ended idle before a node restart.
+	resumeNote = "Your session was paused while it waited; it resumes for the input that follows."
 	crashSummary   = "session crashed repeatedly"
 	// nudgeText is sent, once, when a turn ends without a Report since the worker's last Input; blockedSummary is the
 	// report filed when the next turn ends without one too.
@@ -287,6 +290,8 @@ const (
 	msgStop
 	msgEnded
 	msgShutdown
+	// msgWake only schedules: a launch put off (waiting for credentials) falls due.
+	msgWake
 )
 
 type message struct {
@@ -340,6 +345,8 @@ func (n *Node) loop() {
 				n.onEnded(st, m.s)
 			case msgShutdown:
 				n.onShutdown(st)
+			case msgWake:
+				n.schedule(st)
 			}
 		}
 		if st.shutting && n.liveCount() == 0 {
@@ -432,12 +439,25 @@ func (n *Node) onEnded(st *loopState, s *session) {
 	if k := s.place.dirKey; k != "" && st.busy[k] == s.t.ID {
 		delete(st.busy, k)
 	}
-	if !st.shutting && !s.isStopped() && len(s.deliverCh) > 0 {
+	if wait, attempt := s.credentialWait(); wait > 0 && !st.shutting && !s.isStopped() {
+		// The launch waits for GitHub credentials without a slot: it is queued again, due after the pause.
+		if !slices.ContainsFunc(st.queue, func(q *session) bool { return q.t.ID == s.t.ID }) {
+			ns := n.newSession(s.t, s.a, s.place)
+			ns.credAttempt, ns.notBefore = attempt+1, time.Now().Add(wait)
+			st.queue = append(st.queue, ns)
+			time.AfterFunc(wait, func() { n.post(message{kind: msgWake}) })
+		}
+	} else if !st.shutting && !s.isStopped() && len(s.deliverCh) > 0 {
 		// Inputs arrived after the runner stopped listening: launch the Assignment again to take them.
 		a := s.a
 		a.State = core.AssignmentRunning
 		if id := s.currentSessionID(); id != "" {
 			a.SessionID = id
+		}
+		if s.isParked() {
+			// It handed off and its turn ended idle: it resumes as a paused session, not a crashed one.
+			now := time.Now()
+			a.IdleAt, a.DeliveredAt = &now, nil
 		}
 		n.onStart(st, s.t, a)
 	}
@@ -458,15 +478,16 @@ func (n *Node) onShutdown(st *loopState) {
 	}
 }
 
-// schedule launches queued sessions while slots are free, skipping a Ticket whose previous session still ends and a
-// non-git directory another Ticket uses.
+// schedule launches queued sessions while slots are free, skipping a Ticket whose previous session still ends, a
+// non-git directory another Ticket uses and a launch put off until later (waiting for credentials).
 func (n *Node) schedule(st *loopState) {
 	for i := 0; i < len(st.queue); {
 		if n.liveCount() >= n.cfg.Slots {
 			return
 		}
 		s := st.queue[i]
-		if n.liveSession(s.t.ID) != nil || (s.place.dirKey != "" && st.busy[s.place.dirKey] != "") {
+		if n.liveSession(s.t.ID) != nil || (s.place.dirKey != "" && st.busy[s.place.dirKey] != "") ||
+			time.Now().Before(s.notBefore) {
 			i++
 			continue
 		}
@@ -529,6 +550,55 @@ type session struct {
 	githubVars []string
 	// ended is set once the session's runner is done, before it leaves the registry.
 	ended bool
+	// handoff is set while the session's latest Report is ready and its Ticket stayed open (it waits for its pull
+	// request); parked once its runner ended the process for it, the Assignment running on with its session.
+	handoff bool
+	parked  bool
+	// credWait is set when the launch could not get its GitHub credentials yet: the pause before it is queued again.
+	credWait time.Duration
+
+	// credAttempt numbers the launch attempts of a launch waiting for credentials (1 for the first); notBefore is when
+	// a queued launch put off for them falls due. Both are fixed at creation.
+	credAttempt int
+	notBefore   time.Time
+}
+
+// noteHandoff records the state of the Report the session just filed: ready on a Ticket that stays open hands off.
+func (s *session) noteHandoff(handoff bool) {
+	s.mu.Lock()
+	s.handoff = handoff
+	s.mu.Unlock()
+}
+
+func (s *session) handedOff() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.handoff
+}
+
+func (s *session) markParked() {
+	s.mu.Lock()
+	s.parked = true
+	s.mu.Unlock()
+}
+
+func (s *session) isParked() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.parked
+}
+
+func (s *session) setCredentialWait(d time.Duration) {
+	s.mu.Lock()
+	s.credWait = d
+	s.mu.Unlock()
+}
+
+// credentialWait returns the pause of a launch that waits for credentials (zero: none) and its attempt number.
+func (s *session) credentialWait() (time.Duration, int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.credWait, s.credAttempt
 }
 
 func (s *session) markEnded() {
@@ -546,7 +616,7 @@ func (s *session) over() bool {
 
 func (n *Node) newSession(t core.Ticket, a core.Assignment, p placement) *session {
 	return &session{
-		t: t, a: a, place: p,
+		t: t, a: a, place: p, credAttempt: 1,
 		name:      filepath.Base(TicketDir(n.cfg.WorkRoot, t)),
 		log:       n.log.With("ticket", t.ID, "assignment", a.ID),
 		deliverCh: make(chan struct{}, 1),
@@ -715,6 +785,11 @@ type runner struct {
 	// once a turn that ended without a Report since then was nudged.
 	inputReports int
 	nudged       bool
+	// idle is set when a turn ended well and nothing was sent since; park once the runner ends the process because its
+	// worker handed off (parkIfHandedOff). paused is set when the first process resumes a paused session.
+	idle   bool
+	park   bool
+	paused bool
 
 	// usage is what the session did since the last RecordUsage; tools maps the ids of tool calls in flight to their
 	// tool; firstSent and firstOutput time the Ticket's time to first output.
@@ -759,21 +834,17 @@ func (r *runner) run() {
 	}
 	// GitHub credentials that cannot be had yet (GitHub unreachable, the bot not known yet) delay the launch; they are
 	// retried until they come or the session is stopped, never filed as failed: the Ticket shows working/queued meanwhile.
-	for attempt := 1; ; attempt++ {
-		err := n.prepare(s)
-		if err == nil {
-			break
-		}
+	// The launch waits without a slot: the runner ends, and the loop queues it again, due after the pause (onEnded).
+	if err := n.prepare(s); err != nil {
 		if !credentialsLater(err) {
 			r.fail("prepare ticket directory: " + redact.String(err.Error()))
 			return
 		}
-		d := n.credentialDelay(attempt)
-		r.log.Warn("github credentials not available yet; will retry the launch", "attempt", attempt, "retryIn", d.String(),
+		d := n.credentialDelay(s.credAttempt)
+		r.log.Warn("github credentials not available yet; will retry the launch", "attempt", s.credAttempt, "retryIn", d.String(),
 			"error", redact.String(err.Error()))
-		if !r.sleep(d) {
-			return
-		}
+		s.setCredentialWait(d)
+		return
 	}
 	s.setGitHubVars(n.githubVariables(s))
 	// A running Assignment with a session resumes it after a crash or a node restart; a new Assignment of a
@@ -782,6 +853,9 @@ func (r *runner) run() {
 	if resumeID == "" {
 		resumeID = previousSessionID(s.t, s.a.ID)
 	}
+	// A session whose last turn ended idle, with nothing delivered since (a handoff, or an idle Assignment after a node
+	// restart), was paused, not interrupted: it resumes with the resume note instead of the crash note.
+	r.paused = recovering && pausedAt(s.a)
 	if recovering {
 		r.seedUnread()
 	}
@@ -817,6 +891,7 @@ func (r *runner) run() {
 		if !crashed {
 			return
 		}
+		r.paused = false
 		r.usage.Crashes++
 		r.flushUsage()
 		crashes++
@@ -856,6 +931,7 @@ loop:
 			r.deliver(sess)
 		case <-s.reportCh:
 			r.markRead(s.reportCount())
+			r.parkIfHandedOff()
 		case <-s.stopCh:
 			crashed = false
 			r.log.Info("session stopped", "reason", s.reason())
@@ -865,11 +941,22 @@ loop:
 			}
 			break loop
 		}
+		if r.park {
+			// The worker handed off and its turn is over: the process ends, the slot is free, the Assignment runs on
+			// with its session, which a later Input resumes.
+			crashed = false
+			r.log.Info("worker handed off; session paused until its next input")
+			_ = sess.Close()
+			for ev := range events {
+				r.account(ev)
+			}
+			break loop
+		}
 	}
 	_ = sess.Close()
 	err := sess.Wait()
 	r.flushUsage()
-	if s.isStopped() {
+	if s.isStopped() || r.park {
 		return false, ""
 	}
 	cause = crashCause(err, sess.Stderr())
@@ -918,7 +1005,9 @@ func (r *runner) sendFirst(sess *claude.Session, recovering bool) {
 	}
 	ids := r.pending(t)
 	var b strings.Builder
-	if recovering {
+	if recovering && r.paused {
+		b.WriteString(resumeNote + "\n")
+	} else if recovering {
 		b.WriteString(recoveryNote + recoveryAdvice + "\n")
 	} else {
 		fmt.Fprintf(&b, "You are the worker of Athena Ticket %s: %s\n\nExecution variables:\n", t.ID, t.Title)
@@ -1126,8 +1215,40 @@ func (r *runner) onEvent(ev claude.Event) {
 		}
 		// The turn that took in everything sent before its end is over.
 		r.markRead(-1)
+		r.idle = true
 		r.turnEnded()
+		r.parkIfHandedOff()
 	}
+}
+
+// parkIfHandedOff ends the process of a worker that handed off (its latest Report is ready and its Ticket waits for
+// its pull request) once its turn is over with nothing left for it: no Input waits and no Approval is pending. It
+// records the turn's end, so a node restart, too, sees the Assignment idle; the Assignment runs on with its session.
+func (r *runner) parkIfHandedOff() {
+	s := r.s
+	if !r.idle || r.park || !r.initSeen || !r.started || !s.handedOff() || s.isStopped() || len(s.deliverCh) > 0 {
+		return
+	}
+	t, _, err := r.eng.Ticket(s.t.ID)
+	if err != nil {
+		r.log.Error("read ticket", "error", err)
+		return
+	}
+	// The Ticket's own state decides: its running Assignment, this one, still stands on a ready Report.
+	if l := t.LatestAssignment(); !t.HandedOff() || l == nil || l.ID != s.a.ID || t.PendingApproval != "" || len(r.pending(t)) > 0 {
+		return
+	}
+	if err := r.eng.TurnEnded(s.t.ID, s.a.ID); err != nil {
+		r.log.Error("record turn end", "error", err)
+		return
+	}
+	s.markParked()
+	r.park = true
+}
+
+// pausedAt reports whether a running Assignment's last turn ended idle with nothing delivered since.
+func pausedAt(a core.Assignment) bool {
+	return a.IdleAt != nil && (a.DeliveredAt == nil || !a.DeliveredAt.After(*a.IdleAt))
 }
 
 // turnFailure is the summary of a failed turn's report: its subtype and its reason, secrets masked.
@@ -1154,6 +1275,7 @@ func turnFailure(e claude.Result) string {
 func (r *runner) inputSent() {
 	r.inputReports = r.s.reportCount()
 	r.nudged = false
+	r.idle = false
 }
 
 // turnEnded checks that a turn that ended well filed a Report since the worker's last Input: the first time it did
@@ -1173,6 +1295,7 @@ func (r *runner) turnEnded() {
 			r.log.Warn("send nudge", "error", err)
 			return
 		}
+		r.idle = false
 		// The nudge is a delivery of no Input: DeliveredAt moves, so a restart sees the nudged turn as busy (R33).
 		if r.started {
 			r.delivered(nil)

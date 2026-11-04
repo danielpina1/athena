@@ -373,6 +373,15 @@ func (n *Node) handleReport(req ReportRequest) Response {
 		s.log.Warn("report refused", "state", req.Status, "error", err)
 		return Response{Error: err.Error()}
 	}
+	// A ready report on a Ticket that stays open (it waits for its pull request) hands the work off: the session pauses
+	// once its turn is over (I1, R34).
+	handoff := false
+	if req.Status == string(core.ReportReady) {
+		if t, _, err := n.engine().Ticket(req.Ticket); err == nil && t.Ended == nil {
+			handoff = true
+		}
+	}
+	s.noteHandoff(handoff)
 	s.noteReport()
 	s.log.Info("report filed", "state", req.Status)
 	return Response{OK: true}

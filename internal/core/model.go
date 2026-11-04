@@ -402,6 +402,17 @@ func (t *Ticket) WaitsForPerson() bool {
 	return true
 }
 
+// HandedOff reports whether an open Ticket's worker handed the work off: the running Assignment's latest Report is
+// ready, so the Ticket waits for the Threads it follows (its pull request) to close, and its Executor keeps no process
+// for it. The next Input resumes the work, as a message resumes an ended Ticket.
+func (t *Ticket) HandedOff() bool {
+	if t.Ended != nil {
+		return false
+	}
+	a := runningAssignment(t)
+	return a != nil && a.Report != nil && a.Report.State == ReportReady
+}
+
 // FollowsDone reports whether a Ticket that follows Threads is done with them, and the outcome it then ends with: no
 // Thread it opened (Own) is still open or, when it opened none, every Thread it follows closed. The outcome is that of
 // the latest of those closes. A Ticket that follows no Thread is never done with them.

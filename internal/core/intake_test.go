@@ -477,6 +477,40 @@ func TestResumeRefusedWhenRevalidationFails(t *testing.T) {
 	eq(t, "resumed", h.ticket(a).Ended, (*Ended)(nil))
 }
 
+// I1 (R34): a Ticket that reported ready and waits for its pull request has no worker process; a message that would
+// resume it is revalidated as for an ended Ticket. While the Mandate does not hold, the message reaches no Ticket and
+// goes to Eval; once it holds again, a message reaches the Ticket and is delivered to its running Assignment.
+func TestResumeOfWaitingTicketRevalidates(t *testing.T) {
+	h := newIntake(t)
+	a := h.sourceTicket(issue)
+	h.must(h.eng.BindThread(a, pull1, true))
+	h.must(h.eng.FileReport(a, ReportInput{State: ReportReady, Summary: "opened #1"}))
+	eq(t, "waiting, open", h.ticket(a).Ended, (*Ended)(nil))
+	delivers := h.callsFor("deliver", a)
+	h.policy.holds = false
+	tr := h.message("c:1", pull1)
+	h.receive(tr)
+	tk := h.ticket(a)
+	eq(t, "revalidated", len(h.policy.revalidated), 1)
+	eq(t, "no input", len(inputsOf(tk, tr.ID)), 0)
+	eq(t, "no delivery", h.callsFor("deliver", a), delivers)
+	eq(t, "not reached", h.disposition(tr.ID).Reached, []string(nil))
+	eq(t, "queued", h.queued(pull1), []string{tr.ID})
+	wantUserError(t, "the owner's message too", h.eng.AddPersonInput(a, "one more thing"))
+
+	h.policy.holds = true
+	tr2 := h.message("c:2", pull1)
+	h.receive(tr2)
+	eq(t, "reached", len(inputsOf(h.ticket(a), tr2.ID)), 1)
+	eq(t, "delivered to the running assignment", h.callsFor("deliver", a), delivers+1)
+	// Once its worker works again (a report other than ready), its messages are not revalidated.
+	h.must(h.eng.FileReport(a, ReportInput{State: ReportProgress, Summary: "renaming"}))
+	n := len(h.policy.revalidated)
+	h.policy.holds = false
+	h.receive(h.message("c:3", pull1))
+	eq(t, "no revalidation while it works", len(h.policy.revalidated), n)
+}
+
 // The owner's message resumes a Source's ended Ticket only while its Mandate holds; an owner task needs no Source.
 func TestPersonInputRevalidatesSourceMandate(t *testing.T) {
 	h := newIntake(t)

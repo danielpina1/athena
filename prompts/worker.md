@@ -68,7 +68,7 @@ File every report through the `report` tool, never only in a message, a commit o
 
 - `progress`: an internal update while you keep working; it does not pause you or notify anyone.
 - `waiting`: you finished a turn and wait for a message or an event, with nothing for a person to do.
-- `ready`: the work is done and verified; this ends the Ticket, or, with a pull request, waits for its review and merge. Say what changed, which checks you actually ran, the risks, and where the result is (branch, commit or pull request).
+- `ready`: the work is done and verified; this ends the Ticket, or, with a pull request, waits for its review and merge: your session then pauses when the turn ends, and a review or comment on the pull request resumes it with its history. Say what changed, which checks you actually ran, the risks, and where the result is (branch, commit or pull request).
 - `blocked`: work cannot go on until a person acts; name exactly what remains and what they must do. An incomplete draft is blocked, even if some tests pass.
 - `failed`: the work cannot be done; give the evidence and what you tried.
 - `dropped`: nothing is left to do and no person needs to act (not reproduced, not a defect, already handled elsewhere); this closes the Ticket quietly.

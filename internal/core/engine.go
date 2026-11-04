@@ -429,7 +429,8 @@ func (e *Engine) FileReport(ticketID string, r ReportInput) error {
 // AddPersonInput gives a Ticket the owner's message: it is recorded as a person's Trigger and reaches the Ticket as a
 // human Input, which answers its question (clearing Attention), releases a blocked or failed report, and goes to the
 // running Assignment (or launches a pending one again). An ended Ticket resumes with a new Assignment, unless a person
-// stopped it or its Mandate no longer revalidates.
+// stopped it or its Mandate no longer revalidates; a Ticket whose worker handed off (HandedOff) resumes only while its
+// Mandate revalidates too.
 func (e *Engine) AddPersonInput(ticketID, text string) error {
 	if strings.TrimSpace(text) == "" {
 		return userErrorf("a message needs text")
@@ -442,7 +443,7 @@ func (e *Engine) AddPersonInput(ticketID, text string) error {
 		if t.Ended != nil && t.Ended.By == EndByHuman {
 			return userErrorf("ticket %s was stopped", ticketID)
 		}
-		if t.Ended != nil && !o.revalidates(t) {
+		if (t.Ended != nil || t.HandedOff()) && !o.revalidates(t) {
 			return userErrorf("the mandate of ticket %s no longer holds; it needs a new accept", ticketID)
 		}
 		trigger := &Trigger{ID: newID(), Source: ownerSource, Actor: OwnerActor, Human: true, At: o.at, Text: text}
@@ -679,8 +680,9 @@ func (o *op) enqueue(kind, key string, payload []byte) error {
 	return nil
 }
 
-// revalidates reports whether an ended Ticket's Mandate still holds under the current Policy before it resumes. An
-// owner task's Mandate needs no Source, and without a Policy every Mandate holds.
+// revalidates reports whether a Ticket's Mandate still holds under the current Policy before it resumes (an ended
+// Ticket, or one whose worker handed off). An owner task's Mandate needs no Source, and without a Policy every Mandate
+// holds.
 func (o *op) revalidates(t *Ticket) bool {
 	m := t.Mandate
 	if o.policy == nil || m.PolicyVersion == OwnerPolicyVersion || m.Basis.Via == ViaOwner {
