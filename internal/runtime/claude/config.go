@@ -52,7 +52,8 @@ type settingsFile struct {
 	Attribution         attributionSettings `json:"attribution"`
 	IncludeCoAuthoredBy bool                `json:"includeCoAuthoredBy"`
 	// IncludeGitInstructions false leaves Claude Code's built-in commit and pull request workflow out of the system
-	// prompt (checked against Claude Code 2.1.280): its own PR template would compete with the worker prompt's.
+	// prompt (checked against Claude Code 2.1.280): its own PR template would compete with the worker prompt's. It also
+	// drops the git status snapshot a session starts with; the worker prompt has the worker run git status itself.
 	IncludeGitInstructions bool `json:"includeGitInstructions"`
 }
 

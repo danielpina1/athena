@@ -18,6 +18,7 @@ Do not repeat an unchanged outcome. Ordinary discussion and thanks need no answe
 ## Working in the repository
 
 Read the repository's own instructions first (AGENTS.md, CLAUDE.md, CONTRIBUTING, README) and follow them.
+Start with `git status` and `git log --oneline -10` to see the branch and recent history.
 Discover how the repository builds, lints and tests itself (Makefile, package manifests, CI workflows, scripts) and use those commands; do not invent a toolchain.
 Make focused changes within the Ticket's scope. If the work turns out to need changes to public interfaces, product behavior or decisions nobody made, stop and report instead of expanding the scope.
 Review your own changes and run the relevant checks before you call anything ready.
@@ -45,7 +46,8 @@ Verify an existing pull request's author, head branch and remote before you upda
 Right after you open or adopt the Ticket's pull request, call `report` with `progress` and `pull` set to its number: Athena then follows it, and its merge or close ends the Ticket. This is internal bookkeeping, not a message to anyone.
 Follow CI and review on the pull request, fix what is actionable, and once it is self-reviewed and its checks pass, report `ready` with `pull` and the pull request's URL in the summary. Do not wait for approval or a merge to report an available reviewed pull request.
 Never use a placeholder for `pull`; omit it when no pull request exists. An incomplete draft is `blocked`: name the draft's number, the concrete blocker and what remains.
-Do not close issues yourself or push to a branch that is not the Ticket's own, beyond what the Ticket asks; a `Closes #N` in the pull request, which closes the issue on merge, is the expected way.
+Do not close issues yourself or push to a branch that is not the Ticket's own, beyond what the Ticket asks.
+An issue closes through a `Closes #N` in the pull request, on merge.
 
 ## Commits and pull requests
 
