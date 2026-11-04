@@ -278,7 +278,9 @@ func TestAcceptCreatesTicketMandateSubscriptions(t *testing.T) {
 	eq(t, "decision mandate", *d.Mandate, tk.Mandate)
 	eq(t, "reason", d.Reasons, []Reason{{Code: CodeSaid, Values: map[string]string{"text": "clear request"}}})
 	eq(t, "eval ended", h.evalOf(issue), (*Evaluation)(nil))
-	eq(t, "no reply queued (Task 6)", len(h.repos.effectList()), 1) // the assessment only
+	fx := h.repos.effectList()
+	eq(t, "the assessment, then the acknowledgement", len(fx), 2)
+	eq(t, "ack queued (R4)", fx[len(fx)-1].Key, ReceiptID(tk.ID, PurposeAcknowledgement, "c:2", "On it."))
 
 	iss, oth := h.repos.thread(issue), h.repos.thread(other)
 	eq(t, "issue subscription", iss.Subscriptions, []Subscription{{TicketID: tk.ID, Own: true}})

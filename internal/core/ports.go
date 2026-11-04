@@ -52,6 +52,12 @@ type Tx interface {
 	KVGet(key string) (string, bool, error)
 	// KVSet stores a plain string under key.
 	KVSet(key, value string) error
+	// GetReceipt returns the reply receipt with the given ID, or nil, nil if there is none.
+	GetReceipt(id string) (*Receipt, error)
+	// PutReceipt inserts or replaces a reply receipt.
+	PutReceipt(r *Receipt) error
+	// TicketReceipts returns a Ticket's reply receipts, in queue order (Seq).
+	TicketReceipts(ticketID string) ([]*Receipt, error)
 	// NextSeq returns the next value of the named counter: 1 on first use, then one more each call.
 	// It moves only if the transaction commits.
 	NextSeq(name string) (int, error)
@@ -87,10 +93,12 @@ const (
 	EventApprovalAnswered  = "approval.answered"
 	EventTriggerReceived   = "trigger.received"
 	EventThreadSubscribed  = "thread.subscribed"
-	EventEvalStarted       = "eval.started"
-	EventDecisionRecorded  = "decision.recorded"
-	EventTriggerRequeued   = "trigger.requeued"
-	EventPolicyChanged     = "policy.changed"
+	// EventThreadUnsubscribed is emitted for each Ticket whose Subscription to a Thread was dropped.
+	EventThreadUnsubscribed = "thread.unsubscribed"
+	EventEvalStarted        = "eval.started"
+	EventDecisionRecorded   = "decision.recorded"
+	EventTriggerRequeued    = "trigger.requeued"
+	EventPolicyChanged      = "policy.changed"
 )
 
 // Event is what the Engine reports after a committed change.

@@ -18,6 +18,7 @@ type memRepos struct {
 	decisions map[string][]byte
 	approvals map[string][]byte
 	threads   map[string][]byte
+	receipts  map[string][]byte
 	kv        map[string]string
 	effects   map[string]fakeEffect
 	seqs      map[string]int
@@ -28,7 +29,7 @@ type memRepos struct {
 }
 
 func newMemRepos() *memRepos {
-	return &memRepos{tickets: map[string][]byte{}, triggers: map[string][]byte{}, decisions: map[string][]byte{}, approvals: map[string][]byte{}, threads: map[string][]byte{}, kv: map[string]string{}, effects: map[string]fakeEffect{}, seqs: map[string]int{}}
+	return &memRepos{tickets: map[string][]byte{}, triggers: map[string][]byte{}, decisions: map[string][]byte{}, approvals: map[string][]byte{}, threads: map[string][]byte{}, receipts: map[string][]byte{}, kv: map[string]string{}, effects: map[string]fakeEffect{}, seqs: map[string]int{}}
 }
 
 // fakeEffect is a queued effect, as Enqueue leaves it.
@@ -47,6 +48,7 @@ func (r *memRepos) Tx(fn func(Tx) error) error {
 		decisions: cloneMap(r.decisions),
 		approvals: cloneMap(r.approvals),
 		threads:   cloneMap(r.threads),
+		receipts:  cloneMap(r.receipts),
 		kv:        map[string]string{},
 		effects:   map[string]fakeEffect{},
 		seqs:      map[string]int{},
@@ -70,7 +72,7 @@ func (r *memRepos) Tx(fn func(Tx) error) error {
 		return r.failWith
 	}
 	r.tickets, r.triggers, r.decisions, r.approvals, r.seqs = tx.tickets, tx.triggers, tx.decisions, tx.approvals, tx.seqs
-	r.threads, r.kv, r.effects = tx.threads, tx.kv, tx.effects
+	r.threads, r.kv, r.effects, r.receipts = tx.threads, tx.kv, tx.effects, tx.receipts
 	return nil
 }
 
@@ -153,6 +155,7 @@ func (r *memRepos) counts() (tickets, triggers, decisions int) {
 
 type memTx struct {
 	tickets, triggers, decisions, approvals, threads map[string][]byte
+	receipts                                         map[string][]byte
 	kv                                               map[string]string
 	effects                                          map[string]fakeEffect
 	seqs                                             map[string]int
@@ -631,4 +634,37 @@ func runningOf(t *Ticket) *Assignment {
 		}
 	}
 	return nil
+}
+
+func (tx *memTx) GetReceipt(id string) (*Receipt, error) {
+	raw, ok := tx.receipts[id]
+	if !ok {
+		return nil, nil
+	}
+	var r Receipt
+	mustUnmarshal(raw, &r)
+	return &r, nil
+}
+
+func (tx *memTx) PutReceipt(r *Receipt) error {
+	raw, err := json.Marshal(r)
+	if err != nil {
+		return err
+	}
+	tx.receipts[r.ID] = raw
+	return nil
+}
+
+// TicketReceipts lists a Ticket's receipts in queue order, as the SQLite store does.
+func (tx *memTx) TicketReceipts(ticketID string) ([]*Receipt, error) {
+	var out []*Receipt
+	for _, raw := range tx.receipts {
+		var r Receipt
+		mustUnmarshal(raw, &r)
+		if r.TicketID == ticketID {
+			out = append(out, &r)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Seq < out[j].Seq })
+	return out, nil
 }

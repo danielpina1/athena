@@ -392,6 +392,11 @@ func (e *Engine) Decide(d DecisionInput) (DecisionResult, error) {
 	default:
 		return DecisionResult{}, userErrorf("unknown decision kind %q (accept, ignore or stop)", d.Kind)
 	}
+	if d.Kind == DecisionAccept {
+		if err := ackRefusal(d.Ack); err != nil {
+			return DecisionResult{}, err
+		}
+	}
 	var res DecisionResult
 	err := e.command(cmdDecide, func(o *op) error {
 		res = DecisionResult{}
@@ -652,6 +657,13 @@ func (o *op) accept(th *Thread, ev *Evaluation, d DecisionInput, p Policy, res *
 			}
 		}
 	}
+	// The acknowledgement the accept carries goes out through Reply in this transaction, where a person's message
+	// started the Ticket (the reference's acknowledgeAccepted: bots and CI are not acknowledged).
+	if strings.TrimSpace(d.Ack) != "" && primary.Human {
+		if _, err := o.reply(ReplyRequest{TicketID: t.ID, TriggerID: primary.ID, Purpose: PurposeAcknowledgement, Text: d.Ack}); err != nil {
+			return err
+		}
+	}
 	o.start(t, assignment)
 	o.event(EventTicketCreated, t, assignment, map[string]any{"decisionId": dec.ID, "strength": mandate.Strength})
 	res.Decision = *dec
@@ -796,33 +808,42 @@ func (e *Engine) Handback(ticketID, triggerID, reason string) (bool, error) {
 		if _, back := tr.Disposition.HandedBack[ticketID]; back {
 			return userErrorf("ticket %s handed trigger %s back already", ticketID, triggerID)
 		}
-		var primary *Thread
-		if len(tr.Threads) > 0 {
-			if primary, err = o.thread(tr.Threads[0]); err != nil {
-				return err
-			}
-		}
-		before, err := followupOwners(tr, o.tx.GetTicket, primary)
-		if err != nil {
-			return err
-		}
-		if tr.Disposition.HandedBack == nil {
-			tr.Disposition.HandedBack = map[string]string{}
-		}
-		tr.Disposition.HandedBack[ticketID] = reason
-		after, err := followupOwners(tr, o.tx.GetTicket, primary)
-		if err != nil {
-			return err
-		}
-		if primary != nil && slices.Contains(before, ticketID) && len(after) == 0 && queueForEval(primary, triggerID) {
-			queued = true
-			if err := o.tx.PutThread(primary); err != nil {
-				return err
-			}
-		}
-		return o.tx.PutTrigger(tr)
+		queued, err = o.handback(ticketID, tr, reason)
+		return err
 	})
 	return queued, err
+}
+
+// handback records that a Ticket hands a Trigger back with a reason and queues it for Eval on its primary Thread if
+// the Ticket decided it and no other Ticket does now; it reports whether it queued it, and puts the Trigger.
+func (o *op) handback(ticketID string, tr *Trigger, reason string) (bool, error) {
+	var primary *Thread
+	var err error
+	if len(tr.Threads) > 0 {
+		if primary, err = o.thread(tr.Threads[0]); err != nil {
+			return false, err
+		}
+	}
+	before, err := followupOwners(tr, o.tx.GetTicket, primary)
+	if err != nil {
+		return false, err
+	}
+	if tr.Disposition.HandedBack == nil {
+		tr.Disposition.HandedBack = map[string]string{}
+	}
+	tr.Disposition.HandedBack[ticketID] = reason
+	after, err := followupOwners(tr, o.tx.GetTicket, primary)
+	if err != nil {
+		return false, err
+	}
+	queued := false
+	if primary != nil && slices.Contains(before, ticketID) && len(after) == 0 && queueForEval(primary, tr.ID) {
+		queued = true
+		if err := o.tx.PutThread(primary); err != nil {
+			return false, err
+		}
+	}
+	return queued, o.tx.PutTrigger(tr)
 }
 
 // --- People ---
