@@ -1,10 +1,11 @@
 // A Ticket's live session, as its stream renders it: mono 13 px; the agent's words as text, its thinking collapsed,
 // the init line muted, each tool call paired with its result in one row, the result as a closing line. A gap in the
-// stream says output was skipped. The view follows the tail while the owner is within 48 px of the bottom; scrolled
+// stream says how much output was skipped. A batch renders only its own rows: the rows already shown are memoised on
+// their stream items, whose keys and stripped text are computed once per item. The view follows the tail while the owner is within 48 px of the bottom; scrolled
 // up, it stays put and offers "Jump to latest". The ● live dot shows while the link is open and the Ticket works.
 import { memo, type ReactNode, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { StreamItem } from "@/gen/athena/v1/stream_pb";
-import { stripAnsi } from "@/lib/stream/ansi";
+import { itemText } from "@/lib/stream/ansi";
 import { itemKey, useSessionStream } from "@/lib/stream/useSessionStream";
 import { useAthena } from "@/lib/store/state";
 import { cn } from "@/ui/cn";
@@ -17,7 +18,7 @@ export const FOLLOW_PX = 48;
 type Row =
   | { kind: "item"; key: string; item: StreamItem }
   | { kind: "tool"; key: string; call?: StreamItem; result?: StreamItem }
-  | { kind: "gap"; key: string; before: number; after: number };
+  | { kind: "gap"; key: string; bytes: bigint };
 
 /** The stream as rows: a tool's result joins its call's row; the gap sits before the first item past it. */
 export function buildRows(items: readonly StreamItem[], gap?: { from: bigint; to: bigint }): Row[] {
@@ -27,7 +28,7 @@ export function buildRows(items: readonly StreamItem[], gap?: { from: bigint; to
   let gapAt = gap ? items.findIndex((it) => it.offset >= gap.to) : -1;
   if (gap && gapAt < 0) gapAt = items.length;
   items.forEach((it, i) => {
-    if (i === gapAt) rows.push({ kind: "gap", key: "gap", before: i, after: items.length - i });
+    if (gap && i === gapAt) rows.push({ kind: "gap", key: "gap", bytes: gap.to - gap.from });
     const key = itemKey(it);
     if (it.kind === "tool_call") {
       if (it.toolUseId) calls.set(it.toolUseId, rows.length);
@@ -47,14 +48,22 @@ export function buildRows(items: readonly StreamItem[], gap?: { from: bigint; to
     }
     rows.push({ kind: "item", key, item: it });
   });
-  if (gap && gapAt === items.length) rows.push({ kind: "gap", key: "gap", before: items.length, after: 0 });
+  if (gap && gapAt === items.length) rows.push({ kind: "gap", key: "gap", bytes: gap.to - gap.from });
   return rows;
+}
+
+/** A size of transcript as the gap line says it: 512 B, 1.5 KB, 12 KB, 3.0 MB. */
+export function formatBytes(n: bigint): string {
+  const b = n > 0n ? Number(n) : 0;
+  if (b < 1024) return `${b} B`;
+  const [v, unit] = b < 1024 * 1024 ? [b / 1024, "KB"] : [b / (1024 * 1024), "MB"];
+  return `${v < 10 ? v.toFixed(1) : Math.round(v)} ${unit}`;
 }
 
 const TEXT = "whitespace-pre-wrap wrap-anywhere";
 
 function Item({ item }: { item: StreamItem }) {
-  const text = stripAnsi(item.text);
+  const text = itemText(item);
   switch (item.kind) {
     case "say":
       return (
@@ -101,12 +110,9 @@ const RowView = memo(
     switch (row.kind) {
       case "gap":
         return (
-          <div data-gap role="note" className="grid gap-0.5 rounded-xs border border-dashed border-line-soft px-3 py-2">
-            <span className="font-sans font-semibold">Some output was skipped</span>
-            <span className="text-xs text-muted">
-              {row.before} {row.before === 1 ? "item" : "items"} before, {row.after} after
-            </span>
-          </div>
+          <p data-gap role="note" className="rounded-xs border border-dashed border-line-soft px-3 py-2 font-sans font-semibold">
+            Some output was skipped ({formatBytes(row.bytes)})
+          </p>
         );
       case "tool":
         return <ToolCall call={row.call} result={row.result} active={active} />;
@@ -114,7 +120,13 @@ const RowView = memo(
         return <Item item={row.item} />;
     }
   },
-  (a, b) => a.row === b.row && (a.row.kind !== "tool" || a.active === b.active),
+  // buildRows makes new row objects on every batch: compare what they show, so the rows already there stay put.
+  ({ row: a, active: wasActive }, { row: b, active }) => {
+    if (a.kind === "item" && b.kind === "item") return a.item === b.item;
+    if (a.kind === "tool" && b.kind === "tool") return a.call === b.call && a.result === b.result && wasActive === active;
+    if (a.kind === "gap" && b.kind === "gap") return a.bytes === b.bytes;
+    return false;
+  },
 );
 
 export function LiveDot() {
@@ -137,8 +149,11 @@ export type SessionViewProps = {
 };
 
 export function SessionView({ ticketId, compact = false, title, actions }: SessionViewProps) {
-  const { items, gap, live } = useSessionStream(ticketId);
-  const working = useAthena((s) => (s.tickets.get(ticketId) ?? s.details.get(ticketId)?.summary)?.stage === "working");
+  const { items, gap, live, refused } = useSessionStream(ticketId);
+  const stage = useAthena((s) => (s.tickets.get(ticketId) ?? s.details.get(ticketId)?.summary)?.stage);
+  const working = stage === "working";
+  // A call without a result is still running until the Ticket ends (it may wait for an Approval) (R45).
+  const active = stage !== "ended";
   const rows = useMemo(() => buildRows(items, gap), [items, gap]);
 
   const log = useRef<HTMLDivElement>(null);
@@ -182,12 +197,12 @@ export function SessionView({ ticketId, compact = false, title, actions }: Sessi
           )}
         >
           {rows.length === 0 ? (
-            <p className="text-muted">No session output yet.</p>
+            <p className="text-muted">{refused ? "This session's output isn't available." : "No session output yet."}</p>
           ) : (
             <ol className="grid min-w-0 gap-2">
               {rows.map((row) => (
                 <li key={row.key} className="min-w-0">
-                  <RowView row={row} active={working} />
+                  <RowView row={row} active={active} />
                 </li>
               ))}
             </ol>

@@ -3,6 +3,7 @@
 // is a compact, read-only SessionView (reply from the Ticket itself) and holds its Ticket's watch (useWatch).
 // Narrower, the pin control is hidden and ?pin is ignored, but left in the URL.
 import { PinIcon, XIcon } from "lucide-react";
+import { useEffect, useRef } from "react";
 import { Link, useLocation, useNavigate, useSearchParams } from "react-router";
 import { useMediaQuery } from "@/app/Panes";
 import { filterSearch, PIN_PARAM, searchOf } from "@/features/tickets/Filters";
@@ -26,21 +27,41 @@ export function readPins(sp: URLSearchParams): string[] {
   return [...new Set(ids)].slice(0, MAX_PINS);
 }
 
-/** Whether pins show here (1440 px and wider), the pinned ids, and a toggle that keeps every other parameter. */
+/**
+ * Whether pins show here (1440 px and wider), the pinned ids, and a toggle that keeps every other parameter. As with
+ * the filters (R42), react-router applies a URL change in a transition, so a render's location can be older than a
+ * toggle already made: each toggle builds from the latest search written (a ref), and two quick ones both land. A
+ * change that is not one of our own writes re-reads the URL.
+ */
 export function usePins() {
   const wide = useMediaQuery(WIDE_QUERY);
   const [params] = useSearchParams();
   const { pathname, search } = useLocation();
   const navigate = useNavigate();
+  const latest = useRef(search);
+  /** Our writes the router has not committed yet, oldest first. */
+  const pending = useRef<string[]>([]);
+  useEffect(() => {
+    const i = pending.current.indexOf(search);
+    if (i >= 0) {
+      pending.current.splice(0, i + 1);
+      return;
+    }
+    pending.current = [];
+    latest.current = search;
+  }, [search]);
   const pins = readPins(params);
   const toggle = (id: string) => {
-    // From the location at the time of the click, not a render's copy of it.
-    const next = new URLSearchParams(search);
+    const next = new URLSearchParams(latest.current);
     const now = readPins(next);
     const ids = now.includes(id) ? now.filter((p) => p !== id) : [...now, id].slice(0, MAX_PINS);
     if (ids.length > 0) next.set(PIN_PARAM, ids.join(","));
     else next.delete(PIN_PARAM);
-    navigate({ pathname, search: searchOf(next) }, { replace: true });
+    const written = searchOf(next);
+    if (written === latest.current) return;
+    latest.current = written;
+    pending.current.push(written);
+    navigate({ pathname, search: written }, { replace: true });
   };
   return { wide, pins, toggle };
 }

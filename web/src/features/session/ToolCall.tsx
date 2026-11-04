@@ -5,7 +5,7 @@
 import { timestampMs } from "@bufbuild/protobuf/wkt";
 import { ChevronRightIcon } from "lucide-react";
 import type { StreamItem } from "@/gen/athena/v1/stream_pb";
-import { stripAnsi } from "@/lib/stream/ansi";
+import { itemText } from "@/lib/stream/ansi";
 import { cn } from "@/ui/cn";
 
 export type ToolStatus = "ok" | "error" | "running" | "none";
@@ -26,14 +26,14 @@ function firstLine(s: string): string {
 const BLOCK = "max-h-80 overflow-x-hidden overflow-y-auto whitespace-pre-wrap wrap-anywhere rounded-xs bg-surface-2 px-2 py-1";
 
 /**
- * call is missing when it fell out of the kept items; result is missing while the tool runs. active says the
- * session is still working: a call without a result is running then, and has no result after.
+ * call is missing when it fell out of the kept items; result is missing while the tool runs. active says the Ticket
+ * has not ended: a call without a result is running until then (waiting for an Approval too), and has none after.
  */
 export function ToolCall({ call, result, active }: { call?: StreamItem; result?: StreamItem; active: boolean }) {
   const status: ToolStatus = result ? (result.isError ? "error" : "ok") : active ? "running" : "none";
   const took = call?.at && result?.at ? formatDuration(timestampMs(result.at) - timestampMs(call.at)) : undefined;
   const label = status === "none" ? "no result" : took ? `${status} · ${took}` : status;
-  const input = stripAnsi(call?.text ?? "");
+  const input = call ? itemText(call) : "";
   return (
     <details data-testid="tool-call" data-status={status} className="group min-w-0 rounded-xs border border-line-soft">
       <summary className="flex min-h-11 min-w-0 cursor-pointer list-none items-center gap-2 px-2 py-1 lg:min-h-8 [&::-webkit-details-marker]:hidden">
@@ -59,7 +59,7 @@ export function ToolCall({ call, result, active }: { call?: StreamItem; result?:
         )}
         {result ? (
           <pre dir="auto" tabIndex={0} aria-label="Result" className={cn(BLOCK, "font-mono", result.isError && "text-danger")}>
-            {stripAnsi(result.text) || "(no output)"}
+            {itemText(result) || "(no output)"}
           </pre>
         ) : (
           <p className="text-muted">{active ? "Waiting for the result." : "No result was recorded."}</p>

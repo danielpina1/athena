@@ -128,8 +128,16 @@ test("a gap is kept, and a refused stream is not live", () => {
   const { result } = renderHook(() => useSessionStream("T-1"));
   act(() => link.push({ case: "streamGap", value: { ticketId: "T-1", from: 100n, to: 900n } }));
   expect(result.current.gap).toEqual({ from: 100n, to: 900n });
+  expect(result.current.refused).toBe(false);
   act(() => link.push({ case: "streamClose", value: { ticketId: "T-1" } }));
   expect(result.current.live).toBe(false);
+  expect(result.current.refused).toBe(true);
+  // An offline link is not live either, but nothing was refused.
+  act(() => link.set("offline"));
+  act(() => link.set("open"));
+  expect(result.current.refused).toBe(false);
+  act(() => link.set("offline"));
+  expect(result.current).toMatchObject({ live: false, refused: false });
   act(() => link.items("T-2", says(3)));
   expect(result.current.items).toEqual([]);
 });

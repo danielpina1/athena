@@ -1,6 +1,7 @@
-// The session's composer: Enter sends a reply, Shift+Enter adds a line, ⌘⏎ (Ctrl+Enter) interrupts the turn. The
-// text stays in the field until the reply's result is ok, so a failed send loses nothing. An ended Ticket takes no
-// replies: the field is disabled with the reason.
+// The session's composer: Enter sends a reply, Shift+Enter adds a line, ⌘⏎ (Ctrl+Enter) interrupts the turn (the
+// header holds the one Interrupt button). The text stays in the field until the reply's result is ok, so a failed send
+// loses nothing. An Enter that commits an IME candidate sends nothing. An ended Ticket takes no replies: the field is
+// disabled with the reason.
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import type { TicketSummary } from "@/gen/athena/v1/state_pb";
 import { modKeyLabel } from "@/app/shortcuts";
@@ -11,11 +12,28 @@ import { toast } from "@/ui/primitives/toast";
 
 export const ENDED_REASON = "This Ticket has ended, so it takes no more replies.";
 
-/** Interrupts the Ticket's running turn and says how it went. */
+/** Tickets whose interrupt has no result yet. */
+const interrupting = new Set<string>();
+
+/** Whether an interrupt of the Ticket is still waiting for its result. */
+export function interruptBusy(ticketId: string): boolean {
+  return interrupting.has(ticketId);
+}
+
+/**
+ * Interrupts the Ticket's running turn and says how it went. One at a time per Ticket: a second press while the first
+ * waits sends nothing, so the owner never sees "Interrupted" and then "Not interrupted".
+ */
 export async function interruptSession(ticketId: string): Promise<void> {
-  const r = await interrupt(ticketId);
-  if (r.ok) toast({ title: "Interrupted" });
-  else toast({ title: "Not interrupted", description: errorMessage(r.code), tone: "danger" });
+  if (interrupting.has(ticketId)) return;
+  interrupting.add(ticketId);
+  try {
+    const r = await interrupt(ticketId);
+    if (r.ok) toast({ title: "Interrupted" });
+    else toast({ title: "Not interrupted", description: errorMessage(r.code), tone: "danger" });
+  } finally {
+    interrupting.delete(ticketId);
+  }
 }
 
 export function Composer({ ticket, focus = false, onFocused }: { ticket: TicketSummary; focus?: boolean; onFocused?(): void }) {
@@ -48,7 +66,8 @@ export function Composer({ ticket, focus = false, onFocused }: { ticket: TicketS
   };
 
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key !== "Enter" || e.nativeEvent.isComposing) return;
+    // Safari ends the composition before the Enter that commits it: keyCode 229 is the only sign then.
+    if (e.key !== "Enter" || e.nativeEvent.isComposing || e.keyCode === 229) return;
     if (e.metaKey || e.ctrlKey) {
       // Handled here, so the page's own ⌘⏎ does not interrupt a second time.
       e.preventDefault();
@@ -80,11 +99,6 @@ export function Composer({ ticket, focus = false, onFocused }: { ticket: TicketS
         </p>
       )}
       <div className="flex flex-wrap justify-end gap-2">
-        {working && (
-          <Button onClick={() => void interruptSession(ticket.id)} aria-keyshortcuts="Meta+Enter Control+Enter">
-            Interrupt
-          </Button>
-        )}
         <Button variant="primary" onClick={() => void send()} disabled={ended || sending || text.trim() === ""}>
           Send
         </Button>

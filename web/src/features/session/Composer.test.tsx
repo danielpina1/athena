@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import type { CommandResult } from "@/gen/athena/v1/commands_pb";
@@ -6,7 +6,7 @@ import { create } from "@bufbuild/protobuf";
 import { TicketSummarySchema } from "@/gen/athena/v1/state_pb";
 import * as actions from "@/lib/commands/actions";
 import { Toaster } from "@/ui/primitives/toast";
-import { Composer } from "./Composer";
+import { Composer, interruptBusy } from "./Composer";
 
 vi.mock("@/lib/commands/actions", async (orig) => ({
   ...(await orig<typeof import("@/lib/commands/actions")>()),
@@ -82,14 +82,36 @@ test("composer disabled after end with reason", () => {
   expect((screen.getByRole("button", { name: "Send" }) as HTMLButtonElement).disabled).toBe(true);
 });
 
-test("interrupt is offered only while the Ticket works", async () => {
+test("cmd-enter interrupts only while the Ticket works, once at a time", async () => {
   const user = userEvent.setup();
   const view = render(<Composer ticket={ticket("idle")} />);
+  // The header has the one Interrupt button.
   expect(screen.queryByRole("button", { name: "Interrupt" })).toBeNull();
   await user.type(screen.getByRole("textbox"), "x");
   await user.keyboard("{Meta>}{Enter}{/Meta}");
   expect(interrupt).not.toHaveBeenCalled();
   view.rerender(<Composer ticket={ticket("working")} />);
-  await user.click(screen.getByRole("button", { name: "Interrupt" }));
-  expect(interrupt).toHaveBeenCalledWith("T-1");
+  expect(screen.queryByRole("button", { name: "Interrupt" })).toBeNull();
+  let finish!: (r: CommandResult) => void;
+  interrupt.mockReturnValueOnce(new Promise((r) => (finish = r)));
+  await user.keyboard("{Meta>}{Enter}{/Meta}");
+  await user.keyboard("{Meta>}{Enter}{/Meta}");
+  expect(interrupt).toHaveBeenCalledTimes(1);
+  finish(ok);
+  await waitFor(() => expect(interruptBusy("T-1")).toBe(false));
+  await user.keyboard("{Meta>}{Enter}{/Meta}");
+  expect(interrupt).toHaveBeenCalledTimes(2);
+});
+
+test("an Enter that commits an IME candidate does not send", async () => {
+  const user = userEvent.setup();
+  render(<Composer ticket={ticket("working")} />);
+  const box = screen.getByRole("textbox", { name: "Reply to the session" });
+  await user.type(box, "日本");
+  // Safari ends the composition before this keydown, so only keyCode 229 tells.
+  fireEvent.keyDown(box, { key: "Enter", keyCode: 229 });
+  fireEvent.keyDown(box, { key: "Enter", isComposing: true });
+  expect(reply).not.toHaveBeenCalled();
+  fireEvent.keyDown(box, { key: "Enter", keyCode: 13 });
+  expect(reply).toHaveBeenCalledWith("T-1", "日本");
 });

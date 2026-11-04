@@ -29,6 +29,8 @@ export type SessionStream = {
   gap?: { from: bigint; to: bigint };
   /** The stream is being served: the link is open and the server did not refuse it. */
   live: boolean;
+  /** The server refused this stream on this connection (StreamClose: no such Ticket, or streams unavailable). */
+  refused: boolean;
 };
 
 /** The newest items a stream keeps. */
@@ -57,7 +59,7 @@ const listeners = new Map<string, Set<() => void>>();
 /** Items rendered (or never to be rendered) and not yet granted back on this connection. */
 let owed = 0;
 
-const EMPTY: SessionStream = { items: [], live: false };
+const EMPTY: SessionStream = { items: [], live: false, refused: false };
 
 /** FNV-1a over the UTF-16 units: cheap and stable, enough to tell two texts of one line apart. */
 function hash(s: string): string {
@@ -69,13 +71,20 @@ function hash(s: string): string {
   return (h >>> 0).toString(36);
 }
 
-/** The key an item is kept once by. */
+const keys = new WeakMap<StreamItem, string>();
+
+/** The key an item is kept once by; computed once per item (its text can be 256 KiB). */
 export function itemKey(it: StreamItem): string {
-  return `${it.offset}:${it.kind}:${it.toolUseId}:${hash(it.text)}`;
+  let k = keys.get(it);
+  if (k === undefined) {
+    k = `${it.offset}:${it.kind}:${it.toolUseId}:${hash(it.text)}`;
+    keys.set(it, k);
+  }
+  return k;
 }
 
 function notify(e: Entry) {
-  e.view = { items: e.items, gap: e.gap, live: status === "open" && !e.refused };
+  e.view = { items: e.items, gap: e.gap, live: status === "open" && !e.refused, refused: e.refused };
   for (const l of listeners.get(e.id) ?? []) l();
 }
 

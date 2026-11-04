@@ -64,6 +64,19 @@ test("pinned sessions show side by side at 1440 px, up to 3, from the URL", asyn
   expect(screen.getByTestId("where").textContent).toBe("/tickets?pin=T-2,T-3");
 });
 
+test("two quick unpins both land", () => {
+  stubWidth(1440);
+  renderAt("/tickets?pin=T-1,T-2,T-3", <PinnedSessions />);
+  const one = screen.getByRole("button", { name: "Unpin T-1" });
+  const two = screen.getByRole("button", { name: "Unpin T-2" });
+  // Both before the router re-renders.
+  act(() => {
+    one.click();
+    two.click();
+  });
+  expect(screen.getByTestId("where").textContent).toBe("/tickets?pin=T-3");
+});
+
 test("below 1440 px pins are ignored but kept in the URL", () => {
   stubWidth(1439);
   renderAt("/tickets/T-1?pin=T-1", <><PinnedSessions /><PinToggle ticketId="T-1" /></>);

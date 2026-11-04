@@ -5,7 +5,7 @@ import { at, hasClasses, load } from "@/features/tickets/fixtures";
 import { connectStreams } from "@/lib/stream/useSessionStream";
 import { fakeStreamLink, item, says, type FakeStreamLink } from "@/lib/stream/testkit";
 import { useAthena } from "@/lib/store/state";
-import { SessionView } from "./SessionView";
+import { formatBytes, SessionView } from "./SessionView";
 
 let link: FakeStreamLink;
 let disconnect: () => void;
@@ -58,6 +58,19 @@ test("tool call and result pair by id", async () => {
   expect(log.textContent!.indexOf("Bash")).toBeLessThan(log.textContent!.indexOf("Checking the tests"));
 });
 
+test("a call without a result runs in every stage but ended", () => {
+  render(<SessionView ticketId="T-1" />);
+  act(() => link.items("T-1", [item({ offset: 0n, kind: "tool_call", tool: "Bash", toolUseId: "tu1", text: "make deploy" })]));
+  const call = () => screen.getByTestId("tool-call");
+  for (const stage of ["working", "person", "idle"]) {
+    act(() => load({ tickets: [{ ...working, stage, action: stage === "person" ? "approval" : "" }] }));
+    expect(call().getAttribute("data-status"), stage).toBe("running");
+  }
+  act(() => load({ tickets: [{ ...working, stage: "ended", outcome: "stopped" }] }));
+  expect(call().getAttribute("data-status")).toBe("none");
+  expect(call().textContent).toContain("no result");
+});
+
 test("renders each kind, strips ANSI and wraps long lines", () => {
   render(<SessionView ticketId="T-1" />);
   const long = "x".repeat(3000);
@@ -81,18 +94,34 @@ test("renders each kind, strips ANSI and wraps long lines", () => {
   expect(hasClasses(screen.getByRole("log"), "font-mono", "text-sm")).toBe(true); // text-sm is 13 px
 });
 
-test("a gap says output was skipped, with the item counts", () => {
+test("a gap says output was skipped, with its size", () => {
   render(<SessionView ticketId="T-1" />);
   act(() => {
     link.items("T-1", says(2, 0));
     link.push({ case: "streamGap", value: { ticketId: "T-1", from: 20n, to: 5000n } });
     link.items("T-1", says(3, 5000));
   });
-  const gap = screen.getByText("Some output was skipped").closest("[data-gap]")!;
-  expect(gap.textContent).toContain("2 items before, 3 after");
+  // 5000 − 20 bytes of transcript.
+  const gap = screen.getByText("Some output was skipped (4.9 KB)").closest("[data-gap]")!;
+  expect(gap.textContent).toBe("Some output was skipped (4.9 KB)");
   const log = screen.getByRole("log");
   expect(log.textContent!.indexOf("line 10")).toBeLessThan(log.textContent!.indexOf("Some output was skipped"));
   expect(log.textContent!.indexOf("Some output was skipped")).toBeLessThan(log.textContent!.indexOf("line 5000"));
+});
+
+test("skipped sizes read as bytes, KB and MB", () => {
+  expect(formatBytes(512n)).toBe("512 B");
+  expect(formatBytes(1536n)).toBe("1.5 KB");
+  expect(formatBytes(12n * 1024n + 100n)).toBe("12 KB");
+  expect(formatBytes(3n * 1024n * 1024n)).toBe("3.0 MB");
+  expect(formatBytes(-5n)).toBe("0 B");
+});
+
+test("a refused stream says its output is not available", () => {
+  render(<SessionView ticketId="T-1" />);
+  act(() => link.push({ case: "streamClose", value: { ticketId: "T-1" } }));
+  expect(screen.getByText("This session's output isn't available.")).toBeTruthy();
+  expect(screen.queryByText("No session output yet.")).toBeNull();
 });
 
 test("the live dot shows while the link is open and the Ticket works", () => {
