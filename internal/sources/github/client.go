@@ -242,6 +242,20 @@ func (c *Client) Patch(ctx context.Context, path string, in, out any) error {
 	return c.write(ctx, http.MethodPatch, path, in, out)
 }
 
+// deleteAs sends DELETE path authenticated with token instead of the client's own (no retry on a 401: a rejected token
+// is not the client's to drop).
+func (c *Client) deleteAs(ctx context.Context, path, token string) error {
+	target, err := c.resolve(path)
+	if err != nil {
+		return err
+	}
+	if u, err := url.Parse(target); err != nil || !c.sameOrigin(u) {
+		return fmt.Errorf("github: refusing DELETE %s: not on the API host: %w", path, ErrPermanent)
+	}
+	_, err = c.send(ctx, http.MethodDelete, target, path, nil, nil, token)
+	return err
+}
+
 func (c *Client) write(ctx context.Context, method, path string, in, out any) error {
 	var body []byte
 	if in != nil {

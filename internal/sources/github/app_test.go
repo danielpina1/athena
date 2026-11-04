@@ -625,3 +625,29 @@ func TestNewAppAPIURL(t *testing.T) {
 		t.Error(err)
 	}
 }
+
+// RevokeToken revokes a token with that token itself (DELETE /installation/token), never with the installation's.
+func TestRevokeToken(t *testing.T) {
+	clk := newClock()
+	srv := newInstallationServer(t, clk)
+	var auths []string
+	var mu sync.Mutex
+	srv.mux.HandleFunc("DELETE /installation/token", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		auths = append(auths, r.Header.Get("Authorization"))
+		mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	})
+	app := newApp(t, srv.Server, clk)
+	if err := app.RevokeToken(context.Background(), "ghs_worker1"); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if fmt.Sprint(auths) != "[Bearer ghs_worker1]" || srv.mints.Load() != 0 {
+		t.Fatalf("revoke sent %v after %d mints, want the worker's own token and no mint", auths, srv.mints.Load())
+	}
+	if err := app.RevokeToken(context.Background(), ""); err == nil {
+		t.Fatal("revoking an empty token succeeded")
+	}
+}

@@ -206,7 +206,9 @@ You can also give Athena work yourself, in a configured repository, without a me
 - **A worker can obtain its own Assignment's token.** To push and open its pull request, a worker asks Athena for a
   token through a credential helper. It is short-lived (about an hour at most), limited to the single repository of the
   Ticket and to the worker permissions above, minted per Assignment, held in memory and never written to SQLite, logs,
-  prompts or transcripts. A worker can therefore act on that repository as the bot until the token expires.
+  prompts or transcripts. When the worker's session ends, Athena drops the token and revokes it with GitHub (best
+  effort: if the revocation fails, the token still expires on its own). A worker can therefore act on that repository
+  as the bot while its session runs, and a copy it kept until the revocation or, at worst, the expiry.
 - **The private key is not out of a worker's reach.** Athena's rules deny workers the credential paths (the key, your
   `~/.ssh`, `~/.claude` and the like), but those rules are not a boundary: a worker runs as your OS user, as the server
   does, so a determined script can read any 0600 file that user can read, the App's private key included. The

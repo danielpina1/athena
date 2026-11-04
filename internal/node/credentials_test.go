@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -39,6 +40,8 @@ type fakeCreds struct {
 	noIdentity atomic.Bool
 	mu         sync.Mutex
 	repos      []string
+	revoked    []string
+	revokeErr  error
 }
 
 func (f *fakeCreds) Token(_ context.Context, repo string) (string, time.Time, error) {
@@ -54,6 +57,20 @@ func (f *fakeCreds) Token(_ context.Context, repo string) (string, time.Time, er
 		life = time.Hour
 	}
 	return fmt.Sprintf("%s%d", fakeToken, n), time.Now().Add(life), nil
+}
+
+// Revoke records a revoked token; revokeErr makes it fail.
+func (f *fakeCreds) Revoke(_ context.Context, token string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.revoked = append(f.revoked, token)
+	return f.revokeErr
+}
+
+func (f *fakeCreds) revokedTokens() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.revoked...)
 }
 
 func (f *fakeCreds) Identity() (string, string) {
@@ -409,6 +426,32 @@ func TestTokenDroppedOnStop(t *testing.T) {
 	}
 	if h.n.tokens.holds(a.ID) {
 		t.Fatal("a refused request fetched a token again")
+	}
+	// Minor 3: the dropped token is revoked, not left valid until it expires.
+	h.eventually("the dropped token revoked", func() bool { return len(h.creds.revokedTokens()) > 0 })
+	if got := h.creds.revokedTokens(); len(got) != 1 || !strings.HasPrefix(got[0], fakeToken) {
+		t.Fatalf("revoked %q, want the dropped token", got)
+	}
+}
+
+// Revoking is best effort: a failure is logged, and the token is dropped all the same. A token minted for an
+// Assignment dropped meanwhile is revoked too.
+func TestDropRevokesBestEffort(t *testing.T) {
+	creds := &fakeCreds{revokeErr: errors.New("502 bad gateway")}
+	ts := newTokenStore(creds)
+	tok, err := ts.token(context.Background(), "a1", "o/r")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts.drop("a1")
+	ts.wait()
+	if ts.holds("a1") || !slices.Equal(creds.revokedTokens(), []string{tok}) {
+		t.Fatalf("held %v, revoked %q; want %q dropped and revoked", ts.holds("a1"), creds.revokedTokens(), tok)
+	}
+	ts.drop("a2") // nothing held: nothing to revoke
+	ts.wait()
+	if n := len(creds.revokedTokens()); n != 1 {
+		t.Fatalf("revoked %d tokens, want 1", n)
 	}
 }
 

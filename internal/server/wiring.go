@@ -226,6 +226,11 @@ func (c *appCredentials) Token(ctx context.Context, repo string) (string, time.T
 	return t.Value, t.ExpiresAt, nil
 }
 
+var _ node.TokenRevoker = (*appCredentials)(nil)
+
+// Revoke revokes a worker's token the node dropped (node.TokenRevoker).
+func (c *appCredentials) Revoke(ctx context.Context, token string) error { return c.app.RevokeToken(ctx, token) }
+
 // seed records the bot the check fetched, so Identity needs no lookup of its own.
 func (c *appCredentials) seed(login string, id int64) {
 	if login == "" {

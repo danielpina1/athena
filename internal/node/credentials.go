@@ -27,6 +27,12 @@ type Credentials interface {
 	Identity() (login, email string)
 }
 
+// TokenRevoker is the optional part of Credentials that revokes a token the node dropped (spec §11: revoked when the
+// Assignment ends), so a copy a worker kept stops working before it expires.
+type TokenRevoker interface {
+	Revoke(ctx context.Context, token string) error
+}
+
 const (
 	// tokenRefreshMargin is how long before its expiry a held token is replaced.
 	tokenRefreshMargin = 5 * time.Minute
@@ -34,6 +40,8 @@ const (
 	tokenAssumedLife = time.Hour
 	// tokenFetchTimeout bounds one request for a token.
 	tokenFetchTimeout = 30 * time.Second
+	// tokenRevokeTimeout bounds the revocation of a dropped token.
+	tokenRevokeTimeout = 10 * time.Second
 )
 
 // credentialError is a failure to get a GitHub Ticket's credentials from the port. permanent is set for a refusal the
@@ -76,11 +84,14 @@ func (secret) MarshalText() ([]byte, error) { return []byte("***"), nil }
 type tokenStore struct {
 	creds Credentials
 	now   func() time.Time
+	log   *slog.Logger
 
 	mu   sync.Mutex
 	held map[string]*heldToken // by Assignment ID
 	// dead holds the Assignments whose token was dropped: none is fetched for them until revive.
 	dead map[string]bool
+	// revoking counts the revocations in flight.
+	revoking sync.WaitGroup
 }
 
 // heldToken is one Assignment's token; its own lock serializes fetches, so concurrent requests fetch once.
@@ -93,7 +104,8 @@ type heldToken struct {
 }
 
 func newTokenStore(c Credentials) *tokenStore {
-	return &tokenStore{creds: c, now: time.Now, held: map[string]*heldToken{}, dead: map[string]bool{}}
+	return &tokenStore{creds: c, now: time.Now, log: slog.New(slog.DiscardHandler), held: map[string]*heldToken{},
+		dead: map[string]bool{}}
 }
 
 // token returns the Assignment's token for repo, fetching one when it holds none, holds one for another repository,
@@ -141,13 +153,14 @@ func (ts *tokenStore) token(ctx context.Context, assignmentID, repo string) (str
 	ts.mu.Unlock()
 	if !current {
 		// Dropped while it was fetched: the Assignment ended, nothing keeps the token.
+		ts.revoke(assignmentID, v)
 		return "", errors.New("the assignment has ended")
 	}
 	h.repo, h.value, h.expires = repo, secret(v), exp
 	return v, nil
 }
 
-// drop forgets the Assignment's token; later requests for it are refused until revive.
+// drop forgets the Assignment's token, and revokes it; later requests for it are refused until revive.
 func (ts *tokenStore) drop(assignmentID string) {
 	ts.mu.Lock()
 	h := ts.held[assignmentID]
@@ -158,9 +171,34 @@ func (ts *tokenStore) drop(assignmentID string) {
 		return
 	}
 	h.mu.Lock()
+	v := string(h.value)
 	h.value, h.dropped = "", true
 	h.mu.Unlock()
+	ts.revoke(assignmentID, v)
 }
+
+// revoke revokes a dropped token when the port can, in the background so no slot waits for GitHub, and best effort: a
+// failure is logged, and the token expires on its own. wait waits for the revocations in flight.
+func (ts *tokenStore) revoke(assignmentID, token string) {
+	r, ok := ts.creds.(TokenRevoker)
+	if !ok || token == "" {
+		return
+	}
+	ts.revoking.Add(1)
+	go func() {
+		defer ts.revoking.Done()
+		ctx, cancel := context.WithTimeout(context.Background(), tokenRevokeTimeout)
+		defer cancel()
+		if err := r.Revoke(ctx, token); err != nil {
+			ts.log.Warn("revoke a dropped github token; it expires on its own", "assignment", assignmentID,
+				"error", redact.String(err.Error()))
+			return
+		}
+		ts.log.Info("revoked the github token of an ended assignment", "assignment", assignmentID)
+	}()
+}
+
+func (ts *tokenStore) wait() { ts.revoking.Wait() }
 
 // revive lets a new session of an Assignment whose token was dropped hold one again.
 func (ts *tokenStore) revive(assignmentID string) {

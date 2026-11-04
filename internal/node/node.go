@@ -198,6 +198,7 @@ func New(cfg Config, eng EngineCallbacks) *Node {
 		spawnHist:    cfg.Metrics.Histogram("session_spawn_seconds", "runtime", runtimeClaude),
 		initHist:     cfg.Metrics.Histogram("session_init_seconds", "runtime", runtimeClaude),
 	}
+	n.tokens.log = log
 	if eng != nil {
 		n.SetEngine(eng)
 	}
@@ -245,6 +246,7 @@ func (n *Node) Close() error {
 		n.post(message{kind: msgShutdown})
 		<-n.done
 		n.runners.Wait()
+		n.tokens.wait()
 		n.cancel()
 	})
 	return nil

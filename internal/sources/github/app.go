@@ -332,6 +332,15 @@ func (a *App) mint(ctx context.Context, body map[string]any) (Token, error) {
 	return Token{Value: out.Token, ExpiresAt: out.ExpiresAt}, nil
 }
 
+// RevokeToken revokes an installation access token, such as a worker's scoped token whose Assignment ended:
+// DELETE /installation/token, authenticated with that token itself.
+func (a *App) RevokeToken(ctx context.Context, token string) error {
+	if token == "" {
+		return errors.New("github app: no token to revoke")
+	}
+	return a.inst.deleteAs(ctx, "/installation/token", token)
+}
+
 // Client returns the client that authenticates with the installation token.
 func (a *App) Client() *Client { return a.inst }
 
