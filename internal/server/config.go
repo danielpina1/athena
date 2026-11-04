@@ -30,7 +30,7 @@ import (
 //	 "sandbox": {"enabled": true, "required": false, "allowedDomains": [], "allowWrite": [],
 //	             "weakerNetworkIsolation": false, "caFile": ""},
 //	 "web": {"enabled": false, "listen": ":8443", "host": "", "ips": [], "tls": "ca",
-//	         "acme": {"email", "provider", "resolvers": [], "directory", "agreeTos": false}, "pushContact": ""}}
+//	         "acme": {"email", "provider", "resolvers": [], "directory", "agreeTos": false}}}
 //
 // It holds the path of the GitHub App's private key, never the key. Without the file, or without its github part,
 // the server runs owner tasks only: no Source, no router. Without an enabled web part there is no dashboard endpoint.
@@ -440,9 +440,6 @@ type WebConfig struct {
 	// a loopback listen address with host localhost).
 	TLS  string        `json:"tls"`
 	ACME WebACMEConfig `json:"acme"`
-	// PushContact is an address push services may use to reach the owner (mailto: or https:). The VAPID token names
-	// the dashboard's origin as its subject (ruling R27), so nothing sends this yet.
-	PushContact string `json:"pushContact,omitempty"`
 }
 
 // WebACMEConfig is mode acme: the DNS provider (cloudflare, exec or httpreq, credentials in lego's environment
@@ -528,11 +525,6 @@ func (w WebConfig) validate() error {
 	default:
 		return fmt.Errorf("web.tls %q is not ca, acme or off", w.TLS)
 	}
-	if c := w.PushContact; c != "" {
-		if u, err := url.Parse(c); err != nil || (u.Scheme != "mailto" && u.Scheme != "https") || (u.Opaque == "" && u.Host == "") {
-			return fmt.Errorf("web.pushContact %q is not a mailto: or https: URL", c)
-		}
-	}
 	return nil
 }
 
@@ -577,14 +569,19 @@ func (w WebConfig) ParsedIPs() []net.IP {
 	return out
 }
 
-// SetupWeb records the web part in <stateDir>/config.json, enabled, keeping the rest of the file. In mode ca it first
-// creates Athena's CA, or checks that the existing one was made for this host and these addresses, so a mismatch is
+// SetupWeb records the web part in <stateDir>/config.json, enabled, keeping the rest of the file, which must load. In
+// mode ca it then creates Athena's CA, or checks that the existing one was made for this host and these addresses, so a mismatch is
 // refused here rather than at the server's start. The server reads the configuration when it starts.
 func SetupWeb(stateDir string, w WebConfig) error {
 	w.Enabled = true
 	w = w.withDefaults()
 	if err := w.validate(); err != nil {
 		return fmt.Errorf("web setup: %w", err)
+	}
+	// The rest of the file must load first: nothing is created for a configuration that cannot be saved.
+	c, err := LoadConfig(stateDir)
+	if err != nil {
+		return err
 	}
 	if w.TLS == "ca" {
 		if err := ensurePrivateDir(stateDir); err != nil {
@@ -593,10 +590,6 @@ func SetupWeb(stateDir string, w WebConfig) error {
 		if _, err := pki.LoadOrCreateCA(web.CADir(stateDir), w.Host, w.ParsedIPs()); err != nil {
 			return fmt.Errorf("web setup: %w", err)
 		}
-	}
-	c, err := LoadConfig(stateDir)
-	if err != nil {
-		return err
 	}
 	c.Web = &w
 	return SaveConfig(stateDir, c)

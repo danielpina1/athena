@@ -157,6 +157,9 @@ func TestWebSetupStatusAndCA(t *testing.T) {
 	if code, _, errs := runWeb(dir, "ca"); code != 1 || !strings.Contains(errs, "mode ca") {
 		t.Fatalf("ca in acme mode: %d %s", code, errs)
 	}
+	if code, _, errs := runWeb(t.TempDir(), "setup", "--host", "h.test", "--ip", "10.0.0.1,nope"); code != 2 || !strings.Contains(errs, `"nope" is not an IP address`) {
+		t.Fatalf("bad --ip: %d %s", code, errs)
+	}
 	// Errors name the field.
 	if code, _, errs := runWeb(t.TempDir(), "setup"); code != 1 || !strings.Contains(errs, "web.host") {
 		t.Fatalf("setup without host: %d %s", code, errs)
@@ -294,7 +297,13 @@ func TestWebRevokeThroughRunningServer(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, server.ConfigFile), []byte(`{"web":{"host":"h.test"}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if code, out, errs := runWeb(dir, "status"); code != 0 || !strings.Contains(out, "(disabled") || !strings.Contains(out, "does not serve the dashboard") {
+	code, out, errs = runWeb(dir, "status")
+	if code != 0 || !strings.Contains(out, "(disabled") || !strings.Contains(out, "does not serve the dashboard") ||
+		strings.Contains(out, "server not running") {
 		t.Fatalf("status: %d %q %s", code, out, errs)
+	}
+	// status reads only: no CA is created for it.
+	if _, err := os.Stat(filepath.Join(dir, "pki")); !os.IsNotExist(err) {
+		t.Fatalf("status created the CA: %v", err)
 	}
 }

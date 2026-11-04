@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
+
 	"github.com/danielpina1/athena/internal/node"
 	"github.com/danielpina1/athena/internal/pb/athenav1"
 	"github.com/danielpina1/athena/internal/web"
@@ -60,7 +62,6 @@ func TestWebConfigNamesTheField(t *testing.T) {
 		{`{"host":"h.test","tls":"acme"}`, "web.acme.provider is required"},
 		{`{"host":"h.test","tls":"acme","acme":{"provider":"route53"}}`, "web.acme.provider"},
 		{`{"host":"h.test","tls":"acme","acme":{"provider":"exec","directory":"http://x"}}`, "web.acme.directory"},
-		{`{"host":"h.test","pushContact":"owner"}`, "web.pushContact"},
 		{`{"host":"h.test","acme":{"agreeTOS":true,"bogus":1}}`, "unknown field"},
 	} {
 		dir := t.TempDir()
@@ -73,7 +74,7 @@ func TestWebConfigNamesTheField(t *testing.T) {
 	}
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, ConfigFile), []byte(`{"web":{"enabled":true,"host":"Athena.Home.Arpa","ips":["10.8.0.1"],
-		"tls":"acme","acme":{"provider":"cloudflare","email":"me@example.com","agreeTos":true},"pushContact":"mailto:me@example.com"}}`), 0o600); err != nil {
+		"tls":"acme","acme":{"provider":"cloudflare","email":"me@example.com","agreeTos":true}}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := LoadConfig(dir)
@@ -286,9 +287,36 @@ func TestWebE2E(t *testing.T) {
 	w.stop()
 	select {
 	case err := <-c.done:
-		c.done <- err
+		c.done <- err // for the cleanup's close
+		if code := websocket.CloseStatus(err); code != websocket.StatusGoingAway {
+			t.Fatalf("closed with %d (%v), want 1001", code, err)
+		}
 	case <-time.After(waitTimeout):
 		t.Fatal("connection open after the server stopped")
+	}
+	// The hub's loop returned before Run did: a feed taken now ends after its replay, at once.
+	w.hub.Wait()
+	feed, _ := w.hub.Subscribe(0, w.hub.Epoch())
+	for open := true; open; {
+		select {
+		case _, open = <-feed.C():
+		case <-time.After(time.Second):
+			t.Fatal("the hub still runs after the server stopped")
+		}
+	}
+}
+
+// TestWebSetupNeedsALoadableConfig: setup creates nothing (no CA) for a configuration it could not save.
+func TestWebSetupNeedsALoadableConfig(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ConfigFile), []byte(`{"evalTimeoutSeconds":-1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetupWeb(dir, WebConfig{Host: "athena.test"}); err == nil || !strings.Contains(err.Error(), "evalTimeoutSeconds") {
+		t.Fatalf("setup over a bad config: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "pki")); !os.IsNotExist(err) {
+		t.Fatalf("a CA was created for a configuration that was not saved: %v", err)
 	}
 }
 
@@ -335,11 +363,13 @@ func TestWebTLSOffOnLoopback(t *testing.T) {
 		t.Fatalf("origin %s, vapid %v, pusher %v", ep.origin, ep.vapid, ep.pusher)
 	}
 	base := "http://" + ep.l.Addr().String()
+	client := &http.Client{Timeout: waitTimeout, Transport: &http.Transport{DisableKeepAlives: true}}
 	for path, want := range map[string]int{"/healthz": 200, "/push/key": 404, "/ca.pem": 404} {
-		resp, err := http.Get(base + path)
+		resp, err := client.Get(base + path)
 		if err != nil {
 			t.Fatal(err)
 		}
+		_, _ = io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
 		if resp.StatusCode != want || resp.Header.Get("Strict-Transport-Security") != "" {
 			t.Fatalf("%s = %d (HSTS %q)", path, resp.StatusCode, resp.Header.Get("Strict-Transport-Security"))

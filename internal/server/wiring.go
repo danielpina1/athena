@@ -553,8 +553,9 @@ func resumeAssessments(eng *core.Engine, fx *effects.Runner, log *slog.Logger) {
 
 // --- the dashboard's endpoint ---
 
-// webShutdown bounds the wait for the web requests in flight at shutdown.
-const webShutdown = 5 * time.Second
+// webShutdown bounds the wait for the web requests in flight at shutdown; the rest are cut. The login's requests are
+// short, and a connection a browser opened ahead without a request yet would otherwise hold the stop for 5 s.
+const webShutdown = 2 * time.Second
 
 // webEndpoint is the dashboard's HTTPS endpoint and what feeds it. newWebEndpoint (before the effects runner starts)
 // binds the listener, so a busy port fails the start, prepares the certificate and the push key, and registers the
@@ -681,8 +682,8 @@ func (w *webEndpoint) start(d *Dispatcher, n *node.Node, fx *effects.Runner, ver
 	return nil
 }
 
-// stop closes the listener, ends the dashboard connections and stops the Notifier, the renewals and the hub, so
-// nothing of the web part touches the store after it returns. It is idempotent and safe before start.
+// stop closes the listener, ends the dashboard connections and stops the Notifier, the renewals and the hub, and waits
+// for each, so nothing of the web part touches the store after it returns. It is idempotent and safe before start.
 func (w *webEndpoint) stop() {
 	if w == nil {
 		return
@@ -700,6 +701,8 @@ func (w *webEndpoint) stop() {
 		w.st.OnCommit(nil)
 		w.cancel()
 		w.wg.Wait()
+		// Last, with every connection and the Notifier gone: no read of the store is in flight after this.
+		w.hub.Wait()
 	})
 }
 

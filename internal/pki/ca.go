@@ -68,6 +68,21 @@ func LoadOrCreateCA(dir string, host string, ips []net.IP) (*CA, error) {
 	return createCA(dir, host, ips)
 }
 
+// LoadCA loads the CA in dir without creating or changing anything; ok is false when there is none yet (no ca.key).
+// An existing CA passes the same checks as in LoadOrCreateCA, a mismatch with host or ips included.
+func LoadCA(dir string, host string, ips []net.IP) (ca *CA, ok bool, err error) {
+	if _, err := os.Stat(filepath.Join(dir, caKeyFile)); errors.Is(err, os.ErrNotExist) {
+		return nil, false, nil
+	} else if err != nil {
+		return nil, false, fmt.Errorf("pki: %w", err)
+	}
+	ca, err = loadCA(dir, strings.ToLower(host), ips)
+	return ca, err == nil, err
+}
+
+// CertPath is the CA certificate's file in dir, the one devices install.
+func CertPath(dir string) string { return filepath.Join(dir, caCertFile) }
+
 func loadCA(dir, host string, ips []net.IP) (*CA, error) {
 	keyPath := filepath.Join(dir, caKeyFile)
 	st, err := os.Stat(keyPath)

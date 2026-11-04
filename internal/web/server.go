@@ -7,9 +7,11 @@ import (
 	"encoding/pem"
 	"errors"
 	"io"
+	stdlog "log"
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/danielpina1/athena/internal/pki"
@@ -92,7 +94,7 @@ func NewServer(cfg ServerConfig) *Server {
 	mux.HandleFunc("GET /ws", cfg.Dashboard.ServeConn)
 	cfg.Auth.Mount(mux)
 	if cfg.VAPID != nil {
-		mux.Handle("/push/key", cfg.VAPID.Handler())
+		mux.Handle("GET /push/key", cfg.VAPID.Handler())
 	}
 	if ca := cfg.CA; ca != nil {
 		caPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: ca.DER()})
@@ -115,9 +117,22 @@ func NewServer(cfg ServerConfig) *Server {
 		ReadHeaderTimeout: readHeaderTimeout,
 		IdleTimeout:       idleTimeout,
 		MaxHeaderBytes:    maxHeaderBytes,
-		// Failed handshakes from whatever reaches the port are noise; the certificate's own health is the tls item.
-		ErrorLog: slog.NewLogLogger(log.With("component", "web").Handler(), slog.LevelDebug),
+		ErrorLog:          stdlog.New(serverErrors{log.With("component", "web")}, "", 0),
 	}}
+}
+
+// serverErrors is the http.Server's error log: a failed TLS handshake from whatever reaches the port is noise and goes
+// to debug (the certificate's own health is the tls item); anything else, a handler's panic included, is a warning.
+type serverErrors struct{ log *slog.Logger }
+
+func (e serverErrors) Write(p []byte) (int, error) {
+	msg := strings.TrimRight(string(p), "\n")
+	if strings.HasPrefix(msg, "http: TLS handshake error") {
+		e.log.Debug(msg)
+	} else {
+		e.log.Warn(msg)
+	}
+	return len(p), nil
 }
 
 // securityHeaders sets the headers every response carries; HSTS only over TLS.
@@ -151,10 +166,13 @@ func (s *Server) Serve(l net.Listener) error {
 	return err
 }
 
-// Shutdown closes the listener, waits (up to ctx) for the requests in flight, then ends the dashboard connections
-// and waits for them.
+// Shutdown closes the listener, waits (up to ctx) for the requests in flight and closes what is left, then ends the
+// dashboard connections and waits for them.
 func (s *Server) Shutdown(ctx context.Context) error {
 	err := s.srv.Shutdown(ctx)
+	if err != nil {
+		_ = s.srv.Close()
+	}
 	s.dash.Close()
 	return err
 }

@@ -218,9 +218,25 @@ func (c *command) revokePasskey(st *store.Store, id string) (int, error) {
 // profileFile is where `athena web ca` writes the CA's Apple profile, beside ca.pem.
 const profileFile = "athena-ca.mobileconfig"
 
+// ipList is a repeatable --ip flag; a value may also list several, comma-separated. Each must be an address.
+type ipList []string
+
+func (l *ipList) String() string { return strings.Join(*l, ",") }
+func (l *ipList) Set(v string) error {
+	for _, p := range strings.Split(v, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			if net.ParseIP(p) == nil {
+				return fmt.Errorf("%q is not an IP address", p)
+			}
+			*l = append(*l, p)
+		}
+	}
+	return nil
+}
+
 func (c *command) webSetup(args []string) int {
 	host := c.fs.String("host", "", "the DNS name your devices reach the dashboard by, for example athena.home.arpa")
-	var ips repoList
+	var ips ipList
 	c.fs.Var(&ips, "ip", "an address the certificate also names (mode ca), for example the VPN address; repeat for more")
 	listen := c.fs.String("listen", "", "the address to listen on (default "+server.DefaultWebListen+"); prefer the VPN interface's, like 10.8.0.1:8443")
 	mode := c.fs.String("tls", "", "ca (default: Athena's own CA), acme (a public certificate through DNS-01) or off (loopback only)")
@@ -324,17 +340,18 @@ func (c *command) webStatus(args []string) int {
 		fmt.Fprintf(tw, "TLS:\t%s: %s\n", live.TLS, live.TLSMessage)
 	case w.TLS == "off":
 		fmt.Fprintf(tw, "TLS:\toff (plain HTTP on loopback)\n")
+	case live == nil:
+		fmt.Fprintf(tw, "TLS:\t%s: %s (server not running)\n", w.TLS, certExpiry(web.CertFile(c.stateDir)))
 	default:
-		fmt.Fprintf(tw, "TLS:\t%s: %s\n", w.TLS, certExpiry(web.CertFile(c.stateDir)))
+		fmt.Fprintf(tw, "TLS:\t%s: %s (the running server does not serve the dashboard)\n", w.TLS, certExpiry(web.CertFile(c.stateDir)))
 	}
 	if w.TLS == "ca" {
+		// Read only: status never creates the CA (setup does).
 		fp := "none yet (athena web setup creates it)"
-		if _, err := os.Stat(filepath.Join(web.CADir(c.stateDir), "ca.key")); err == nil {
-			if ca, err := pki.LoadOrCreateCA(web.CADir(c.stateDir), w.Host, w.ParsedIPs()); err != nil {
-				fp = err.Error()
-			} else {
-				fp = ca.Fingerprint()
-			}
+		if ca, ok, err := pki.LoadCA(web.CADir(c.stateDir), w.Host, w.ParsedIPs()); err != nil {
+			fp = err.Error()
+		} else if ok {
+			fp = ca.Fingerprint()
 		}
 		fmt.Fprintf(tw, "CA fingerprint:\t%s\n", fp)
 	}
@@ -359,7 +376,7 @@ func (c *command) webStatus(args []string) int {
 	return 0
 }
 
-// certExpiry reads the stored certificate's expiry, for when no server runs.
+// certExpiry reads the stored certificate's expiry, for when no running server reports it.
 func certExpiry(path string) string {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -373,7 +390,7 @@ func certExpiry(path string) string {
 	if err != nil {
 		return "unreadable certificate " + path
 	}
-	return "certificate valid until " + cert.NotAfter.Local().Format("2006-01-02") + " (server not running)"
+	return "certificate valid until " + cert.NotAfter.Local().Format("2006-01-02")
 }
 
 func (c *command) webCA(args []string) int {
@@ -397,7 +414,7 @@ func (c *command) webCA(args []string) int {
 		return c.fail(fmt.Errorf("athena web ca: %w", err))
 	}
 	fmt.Fprintf(c.stdout, "fingerprint (SHA-256): %s\n", ca.Fingerprint())
-	fmt.Fprintf(c.stdout, "certificate:           %s\n", filepath.Join(dir, "ca.pem"))
+	fmt.Fprintf(c.stdout, "certificate:           %s\n", pki.CertPath(dir))
 	fmt.Fprintf(c.stdout, "profile (iOS, macOS):  %s\n", profile)
 	fmt.Fprintf(c.stdout, "also served at %s/ca.pem and %s/ca.mobileconfig\n", w.URL(), w.URL())
 	return 0

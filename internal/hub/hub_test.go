@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -736,6 +737,75 @@ func TestSubscribeAfterShutdownIsClosed(t *testing.T) {
 			if time.Now().After(deadline) {
 				t.Fatal("Subscribe after shutdown returned an open feed")
 			}
+		}
+	}
+}
+
+// blockingSource holds its Ticket and Health reads until released, to catch a read still in flight.
+type blockingSource struct {
+	*fakeSource
+	entered chan string
+	release chan struct{}
+	block   atomic.Bool
+}
+
+func (b *blockingSource) wait(what string) {
+	if b.block.Load() {
+		b.entered <- what
+		<-b.release
+	}
+}
+
+func (b *blockingSource) Ticket(id string) (core.Ticket, core.Stage, error) {
+	b.wait("ticket")
+	return b.fakeSource.Ticket(id)
+}
+
+func (b *blockingSource) Health() []HealthItem {
+	b.wait("health")
+	return b.fakeSource.Health()
+}
+
+// TestWaitJoinsReadsInFlight: after ctx is done, Wait returns only once the loop's and the probe's reads of the
+// Source have returned, so the store behind it can close after Wait.
+func TestWaitJoinsReadsInFlight(t *testing.T) {
+	for _, what := range []string{"ticket", "health"} {
+		f := newFake()
+		f.put(core.Ticket{ID: "T-0001", Title: "x", CreatedAt: epoch0, UpdatedAt: epoch0})
+		src := &blockingSource{fakeSource: f, entered: make(chan string, 4), release: make(chan struct{})}
+		h := New(src, quiet())
+		h.healthTick = time.Hour
+		if what == "health" {
+			h.healthTick = 5 * time.Millisecond
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		h.Start(ctx)
+		src.block.Store(true)
+		if what == "ticket" {
+			h.OnCommit(store.Changes{Tickets: []string{"T-0001"}})
+		}
+		select {
+		case got := <-src.entered:
+			if got != what {
+				t.Fatalf("%s: blocked in %s", what, got)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("%s: no read started", what)
+		}
+		cancel()
+		waited := make(chan struct{})
+		go func() { h.Wait(); close(waited) }()
+		select {
+		case <-waited:
+			t.Fatalf("%s: Wait returned with a read in flight", what)
+		case <-time.After(50 * time.Millisecond):
+		}
+		src.block.Store(false)
+		close(src.release)
+		select {
+		case <-waited:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("%s: Wait did not return after the read", what)
 		}
 	}
 }

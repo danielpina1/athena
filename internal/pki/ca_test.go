@@ -363,3 +363,27 @@ func TestLoadOrCreateRejectsBadHost(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadCAIsReadOnly(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "ca")
+	if ca, ok, err := LoadCA(dir, testHost, testIPs); ca != nil || ok || err != nil {
+		t.Fatalf("no CA: %v %v %v", ca, ok, err)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("LoadCA created %s: %v", dir, err)
+	}
+	made, err := LoadOrCreateCA(dir, testHost, testIPs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ca, ok, err := LoadCA(dir, strings.ToUpper(testHost), testIPs)
+	if err != nil || !ok || ca.Fingerprint() != made.Fingerprint() {
+		t.Fatalf("load: %v %v", ok, err)
+	}
+	if _, ok, err := LoadCA(dir, "new.example", testIPs); ok || err == nil || !strings.Contains(err.Error(), "move") {
+		t.Fatalf("host change: %v %v", ok, err)
+	}
+	if CertPath(dir) != filepath.Join(dir, "ca.pem") {
+		t.Fatal(CertPath(dir))
+	}
+}

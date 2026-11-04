@@ -109,6 +109,9 @@ type Hub struct {
 	healthSince map[string]healthState
 	node        *athenav1.NodeStatus
 	closed      bool // the hub has stopped: Subscribe returns closed feeds
+
+	// running counts the loop and the health probe; Wait waits for both after ctx is done.
+	running sync.WaitGroup
 }
 
 type healthState struct {
@@ -163,13 +166,23 @@ func (h *Hub) Start(ctx context.Context) {
 	h.mu.Lock()
 	h.health, h.node = health, n
 	h.mu.Unlock()
+	h.running.Add(2) // the loop and its probe
 	go h.run(ctx)
 }
 
+// Wait returns once the goroutines Start began have returned, after ctx is done: no read of the Source is in flight
+// then, so the store behind it may close. Snapshot and Detail, which run on their callers' goroutines, are the
+// callers' to stop first.
+func (h *Hub) Wait() { h.running.Wait() }
+
 func (h *Hub) run(ctx context.Context) {
+	defer h.running.Done()
 	defer h.closeAll()
 	probed := make(chan *athenav1.Health, 1)
-	go h.probeEvery(ctx, probed)
+	go func() {
+		defer h.running.Done()
+		h.probeEvery(ctx, probed)
+	}()
 	for {
 		// An overflow comes first: what is queued is older than the loss and is dropped with it.
 		h.recover()

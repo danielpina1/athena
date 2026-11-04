@@ -6,10 +6,12 @@ import (
 	"crypto/tls"
 	"encoding/pem"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -86,6 +88,11 @@ func TestSecurityHeaders(t *testing.T) {
 	}
 	if rec := get(t, h, "/push/key"); rec.Code != http.StatusOK || rec.Body.String() != v.PublicKey() {
 		t.Fatalf("push key = %d %q", rec.Code, rec.Body)
+	}
+	post := httptest.NewRecorder()
+	h.ServeHTTP(post, httptest.NewRequest("POST", "/push/key", nil))
+	if post.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("POST push key = %d", post.Code)
 	}
 
 	// Plain HTTP (mode off, loopback only) sends no HSTS: a browser would pin a scheme the endpoint does not speak.
@@ -207,5 +214,38 @@ func TestServerShutdownClosesConnections(t *testing.T) {
 		_, _ = io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
 		t.Fatal("listener still serving")
+	}
+}
+
+// recordLevels is a slog handler that keeps each record's level and message.
+type recordLevels struct {
+	mu   sync.Mutex
+	recs map[string]slog.Level
+}
+
+func (r *recordLevels) Enabled(context.Context, slog.Level) bool { return true }
+func (r *recordLevels) Handle(_ context.Context, rec slog.Record) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.recs[rec.Message] = rec.Level
+	return nil
+}
+func (r *recordLevels) WithAttrs([]slog.Attr) slog.Handler { return r }
+func (r *recordLevels) WithGroup(string) slog.Handler      { return r }
+
+// TestServerErrorLogLevels: the http.Server's handshake noise is debug, a handler's panic a warning.
+func TestServerErrorLogLevels(t *testing.T) {
+	e := newConnEnv(t)
+	rl := &recordLevels{recs: map[string]slog.Level{}}
+	s := NewServer(ServerConfig{Auth: e.Auth, Dashboard: e.dash, TLS: &tls.Config{}, Log: slog.New(rl)})
+	s.srv.ErrorLog.Printf("http: TLS handshake error from 10.0.0.9:5555: EOF")
+	s.srv.ErrorLog.Printf("http: panic serving 10.0.0.9:5556: boom")
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	if lv, ok := rl.recs["http: TLS handshake error from 10.0.0.9:5555: EOF"]; !ok || lv != slog.LevelDebug {
+		t.Fatalf("handshake error logged at %v (%v)", lv, ok)
+	}
+	if lv, ok := rl.recs["http: panic serving 10.0.0.9:5556: boom"]; !ok || lv != slog.LevelWarn {
+		t.Fatalf("panic logged at %v (%v): %v", lv, ok, rl.recs)
 	}
 }
