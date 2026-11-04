@@ -20,6 +20,10 @@ const (
 	engineBudget   = 5 * time.Millisecond
 	dispatchBudget = 100 * time.Millisecond
 	rssBudget      = 100 << 20
+	// linkBudget is the p95 of the dashboard's latencies: a delta, a stream item and a command's result reaching a
+	// phone (spec §10.3); webRSSBudget the idle RSS with one client connected.
+	linkBudget   = 250 * time.Millisecond
+	webRSSBudget = 100 << 20
 
 	// Regressions smaller than these are not reported however large they are in percent: they are below what a
 	// machine's timing resolves from run to run.
@@ -27,6 +31,7 @@ const (
 	engineFloor   = 20 * time.Microsecond
 	dispatchFloor = time.Millisecond
 	rssFloor      = 2 << 20
+	linkFloor     = 5 * time.Millisecond
 
 	resultsFile  = "results.json"
 	baselineFile = "baseline.json"
@@ -37,6 +42,10 @@ const (
 	probeSamples = 15
 	// rssIdle is how long the server idles before its RSS is read: past its second resource sample.
 	rssIdle = 11 * time.Second
+	// webRSSIdle is the settle before the RSS of a server with a connected client is read.
+	webRSSIdle = 30 * time.Second
+	// linkSamples is how many samples each dashboard latency takes.
+	linkSamples = 200
 )
 
 // quantile returns the q-quantile (0 < q <= 1) of the samples by the nearest-rank method.
@@ -108,6 +117,23 @@ func measureNetRounds(name string, budget, floor time.Duration, n int, measure, 
 	return summarize(name, budget, floor, n, rs)
 }
 
+// measureP95Rounds is measureRounds for a latency judged on its p95 (Result.P95): Best, which regressions are judged
+// on, is then the lowest round p95.
+func measureP95Rounds(name string, budget, floor time.Duration, n int, measure func(n int) []time.Duration) Result {
+	var rs []roundStats
+	var p95s []time.Duration
+	for i := 0; i < rounds; i++ {
+		samples := measure(n)
+		r := statsOf(samples)
+		r.raw = quantile(samples, 0.95)
+		p95s = append(p95s, r.raw)
+		rs = append(rs, r)
+	}
+	res := summarize(name, budget, floor, n, rs)
+	res.P95 = int64(quantile(p95s, 0.5))
+	return res
+}
+
 // retries is how often a result found over its budget or regressed is measured again before the run fails. Timing on a
 // shared machine drifts with its load over minutes, which a baseline recorded at another time does not know; a real
 // slowdown shows in every attempt, so the best attempt is kept (the lowest p99 and best p99).
@@ -140,6 +166,18 @@ func TestBudgets(t *testing.T) {
 		}},
 		{"server_idle_rss", func() Result {
 			return Result{Name: "server_idle_rss", Unit: "bytes", Value: int64(idleRSS(t, rssIdle)), Floor: rssFloor, Budget: rssBudget}
+		}},
+		{"link_delta_p95_ms", func() Result {
+			return measureP95Rounds("link_delta_p95_ms", linkBudget, linkFloor, linkSamples, func(n int) []time.Duration { return measureLinkDelta(t, n) })
+		}},
+		{"stream_item_p95_ms", func() Result {
+			return measureP95Rounds("stream_item_p95_ms", linkBudget, linkFloor, linkSamples, func(n int) []time.Duration { return measureStreamItem(t, n) })
+		}},
+		{"command_result_p95_ms", func() Result {
+			return measureP95Rounds("command_result_p95_ms", linkBudget, linkFloor, linkSamples, func(n int) []time.Duration { return measureCommandResult(t, n) })
+		}},
+		{"server_idle_rss_web_mb", func() Result {
+			return Result{Name: "server_idle_rss_web_mb", Unit: "bytes", Value: int64(webIdleRSS(t, webRSSIdle)), Floor: rssFloor, Budget: webRSSBudget}
 		}},
 	}
 	report := newReport()
@@ -189,10 +227,14 @@ func TestBudgets(t *testing.T) {
 
 	for _, r := range report.Results {
 		if r.Unit == "bytes" {
-			t.Logf("%-18s %-24s budget %s", r.Name, show(r.Unit, r.Value), show(r.Unit, r.Budget))
+			t.Logf("%-24s %-24s budget %s", r.Name, show(r.Unit, r.Value), show(r.Unit, r.Budget))
 			continue
 		}
-		t.Logf("%-18s p50 %-12s p99 %-12s best p99 %-12s budget %s", r.Name, show(r.Unit, r.P50), show(r.Unit, r.P99), show(r.Unit, r.Best), show(r.Unit, r.Budget))
+		if r.P95 > 0 {
+			t.Logf("%-24s p50 %-12s p95 %-12s best p95 %-12s budget %s", r.Name, show(r.Unit, r.P50), show(r.Unit, r.P95), show(r.Unit, r.Best), show(r.Unit, r.Budget))
+			continue
+		}
+		t.Logf("%-24s p50 %-12s p99 %-12s best p99 %-12s budget %s", r.Name, show(r.Unit, r.P50), show(r.Unit, r.P99), show(r.Unit, r.Best), show(r.Unit, r.Budget))
 	}
 	if err := writeReport(resultsFile, report); err != nil {
 		t.Fatal(err)
@@ -220,6 +262,9 @@ func TestBudgets(t *testing.T) {
 // of two attempts with a probe, the one with the lower p99 relative to its probe supplies Best and Probe.
 func best(a, b Result) Result {
 	a.P50, a.P99, a.Max = min(a.P50, b.P50), min(a.P99, b.P99), min(a.Max, b.Max)
+	if a.P95 > 0 {
+		a.P95 = min(a.P95, b.P95)
+	}
 	switch {
 	case a.Probe > 0 && b.Probe > 0:
 		if float64(b.Best)/float64(b.Probe) < float64(a.Best)/float64(a.Probe) {
@@ -272,6 +317,9 @@ func TestHarnessSmoke(t *testing.T) {
 		"hook":     measureHook(t, 10),
 		"engine":   measureEngine(t, 6),
 		"dispatch": measureDispatch(t, 2, false),
+		"link":     measureLinkDelta(t, 2),
+		"stream":   measureStreamItem(t, 2),
+		"command":  measureCommandResult(t, 2),
 	} {
 		if len(d) == 0 || quantile(d, 0.99) <= 0 {
 			t.Errorf("%s: no measurements: %v", name, d)
@@ -361,6 +409,15 @@ func TestCompare(t *testing.T) {
 	}
 	if got := breaches(mk(11*ms, 150*us, 25*ms, 101<<20)); len(got) != 2 {
 		t.Errorf("breaches = %v, want 2", got)
+	}
+	// A latency with a p95 is judged on it, not on its p99.
+	p95 := newReport(Result{Name: "command_result_p95_ms", Unit: "ns", P95: 200 * ms, P99: 400 * ms, Best: 200 * ms, Budget: 250 * ms})
+	if got := breaches(p95); len(got) != 0 {
+		t.Errorf("a p95 within budget breached on its p99: %v", got)
+	}
+	p95.Results[0].P95 = 251 * ms
+	if got := breaches(p95); len(got) != 1 {
+		t.Errorf("a p95 over budget = %v, want 1 breach", got)
 	}
 	if got := breaches(mk(10*ms, 5*ms, 100*ms, 100<<20)); len(got) != 0 {
 		t.Errorf("at the budget is not a breach: %v", got)

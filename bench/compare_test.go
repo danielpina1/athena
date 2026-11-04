@@ -30,6 +30,7 @@ type Result struct {
 	Unit    string `json:"unit"`
 	Samples int    `json:"samples,omitempty"`
 	P50     int64  `json:"p50,omitempty"`
+	P95     int64  `json:"p95,omitempty"`
 	P99     int64  `json:"p99,omitempty"`
 	Best    int64  `json:"best,omitempty"`
 	Probe   int64  `json:"probe,omitempty"`
@@ -39,10 +40,14 @@ type Result struct {
 	Budget  int64  `json:"budget"`
 }
 
-// budgeted is the number budgets are judged on.
+// budgeted is the number budgets are judged on: a size, the p95 of a latency that has one (the dashboard's, whose
+// budgets are p95s) or its p99.
 func (r Result) budgeted() int64 {
 	if r.Unit == "bytes" {
 		return r.Value
+	}
+	if r.P95 > 0 {
+		return r.P95
 	}
 	return r.P99
 }
