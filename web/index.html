@@ -5,6 +5,17 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <!-- Light and dark are both first-class; tokens.css picks the dark tokens for a dark system before JS runs. -->
     <meta name="color-scheme" content="light dark" />
+    <!-- The browser bar follows the system scheme: white on light, the dark --bg on dark. -->
+    <meta name="theme-color" content="#FFFFFF" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#0A0A0A" media="(prefers-color-scheme: dark)" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png" />
+    <!-- iOS: the Home Screen icon and name, and a standalone app (Web Push there needs the Home Screen app). -->
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="Athena" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <title>Athena</title>
   </head>
   <body>

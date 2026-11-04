@@ -283,3 +283,33 @@ test("a hidden page does not retry the check, a shown one does", async () => {
   await screen.findByText("the app");
   vis.mockRestore();
 });
+
+test("the installed app started offline shows the shell, then checks the session when the network is back", async () => {
+  // The service worker served the cached shell: the owner sees the app (and the link's unreachable banner), not sign-in.
+  Object.defineProperty(navigator, "serviceWorker", { configurable: true, value: { controller: {} } });
+  try {
+    const { server, runtime } = setup();
+    let n = 0;
+    const { calls } = fakeFetch({
+      "GET /auth/session": () => {
+        if (n++ === 0) throw new TypeError("network down");
+        return { json: { authenticated: false } };
+      },
+    });
+    gate(runtime);
+    await screen.findByText("the app");
+    expect(screen.queryByText("Could not reach Athena. Check your connection.")).toBeNull();
+    expect(server.sockets).toHaveLength(1); // the link tries, and its banner says the server is unreachable
+
+    // Back online, and the session had ended meanwhile: sign-in, with the link stopped.
+    act(() => {
+      window.dispatchEvent(new Event("online"));
+    });
+    await screen.findByRole("button", { name: "Sign in with passkey" });
+    expect(calls).toHaveLength(2);
+    expect(runtime.client.status).toBe("offline");
+    expect(server.sockets.at(-1)!.readyState).toBe(3);
+  } finally {
+    delete (navigator as { serviceWorker?: unknown }).serviceWorker;
+  }
+});

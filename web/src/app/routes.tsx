@@ -22,6 +22,7 @@ import { NeedsYou } from "@/features/needs-you/NeedsYou";
 import { NewTask } from "@/features/new-task/NewTask";
 import { Routing } from "@/features/routing/Routing";
 import { PinnedSessions } from "@/features/session/PinnedSessions";
+import { NotificationsControl } from "@/features/settings/NotificationsControl";
 import { TicketDetail } from "@/features/tickets/TicketDetail";
 import { TicketList } from "@/features/tickets/TicketList";
 import { selectCounts } from "@/lib/store/selectors";
@@ -129,6 +130,7 @@ function SettingsView() {
     <Panes
       detail={
         <Placeholder title="Settings" text="Policy, notifications, prompts and this device.">
+          <NotificationsControl />
           <section aria-labelledby="settings-system" className="mt-4 grid gap-1 border-t border-line pt-4">
             <h2 id="settings-system" className="font-mono text-xs text-muted uppercase">
               System

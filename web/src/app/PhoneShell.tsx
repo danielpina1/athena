@@ -5,6 +5,7 @@ import { SearchIcon } from "lucide-react";
 import type { ReactNode } from "react";
 import { NavLink } from "react-router";
 import { ConnectionBanner, ConnectionDot, type LinkSource } from "@/app/ConnectionBanner";
+import { UpdateBanner } from "@/app/UpdateBanner";
 import { NAV, type NavItem, useNavCount } from "@/app/routes";
 import { NeedsCount } from "@/app/Sidebar";
 import { cn } from "@/ui/cn";
@@ -66,6 +67,7 @@ export function PhoneShell({
           </button>
         </div>
         <ConnectionBanner link={link} />
+        <UpdateBanner />
       </header>
       <main className="min-w-0 flex-1 pb-[calc(57px+env(safe-area-inset-bottom))]">{children}</main>
       <nav

@@ -9,9 +9,10 @@ const dist = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "internal
 const manifest = JSON.parse(readFileSync(join(dist, ".vite", "manifest.json"), "utf8"));
 const budgets = { js: 200, css: 30 };
 
-const entry = Object.keys(manifest).find((k) => manifest[k].isEntry);
+// The app's entry; the service worker (src/sw.ts, emitted as /sw.js) is an entry too but no page loads it.
+const entry = Object.keys(manifest).find((k) => manifest[k].isEntry && manifest[k].src === "index.html");
 if (!entry) {
-  console.error("bundle-budget: no entry chunk in the manifest");
+  console.error("bundle-budget: no index.html entry chunk in the manifest");
   process.exit(1);
 }
 
@@ -28,6 +29,7 @@ const visit = (key) => {
 };
 visit(entry);
 
+console.log(`sw.js ${(gz("sw.js") / 1024).toFixed(1)} KB gzipped`);
 let failed = false;
 for (const kind of ["js", "css"]) {
   const kb = sizes[kind] / 1024;

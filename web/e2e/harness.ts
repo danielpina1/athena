@@ -3,8 +3,8 @@
 //   - test: Playwright's, with baseURL set to the shared server, a `session` fixture (below), and a page that fails
 //     the test when the browser reports a Content Security Policy violation.
 //   - signedInPage(page): a CDP virtual authenticator (ctap2, internal, resident key, user verification), then the
-//     real enrollment (a fresh `athena web enroll` link) and sign-in with that passkey. Both screens are checked
-//     with axe on the way.
+//     real enrollment (a fresh `athena web enroll` link, after revoking the earlier tests' passkeys) and sign-in with
+//     that passkey. Both screens are checked with axe on the way.
 //   - athena(...args): the CLI against the shared state dir, e.g. athena("task", "Deploy it") → its stdout.
 //   - expectAccessible(page): axe on the current screen; any serious or critical violation fails.
 //   - session.requestApproval(ticket, tool, input) and session.report(ticket, state, text, question?): act as the
@@ -88,10 +88,27 @@ export async function expectShell(page: Page): Promise<void> {
 }
 
 /**
+ * Revokes every enrolled passkey. The server lists them all in a new passkey's excludeCredentials, and Chromium
+ * refuses a creation once that list is past 64 (the 66th enrollment on one server failed), while every
+ * signedInPage enrolls one. The specs run one at a time and none signs in twice, so the passkeys there belong to
+ * tests that have finished.
+ */
+async function revokeEarlierPasskeys(): Promise<void> {
+  const ids = (await athena("web", "passkeys"))
+    .split("\n")
+    .slice(1)
+    .map((line) => line.split(/\s+/)[0])
+    .filter((id) => /^[A-Za-z0-9_-]{16,}$/.test(id));
+  // "--" first: a base64url id can start with "-", which would read as a flag.
+  for (const id of ids) await run(join(BIN, "athena"), ["web", "revoke", "--state-dir", env("ATHENA_E2E_STATE"), "--", id]);
+}
+
+/**
  * Enrolls a new passkey on a virtual authenticator and signs in with it: page ends on the signed-in shell at "/".
  * Each call enrolls its own passkey; the links are single-use.
  */
 export async function signedInPage(page: Page): Promise<Page> {
+  await revokeEarlierPasskeys();
   const cdp = await page.context().newCDPSession(page);
   await cdp.send("WebAuthn.enable");
   const { authenticatorId } = await cdp.send("WebAuthn.addVirtualAuthenticator", {

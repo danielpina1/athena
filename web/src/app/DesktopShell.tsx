@@ -2,6 +2,7 @@
 // one pane across both), under the connection banner when the link is down.
 import type { ReactNode } from "react";
 import { ConnectionBanner, type LinkSource } from "@/app/ConnectionBanner";
+import { UpdateBanner } from "@/app/UpdateBanner";
 import { Sidebar } from "@/app/Sidebar";
 
 export function DesktopShell({
@@ -18,6 +19,7 @@ export function DesktopShell({
       <Sidebar link={link} onOpenPalette={onOpenPalette} />
       <div className="flex min-w-0 flex-1 flex-col">
         <ConnectionBanner link={link} />
+        <UpdateBanner />
         <main className="flex min-h-0 flex-1">{children}</main>
       </div>
     </div>

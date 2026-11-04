@@ -7,8 +7,11 @@ import { getSession, bindSession, signOut as endSession } from "@/lib/auth/sessi
 import { setOutbox } from "@/lib/commands/actions";
 import { connectOutbox, linkSender, Outbox } from "@/lib/commands/outbox";
 import { LinkClient } from "@/lib/link/client";
+import { resubscribePush } from "@/lib/push";
 import { connectStreams } from "@/lib/stream/useSessionStream";
 import { connectStore, useAthena } from "@/lib/store/state";
+import { appUpdates } from "@/lib/update";
+import { trackVisibility } from "@/lib/visibility";
 import { toast } from "@/ui/primitives/toast";
 
 export type Phase = { kind: "checking" } | { kind: "signedOut"; notice?: string } | { kind: "signedIn" };
@@ -114,6 +117,8 @@ export function createRuntime(opts: RuntimeOptions): Runtime {
     client.stop();
     client.start();
     setPhase({ kind: "signedIn" });
+    // Plan 3 ends a push subscription with its session: this session is given the device's again.
+    void resubscribePush();
   };
 
   // The start-up check failed for want of a network: ask again when the network is back or the page is shown.
@@ -145,10 +150,21 @@ export function createRuntime(opts: RuntimeOptions): Runtime {
     checkSession() {
       checked ??= (async () => {
         try {
-          if ((await getSession()).signedIn) connect();
-          else setPhase({ kind: "signedOut" });
+          if ((await getSession()).signedIn) {
+            // Already showing the offline shell: its link is running and reconnects on its own.
+            if (phase() !== "signedIn") connect();
+          } else {
+            client.stop();
+            setPhase({ kind: "signedOut" });
+          }
         } catch {
-          setPhase({ kind: "signedOut", notice: "Could not reach Athena. Check your connection." });
+          // The installed app's cached shell (the service worker served this page): the app, with the link's
+          // "unreachable" banner, until the server answers. Otherwise sign-in says the server could not be reached.
+          if (navigator.serviceWorker?.controller) {
+            if (phase() !== "signedIn") connect();
+          } else {
+            setPhase({ kind: "signedOut", notice: "Could not reach Athena. Check your connection." });
+          }
           watchOnline();
         }
       })();
@@ -205,6 +221,12 @@ export function boot(): Runtime {
     runtime = createRuntime({ url: `${scheme}://${location.host}/ws`, clientId: deviceClientId() });
     setOutbox(runtime.outbox);
     connectStreams(runtime.client);
+    trackVisibility(runtime.client);
+    // A server update restarts the server: after each reconnect, ask whether a new app is waiting.
+    let opened = 0;
+    runtime.client.onStatus((s) => {
+      if (s === "open" && ++opened > 1) appUpdates()?.check();
+    });
   }
   return runtime;
 }
