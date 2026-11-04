@@ -29,7 +29,7 @@ test("a no-repo task starts from the form and lands on its detail, light and dar
   await expect(page.getByRole("alert")).toContainText("owner/name");
   await expect(page.getByRole("button", { name: "Start" })).toBeDisabled();
   await repo.fill("");
-  await repo.press("Escape"); // closes the list, which would otherwise cover Start
+  await expect(repo).toBeFocused(); // the list is still open: Start must take the first tap
   const start = page.getByRole("button", { name: "Start" });
   await expect(start).toBeEnabled();
   await start.click();

@@ -142,3 +142,35 @@ test("model suggestions are the recent models, and an empty model sends none", a
   await user.click(start());
   expect(submitTask).toHaveBeenCalledWith({ text: "x", model: "haiku" });
 });
+
+test("a bare slash is refused as a directory", async () => {
+  const user = setup();
+  await user.type(task(), "x");
+  await user.type(repoBox(), "/");
+  expect(screen.getByRole("alert").textContent).toMatch(/owner\/name/);
+  expect((start() as HTMLButtonElement).disabled).toBe(true);
+  await user.type(repoBox(), "srv");
+  expect(screen.queryByRole("alert")).toBeNull();
+});
+
+test("the list closes on a pointerdown outside and on picking", async () => {
+  const user = setup();
+  const list = () => document.querySelector("[cmdk-list]")?.parentElement as HTMLElement;
+  await user.click(repoBox());
+  expect(list().hidden).toBe(false);
+  // A press outside takes the list out of the way at once, and the click collapses it: Start never moves mid-tap.
+  fireEvent.pointerDown(task());
+  expect(list().className).toContain("invisible");
+  expect(list().hidden).toBe(false);
+  fireEvent.click(task());
+  expect(list().hidden).toBe(true);
+  await user.click(repoBox());
+  expect(list().hidden).toBe(false);
+  await user.click(screen.getByRole("option", { name: "acme/api" }));
+  expect(list().hidden).toBe(true);
+  await user.clear(repoBox());
+  await user.type(repoBox(), "o/r");
+  expect(list().hidden).toBe(false);
+  await user.click(screen.getByRole("option", { name: "Use o/r" }));
+  expect(list().hidden).toBe(true);
+});

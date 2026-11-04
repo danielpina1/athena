@@ -2,7 +2,7 @@
 // Folders), "No repository" (the default, an empty field), or free entry of owner/name (a GitHub repository) or an
 // absolute path (a directory). The field's text is the value; resolveRepo says what it means and whether it is valid.
 import { Command as CommandPrimitive } from "cmdk";
-import { useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import type { RepoView } from "@/gen/athena/v1/state_pb";
 import { cn } from "@/ui/cn";
 import { Command, CommandEmpty, CommandGroup, CommandItem, CommandList } from "@/ui/primitives/command";
@@ -23,7 +23,8 @@ export function resolveRepo(text: string, repos: readonly RepoView[]): RepoChoic
   const listed = repos.find((r) => r.name === t);
   if (listed) return listed.kind === "github" ? { kind: "repo", repo: t } : { kind: "dir", dir: t };
   if (OWNER_NAME.test(t)) return { kind: "repo", repo: t };
-  if (t.startsWith("/")) return { kind: "dir", dir: t };
+  // An absolute path: a leading / and at least one segment (a bare "/" is the whole disk, not a project).
+  if (/^\/[^/]/.test(t)) return { kind: "dir", dir: t };
   return { kind: "invalid" };
 }
 
@@ -33,7 +34,7 @@ const GROUPS: ReadonlyArray<{ kind: string; label: string }> = [
   { kind: "dir", label: "Folders" },
 ];
 
-export const REPO_ERROR = "Use owner/name for a GitHub repository, or an absolute path starting with /.";
+export const REPO_ERROR = "Use owner/name for a GitHub repository, or an absolute path such as /Users/me/code.";
 
 export function RepoPicker({
   value,
@@ -45,6 +46,9 @@ export function RepoPicker({
   repos: readonly RepoView[];
 }) {
   const [open, setOpen] = useState(false);
+  const root = useRef<HTMLDivElement>(null);
+  const pointerDown = useRef(false);
+  const [fading, setFading] = useState(false);
   const errorId = useId();
   const choice = resolveRepo(value, repos);
   const invalid = choice.kind === "invalid";
@@ -57,11 +61,51 @@ export function RepoPicker({
   const shown = (kind: string) => repos.filter((r) => r.kind === kind && (q === "" || r.name.toLowerCase().includes(q)));
   const pick = (text: string) => {
     onChange(text);
+    setFading(false);
     setOpen(false);
   };
 
+  // Outside the field the list closes. It sits in the flow (a floating one covers Model and Start), so collapsing it
+  // on pointerdown would move Start from under the finger: the list goes invisible at once (it takes no tap) and
+  // collapses on the click, after Start has taken its tap.
+  useEffect(() => {
+    if (!open) return;
+    const outside = (e: Event) => !root.current?.contains(e.target as Node);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const close = () => {
+      clearTimeout(timer);
+      pointerDown.current = false;
+      setFading(false);
+      setOpen(false);
+    };
+    const down = (e: PointerEvent) => {
+      pointerDown.current = true;
+      if (outside(e)) setFading(true);
+    };
+    const up = (e: PointerEvent) => {
+      // A press that never becomes a click (a drag, a scroll) still closes it.
+      if (outside(e)) timer = setTimeout(close, 400);
+    };
+    const click = (e: MouseEvent) => {
+      if (outside(e)) close();
+      else pointerDown.current = false;
+    };
+    const cancel = () => close();
+    document.addEventListener("pointerdown", down, true);
+    document.addEventListener("pointerup", up, true);
+    document.addEventListener("click", click);
+    document.addEventListener("pointercancel", cancel, true);
+    return () => {
+      clearTimeout(timer);
+      document.removeEventListener("pointerdown", down, true);
+      document.removeEventListener("pointerup", up, true);
+      document.removeEventListener("click", click);
+      document.removeEventListener("pointercancel", cancel, true);
+    };
+  }, [open]);
+
   return (
-    <div className="relative grid min-w-0 gap-1">
+    <div ref={root} className="grid min-w-0 gap-1">
       <Command
         shouldFilter={false}
         label="Repository"
@@ -72,7 +116,8 @@ export function RepoPicker({
           }
         }}
         onBlur={(e) => {
-          if (!e.currentTarget.contains(e.relatedTarget)) setOpen(false);
+          // Tabbing away closes it; a tap elsewhere is handled by the document listeners above.
+          if (!pointerDown.current && !e.currentTarget.contains(e.relatedTarget)) setOpen(false);
         }}
         className="size-auto overflow-visible bg-transparent"
       >
@@ -84,10 +129,14 @@ export function RepoPicker({
           value={value}
           onValueChange={(v) => {
             onChange(v);
+            setFading(false);
             setOpen(true);
           }}
           onFocus={() => setOpen(true)}
-          onClick={() => setOpen(true)}
+          onClick={() => {
+            setFading(false);
+            setOpen(true);
+          }}
           autoCapitalize="none"
           autoCorrect="off"
           spellCheck={false}
@@ -96,40 +145,40 @@ export function RepoPicker({
         {/* Always mounted, so the field's aria-controls names an element. Held down on the list, the field keeps
             focus, so a click picks before the blur closes it. */}
         <div
-            hidden={!open}
-            onMouseDown={(e) => e.preventDefault()}
-            className="absolute top-full right-0 left-0 z-20 mt-1 rounded-md border border-line bg-surface"
-          >
-            <CommandList>
-              {offerTyped && (
-                <CommandItem value={`use ${typed}`} onSelect={() => pick(typed)}>
-                  <span className="min-w-0 break-all">
-                    Use <span className="font-mono">{typed}</span>
-                  </span>
-                </CommandItem>
-              )}
-              {typed === "" && (
-                <CommandItem value="no repository" onSelect={() => pick("")}>
-                  No repository
-                </CommandItem>
-              )}
-              {GROUPS.map(({ kind, label }) => {
-                const list = shown(kind);
-                return list.length === 0 ? null : (
-                  <CommandGroup key={kind} heading={label}>
-                    {list.map((r) => (
-                      <CommandItem key={r.name} value={`${kind} ${r.name}`} onSelect={() => pick(r.name)}>
-                        <span className="min-w-0 font-mono text-sm break-all">{r.name}</span>
-                      </CommandItem>
-                    ))}
-                  </CommandGroup>
-                );
-              })}
-              {!offerTyped && typed !== "" && GROUPS.every((g) => shown(g.kind).length === 0) && (
-                <CommandEmpty>No repository matches.</CommandEmpty>
-              )}
-            </CommandList>
-          </div>
+          hidden={!open}
+          onMouseDown={(e) => e.preventDefault()}
+          className={cn("mt-1 rounded-md border border-line bg-surface", fading && "pointer-events-none invisible")}
+        >
+          <CommandList>
+            {offerTyped && (
+              <CommandItem value={`use ${typed}`} onSelect={() => pick(typed)}>
+                <span className="min-w-0 break-all">
+                  Use <span className="font-mono">{typed}</span>
+                </span>
+              </CommandItem>
+            )}
+            {typed === "" && (
+              <CommandItem value="no repository" onSelect={() => pick("")}>
+                No repository
+              </CommandItem>
+            )}
+            {GROUPS.map(({ kind, label }) => {
+              const list = shown(kind);
+              return list.length === 0 ? null : (
+                <CommandGroup key={kind} heading={label}>
+                  {list.map((r) => (
+                    <CommandItem key={r.name} value={`${kind} ${r.name}`} onSelect={() => pick(r.name)}>
+                      <span className="min-w-0 font-mono text-sm break-all">{r.name}</span>
+                    </CommandItem>
+                  ))}
+                </CommandGroup>
+              );
+            })}
+            {!offerTyped && typed !== "" && GROUPS.every((g) => shown(g.kind).length === 0) && (
+              <CommandEmpty>No repository matches.</CommandEmpty>
+            )}
+          </CommandList>
+        </div>
       </Command>
       {invalid && (
         <p id={errorId} role="alert" className="text-sm text-danger">
