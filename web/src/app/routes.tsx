@@ -1,5 +1,5 @@
 // The signed-in app's routes and its navigation. The views here are placeholders (a heading and one sentence) until
-// the task that builds each replaces it: Needs you (Task 10), Tickets (11), New (13), Routing (14), Graph (15),
+// the task that builds each replaces it: Tickets (11), New (13), Routing (14), Graph (15),
 // Nodes and Settings (17). /design and /enroll render outside the session gate (App.tsx).
 //
 // Query contracts the palette already uses: /tickets/:id?tab=session opens a Ticket's live session (Task 12), and
@@ -17,6 +17,7 @@ import {
 import { lazy, type ReactNode, Suspense } from "react";
 import { Link, matchPath, Route, Routes, useParams } from "react-router";
 import { Panes } from "@/app/Panes";
+import { NeedsYou } from "@/features/needs-you/NeedsYou";
 import { selectCounts } from "@/lib/store/selectors";
 import { useAthena } from "@/lib/store/state";
 import { EmptyState } from "@/ui/athena/EmptyState";
@@ -72,12 +73,7 @@ function NothingSelected({ what }: { what: string }) {
 }
 
 function NeedsYouView() {
-  return (
-    <Panes
-      list={<Placeholder title="Needs you" text="Approvals, questions and reviews that wait on you, oldest first." />}
-      detail={<NothingSelected what="item" />}
-    />
-  );
+  return <Panes detail={<NeedsYou />} />;
 }
 
 function TicketsView() {

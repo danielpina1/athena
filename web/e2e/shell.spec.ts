@@ -12,13 +12,16 @@ test("the shell renders, light and dark", async ({ page }, testInfo) => {
   const nav = page.getByRole("navigation", { name: "Main" });
   if (testInfo.project.name === "desktop") {
     await expect(nav.getByRole("link")).toHaveText(["Needs you", "Tickets", "New", "Graph", "Routing", "Nodes", "Settings"]);
-    await expect(page.locator('main [data-pane="list"]')).toBeVisible();
-    await expect(page.locator('main [data-pane="detail"]')).toBeVisible();
     await expect(page.getByRole("region", { name: "Today" })).toBeVisible();
+    // Needs you has no list pane (its cards span both); Tickets has the list and the detail.
+    await expect(page.locator('main [data-pane="full"]')).toBeVisible();
+    await nav.getByRole("link", { name: "Tickets" }).click();
     // The sidebar is 240 px and the list pane 400 px; the detail pane takes the rest.
     expect((await page.locator("aside").boundingBox())?.width).toBe(240);
     expect((await page.locator('main [data-pane="list"]').boundingBox())?.width).toBe(400);
     expect((await page.locator('main [data-pane="detail"]').boundingBox())?.width).toBe(1440 - 240 - 400);
+    await nav.getByRole("link", { name: "Needs you" }).click();
+    await expect(page.getByRole("heading", { name: "Needs you", level: 1 })).toBeVisible();
   } else {
     await expect(nav.getByRole("link")).toHaveCount(5);
     await expect(page.getByRole("region", { name: "Today" })).toHaveCount(0);
