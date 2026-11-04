@@ -1,5 +1,5 @@
 // The signed-in app's routes and its navigation. The views here are placeholders (a heading and one sentence) until
-// the task that builds each replaces it: Graph (15), Nodes and Settings (17).
+// the task that builds each replaces it: Nodes and Settings (17). Graph is a lazy chunk (app/routes/graph.tsx).
 // /design and /enroll render outside the session gate (App.tsx).
 //
 // Query contracts the palette already uses: /tickets/:id?tab=session opens a Ticket's live session, and
