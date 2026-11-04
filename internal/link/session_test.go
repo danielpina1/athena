@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/danielpina1/athena/internal/pb/athenav1"
 )
@@ -126,7 +127,7 @@ func (c *fakeClock) waiting() int {
 
 func eventually(t *testing.T, what string, cond func() bool) {
 	t.Helper()
-	for i := 0; i < 500; i++ {
+	for i := 0; i < 2500; i++ {
 		if cond() {
 			return
 		}
@@ -138,7 +139,7 @@ func eventually(t *testing.T, what string, cond func() bool) {
 // advanceUntil advances clk by step until cond holds: the sessions register their timers asynchronously.
 func advanceUntil(t *testing.T, clk *fakeClock, step time.Duration, what string, cond func() bool) {
 	t.Helper()
-	for i := 0; i < 500; i++ {
+	for i := 0; i < 2500; i++ {
 		if cond() {
 			return
 		}
@@ -329,7 +330,6 @@ func TestResumeGapRefused(t *testing.T) {
 
 func TestStreamQueueFullDoesNotBlockControl(t *testing.T) {
 	ca, cb := memPair()
-	ca.drop = false
 	// a's writer is stalled by a Conn that blocks Write until released.
 	gate := make(chan struct{})
 	slow := &gatedConn{memConn: ca, gate: gate}
@@ -398,7 +398,12 @@ func TestCreditTracking(t *testing.T) {
 	if err := a.Grant(athenav1.Channel_EVENTS, 5); err != nil {
 		t.Fatal(err)
 	}
-	eventually(t, "credit", func() bool { return b.Credit(athenav1.Channel_STREAM) == 300 })
+	// Credit is per connection: the grants are not durable, so a resume has nothing to replay.
+	eventually(t, "grants written", func() bool { a.mu.Lock(); defer a.mu.Unlock(); return len(a.queues[athenav1.Channel_CONTROL]) == 0 })
+	if n := len(a.Unacked()); n != 0 {
+		t.Fatalf("credit frames are durable: %d unacked", n)
+	}
+	eventually(t, "credit", func() bool { return b.Credit(athenav1.Channel_STREAM) == 300 && b.Credit(athenav1.Channel_EVENTS) == 5 })
 	if b.Credit(athenav1.Channel_EVENTS) != 5 || b.Credit(athenav1.Channel_CONTROL) != 0 || a.Credit(athenav1.Channel_STREAM) != 0 {
 		t.Fatalf("credit: events %d control %d, a's own %d", b.Credit(athenav1.Channel_EVENTS), b.Credit(athenav1.Channel_CONTROL), a.Credit(athenav1.Channel_STREAM))
 	}
@@ -412,7 +417,7 @@ func TestHeartbeatKillsSilentPeer(t *testing.T) {
 	go func() { res <- s.Run(context.Background()) }()
 
 	for _, at := range []time.Duration{15, 30} {
-		eventually(t, "heartbeat timer", func() bool { return clk.waiting() >= 1 })
+		eventually(t, "heartbeat timers", func() bool { return clk.waiting() >= 2 })
 		clk.Advance(15 * time.Second)
 		select {
 		case err := <-res:
@@ -426,7 +431,7 @@ func TestHeartbeatKillsSilentPeer(t *testing.T) {
 			t.Fatal("no ping")
 		}
 	}
-	eventually(t, "heartbeat timer", func() bool { return clk.waiting() >= 1 })
+	eventually(t, "heartbeat timers", func() bool { return clk.waiting() >= 2 })
 	clk.Advance(15 * time.Second) // 45 s of silence
 	if err := <-res; !errors.Is(err, ErrPeerDead) {
 		t.Fatalf("Run: %v", err)
@@ -444,7 +449,7 @@ func TestHeartbeatAnyFrameKeepsPeerAlive(t *testing.T) {
 	go func() { res <- s.Run(context.Background()) }()
 	pong, _ := Encode(&athenav1.Frame{Body: &athenav1.Frame_Pong{Pong: &athenav1.Pong{AtUnixMs: 1}}})
 	for i := 0; i < 6; i++ { // 90 s, a frame every 15 s
-		eventually(t, "heartbeat timer", func() bool { return clk.waiting() >= 1 })
+		eventually(t, "heartbeat timers", func() bool { return clk.waiting() >= 2 })
 		_ = cb.Write(context.Background(), pong)
 		eventually(t, "frame read", func() bool {
 			s.mu.Lock()
@@ -452,7 +457,7 @@ func TestHeartbeatAnyFrameKeepsPeerAlive(t *testing.T) {
 			return s.lastRecv.Equal(clk.Now())
 		})
 		clk.Advance(15 * time.Second)
-		eventually(t, "heartbeat timer", func() bool { return clk.waiting() >= 1 })
+		eventually(t, "heartbeat timers", func() bool { return clk.waiting() >= 2 })
 		select {
 		case err := <-res:
 			t.Fatalf("died: %v", err)
@@ -542,5 +547,123 @@ func TestUnackedCoversFramesStillQueuedAtClose(t *testing.T) {
 	}
 	if len(tags) != 3 || tags[0] != 1 || tags[1] != 4 || tags[2] != 2 || seqs[0] != 1 || seqs[1] != 2 || seqs[2] != 3 {
 		t.Fatalf("unacked tags %v seqs %v, want tags 1 4 2 seqs 1 2 3", tags, seqs)
+	}
+}
+
+func TestDeadlineIsLastFramePlusDeadAfter(t *testing.T) {
+	ca, cb := memPair()
+	clk := newFakeClock()
+	t0 := clk.Now()
+	s := New(ca, Options{Now: clk.Now, After: clk.After})
+	res := make(chan error, 1)
+	go func() { res <- s.Run(context.Background()) }()
+	step := func(d time.Duration) {
+		eventually(t, "heartbeat timers", func() bool { return clk.waiting() >= 2 })
+		clk.Advance(d)
+	}
+	step(7 * time.Second) // mid-interval: the next ping is at 15 s
+	pong, _ := Encode(&athenav1.Frame{Body: &athenav1.Frame_Pong{Pong: &athenav1.Pong{AtUnixMs: 1}}})
+	_ = cb.Write(context.Background(), pong)
+	eventually(t, "frame read", func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.lastRecv.Equal(t0.Add(7 * time.Second))
+	})
+	// Silence from t0+7 s: dead at t0+52 s exactly, not at the next ping tick after that.
+	for at := 8; at < 52; at++ {
+		step(time.Second)
+		select {
+		case err := <-res:
+			t.Fatalf("died at t0+%ds: %v", at, err)
+		case <-time.After(time.Millisecond):
+		}
+	}
+	step(time.Second)
+	if err := <-res; !errors.Is(err, ErrPeerDead) {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := clk.Now().Sub(t0); got != 52*time.Second {
+		t.Fatalf("died at t0+%v", got)
+	}
+}
+
+func TestNearLimitFrameIsRefusedOrCarried(t *testing.T) {
+	ca, cb := memPair()
+	var got collector
+	a, _ := start(t, ca, Options{})
+	b, _ := start(t, cb, Options{OnFrame: got.add})
+	big := func(n int) *athenav1.Frame {
+		f := &athenav1.Frame{Channel: athenav1.Channel_CONTROL, Body: &athenav1.Frame_Error{Error: &athenav1.Error{}}}
+		f.Body.(*athenav1.Frame_Error).Error.Message = strings.Repeat("x", n-proto.Size(f)-8)
+		for proto.Size(f) < n {
+			f.Body.(*athenav1.Frame_Error).Error.Message += "x"
+		}
+		return f
+	}
+	// Over the limit once seq and ack are stamped: refused up front, nothing queued, session alive.
+	if err := a.Send(athenav1.Channel_CONTROL, true, big(MaxFrame)); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("MaxFrame-sized frame: %v", err)
+	}
+	if err := a.Send(athenav1.Channel_CONTROL, true, big(MaxFrame-stampSlack+1)); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("one over: %v", err)
+	}
+	if n := len(a.Unacked()); n != 0 {
+		t.Fatalf("refused frame kept: %d", n)
+	}
+	// The largest accepted frame still encodes with a 10-byte-varint seq and ack: force big numbers.
+	a.mu.Lock()
+	a.sendSeq, a.recvSeq = 1<<63, 1<<63
+	a.mu.Unlock()
+	b.mu.Lock()
+	b.recvSeq = 1 << 63
+	b.mu.Unlock()
+	if err := a.Send(athenav1.Channel_CONTROL, true, big(MaxFrame-stampSlack)); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "delivered", func() bool { return got.len() == 1 })
+	if b.LastReceived() != 1<<63+1 {
+		t.Fatalf("largest frame not carried: LastReceived %d", b.LastReceived())
+	}
+	if err := a.Send(athenav1.Channel_CONTROL, true, delta(1)); err != nil { // the session still works
+		t.Fatal(err)
+	}
+	eventually(t, "delivered after", func() bool { return got.len() == 2 })
+}
+
+func TestUnackedCapBackpressure(t *testing.T) {
+	ca, _ := memPair()
+	slow := &gatedConn{memConn: ca, gate: make(chan struct{})}
+	a, _ := start(t, slow, Options{SendQueue: map[athenav1.Channel]int{athenav1.Channel_EVENTS: 1 << 20}})
+	var err error
+	n := 0
+	for ; err == nil && n < 2*maxUnacked; n++ {
+		err = a.Send(athenav1.Channel_EVENTS, true, delta(uint64(n)))
+	}
+	if !errors.Is(err, ErrBackpressure) || n-1 != maxUnacked {
+		t.Fatalf("accepted %d durable frames, err %v; want %d then ErrBackpressure", n-1, err, maxUnacked)
+	}
+	if err := a.Send(athenav1.Channel_EVENTS, false, delta(0)); err != nil {
+		t.Fatalf("non-durable send is not capped by unacked: %v", err)
+	}
+}
+
+func TestBlobChannelRefused(t *testing.T) {
+	ca, _ := memPair()
+	a := New(ca, Options{})
+	if err := a.Send(athenav1.Channel_BLOB, false, delta(1)); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("BLOB: %v", err)
+	}
+}
+
+func TestFailedResumeClosesSession(t *testing.T) {
+	ca, _ := memPair()
+	f := delta(1)
+	f.Seq = 5
+	s := New(ca, Options{Resume: &Resume{PeerLastSeq: 2, Unacked: []*athenav1.Frame{f}}})
+	if err := s.Run(context.Background()); !errors.Is(err, ErrProtocol) {
+		t.Fatalf("Run: %v", err)
+	}
+	if err := s.Send(athenav1.Channel_EVENTS, true, delta(2)); !errors.Is(err, ErrClosed) {
+		t.Fatalf("Send after failed resume: %v", err)
 	}
 }

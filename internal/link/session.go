@@ -7,6 +7,8 @@ import (
 	"sync"
 	"time"
 
+	"google.golang.org/protobuf/proto"
+
 	"github.com/danielpina1/athena/internal/pb/athenav1"
 )
 
@@ -23,6 +25,8 @@ var (
 	ErrClosed = errors.New("link: session closed")
 	// ErrPeerDead is the Run result when nothing was received for DeadAfter.
 	ErrPeerDead = errors.New("link: peer silent")
+	// ErrInternal is the Run result when the session could not encode a frame it had accepted.
+	ErrInternal = errors.New("link: internal error")
 	// ErrProtocol is the Run result when the peer broke the framing or sequencing rules.
 	ErrProtocol = errors.New("link: protocol violation")
 )
@@ -32,6 +36,11 @@ const (
 	defaultDeadAfter = 45 * time.Second
 	defaultAckDelay  = 200 * time.Millisecond
 	defaultQueue     = 256
+	// maxUnacked bounds the durable frames in flight (sent and not acked, plus queued): a peer that pings but never
+	// acks makes durable Sends fail with ErrBackpressure instead of growing memory.
+	maxUnacked = 1024
+	// stampSlack is what Channel, Seq and Ack add to an encoded Frame at most: three fields, two with a 10-byte varint.
+	stampSlack = 24
 )
 
 // Resume carries a dropped Session's state into its successor on a new connection.
@@ -73,6 +82,7 @@ type Session struct {
 
 	mu       sync.Mutex
 	closed   bool
+	pending  int // durable frames in the queues
 	initErr  error
 	sendSeq  uint64
 	unacked  []*athenav1.Frame
@@ -140,14 +150,19 @@ type queued struct {
 // channelOrder is the writer's service order.
 var channelOrder = []athenav1.Channel{athenav1.Channel_CONTROL, athenav1.Channel_EVENTS, athenav1.Channel_STREAM, athenav1.Channel_BLOB}
 
-// Send queues f on ch, taking ownership of it. It never blocks: a full queue is ErrBackpressure. A durable frame is
-// numbered when it is written, so seq follows write order across channels, and is kept until the peer acks it.
+// Send queues f on ch, taking ownership of it. It never blocks: a full queue, or maxUnacked durable frames in
+// flight, is ErrBackpressure. A durable frame is numbered when it is written, so seq follows write order across
+// channels, and is kept until the peer acks it. BLOB is reserved and refused, as is a frame with no body or too big
+// to carry its seq and ack.
 func (s *Session) Send(ch athenav1.Channel, durable bool, f *athenav1.Frame) error {
-	if _, err := Encode(f); err != nil {
-		return err
+	if ch == athenav1.Channel_BLOB || f.GetBody() == nil {
+		return fmt.Errorf("%w: channel %v, body %T", ErrInvalid, ch, f.GetBody())
 	}
 	f.Channel = ch
 	f.Seq, f.Ack = 0, 0
+	if n := proto.Size(f); n > MaxFrame-stampSlack {
+		return fmt.Errorf("%w: %d bytes, over %d", ErrInvalid, n, MaxFrame-stampSlack)
+	}
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
@@ -157,24 +172,28 @@ func (s *Session) Send(ch athenav1.Channel, durable bool, f *athenav1.Frame) err
 	if !ok {
 		limit = defaultQueue
 	}
-	if len(s.queues[ch]) >= limit {
+	if len(s.queues[ch]) >= limit || durable && len(s.unacked)+s.pending >= maxUnacked {
 		s.mu.Unlock()
 		return ErrBackpressure
 	}
 	s.queues[ch] = append(s.queues[ch], queued{f, durable})
+	if durable {
+		s.pending++
+	}
 	s.mu.Unlock()
 	signal(s.wake)
 	return nil
 }
 
-// Grant gives the peer items more credit on ch. The grant is durable, so a resume does not lose it.
+// Grant gives the peer items more credit on ch. Credit belongs to one connection: the grant is not durable, a
+// Session's tally starts at 0, and after a resume the caller grants again.
 func (s *Session) Grant(ch athenav1.Channel, items uint32) error {
-	return s.Send(athenav1.Channel_CONTROL, true, &athenav1.Frame{
+	return s.Send(athenav1.Channel_CONTROL, false, &athenav1.Frame{
 		Body: &athenav1.Frame_Credit{Credit: &athenav1.Credit{Channel: ch, Items: items}},
 	})
 }
 
-// Credit is the total the peer has granted on ch.
+// Credit is the total the peer has granted on ch over this connection.
 func (s *Session) Credit(ch athenav1.Channel) uint32 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -207,6 +226,7 @@ func signal(c chan struct{}) {
 // (ErrProtocol, 4001), the connection fails, or ctx ends. It closes the connection before returning.
 func (s *Session) Run(ctx context.Context) error {
 	if s.initErr != nil {
+		s.flush()
 		_ = s.conn.Close(CloseProtocol, "resume gap")
 		return s.initErr
 	}
@@ -237,6 +257,8 @@ func (s *Session) Run(ctx context.Context) error {
 		code, reason = CloseDead, "peer silent"
 	case errors.Is(err, ErrProtocol):
 		code, reason = CloseProtocol, "protocol violation"
+	case errors.Is(err, ErrInternal):
+		code, reason = 1011, "internal error"
 	case ctx.Err() != nil:
 		code, reason = 1001, "going away"
 	}
@@ -261,6 +283,7 @@ func (s *Session) flush() {
 			}
 		}
 	}
+	s.pending = 0
 	s.queues = nil
 	s.replay = nil
 }
@@ -293,6 +316,7 @@ func (s *Session) receive(f *athenav1.Frame) (deliver bool, err error) {
 	if a := f.GetAck(); a > 0 {
 		n := 0
 		for n < len(s.unacked) && s.unacked[n].GetSeq() <= a {
+			s.unacked[n] = nil
 			n++
 		}
 		s.unacked = s.unacked[n:]
@@ -352,29 +376,40 @@ func (s *Session) ackLoop(ctx context.Context) error {
 	}
 }
 
-// heartbeatLoop pings every Heartbeat and declares the peer dead after DeadAfter without a frame.
+// heartbeatLoop pings every Heartbeat and declares the peer dead exactly DeadAfter after the last frame: the
+// deadline timer is re-armed for what remains whenever it fires early.
 func (s *Session) heartbeatLoop(ctx context.Context) error {
+	ping := s.o.After(s.o.Heartbeat)
+	dead := s.o.After(s.o.DeadAfter)
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-s.o.After(s.o.Heartbeat):
-		}
-		s.mu.Lock()
-		if s.now().Sub(s.lastRecv) >= s.o.DeadAfter {
+		case <-ping:
+			ping = s.o.After(s.o.Heartbeat)
+			s.mu.Lock()
+			s.pingDue = true
 			s.mu.Unlock()
-			return ErrPeerDead
+			signal(s.wake)
+		case <-dead:
+			s.mu.Lock()
+			rem := s.o.DeadAfter - s.now().Sub(s.lastRecv)
+			s.mu.Unlock()
+			if rem <= 0 {
+				return ErrPeerDead
+			}
+			dead = s.o.After(rem)
 		}
-		s.pingDue = true
-		s.mu.Unlock()
-		signal(s.wake)
 	}
 }
 
 func (s *Session) writeLoop(ctx context.Context) error {
 	for {
-		f := s.next()
-		if f == nil {
+		b, err := s.next()
+		if err != nil {
+			return err
+		}
+		if b == nil {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
@@ -382,25 +417,23 @@ func (s *Session) writeLoop(ctx context.Context) error {
 			}
 			continue
 		}
-		b, err := Encode(f)
-		if err != nil {
-			return err
-		}
 		if err := s.conn.Write(ctx, b); err != nil {
 			return err
 		}
 	}
 }
 
-// next picks the frame to write and stamps it, or returns nil when there is nothing to say. Order: frames of a resume
-// (they hold the lowest seqs), pong and ping, the channel queues, then a standalone ack.
-func (s *Session) next() *athenav1.Frame {
+// next picks the frame to write, stamps and encodes it, or returns nil when there is nothing to say. Order: frames of
+// a resume (they hold the lowest seqs), pong and ping, the channel queues, then a standalone ack. A frame that will
+// not encode (Send's size check makes that a bug) is dropped, numbered or not, and ends the session with ErrInternal.
+func (s *Session) next() ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var f *athenav1.Frame
+	fresh := false // a queued durable frame, numbered just now
 	switch {
 	case len(s.replay) > 0:
-		f, s.replay = s.replay[0], s.replay[1:]
+		f, s.replay[0], s.replay = s.replay[0], nil, s.replay[1:]
 	case s.pongDue:
 		s.pongDue = false
 		f = &athenav1.Frame{Channel: athenav1.Channel_CONTROL, Body: &athenav1.Frame_Pong{Pong: &athenav1.Pong{AtUnixMs: s.pongAt}}}
@@ -409,24 +442,42 @@ func (s *Session) next() *athenav1.Frame {
 		f = &athenav1.Frame{Channel: athenav1.Channel_CONTROL, Body: &athenav1.Frame_Ping{Ping: &athenav1.Ping{AtUnixMs: uint64(s.now().UnixMilli())}}}
 	default:
 		for _, ch := range channelOrder {
-			if q := s.queues[ch]; len(q) > 0 {
-				s.queues[ch] = q[1:]
-				f = q[0].f
-				if q[0].durable {
-					s.sendSeq++
-					f.Seq = s.sendSeq
-					s.unacked = append(s.unacked, f)
-				}
-				break
+			q := s.queues[ch]
+			if len(q) == 0 {
+				continue
 			}
+			head := q[0]
+			q[0] = queued{}
+			s.queues[ch] = q[1:]
+			f = head.f
+			if head.durable {
+				s.pending--
+				s.sendSeq++
+				f.Seq = s.sendSeq
+				s.unacked = append(s.unacked, f)
+				fresh = true
+			}
+			break
 		}
 	}
 	if f == nil && s.ackDue && s.ackFired {
 		f = &athenav1.Frame{Channel: athenav1.Channel_CONTROL, Body: &athenav1.Frame_Ping{Ping: &athenav1.Ping{}}}
 	}
-	if f != nil {
-		f.Ack = s.recvSeq
-		s.ackDue, s.ackFired = false, false
+	if f == nil {
+		return nil, nil
 	}
-	return f
+	f.Ack = s.recvSeq
+	b, err := Encode(f)
+	if err != nil {
+		if f.Seq != 0 && len(s.unacked) > 0 && s.unacked[len(s.unacked)-1] == f {
+			s.unacked[len(s.unacked)-1] = nil
+			s.unacked = s.unacked[:len(s.unacked)-1]
+			if fresh {
+				s.sendSeq--
+			}
+		}
+		return nil, fmt.Errorf("%w: %v", ErrInternal, err)
+	}
+	s.ackDue, s.ackFired = false, false
+	return b, nil
 }

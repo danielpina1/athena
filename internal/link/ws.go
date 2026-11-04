@@ -22,9 +22,12 @@ type Conn interface {
 
 type wsConn struct{ c *websocket.Conn }
 
-// NewWS adapts a WebSocket to a Conn: binary messages only, at most MaxFrame bytes each.
+// NewWS adapts a WebSocket to a Conn: binary messages only, at most MaxFrame bytes each, decompressed.
 func NewWS(c *websocket.Conn) Conn {
-	c.SetReadLimit(MaxFrame)
+	// The limit covers the decompressed message (read.go sets the limitReader over the flate reader), so a deflate
+	// bomb stops here. One byte over MaxFrame: a message of exactly MaxFrame must not trip the reader's end check,
+	// and Decode refuses anything above MaxFrame.
+	c.SetReadLimit(MaxFrame + 1)
 	return &wsConn{c: c}
 }
 
@@ -34,8 +37,7 @@ func (w *wsConn) Read(ctx context.Context) ([]byte, error) {
 		return nil, err
 	}
 	if typ != websocket.MessageBinary {
-		_ = w.c.Close(websocket.StatusUnsupportedData, "binary frames only")
-		return nil, fmt.Errorf("%w: text message", ErrInvalid)
+		return nil, fmt.Errorf("%w: text message", ErrProtocol)
 	}
 	return b, nil
 }
