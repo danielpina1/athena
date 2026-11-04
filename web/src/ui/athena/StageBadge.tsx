@@ -22,10 +22,17 @@ const OUTCOME: Record<string, string> = {
   closed: "Closed",
 };
 
-export type StageProps = { stage: string; action?: string; outcome?: string };
+export type StageProps = {
+  stage: string;
+  action?: string;
+  outcome?: string;
+  /** The owner asked to stop it and it has not ended yet (the store's `stopping`). */
+  stopping?: boolean;
+};
 
 /** The Global Constraints stage label for a Ticket's stage, action and outcome. */
-export function stageLabel({ stage, action = "", outcome = "" }: StageProps): string {
+export function stageLabel({ stage, action = "", outcome = "", stopping = false }: StageProps): string {
+  if (stopping && stage !== "ended") return "Stopping…";
   switch (stage) {
     case "person":
       return PERSON[action] ?? "Needs you";
@@ -53,7 +60,13 @@ function tone({ stage, action = "", outcome = "" }: StageProps): string {
   return "border-line-soft text-muted";
 }
 
-export function StageBadge({ stage, action = "", outcome = "", className }: StageProps & { className?: string }) {
+export function StageBadge({
+  stage,
+  action = "",
+  outcome = "",
+  stopping = false,
+  className,
+}: StageProps & { className?: string }) {
   const running = stage === "working" && action !== "queued";
   return (
     <span data-stage={stage} className={cn(base, tone({ stage, action, outcome }), className)}>
@@ -64,7 +77,7 @@ export function StageBadge({ stage, action = "", outcome = "", className }: Stag
           className="size-2 shrink-0 rounded-full border-[1.5px] border-current"
         />
       )}
-      <span className="truncate">{stageLabel({ stage, action, outcome })}</span>
+      <span className="truncate">{stageLabel({ stage, action, outcome, stopping })}</span>
     </span>
   );
 }
