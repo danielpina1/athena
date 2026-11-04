@@ -56,9 +56,13 @@ type liveServer struct {
 // startLive starts a server with a temp state dir, real claude and the haiku model.
 func startLive(t *testing.T) *liveServer {
 	t.Helper()
-	claudeBin := liveEnv(t)
+	return startLiveIn(t, liveEnv(t), newStateDir(t))
+}
+
+// startLiveIn is startLive on a given state dir (it may hold a config.json) and claude binary.
+func startLiveIn(t *testing.T, claudeBin, stateDir string) *liveServer {
+	t.Helper()
 	athena := buildAthena(t)
-	stateDir := newStateDir(t)
 	cfg := Config{
 		StateDir: stateDir,
 		Node: node.Config{

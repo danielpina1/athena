@@ -65,3 +65,26 @@ What to look for:
   are expired.
 
 Clean up with `rm -rf /tmp/athena-smoke /tmp/athena-smoke-outside.txt`.
+
+## GitHub (needs your GitHub App)
+
+This part needs a GitHub App you created and installed on a **sandbox repository** ([setup guide](github-app.md)). Then:
+
+    S=/tmp/athena-smoke
+    ./bin/athena github setup --app-id N --slug S --key ~/.athena/github-app.pem --installation N --repo you/sandbox --state-dir $S
+    ./bin/athena github check --state-dir $S        # prints the bot, the account and the repositories
+    ./bin/athena server --state-dir $S --model haiku
+
+Mention the App in an issue of the sandbox repository, for example `@<slug> create hello.txt containing hi and open a PR`,
+written from your own account (the App's own comments are never Triggers). What to expect, within about a minute (polls
+run every 30 s):
+
+- In the default mode, `observe`: `athena triggers` lists the mention, `athena decisions` shows `accept (would accept)`,
+  and nothing is written to GitHub.
+- After `athena policy show > p.json`, editing `"mode"` to `"auto"` and `athena policy set p.json --state-dir $S`: one
+  acknowledgement comment by `<slug>[bot]`, a Ticket (`athena status`) on branch `athena/<ticket>`, and a pull request
+  adding `hello.txt`. Merge it on GitHub; the Ticket ends `merged`, and nothing else is posted twice.
+- `athena threads` shows the issue's Thread and its Ticket; `athena task --repo you/sandbox "..."` starts a Ticket
+  yourself.
+
+The same flow runs unattended with `go test -tags live -run LiveGitHub` (variables and cost in the setup guide).
