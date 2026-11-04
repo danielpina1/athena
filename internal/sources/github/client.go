@@ -90,6 +90,9 @@ type Client struct {
 	token func(ctx context.Context) (string, error)
 	ua    string
 	now   func() time.Time
+	// onUnauthorized, when set, is told the token a request used when GitHub answered 401; the request is then
+	// retried once if the token func now returns a different token.
+	onUnauthorized func(token string)
 
 	mu    sync.Mutex
 	etags map[string]cached
@@ -105,11 +108,13 @@ type cached struct {
 
 // NewClient returns a client for apiURL (DefaultAPIURL when empty) that authenticates every request with the token
 // token returns. version is the Athena version, sent in the User-Agent. hc defaults to a client with a 30 s timeout.
-func NewClient(hc *http.Client, apiURL string, token func(ctx context.Context) (string, error), version string) *Client {
+// It refuses an apiURL it cannot parse, that is not http(s) with a host, that carries credentials, or that is plain
+// http to a host other than loopback (127.0.0.1, ::1, localhost).
+func NewClient(hc *http.Client, apiURL string, token func(ctx context.Context) (string, error), version string) (*Client, error) {
 	return newClient(hc, apiURL, token, version, time.Now)
 }
 
-func newClient(hc *http.Client, apiURL string, token func(ctx context.Context) (string, error), version string, now func() time.Time) *Client {
+func newClient(hc *http.Client, apiURL string, token func(ctx context.Context) (string, error), version string, now func() time.Time) (*Client, error) {
 	if hc == nil {
 		hc = &http.Client{Timeout: 30 * time.Second}
 	}
@@ -119,13 +124,50 @@ func newClient(hc *http.Client, apiURL string, token func(ctx context.Context) (
 	if version == "" {
 		version = "dev"
 	}
-	base, err := url.Parse(strings.TrimRight(apiURL, "/"))
-	if err != nil || base.Host == "" {
-		base = &url.URL{Scheme: "https", Host: "invalid.invalid"}
+	base, err := parseAPIURL(apiURL)
+	if err != nil {
+		return nil, err
 	}
 	c := &Client{hc: hc, base: base, token: token, ua: "athena/" + version, now: now, etags: map[string]cached{}}
 	c.remaining.Store(-1)
-	return c
+	return c, nil
+}
+
+// parseAPIURL checks an API URL: https, or http only to loopback, with a host and no credentials.
+func parseAPIURL(raw string) (*url.URL, error) {
+	u, err := url.Parse(strings.TrimRight(raw, "/"))
+	if err != nil {
+		return nil, fmt.Errorf("github: API URL is not a valid URL: %s", redact.String(err.Error()))
+	}
+	if u.Host == "" || u.Hostname() == "" {
+		return nil, errors.New("github: API URL needs a scheme and a host")
+	}
+	if u.User != nil {
+		return nil, errors.New("github: API URL must not carry credentials")
+	}
+	switch u.Scheme {
+	case "https":
+	case "http":
+		if h := u.Hostname(); !strings.EqualFold(h, "localhost") && h != "127.0.0.1" && h != "::1" {
+			return nil, fmt.Errorf("github: API URL %s is plain http; only https (or http to loopback) is allowed", u.Host)
+		}
+	default:
+		return nil, fmt.Errorf("github: API URL scheme %q is not https", u.Scheme)
+	}
+	return u, nil
+}
+
+// resolve turns a request path into a full URL on the API host. The path must start with "/".
+func (c *Client) resolve(path string) (string, error) {
+	if !strings.HasPrefix(path, "/") {
+		return "", fmt.Errorf("github: refusing request path %q: it must start with /: %w", path, ErrPermanent)
+	}
+	return c.base.String() + path, nil
+}
+
+// sameOrigin reports whether u is on the API's scheme and host (and carries no credentials).
+func (c *Client) sameOrigin(u *url.URL) bool {
+	return u.User == nil && u.Scheme == c.base.Scheme && strings.EqualFold(u.Host, c.base.Host)
 }
 
 // RateRemaining is the x-ratelimit-remaining of the latest response that had one, or -1 before any.
@@ -150,7 +192,11 @@ func (c *Client) Get(ctx context.Context, path string, out any) (notModified boo
 	if had {
 		hdr = http.Header{"If-None-Match": {prev.etag}}
 	}
-	resp, err := c.do(ctx, http.MethodGet, c.base.String()+path, path, nil, hdr)
+	target, err := c.resolve(path)
+	if err != nil {
+		return false, err
+	}
+	resp, err := c.do(ctx, http.MethodGet, target, path, nil, hdr)
 	if err != nil {
 		return false, err
 	}
@@ -201,7 +247,11 @@ func (c *Client) write(ctx context.Context, method, path string, in, out any) er
 			return fmt.Errorf("github: %s %s: encode: %w", method, path, err)
 		}
 	}
-	resp, err := c.do(ctx, method, c.base.String()+path, path, body, nil)
+	target, err := c.resolve(path)
+	if err != nil {
+		return err
+	}
+	resp, err := c.do(ctx, method, target, path, body, nil)
 	if err != nil {
 		return err
 	}
@@ -218,7 +268,10 @@ var nextLink = regexp.MustCompile(`<([^>]*)>\s*;[^,]*\brel="?next"?`)
 // Paginate GETs path and every page its Link header names as next, calling fn with each page's raw body. It stops at
 // the first error fn returns. A next link to another host is refused so the token never leaves the API.
 func (c *Client) Paginate(ctx context.Context, path string, fn func(json.RawMessage) error) error {
-	target := c.base.String() + path
+	target, err := c.resolve(path)
+	if err != nil {
+		return err
+	}
 	for page := 0; page < maxPages; page++ {
 		resp, err := c.do(ctx, http.MethodGet, target, path, nil, nil)
 		if err != nil {
@@ -232,7 +285,7 @@ func (c *Client) Paginate(ctx context.Context, path string, fn func(json.RawMess
 			return nil
 		}
 		next, err := url.Parse(m[1])
-		if err != nil || next.Scheme != c.base.Scheme || next.Host != c.base.Host {
+		if err != nil || !c.sameOrigin(next) {
 			return &APIError{Method: http.MethodGet, Path: path, Status: resp.status, Message: "next page is not on the API host", class: ErrPermanent}
 		}
 		target = next.String()
@@ -249,10 +302,31 @@ type response struct {
 // do sends one request. It returns the response for a 2xx and for a 304; any other status is an error. label is the
 // path shown in errors (the full URL of a next page can carry a query only).
 func (c *Client) do(ctx context.Context, method, target, label string, body []byte, extra http.Header) (*response, error) {
+	if u, err := url.Parse(target); err != nil || !c.sameOrigin(u) {
+		return nil, fmt.Errorf("github: refusing %s %s: not on the API host: %w", method, label, ErrPermanent)
+	}
 	tok, err := c.token(ctx)
 	if err != nil {
 		return nil, err
 	}
+	r, err := c.send(ctx, method, target, label, body, extra, tok)
+	var ae *APIError
+	if c.onUnauthorized != nil && errors.As(err, &ae) && ae.Status == http.StatusUnauthorized {
+		// The token was rejected: have its owner drop it, then retry once with whatever the token func returns now.
+		c.onUnauthorized(tok)
+		tok2, terr := c.token(ctx)
+		if terr != nil {
+			return nil, terr
+		}
+		if tok2 != tok {
+			return c.send(ctx, method, target, label, body, extra, tok2)
+		}
+	}
+	return r, err
+}
+
+// send makes one attempt with tok.
+func (c *Client) send(ctx context.Context, method, target, label string, body []byte, extra http.Header, tok string) (*response, error) {
 	var rd io.Reader
 	if body != nil {
 		rd = bytes.NewReader(body)

@@ -11,6 +11,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -200,6 +201,9 @@ func TestKeyFileInvalid(t *testing.T) {
 // installationServer answers the token endpoint, counting requests.
 type installationServer struct {
 	*httptest.Server
+	mux    *http.ServeMux
+	gets   atomic.Int64 // GET /app/installations/777 requests
+	owner  string
 	mints  atomic.Int64
 	bodies chan []byte
 	expiry func() time.Time
@@ -211,6 +215,12 @@ func newInstallationServer(t *testing.T, clk *clock) *installationServer {
 	s := &installationServer{bodies: make(chan []byte, 100)}
 	s.expiry = func() time.Time { return clk.now().Add(time.Hour) }
 	mux := http.NewServeMux()
+	s.mux, s.owner = mux, "Owner"
+	mux.HandleFunc("GET /app/installations/777", func(w http.ResponseWriter, r *http.Request) {
+		s.gets.Add(1)
+		verifyJWT(t, strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+		fmt.Fprintf(w, `{"id":777,"account":{"login":%q}}`, s.owner)
+	})
 	mux.HandleFunc("POST /app/installations/777/access_tokens", func(w http.ResponseWriter, r *http.Request) {
 		n := s.mints.Add(1)
 		if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
@@ -341,7 +351,9 @@ func TestScopedTokenRequestBody(t *testing.T) {
 		t.Fatalf("body = %v\nwant   %v", got, want)
 	}
 	// Scoped tokens are minted every time and never share the installation token's cache.
-	app.ScopedToken(context.Background(), "owner/widgets", map[string]string{"contents": "read"})
+	if _, err := app.ScopedToken(context.Background(), "owner/widgets", map[string]string{"contents": "read"}); err != nil {
+		t.Fatal(err)
+	}
 	if srv.mints.Load() != 2 {
 		t.Fatalf("%d mints, want 2", srv.mints.Load())
 	}
@@ -451,5 +463,165 @@ func TestTokenNeverFormatted(t *testing.T) {
 	}
 	if got := redact.String("token " + secret + " failed"); strings.Contains(got, "ghs_") {
 		t.Errorf("redact.String left the token: %q", got)
+	}
+}
+
+func TestScopedTokenOwnerMustMatchInstallationAccount(t *testing.T) {
+	clk := newClock()
+	srv := newInstallationServer(t, clk)
+	app := newApp(t, srv.Server, clk)
+	ctx := context.Background()
+
+	_, err := app.ScopedToken(ctx, "other/widgets", nil)
+	if err == nil || !strings.Contains(err.Error(), "other") || !strings.Contains(err.Error(), "Owner") {
+		t.Fatalf("err = %v, want a mismatch naming both owners", err)
+	}
+	if !isClass(err, ErrPermanent) {
+		t.Errorf("a mismatch is permanent: %v", err)
+	}
+	if srv.mints.Load() != 0 {
+		t.Fatalf("%d mints for a refused repository", srv.mints.Load())
+	}
+	// Case-insensitive match, learned once.
+	for _, repo := range []string{"owner/widgets", "OWNER/gadgets", "Owner/widgets"} {
+		if _, err := app.ScopedToken(ctx, repo, nil); err != nil {
+			t.Fatalf("%s: %v", repo, err)
+		}
+	}
+	if srv.gets.Load() != 1 {
+		t.Errorf("installation looked up %d times, want 1", srv.gets.Load())
+	}
+	// A bare name needs no lookup; malformed names are refused.
+	for _, bad := range []string{"a/b/c", "/widgets", "owner/", "owner//x"} {
+		if _, err := app.ScopedToken(ctx, bad, nil); err == nil {
+			t.Errorf("%q: want an error", bad)
+		}
+	}
+}
+
+func TestScopedTokenOmitsNilPermissions(t *testing.T) {
+	clk := newClock()
+	srv := newInstallationServer(t, clk)
+	app := newApp(t, srv.Server, clk)
+	if _, err := app.ScopedToken(context.Background(), "widgets", nil); err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(<-srv.bodies, &got); err != nil {
+		t.Fatal(err)
+	}
+	if _, has := got["permissions"]; has || len(got) != 1 {
+		t.Fatalf("body = %v, want only repositories", got)
+	}
+}
+
+func TestScopedTokenAccountLookupFailureNotCached(t *testing.T) {
+	clk := newClock()
+	srv := newInstallationServer(t, clk)
+	app := newApp(t, srv.Server, clk)
+	srv.owner = "" // the account is missing from the response
+	if _, err := app.ScopedToken(context.Background(), "owner/widgets", nil); err == nil {
+		t.Fatal("want an error when the installation has no account login")
+	}
+	srv.owner = "owner"
+	if _, err := app.ScopedToken(context.Background(), "owner/widgets", nil); err != nil {
+		t.Fatalf("a failed lookup must not stick: %v", err)
+	}
+}
+
+func TestRejectedInstallationTokenIsDropped(t *testing.T) {
+	clk := newClock()
+	srv := newInstallationServer(t, clk)
+	var seen []string
+	var mu sync.Mutex
+	srv.mux.HandleFunc("GET /ping", func(w http.ResponseWriter, r *http.Request) {
+		auth := r.Header.Get("Authorization")
+		mu.Lock()
+		seen = append(seen, auth)
+		mu.Unlock()
+		if auth == "Bearer ghs_secret1" { // revoked
+			w.WriteHeader(401)
+			fmt.Fprint(w, `{"message":"Bad credentials"}`)
+			return
+		}
+		fmt.Fprint(w, `{"ok":true}`)
+	})
+	app := newApp(t, srv.Server, clk)
+	ctx := context.Background()
+	var out struct{ OK bool }
+	if _, err := app.Client().Get(ctx, "/ping", &out); err != nil || !out.OK {
+		t.Fatalf("Get = %v, %+v: the request should be retried once with a new token", err, out)
+	}
+	mu.Lock()
+	if fmt.Sprint(seen) != "[Bearer ghs_secret1 Bearer ghs_secret2]" {
+		t.Errorf("Authorization headers seen: %v", seen)
+	}
+	mu.Unlock()
+	tok, _ := app.InstallationToken(ctx)
+	if tok.Value != "ghs_secret2" || srv.mints.Load() != 2 {
+		t.Fatalf("token = %q after %d mints", tok.Value, srv.mints.Load())
+	}
+}
+
+func TestRejectedInstallationTokenRetriesOnce(t *testing.T) {
+	clk := newClock()
+	srv := newInstallationServer(t, clk)
+	var pings atomic.Int64
+	srv.mux.HandleFunc("GET /ping", func(w http.ResponseWriter, r *http.Request) {
+		pings.Add(1)
+		w.WriteHeader(401)
+	})
+	app := newApp(t, srv.Server, clk)
+	_, err := app.Client().Get(context.Background(), "/ping", nil)
+	var ae *APIError
+	if !isClass(err, ErrPermanent) || !errors.As(err, &ae) || ae.Status != 401 {
+		t.Fatalf("err = %v, want a 401 ErrPermanent", err)
+	}
+	if pings.Load() != 2 || srv.mints.Load() != 2 {
+		t.Fatalf("%d requests, %d mints; want one retry", pings.Load(), srv.mints.Load())
+	}
+}
+
+func TestInvalidateIsCompareAndClear(t *testing.T) {
+	clk := newClock()
+	srv := newInstallationServer(t, clk)
+	app := newApp(t, srv.Server, clk)
+	ctx := context.Background()
+	t1, _ := app.InstallationToken(ctx)
+	app.invalidate("ghs_someone_elses_old_token") // another caller already replaced that token
+	if t2, _ := app.InstallationToken(ctx); t2.Value != t1.Value || srv.mints.Load() != 1 {
+		t.Fatalf("a stale invalidation wiped the current token: %q, %d mints", t2.Value, srv.mints.Load())
+	}
+	app.invalidate(t1.Value)
+	if t3, _ := app.InstallationToken(ctx); t3.Value != "ghs_secret2" {
+		t.Fatalf("token = %q, want a fresh mint", t3.Value)
+	}
+}
+
+func TestJWTRejectionDoesNotRetry(t *testing.T) {
+	clk := newClock()
+	var posts atomic.Int64
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /app/installations/777/access_tokens", func(w http.ResponseWriter, r *http.Request) {
+		posts.Add(1)
+		w.WriteHeader(401)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	app := newApp(t, srv, clk)
+	if _, err := app.InstallationToken(context.Background()); !isClass(err, ErrPermanent) || posts.Load() != 1 {
+		t.Fatalf("err = %v after %d posts", err, posts.Load())
+	}
+}
+
+func TestNewAppAPIURL(t *testing.T) {
+	path := writeKey(t, 0o600, false)
+	for _, bad := range []string{"://bad", "http://api.github.com", "api.github.com"} {
+		if _, err := NewApp(AppConfig{AppID: 1, KeyFile: path, APIURL: bad}, nil, nil); err == nil {
+			t.Errorf("APIURL %q: want an error", bad)
+		}
+	}
+	if _, err := NewApp(AppConfig{AppID: 1, KeyFile: path, APIURL: "http://127.0.0.1:1"}, nil, nil); err != nil {
+		t.Error(err)
 	}
 }

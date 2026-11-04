@@ -98,6 +98,9 @@ type App struct {
 	mu      sync.Mutex    // guards tok and hasTok
 	tok     Token
 	hasTok  bool
+
+	accMu   sync.Mutex // guards account
+	account string     // the installation account's login, learned once
 }
 
 // NewApp reads and checks the key file and returns the App. It refuses a key file that group or others can access
@@ -117,11 +120,16 @@ func NewApp(cfg AppConfig, hc *http.Client, now func() time.Time) (*App, error) 
 		return nil, err
 	}
 	a := &App{cfg: cfg, key: key, now: now, refresh: make(chan struct{}, 1)}
-	a.jwt = newClient(hc, cfg.APIURL, func(context.Context) (string, error) { return a.JWT() }, cfg.Version, now)
-	a.inst = newClient(hc, cfg.APIURL, func(ctx context.Context) (string, error) {
+	if a.jwt, err = newClient(hc, cfg.APIURL, func(context.Context) (string, error) { return a.JWT() }, cfg.Version, now); err != nil {
+		return nil, err
+	}
+	if a.inst, err = newClient(hc, cfg.APIURL, func(ctx context.Context) (string, error) {
 		t, err := a.InstallationToken(ctx)
 		return t.Value, err
-	}, cfg.Version, now)
+	}, cfg.Version, now); err != nil {
+		return nil, err
+	}
+	a.inst.onUnauthorized = a.invalidate
 	return a, nil
 }
 
@@ -225,16 +233,76 @@ func (a *App) unexpiredToken() (Token, bool) {
 	return a.tok, a.hasTok && a.now().Before(a.tok.ExpiresAt)
 }
 
-// ScopedToken mints a token for one repository (a name, or owner/name) with the given permissions, for a worker. It is
-// never cached and never shared with the installation token.
-func (a *App) ScopedToken(ctx context.Context, repo string, perms map[string]string) (Token, error) {
-	if i := strings.LastIndex(repo, "/"); i >= 0 {
-		repo = repo[i+1:]
+// invalidate drops the cached installation token if it is still token: a token GitHub rejected (revoked, or the clock
+// is skewed). Compare-and-clear, so a token another caller has just refreshed is kept.
+func (a *App) invalidate(token string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.hasTok && a.tok.Value == token {
+		a.tok, a.hasTok = Token{}, false
 	}
-	if repo == "" {
+}
+
+// ScopedToken mints a token for one repository with the given permissions, for a worker. repo is a bare name or
+// owner/name; an owner must be the installation's account (compared case-insensitively), so another owner's repository
+// of the same name is refused. A nil perms asks for the installation's own permissions. The token is never cached and
+// never shared with the installation token.
+func (a *App) ScopedToken(ctx context.Context, repo string, perms map[string]string) (Token, error) {
+	owner, name := "", repo
+	if strings.Contains(repo, "/") {
+		parts := strings.Split(repo, "/")
+		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+			return Token{}, fmt.Errorf("github app: repository %q is not a name or owner/name", repo)
+		}
+		owner, name = parts[0], parts[1]
+	}
+	if name == "" {
 		return Token{}, errors.New("github app: scoped token needs a repository")
 	}
-	return a.mint(ctx, map[string]any{"repositories": []string{repo}, "permissions": perms})
+	if owner != "" {
+		account, err := a.accountLogin(ctx)
+		if err != nil {
+			return Token{}, err
+		}
+		if !strings.EqualFold(owner, account) {
+			return Token{}, fmt.Errorf("github app: repository owner %q is not the installation's account %q: %w", owner, account, ErrPermanent)
+		}
+	}
+	body := map[string]any{"repositories": []string{name}}
+	if perms != nil {
+		body["permissions"] = perms
+	}
+	return a.mint(ctx, body)
+}
+
+// accountLogin is the login of the account the App is installed on, fetched once from GET /app/installations/{id}.
+func (a *App) accountLogin(ctx context.Context) (string, error) {
+	a.accMu.Lock()
+	defer a.accMu.Unlock()
+	if a.account != "" {
+		return a.account, nil
+	}
+	if a.cfg.InstallationID <= 0 {
+		return "", errors.New("github app: installation id is required")
+	}
+	path := "/app/installations/" + strconv.FormatInt(a.cfg.InstallationID, 10)
+	var out struct {
+		Account struct {
+			Login string `json:"login"`
+		} `json:"account"`
+	}
+	notModified, err := a.jwt.Get(ctx, path, &out)
+	if err != nil {
+		return "", err
+	}
+	if notModified {
+		a.jwt.Cached(path, &out)
+	}
+	if out.Account.Login == "" {
+		return "", errors.New("github app: the installation has no account login")
+	}
+	a.account = out.Account.Login
+	return a.account, nil
 }
 
 // mint POSTs for an installation access token, authenticated with the App's JWT.

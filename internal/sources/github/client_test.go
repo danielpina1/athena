@@ -20,6 +20,15 @@ func staticToken(v string) func(context.Context) (string, error) {
 	return func(context.Context) (string, error) { return v, nil }
 }
 
+// newTestClient is NewClient for tests whose URL is known good.
+func newTestClient(hc *http.Client, apiURL string, token func(context.Context) (string, error), version string) *Client {
+	c, err := NewClient(hc, apiURL, token, version)
+	if err != nil {
+		panic(err)
+	}
+	return c
+}
+
 func isClass(err, class error) bool { return errors.Is(err, class) }
 
 func TestRequestHeaders(t *testing.T) {
@@ -35,7 +44,7 @@ func TestRequestHeaders(t *testing.T) {
 		fmt.Fprint(w, `{}`)
 	}))
 	defer srv.Close()
-	c := NewClient(srv.Client(), srv.URL+"/", staticToken("ghs_tok"), "1.2.3")
+	c := newTestClient(srv.Client(), srv.URL+"/", staticToken("ghs_tok"), "1.2.3")
 	if _, err := c.Get(context.Background(), "/x", nil); err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +62,7 @@ func TestETagNotModified(t *testing.T) {
 		fmt.Fprint(w, `{"n":1}`)
 	}))
 	defer srv.Close()
-	c := NewClient(srv.Client(), srv.URL, staticToken("t"), "v")
+	c := newTestClient(srv.Client(), srv.URL, staticToken("t"), "v")
 	ctx := context.Background()
 
 	var out struct{ N int }
@@ -92,8 +101,8 @@ func TestETagPerClient(t *testing.T) {
 		fmt.Fprint(w, `{}`)
 	}))
 	defer srv.Close()
-	a := NewClient(srv.Client(), srv.URL, staticToken("a"), "v")
-	b := NewClient(srv.Client(), srv.URL, staticToken("b"), "v")
+	a := newTestClient(srv.Client(), srv.URL, staticToken("a"), "v")
+	b := newTestClient(srv.Client(), srv.URL, staticToken("b"), "v")
 	a.Get(context.Background(), "/p", nil)
 	b.Get(context.Background(), "/p", nil)
 	if last.Load() != "" {
@@ -104,7 +113,7 @@ func TestETagPerClient(t *testing.T) {
 func TestNotModifiedWithoutETagIsAnError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(304) }))
 	defer srv.Close()
-	c := NewClient(srv.Client(), srv.URL, staticToken("t"), "v")
+	c := newTestClient(srv.Client(), srv.URL, staticToken("t"), "v")
 	if _, err := c.Get(context.Background(), "/p", nil); !isClass(err, ErrPermanent) {
 		t.Fatalf("err = %v", err)
 	}
@@ -132,7 +141,7 @@ func TestRateLimitedReset(t *testing.T) {
 				fmt.Fprint(w, `{"message":"API rate limit exceeded"}`)
 			}))
 			defer srv.Close()
-			cl := NewClient(srv.Client(), srv.URL, staticToken("t"), "v")
+			cl := newTestClient(srv.Client(), srv.URL, staticToken("t"), "v")
 			cl.now = func() time.Time { return now }
 			_, err := cl.Get(context.Background(), "/p", nil)
 			var rl ErrRateLimited
@@ -159,7 +168,7 @@ func TestForbiddenWithoutRateLimitIsPermanent(t *testing.T) {
 		fmt.Fprint(w, `{"message":"Resource not accessible by integration"}`)
 	}))
 	defer srv.Close()
-	c := NewClient(srv.Client(), srv.URL, staticToken("t"), "v")
+	c := newTestClient(srv.Client(), srv.URL, staticToken("t"), "v")
 	_, err := c.Get(context.Background(), "/p", nil)
 	if !isClass(err, ErrPermanent) {
 		t.Fatalf("err = %v", err)
@@ -178,7 +187,7 @@ func TestRateRemainingRecorded(t *testing.T) {
 		fmt.Fprint(w, `{}`)
 	}))
 	defer srv.Close()
-	c := NewClient(srv.Client(), srv.URL, staticToken("t"), "v")
+	c := newTestClient(srv.Client(), srv.URL, staticToken("t"), "v")
 	if c.RateRemaining() != -1 {
 		t.Errorf("before any response RateRemaining = %d, want -1", c.RateRemaining())
 	}
@@ -226,7 +235,7 @@ func TestErrorClasses(t *testing.T) {
 				fmt.Fprint(w, c.body)
 			}))
 			defer srv.Close()
-			cl := NewClient(srv.Client(), srv.URL, staticToken("t"), "v")
+			cl := newTestClient(srv.Client(), srv.URL, staticToken("t"), "v")
 			var err error
 			switch c.method {
 			case "GET":
@@ -256,14 +265,14 @@ func TestNetworkErrors(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	url := srv.URL
 	srv.Close()
-	c := NewClient(&http.Client{Timeout: time.Second}, url, staticToken("t"), "v")
+	c := newTestClient(&http.Client{Timeout: time.Second}, url, staticToken("t"), "v")
 	if _, err := c.Get(context.Background(), "/p", nil); !isClass(err, ErrTransient) {
 		t.Fatalf("connection refused: err = %v", err)
 	}
 
 	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { time.Sleep(300 * time.Millisecond) }))
 	defer slow.Close()
-	c = NewClient(&http.Client{Timeout: 50 * time.Millisecond}, slow.URL, staticToken("t"), "v")
+	c = newTestClient(&http.Client{Timeout: 50 * time.Millisecond}, slow.URL, staticToken("t"), "v")
 	if _, err := c.Get(context.Background(), "/p", nil); !isClass(err, ErrTransient) {
 		t.Fatalf("client timeout: err = %v", err)
 	}
@@ -271,7 +280,7 @@ func TestNetworkErrors(t *testing.T) {
 	// A canceled context is the caller's decision, not a transient failure.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	c = NewClient(slow.Client(), slow.URL, staticToken("t"), "v")
+	c = newTestClient(slow.Client(), slow.URL, staticToken("t"), "v")
 	err := func() error { _, err := c.Get(ctx, "/p", nil); return err }()
 	if !errors.Is(err, context.Canceled) || isClass(err, ErrTransient) {
 		t.Fatalf("canceled: err = %v", err)
@@ -280,7 +289,7 @@ func TestNetworkErrors(t *testing.T) {
 
 func TestTokenFuncErrorPropagates(t *testing.T) {
 	boom := errors.New("no token")
-	c := NewClient(http.DefaultClient, "http://127.0.0.1:1", func(context.Context) (string, error) { return "", boom }, "v")
+	c := newTestClient(http.DefaultClient, "http://127.0.0.1:1", func(context.Context) (string, error) { return "", boom }, "v")
 	if _, err := c.Get(context.Background(), "/p", nil); !errors.Is(err, boom) {
 		t.Fatalf("err = %v", err)
 	}
@@ -293,7 +302,7 @@ func TestErrorsNeverCarrySecrets(t *testing.T) {
 		fmt.Fprintf(w, `{"message":"bad token ghs_LEAKEDsecret and Authorization: Bearer abc.def.ghi %s"}`, long)
 	}))
 	defer srv.Close()
-	c := NewClient(srv.Client(), srv.URL, staticToken("ghs_THETOKEN"), "v")
+	c := newTestClient(srv.Client(), srv.URL, staticToken("ghs_THETOKEN"), "v")
 	err := c.Post(context.Background(), "/p", map[string]string{"a": "b"}, nil)
 	if err == nil {
 		t.Fatal("want an error")
@@ -319,7 +328,7 @@ func TestErrorsNeverCarrySecrets(t *testing.T) {
 	dead := httptest.NewServer(http.NotFoundHandler())
 	u := dead.URL
 	dead.Close()
-	_, err = NewClient(http.DefaultClient, u, staticToken("ghs_THETOKEN"), "v").Get(context.Background(), "/p", nil)
+	_, err = newTestClient(http.DefaultClient, u, staticToken("ghs_THETOKEN"), "v").Get(context.Background(), "/p", nil)
 	if err == nil || strings.Contains(err.Error(), "THETOKEN") {
 		t.Fatalf("err = %v", err)
 	}
@@ -335,7 +344,7 @@ func TestPostAndPatchBodies(t *testing.T) {
 		fmt.Fprint(w, `{"id":5}`)
 	}))
 	defer srv.Close()
-	c := NewClient(srv.Client(), srv.URL, staticToken("t"), "v")
+	c := newTestClient(srv.Client(), srv.URL, staticToken("t"), "v")
 	var out struct{ ID int }
 	if err := c.Post(context.Background(), "/issues/1/comments", map[string]string{"body": "hi"}, &out); err != nil || out.ID != 5 {
 		t.Fatalf("Post: %v %+v", err, out)
@@ -366,7 +375,7 @@ func TestPaginate(t *testing.T) {
 	}))
 	defer srv.Close()
 	srvURL = srv.URL
-	c := NewClient(srv.Client(), srv.URL, staticToken("t"), "v")
+	c := newTestClient(srv.Client(), srv.URL, staticToken("t"), "v")
 	var all []int
 	err := c.Paginate(context.Background(), "/items", func(raw json.RawMessage) error {
 		var page []int
@@ -402,9 +411,53 @@ func TestPaginateRefusesForeignHost(t *testing.T) {
 		fmt.Fprint(w, `[]`)
 	}))
 	defer srv.Close()
-	c := NewClient(srv.Client(), srv.URL, staticToken("t"), "v")
+	c := newTestClient(srv.Client(), srv.URL, staticToken("t"), "v")
 	err := c.Paginate(context.Background(), "/items", func(json.RawMessage) error { return nil })
 	if !isClass(err, ErrPermanent) || hit.Load() {
 		t.Fatalf("err = %v, foreign host hit = %v", err, hit.Load())
+	}
+}
+
+func TestRefusesUnsafeRequestTargets(t *testing.T) {
+	var hits atomic.Int64
+	var tokenCalls atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits.Add(1); fmt.Fprint(w, `[]`) }))
+	defer srv.Close()
+	c := newTestClient(srv.Client(), srv.URL, func(context.Context) (string, error) { tokenCalls.Add(1); return "t", nil }, "v")
+	ctx := context.Background()
+	// With a base of http://127.0.0.1:port, "@evil.example/x" would make evil.example the host.
+	for _, path := range []string{"@evil.example/x", "evil.example/x", "", "x", "https://evil.example/x"} {
+		_, err := c.Get(ctx, path, nil)
+		errs := []error{
+			err,
+			c.Post(ctx, path, map[string]int{}, nil),
+			c.Patch(ctx, path, map[string]int{}, nil),
+			c.Paginate(ctx, path, func(json.RawMessage) error { return nil }),
+		}
+		for i, e := range errs {
+			if !isClass(e, ErrPermanent) {
+				t.Errorf("path %q, call %d: err = %v, want ErrPermanent", path, i, e)
+			}
+		}
+	}
+	if hits.Load() != 0 || tokenCalls.Load() != 0 {
+		t.Fatalf("%d requests sent and %d token fetches for refused paths", hits.Load(), tokenCalls.Load())
+	}
+	if _, err := c.Get(ctx, "/ok", nil); err != nil || hits.Load() != 1 {
+		t.Fatalf("a good path must still work: %v, %d hits", err, hits.Load())
+	}
+}
+
+func TestNewClientAPIURL(t *testing.T) {
+	tok := staticToken("t")
+	for _, bad := range []string{"://bad", "http://api.github.com", "ftp://x", "api.github.com", "https://", "http://127.0.0.1.evil.example", "http://localhost.evil.example/", "http://", "/relative"} {
+		if c, err := NewClient(nil, bad, tok, "v"); err == nil || c != nil {
+			t.Errorf("APIURL %q: want an error, got %v", bad, err)
+		}
+	}
+	for _, good := range []string{"", "https://api.github.com", "https://ghe.example.com/api/v3/", "http://127.0.0.1:8080", "http://localhost:80", "http://[::1]:9", "http://LOCALHOST"} {
+		if _, err := NewClient(nil, good, tok, "v"); err != nil {
+			t.Errorf("APIURL %q: %v", good, err)
+		}
 	}
 }
