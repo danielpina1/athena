@@ -43,8 +43,9 @@ func TestWriteSettingsShape(t *testing.T) {
 			"Stop":              hookEntry("/opt/athena/bin/athena hook Stop", 30),
 			"SessionStart":      hookEntry("/opt/athena/bin/athena hook SessionStart", 30),
 		},
-		"attribution":         map[string]any{"commit": "", "pr": "", "sessionUrl": false},
-		"includeCoAuthoredBy": false,
+		"attribution":            map[string]any{"commit": "", "pr": "", "sessionUrl": false},
+		"includeCoAuthoredBy":    false,
+		"includeGitInstructions": false,
 	}
 	if got := readJSON(t, path); !reflect.DeepEqual(got, want) {
 		gb, _ := json.MarshalIndent(got, "", " ")
@@ -251,5 +252,17 @@ func TestWriteSettingsHidesAttribution(t *testing.T) {
 	}
 	if v, ok := got["includeCoAuthoredBy"]; !ok || v != false {
 		t.Errorf("includeCoAuthoredBy = %v (set %v), want false", v, ok)
+	}
+}
+
+// Claude Code's built-in commit and pull request workflow is off: its own PR template and "commit only when asked"
+// lines would compete with the worker prompt's section on commits and pull requests.
+func TestWriteSettingsTurnsOffGitInstructions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	if err := WriteSettingsWith(path, "/bin/athena", "/run/a.sock", 0, &Sandbox{}); err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := readJSON(t, path).(map[string]any)["includeGitInstructions"]; !ok || v != false {
+		t.Errorf("includeGitInstructions = %v (set %v), want false", v, ok)
 	}
 }

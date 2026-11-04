@@ -51,6 +51,9 @@ type settingsFile struct {
 	// attribution; a newer one reads attribution and ignores it (checked against Claude Code 2.1.280).
 	Attribution         attributionSettings `json:"attribution"`
 	IncludeCoAuthoredBy bool                `json:"includeCoAuthoredBy"`
+	// IncludeGitInstructions false leaves Claude Code's built-in commit and pull request workflow out of the system
+	// prompt (checked against Claude Code 2.1.280): its own PR template would compete with the worker prompt's.
+	IncludeGitInstructions bool `json:"includeGitInstructions"`
 }
 
 // attributionSettings is Claude Code's "attribution" block: an empty commit or pr hides that attribution, and
