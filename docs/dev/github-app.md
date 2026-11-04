@@ -181,6 +181,65 @@ You can also give Athena work yourself, in a configured repository, without a me
 
     athena task --repo yourlogin/sandbox "Fix the typo in README.md"
 
+## 5. The worker sandbox
+
+Athena turns on Claude Code's sandbox for every worker session on macOS and Linux. Workers start with
+`--settings <generated file> --setting-sources ""`, so your own `/sandbox` or `settings.json` sandbox setting never
+reaches them; the generated `.athena/settings.json` carries the sandbox block instead. A worker's Bash commands, and
+every process they start (git, gh, scripts, builds), may then:
+
+- **write** only the Ticket's directory, the repository's git directory (so commits work in the worktree), the
+  sandbox's own temporary directory (`$TMPDIR`) and the paths you add. The git directory's `config` and `hooks` and
+  Athena's own `.athena/settings.json`, `.athena/mcp.json` and `.athena/.gitignore` stay read-only, even inside those.
+- **read** everything your user can, except the GitHub App's private key.
+- **connect** only to GitHub (`github.com`, `*.github.com`, `*.githubusercontent.com`), the hosts you add, and the
+  node socket. `athena git-credential` (git's credential helper) and `athena gh` reach Athena through that socket, so
+  pushing and opening the pull request keep working. Any other host is refused, never asked about.
+
+A worker cannot ask to run a command outside the sandbox (Claude Code's `dangerouslyDisableSandbox` is ignored), and a
+sandboxed command still goes through Athena's rules and Approvals as before. The sandbox covers commands only: Claude
+Code's own Read, Edit, Write and WebFetch tools, the hooks and Athena's MCP server run outside it, and Athena's rules
+are what confine those.
+
+Configure it in the `sandbox` part of `~/.athena/config.json` (every field is optional; restart the server after a
+change). `athena github setup` keeps this part when it rewrites the file.
+
+```json
+{
+  "sandbox": {
+    "enabled": true,
+    "required": false,
+    "allowedDomains": ["proxy.golang.org", "sum.golang.org", "registry.npmjs.org"],
+    "allowWrite": ["/Users/you/Library/Caches/go-build", "/Users/you/go/pkg/mod"],
+    "weakerNetworkIsolation": false,
+    "caFile": ""
+  }
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `enabled` | Unset: on for macOS and Linux. `false` turns it off; the server log then warns at every start. |
+| `required` | `true` makes a worker fail to start when the sandbox cannot start (on Linux: `bubblewrap` or `socat` missing). By default Claude Code warns and runs the commands **unsandboxed**; set it once the sandbox works on your machine. |
+| `allowedDomains` | Hosts reachable besides GitHub: package registries and module proxies your projects' builds and tests download from. `*.example.com` matches the subdomains. |
+| `allowWrite` | Absolute paths writable besides the Ticket's directory, such as build and module caches in your home directory (`go build` writes `~/Library/Caches/go-build` on macOS, `~/.cache/go-build` on Linux). |
+| `weakerNetworkIsolation` | macOS: lets commands reach the `trustd` service. `gh` (and other Go programs) need it to verify GitHub's certificate behind a TLS-inspecting proxy whose CA is in the keychain. It opens a path out of the sandbox through that service. |
+| `caFile` | Absolute path to a PEM bundle that workers' git, curl and OpenSSL verify TLS with (`SSL_CERT_FILE`, `GIT_SSL_CAINFO`, `CURL_CA_BUNDLE`). Inside the sandbox git and curl cannot use the keychain, so behind a TLS-inspecting proxy they need the proxy's CA in a file. |
+
+**Behind a TLS-inspecting proxy** (a corporate secure web gateway that re-signs HTTPS with its own CA), a sandboxed
+worker's `git push` fails with `SSL certificate problem: unable to get local issuer certificate` and `gh` cannot
+verify GitHub either. Export the system roots plus the proxy's CA into one bundle your user can read, and set both
+fields:
+
+    { cat /etc/ssl/cert.pem; security find-certificate -a -p -c "<the CA's name>" /Library/Keychains/System.keychain; } \
+        > ~/.athena/ca.pem
+
+    "sandbox": {"caFile": "/Users/you/.athena/ca.pem", "weakerNetworkIsolation": true}
+
+**On Linux** the sandbox needs `bubblewrap` and `socat` installed. Linux cannot allow one Unix socket by path, so for
+workers to reach the node socket Athena lets their commands connect to **any** Unix socket (the Docker socket or an
+SSH agent, if one is reachable); macOS allows the node socket alone.
+
 ## Safety notes
 
 - **The App is a separate identity from you.** Commits, pull requests and comments come from `<slug>[bot]`, with the
@@ -194,28 +253,32 @@ You can also give Athena work yourself, in a configured repository, without a me
 - **Observe is the default; `auto` is a choice.** Observe holds back proactive work only. An explicit request (an
   allowed account that mentions the App, or a cell set to `explicit`) starts work and writes to GitHub in every mode;
   keep `allowed` to accounts you trust.
-- **Workers run as your OS user.** They have your files, your shell and your network. Athena confines them with rules
-  (the Ticket's directory, blocked commands, no credential files, an Approval for anything else), but a script can do
-  what a named path cannot, so the file-level isolation is **best effort**, not a security boundary.
-  - **Claude Code's sandbox does not protect workers today.** Athena starts workers with `--settings <generated file>
-    --setting-sources ""`, and the generated settings do not enable the sandbox, so your own `/sandbox` setting is
-    ignored. Athena does not enable the sandbox for workers and does not load your sandbox setting. Setting it in
-    worker settings is a planned follow-up.
-  - Until then the effective isolation is a **dedicated, restricted OS user** that owns only `~/.athena` and its own
-    `claude` login and nothing else you care about, or a **VM or container**. Run the whole server there.
+- **Workers run as your OS user.** They have your files, your shell and your network, confined by two layers, and
+  neither is a security boundary on its own:
+  - **Athena's rules** (the Ticket's directory, blocked commands, no credential files, an Approval for anything else)
+    govern every tool call, including Claude Code's own Read, Edit and Write tools. They judge named paths and parsed
+    commands, and a script can do what a named path cannot, so they are **best effort**.
+  - **Claude Code's sandbox** (section 5, on by default on macOS and Linux) confines what a worker's commands actually
+    do: writes to the worktree and its git directory, reads of everything but the App key, connections to GitHub and
+    your listed hosts. It does not cover Claude Code's own tools, which run outside it, and unless `required` is set a
+    machine where it cannot start runs the commands unsandboxed with only a warning. The server log says
+    `claude code sandbox is on for workers` at every start.
+  - For a real boundary, run the whole server as a **dedicated, restricted OS user** that owns only `~/.athena` and its
+    own `claude` login and nothing else you care about, or in a **VM or container**.
 - **A worker can obtain its own Assignment's token.** To push and open its pull request, a worker asks Athena for a
   token through a credential helper. It is short-lived (about an hour at most), limited to the single repository of the
   Ticket and to the worker permissions above, minted per Assignment, held in memory and never written to SQLite, logs,
   prompts or transcripts. When the worker's session ends, Athena drops the token and revokes it with GitHub (best
   effort: if the revocation fails, the token still expires on its own). A worker can therefore act on that repository
   as the bot while its session runs, and a copy it kept until the revocation or, at worst, the expiry.
-- **The private key is not out of a worker's reach.** Athena's rules deny workers the credential paths (the key, your
-  `~/.ssh`, `~/.claude` and the like), but those rules are not a boundary: a worker runs as your OS user, as the server
-  does, so a determined script can read any 0600 file that user can read, the App's private key included. The
-  restricted-user option keeps *your other* files, keys and logins away from workers, but not the App key itself, which
-  the server (and so that user) must read. Limit the damage: install the App only on repositories you can afford to
-  have written to, and if you suspect a leak delete the key on the App's page and generate another; installation tokens
-  expire on their own. Keep the key `0600` in a directory only that user can read.
+- **The private key is not out of a worker's reach.** The sandbox denies workers' commands the key file, and Athena's
+  rules deny Claude Code's Read tool the credential paths (the key, your `~/.ssh`, `~/.claude` and the like). But a
+  worker runs as your OS user, as the server does, and the rules are not a boundary: with the sandbox off, or through
+  a tool the sandbox does not cover, a determined worker can read any 0600 file that user can read, the App's private
+  key included. The restricted-user option keeps *your other* files, keys and logins away from workers, but not the
+  App key itself, which the server (and so that user) must read. Limit the damage: install the App only on repositories
+  you can afford to have written to, and if you suspect a leak delete the key on the App's page and generate another;
+  installation tokens expire on their own. Keep the key `0600` in a directory only that user can read.
 
 ## Troubleshooting
 
@@ -224,6 +287,10 @@ You can also give Athena work yourself, in a configured repository, without a me
   **Configure**), or fix the `--repo` spelling.
 - Nothing happens after a mention: `athena status` (is the source healthy?), `athena triggers`, `athena decisions`.
   In `observe` mode, "would accept" on an inferred candidate is the whole answer.
+- A worker's `git push` fails with `SSL certificate problem`: a TLS-inspecting proxy; set `caFile` and
+  `weakerNetworkIsolation` (section 5).
+- A worker's build or test fails with `Operation not permitted` or `CONNECT tunnel failed, response 403`: the sandbox
+  refused a write or a host; add the cache path to `allowWrite` or the host to `allowedDomains` (section 5).
 - A mention must name the App's slug as a whole word (`@athena-yourname`), outside quoted lines. The App's own comments
   never become Triggers.
 
@@ -237,6 +304,8 @@ closing the issue and deleting the branch. It uses the real `claude` (haiku), co
 pull request: point it only at a repository you do not mind changing.
 
 It needs `claude` and `gh` (logged in as you, since the issue must come from you and not from the App) on `PATH`.
+The worker runs sandboxed, as by default; behind a TLS-inspecting proxy add `ATHENA_LIVE_SANDBOX_CA_FILE=<bundle>`
+(section 5), which the test puts in `caFile` with `weakerNetworkIsolation`.
 The server runs in a fresh temp state dir, configured from these variables; your own `~/.athena` is not used.
 
     ATHENA_LIVE_GITHUB=1 ATHENA_LIVE_REPO=yourlogin/sandbox \
