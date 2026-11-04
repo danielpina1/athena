@@ -1,0 +1,7 @@
+version: v2
+clean: true
+plugins:
+  - local: ["go", "tool", "protoc-gen-go"]
+    out: internal/pb
+    opt:
+      - module=github.com/danielpina1/athena/internal/pb

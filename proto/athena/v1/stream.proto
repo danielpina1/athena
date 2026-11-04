@@ -1,0 +1,42 @@
+syntax = "proto3";
+
+package athena.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/danielpina1/athena/internal/pb/athenav1;athenav1";
+
+// A watched Ticket's session stream.
+
+message StreamOpen {
+  string ticket_id = 1;
+  // from_offset -1 means "the last 200 items".
+  int64 from_offset = 2;
+}
+
+message StreamItems {
+  string ticket_id = 1;
+  repeated StreamItem items = 2;
+}
+
+message StreamItem {
+  int64 offset = 1;
+  google.protobuf.Timestamp at = 2;
+  // kind is init, say, thinking, tool_call, tool_result, result or other.
+  string kind = 3;
+  string text = 4;
+  string tool = 5;
+  string tool_use_id = 6;
+  bool is_error = 7;
+}
+
+// StreamGap says the items from..to were dropped from the ring.
+message StreamGap {
+  string ticket_id = 1;
+  int64 from = 2;
+  int64 to = 3;
+}
+
+message StreamClose {
+  string ticket_id = 1;
+}
