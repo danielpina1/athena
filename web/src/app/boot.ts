@@ -123,25 +123,36 @@ export function createRuntime(opts: RuntimeOptions): Runtime {
   };
 
   // The start-up check failed (no network, or a server error): ask again when the network is back or the page is shown.
+  // In the offline shell the link keeps trying on its own (backoff up to 15 s): each new attempt asks again too, so a
+  // device that never went offline (a server restart behind a proxy) recovers without an online or visibility event.
   let checked: Promise<void> | undefined;
   let watching = false;
-  const retryCheck = (ev: Event) => {
-    if (ev.type === "visibilitychange" && document.visibilityState !== "visible") return;
+  let offLinkAttempts: (() => void) | undefined;
+  const recheck = () => {
     unwatchOnline();
     checked = undefined;
     void runtime.checkSession();
+  };
+  const retryCheck = (ev: Event) => {
+    if (ev.type === "visibilitychange" && document.visibilityState !== "visible") return;
+    recheck();
   };
   function unwatchOnline() {
     if (!watching) return;
     watching = false;
     window.removeEventListener("online", retryCheck);
     document.removeEventListener("visibilitychange", retryCheck);
+    offLinkAttempts?.();
+    offLinkAttempts = undefined;
   }
   const watchOnline = () => {
     if (watching) return;
     watching = true;
     window.addEventListener("online", retryCheck);
     document.addEventListener("visibilitychange", retryCheck);
+    offLinkAttempts = client.onStatus((st) => {
+      if (st === "connecting" || st === "open") recheck();
+    });
   };
   const runtime: Runtime = {
     client,
@@ -161,9 +172,10 @@ export function createRuntime(opts: RuntimeOptions): Runtime {
           }
         } catch (e) {
           if (e instanceof AuthError) {
-            // The server answered, with an error (a 5xx, or a proxy's): not an offline start.
-            if (phase() === "signedIn") leave(SERVER_ERROR_NOTICE);
-            else setPhase({ kind: "signedOut", notice: SERVER_ERROR_NOTICE });
+            // The server answered with an error (a 5xx, or a proxy's while Athena restarts): it did not say "signed
+            // out". At start-up that is sign-in with an honest notice; in the offline shell the shell, its store and
+            // its link stay, and the check runs again. Only a definite signed-out answer leaves.
+            if (phase() !== "signedIn") setPhase({ kind: "signedOut", notice: SERVER_ERROR_NOTICE });
           } else if (navigator.serviceWorker?.controller) {
             // No network, in the installed app (the service worker served this page from its cache): the app, with
             // the link's "unreachable" banner, until the server answers.

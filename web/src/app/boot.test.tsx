@@ -360,3 +360,39 @@ test("a server error on the start-up check is not taken for an offline start", a
     delete (navigator as { serviceWorker?: unknown }).serviceWorker;
   }
 });
+
+test("a server error while the offline shell is up keeps the shell; the link's next attempt checks again", async () => {
+  Object.defineProperty(navigator, "serviceWorker", { configurable: true, value: { controller: {} } });
+  try {
+    const { server, runtime } = setup();
+    let n = 0;
+    const { calls } = fakeFetch({
+      "GET /auth/session": () => {
+        n++;
+        if (n === 1) throw new TypeError("network down");
+        if (n === 2) return { status: 502, json: { code: "internal" } }; // a proxy while Athena restarts
+        return { json: { authenticated: true } };
+      },
+    });
+    gate(runtime);
+    await screen.findByText("the app");
+    act(() => {
+      window.dispatchEvent(new Event("online"));
+    });
+    await waitFor(() => expect(calls).toHaveLength(2));
+    await runtime.outbox.settled();
+    // Not a "signed out" answer: the shell and its link stay.
+    expect(screen.getByText("the app")).toBeTruthy();
+    expect(screen.queryByText("Athena's server had an error. Try again in a moment.")).toBeNull();
+    expect(runtime.client.status).not.toBe("signedOut");
+    const sockets = server.sockets.length;
+
+    // No online or visibility event comes (the device never went offline): the link's own next attempt asks again.
+    act(() => server.socket.serverClose(1006));
+    await waitFor(() => expect(calls).toHaveLength(3), { timeout: 5000 });
+    await waitFor(() => expect(server.sockets.length).toBeGreaterThan(sockets));
+    expect(screen.getByText("the app")).toBeTruthy();
+  } finally {
+    delete (navigator as { serviceWorker?: unknown }).serviceWorker;
+  }
+});
