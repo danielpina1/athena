@@ -452,6 +452,7 @@ func (n *Node) onStop(st *loopState, t core.Ticket, a core.Assignment, reason st
 	ended := t.Ended != nil
 	if ended {
 		n.streams.end(t.ID)
+		n.dropPrompt(t.ID)
 	}
 	st.queue = slices.DeleteFunc(st.queue, func(q *session) bool {
 		return q.a.ID == a.ID || (ended && q.t.ID == t.ID)
@@ -1504,9 +1505,20 @@ func TranscriptPath(stateDir, ticketID string) string {
 }
 
 // PromptPath returns the file that keeps the system prompt a Ticket's session started with: <stateDir>/prompts/<ticket
-// id>.md. Next to the transcript, it lives in the state directory, which sessions may not read.
+// id>.md. Next to the transcript, it lives in the state directory, outside every path the sandbox lets a session write
+// (with the sandbox off, or an owner allowWrite that covers the state directory, a worker could rewrite its kept
+// prompt). It is removed when the Ticket ends.
 func PromptPath(stateDir, ticketID string) string {
 	return filepath.Join(stateDir, "prompts", ticketID+".md")
+}
+
+// dropPrompt removes the prompt kept for an ended Ticket's sessions.
+func (n *Node) dropPrompt(ticketID string) {
+	if n.cfg.StateDir != "" {
+		if err := os.Remove(PromptPath(n.cfg.StateDir, ticketID)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			n.log.Warn("remove the kept session prompt", "ticket", ticketID, "error", err)
+		}
+	}
 }
 
 // sessionPrompt is the system prompt of the Ticket's next session. A new session gets the current worker prompt

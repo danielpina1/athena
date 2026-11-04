@@ -1,10 +1,8 @@
 package server
 
 import (
-	"log/slog"
-	"strings"
-
 	"google.golang.org/protobuf/types/known/timestamppb"
+	"log/slog"
 
 	"github.com/danielpina1/athena/internal/pb/athenav1"
 	"github.com/danielpina1/athena/internal/store"
@@ -114,8 +112,8 @@ func (d *Dispatcher) setPrompt(name string, base uint32, text *string) error {
 	}
 	if text != nil {
 		switch {
-		case strings.TrimSpace(*text) == "":
-			return userErrorf("a prompt override needs text; reset the part to use the default")
+		case prompts.Blank(*text):
+			return userErrorf("a prompt override needs text beyond comment lines; reset the part to use the default")
 		case len(*text) > maxPromptBytes:
 			return userErrorf("a prompt part is at most 64 KiB")
 		}

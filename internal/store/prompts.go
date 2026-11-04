@@ -2,15 +2,16 @@ package store
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/danielpina1/athena/prompts"
 )
 
-// ErrConflict is returned when a save was edited from a revision that is no longer the current one (the same error as
-// ErrStaleRevision, which the dispatcher reports as the conflict result code).
-var ErrConflict = ErrStaleRevision
+// ErrConflict is returned by SavePrompt when the base revision is not the latest one. It is its own error, so the
+// dispatcher words a stale prompt save apart from any other stale revision.
+var ErrConflict = errors.New("store: prompt revision is stale")
 
 // PromptOverride is the owner's current text for one prompt part and the default it was saved against.
 type PromptOverride struct {
@@ -35,30 +36,34 @@ type PromptRevision struct {
 // PromptOverrides returns the parts whose latest revision is an override (not a reset), by part name, and the latest
 // revision of any part (0 while nothing was saved).
 func (s *Store) PromptOverrides() (map[string]PromptOverride, uint32, error) {
-	rows, err := s.db.Query(`SELECT r.revision, r.part, r.text, r.default_hash, r.default_text FROM prompt_revisions r
-		WHERE r.revision = (SELECT MAX(revision) FROM prompt_revisions WHERE part = r.part)`)
+	out := map[string]PromptOverride{}
+	var latest uint32
+	// One transaction: the rows and the revision come from the same state.
+	err := s.Tx(func(tx *Tx) error {
+		rows, err := tx.sql.Query(`SELECT r.revision, r.part, r.text, r.default_hash, r.default_text FROM prompt_revisions r
+			WHERE r.revision = (SELECT MAX(revision) FROM prompt_revisions WHERE part = r.part)`)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var o PromptOverride
+			var text sql.NullString
+			if err := rows.Scan(&o.Revision, &o.Part, &text, &o.DefaultHash, &o.DefaultText); err != nil {
+				return err
+			}
+			if text.Valid {
+				o.Text = text.String
+				out[o.Part] = o
+			}
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		return tx.sql.QueryRow(`SELECT COALESCE(MAX(revision), 0) FROM prompt_revisions`).Scan(&latest)
+	})
 	if err != nil {
 		return nil, 0, fmt.Errorf("store: prompt overrides: %w", err)
-	}
-	defer rows.Close()
-	out := map[string]PromptOverride{}
-	for rows.Next() {
-		var o PromptOverride
-		var text sql.NullString
-		if err := rows.Scan(&o.Revision, &o.Part, &text, &o.DefaultHash, &o.DefaultText); err != nil {
-			return nil, 0, fmt.Errorf("store: prompt overrides: %w", err)
-		}
-		if text.Valid {
-			o.Text = text.String
-			out[o.Part] = o
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, 0, fmt.Errorf("store: prompt overrides: %w", err)
-	}
-	var latest uint32
-	if err := s.db.QueryRow(`SELECT COALESCE(MAX(revision), 0) FROM prompt_revisions`).Scan(&latest); err != nil {
-		return nil, 0, fmt.Errorf("store: prompt revision: %w", err)
 	}
 	return out, latest, nil
 }

@@ -468,6 +468,8 @@ func (d *Dispatcher) failure(err error) *athenav1.CommandResult {
 		return &athenav1.CommandResult{Code: code, Message: ue.Msg}
 	case errors.Is(err, store.ErrConflict):
 		return &athenav1.CommandResult{Code: web.CodeConflict, Message: stalePrompts}
+	case errors.Is(err, store.ErrStaleRevision):
+		return &athenav1.CommandResult{Code: web.CodeConflict, Message: staleSettings}
 	case errors.Is(err, node.ErrNoSession):
 		return &athenav1.CommandResult{Code: web.CodeUnavailable, Message: "the ticket has no session running"}
 	}

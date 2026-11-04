@@ -1,11 +1,15 @@
 package server
 
 import (
+	"fmt"
+	"io"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/danielpina1/athena/internal/pb/athenav1"
+	"github.com/danielpina1/athena/internal/store"
 	"github.com/danielpina1/athena/internal/web"
 	"github.com/danielpina1/athena/prompts"
 )
@@ -119,6 +123,7 @@ func TestSetPromptRefusals(t *testing.T) {
 	}{
 		{setPromptCmd("e1", "worker", 0, ""), web.CodeInvalid},
 		{setPromptCmd("e2", "worker", 0, "   \n"), web.CodeInvalid},
+		{setPromptCmd("e2b", "worker", 0, "<!-- only a comment -->\n\n"), web.CodeInvalid},
 		{setPromptCmd("e3", "worker", 0, strings.Repeat("x", 64<<10+1)), web.CodeInvalid},
 		{setPromptCmd("e4", "nonsense", 0, "x"), web.CodeNotFound},
 		{resetPromptCmd("e5", "nonsense", 0), web.CodeNotFound},
@@ -181,5 +186,60 @@ func TestPromptsReachTheHubOnSave(t *testing.T) {
 	f := c.next("prompts delta", func(f *athenav1.Frame) bool { return f.GetDelta().GetPrompts() != nil })
 	if p := f.GetDelta().GetPrompts(); p.Revision != 1 || !partView(p, "worker").Overridden {
 		t.Fatalf("delta = %v", p)
+	}
+}
+
+func TestStaleRevisionMessagesAreSeparate(t *testing.T) {
+	d := &Dispatcher{log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	prompt := d.failure(fmt.Errorf("save: %w", store.ErrConflict))
+	if prompt.Code != web.CodeConflict || !strings.Contains(prompt.Message, "prompts") {
+		t.Fatalf("prompt conflict = %v", prompt)
+	}
+	// What SaveMutedKinds returns when its retries run out.
+	settings := d.failure(store.ErrStaleRevision)
+	if settings.Code != web.CodeConflict || strings.Contains(settings.Message, "prompts") {
+		t.Fatalf("settings conflict = %v", settings)
+	}
+}
+
+func TestDefaultChangedTwiceStaysFlaggedAndReturnedClears(t *testing.T) {
+	w := startWeb(t, newStateDir(t))
+	cur := ""
+	for _, p := range prompts.Parts() {
+		if p.Name == prompts.PartReplies {
+			cur = p.Default
+		}
+	}
+	mine := "my replies"
+	flagged := func() bool {
+		v, err := promptsView(w.d.st)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return partView(v, prompts.PartReplies).DefaultUpdated
+	}
+	// Saved against an older default, then the default changed again (another release): still flagged.
+	if _, err := w.d.st.SavePrompt(prompts.PartReplies, &mine, 0, "default v1", "web"); err != nil {
+		t.Fatal(err)
+	}
+	if !flagged() {
+		t.Fatal("not flagged after one default change")
+	}
+	// The owner kept their text against v2, and the compiled default is neither: the default changed twice, still flagged.
+	if _, err := w.d.st.SavePrompt(prompts.PartReplies, &mine, 1, "default v2", "web"); err != nil {
+		t.Fatal(err)
+	}
+	if !flagged() {
+		t.Fatal("not flagged after the default changed twice")
+	}
+	if d, _ := w.d.getPrompt(prompts.PartReplies); d.PreviousDefaultText != "default v2" {
+		t.Fatalf("previous default = %q, want the latest saved against", d.PreviousDefaultText)
+	}
+	// The default returned to the value the override was saved against: no flag.
+	if _, err := w.d.st.SavePrompt(prompts.PartReplies, &mine, 2, cur, "web"); err != nil {
+		t.Fatal(err)
+	}
+	if flagged() {
+		t.Fatal("flagged although the saved default equals the current one")
 	}
 }

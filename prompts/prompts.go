@@ -97,3 +97,6 @@ func compose(parts ...string) string {
 	}
 	return strings.Join(out, "\n\n") + "\n"
 }
+
+// Blank reports whether text says nothing once comment lines and blank space are dropped, as compose drops them.
+func Blank(text string) bool { return compose1(text) == "" }
