@@ -55,7 +55,7 @@ const (
 )
 
 // ReplyRequest asks for a message to a Channel. TriggerID names the person's message an acknowledgement or answer is
-// for (required for both); a result or attention may name one to reply where it was written.
+// for (required for both); a result or attention may name one that reached the Ticket, to reply where it was written.
 type ReplyRequest struct {
 	TicketID  string
 	TriggerID string
@@ -90,10 +90,11 @@ type Receipt struct {
 	Round string `json:"round,omitempty"`
 }
 
-// ReceiptID is a reply's stable ID: the first 16 hex characters of sha256(ticket|purpose|trigger|text), so the same
-// reply asked for twice is queued once.
-func ReceiptID(ticketID, purpose, triggerID, text string) string {
-	sum := sha256.Sum256([]byte(ticketID + "|" + purpose + "|" + triggerID + "|" + text))
+// ReceiptID is a reply's stable ID: the first 16 hex characters of sha256(ticket|purpose|slot|text), so the same
+// reply asked for twice is queued once. slot is the Trigger's ID for an acknowledgement or an answer, the round
+// (<assignment>@<report time, RFC3339Nano>) for a result and the Attention's ID for attention.
+func ReceiptID(ticketID, purpose, slot, text string) string {
+	sum := sha256.Sum256([]byte(ticketID + "|" + purpose + "|" + slot + "|" + text))
 	return hex.EncodeToString(sum[:])[:16]
 }
 
@@ -164,7 +165,25 @@ func (o *op) reply(r ReplyRequest) (string, error) {
 			return "", userErrorf("trigger %s not found", r.TriggerID)
 		}
 	}
-	id := ReceiptID(t.ID, r.Purpose, r.TriggerID, r.Text)
+	// A result or attention may name a Trigger to reply where it was written: only one that reached the Ticket.
+	if tr != nil && (r.Purpose == PurposeResult || r.Purpose == PurposeAttention) && !reachedTicket(t, tr.ID, true) {
+		return "", userErrorf("trigger %s did not reach ticket %s", tr.ID, t.ID)
+	}
+	// The ID's third part (R15): a result's round, an attention's Attention, else the Trigger, so the same text in a
+	// later round or for a later question is a new message.
+	slot, round := r.TriggerID, ""
+	switch r.Purpose {
+	case PurposeResult:
+		if l := t.LatestAssignment(); l != nil && l.Report != nil {
+			round = l.ID + "@" + l.Report.At.UTC().Format(time.RFC3339Nano)
+			slot = round
+		}
+	case PurposeAttention:
+		if t.Attention != nil {
+			slot = t.Attention.ID
+		}
+	}
+	id := ReceiptID(t.ID, r.Purpose, slot, r.Text)
 	existing, err := o.tx.GetReceipt(id)
 	if err != nil {
 		return "", err
@@ -178,7 +197,6 @@ func (o *op) reply(r ReplyRequest) (string, error) {
 		return "", err
 	}
 	asker := tr
-	var round string
 	switch r.Purpose {
 	case PurposeAcknowledgement:
 		if t.Ended != nil {
@@ -206,7 +224,6 @@ func (o *op) reply(r ReplyRequest) (string, error) {
 			(t.Ended != nil && t.Ended.By == EndByHuman) {
 			return "", userErrorf("ticket %s has no ready or dropped report to give the result of", t.ID)
 		}
-		round = l.ID + "@" + l.Report.At.UTC().Format(time.RFC3339Nano)
 		if slices.ContainsFunc(receipts, func(x *Receipt) bool { return x.Purpose == PurposeResult && x.Round == round }) {
 			return "", userErrorf("ticket %s gave the result of this round already", t.ID)
 		}

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 )
 
 // channelled gives a Trigger the Channel of a comment on its primary Thread.
@@ -171,15 +172,36 @@ func TestAttentionOnlyWithAttention(t *testing.T) {
 	wantUserError(t, "no attention", err)
 
 	h.must(h.eng.FileReport(a, ReportInput{State: ReportWaiting, Question: "Which page?"}))
+	h.receive(channelled(h.message("c:9", pull1))) // reaches no Ticket
+	_, err = h.eng.Reply(ReplyRequest{TicketID: a, TriggerID: "c:9", Purpose: PurposeAttention, Text: "Which page?"})
+	wantUserError(t, "attention to a trigger that did not reach the ticket", err)
+	_, err = h.eng.Reply(ReplyRequest{TicketID: a, TriggerID: "c:404", Purpose: PurposeAttention, Text: "Which page?"})
+	wantUserError(t, "attention to an unknown trigger", err)
 	id := h.reply(ReplyRequest{TicketID: a, Purpose: PurposeAttention, Text: "Which page do you mean?"})
+	eq(t, "id from the attention", id, ReceiptID(a, PurposeAttention, h.ticket(a).Attention.ID, "Which page do you mean?"))
 	rc := h.receipt(id)
 	eq(t, "to the ticket's conversation", rc.Conversation, issue)
 	eq(t, "the ticket's channel", rc.Channel.Address["comment"], "c:1")
+	eq(t, "the same text in one attention: one receipt",
+		h.reply(ReplyRequest{TicketID: a, Purpose: PurposeAttention, Text: "Which page do you mean?"}), id)
+	eq(t, "one queued", len(h.replyEffects()), 1)
+	via := h.reply(ReplyRequest{TicketID: a, TriggerID: "c:1", Purpose: PurposeAttention, Text: "Which page, exactly?"})
+	eq(t, "to a trigger that reached it", h.receipt(via).Channel.Address["comment"], "c:1")
 
 	h.must(h.eng.AddPersonInput(a, "The login page.")) // the person answers: Attention clears
 	eq(t, "cleared", h.ticket(a).Attention == nil, true)
 	_, err = h.eng.Reply(ReplyRequest{TicketID: a, Purpose: PurposeAttention, Text: "Which page, again?"})
 	wantUserError(t, "attention cleared", err)
+
+	// R15: a new question is a new attention; the same text asks again.
+	h.tick(1)
+	h.must(h.eng.FileReport(a, ReportInput{State: ReportWaiting, Question: "Which page?"}))
+	n := len(h.replyEffects())
+	again := h.reply(ReplyRequest{TicketID: a, Purpose: PurposeAttention, Text: "Which page do you mean?"})
+	if again == id {
+		t.Error("a new attention's same text reused the old receipt")
+	}
+	eq(t, "queued anew", len(h.replyEffects()), n+1)
 }
 
 // Reference replies.md: an answer only to a person's message that reached the Ticket; a result once per ready or
@@ -205,7 +227,14 @@ func TestReplyPurposeRules(t *testing.T) {
 	_, err = h.eng.Reply(ReplyRequest{TicketID: a, Purpose: PurposeResult, Text: "Fixed."})
 	wantUserError(t, "result before ready", err)
 	h.must(h.eng.FileReport(a, ReportInput{State: ReportReady, Summary: "fixed"}))
+	_, err = h.eng.Reply(ReplyRequest{TicketID: a, TriggerID: "c:9", Purpose: PurposeResult, Text: "Fixed in #2."})
+	wantUserError(t, "result to a trigger that did not reach the ticket", err)
+	_, err = h.eng.Reply(ReplyRequest{TicketID: a, TriggerID: "c:404", Purpose: PurposeResult, Text: "Fixed in #2."})
+	wantUserError(t, "result to an unknown trigger", err)
 	id := h.reply(ReplyRequest{TicketID: a, Purpose: PurposeResult, Text: "Fixed in #2."})
+	l := h.ticket(a).LatestAssignment()
+	round := l.ID + "@" + l.Report.At.UTC().Format(time.RFC3339Nano)
+	eq(t, "id from the round", id, ReceiptID(a, PurposeResult, round, "Fixed in #2."))
 	eq(t, "result to the ticket's conversation", h.receipt(id).Conversation, issue)
 	eq(t, "the same result again", h.reply(ReplyRequest{TicketID: a, Purpose: PurposeResult, Text: "Fixed in #2."}), id)
 	_, err = h.eng.Reply(ReplyRequest{TicketID: a, Purpose: PurposeResult, Text: "Fixed, really."})
@@ -219,5 +248,12 @@ func TestReplyPurposeRules(t *testing.T) {
 	wantUserError(t, "resumed: not ready", err)
 	h.tick(1)
 	h.must(h.eng.FileReport(a, ReportInput{State: ReportDropped, Summary: "nothing to do"}))
-	h.reply(ReplyRequest{TicketID: a, Purpose: PurposeResult, Text: "Nothing more to do."})
+	n := len(h.replyEffects())
+	second := h.reply(ReplyRequest{TicketID: a, Purpose: PurposeResult, Text: "Fixed in #2."})
+	if second == id {
+		t.Error("the next round's same result reused the old receipt")
+	}
+	eq(t, "queued anew", len(h.replyEffects()), n+1)
+	eq(t, "twice in one round: one receipt", h.reply(ReplyRequest{TicketID: a, Purpose: PurposeResult, Text: "Fixed in #2."}), second)
+	eq(t, "still one more", len(h.replyEffects()), n+1)
 }
