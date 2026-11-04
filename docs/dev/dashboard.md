@@ -149,7 +149,7 @@ change):
 
 | Field | Meaning |
 | --- | --- |
-| `localRepoRoots` | Absolute paths, or paths starting with `~/`. Each folder, its children and its grandchildren are searched for a git repository (a `.git` directory or file), not below a repository found, skipping hidden folders, `node_modules`, `vendor`, symbolic links and Athena's state directory. Left out, it is the existing ones of `~/Developer`, `~/code`, `~/src`, `~/repos`, `~/Projects` and `~/Desktop`; `[]` turns the listing off. At most 200 repositories; the server searches in the background at start and every 3 minutes. |
+| `localRepoRoots` | Absolute paths, or paths starting with `~/`. Each folder, its children and its grandchildren are searched for a git repository (a `.git` directory or file), not below a repository found, skipping hidden folders, `node_modules`, `vendor`, symbolic links and Athena's state directory. A root that is itself a symbolic link is resolved once, and the repositories are listed by their resolved paths. Left out, it is the existing ones of `~/Developer`, `~/code`, `~/src`, `~/repos`, `~/Projects` and `~/Desktop`; `[]` turns the listing off. At most 200 repositories, in at most 5 seconds a scan; a scan cut short by the time keeps the last complete list (the server log says so once). The server searches in the background at start and every 3 minutes. |
 
 The dashboard shows these paths only to the signed-in owner. Typing any absolute path in New task still works.
 

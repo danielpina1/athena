@@ -214,7 +214,8 @@ func (s hubSource) NodeStatus() node.Status {
 // Repos lists where a task can be placed: the configured GitHub repositories and the repository or folder of each of
 // the newest Tickets, the last used first. A configured repository no Ticket used goes after them, by name; together
 // they are at most maxRepos. Then come the local git repositories the last scan found under the localRepoRoots and
-// not listed already, by name, at most maxLocalRepos (kind git, never used). A folder is a git repository when it has
+// not listed already (under any spelling through symbolic links), by name, at most maxLocalRepos (kind git, never
+// used). A folder is a git repository when it has
 // a .git entry.
 func (s hubSource) Repos() ([]*athenav1.RepoView, error) {
 	places, err := s.d.st.RecentPlacements(repoTickets)
@@ -276,6 +277,10 @@ func (s hubSource) Repos() ([]*athenav1.RepoView, error) {
 	for i, name := range names {
 		e := known[name]
 		listed[name] = true
+		if e.kind != "github" {
+			// A found repository is a resolved path: a used folder spelled through a link is the same place.
+			listed[resolvePath(name)] = true
+		}
 		out[i] = &athenav1.RepoView{Name: name, Kind: e.kind}
 		if !e.at.IsZero() {
 			out[i].LastUsedAt = timestamppb.New(e.at)

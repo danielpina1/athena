@@ -3,8 +3,10 @@ package server
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -109,8 +111,18 @@ func TestLocalRepoRootsConfigured(t *testing.T) {
 	}
 }
 
+// realDir is dir with its symbolic links resolved (a temporary directory on macOS is under the /var link).
+func realDir(t *testing.T, dir string) string {
+	t.Helper()
+	real, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return real
+}
+
 func TestScanLocalRepos(t *testing.T) {
-	root, outside := t.TempDir(), t.TempDir()
+	root, outside := realDir(t, t.TempDir()), t.TempDir()
 	mkdirs(t, root,
 		"top/.git", "top/inner/.git", // a repository, and one inside it that is not looked for
 		"group/deep/.git",     // a grandchild
@@ -126,52 +138,140 @@ func TestScanLocalRepos(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	skip := map[string]bool{filepath.Join(root, "state"): true, filepath.Join(root, "group", "state2"): true}
+	skip := []string{filepath.Join(root, "state"), filepath.Join(root, "group", "state2")}
+	scan := func(roots, skip []string, limit int, budget time.Duration) scanResult {
+		return scanLocalRepos(context.Background(), roots, skip, limit, budget)
+	}
 
-	got := scanLocalRepos(context.Background(), []string{root}, skip, 100, time.Minute)
+	got := scan([]string{root}, skip, 100, time.Minute)
 	want := []string{filepath.Join(root, "group", "deep"), filepath.Join(root, "group", "wt"), filepath.Join(root, "top")}
-	if fmt.Sprint(got) != fmt.Sprint(want) {
-		t.Errorf("found %v\nwant  %v", got, want)
+	if fmt.Sprint(got.found) != fmt.Sprint(want) || got.cut || got.capped {
+		t.Errorf("found %+v\nwant  %v", got, want)
 	}
 
 	// Overlapping roots list a repository once; the depth counts from each root.
-	got = scanLocalRepos(context.Background(), []string{root, filepath.Join(root, "group")}, skip, 100, time.Minute)
+	got = scan([]string{root, filepath.Join(root, "group")}, skip, 100, time.Minute)
 	want = []string{filepath.Join(root, "group", "deep"), filepath.Join(root, "group", "deeper", "x"),
 		filepath.Join(root, "group", "wt"), filepath.Join(root, "top")}
-	if fmt.Sprint(got) != fmt.Sprint(want) {
-		t.Errorf("overlapping roots: found %v\nwant  %v", got, want)
+	if fmt.Sprint(got.found) != fmt.Sprint(want) {
+		t.Errorf("overlapping roots: found %v\nwant  %v", got.found, want)
 	}
 
 	// A root that is a repository is listed itself.
-	if got := scanLocalRepos(context.Background(), []string{filepath.Join(root, "top")}, nil, 100, time.Minute); fmt.Sprint(got) != fmt.Sprint([]string{filepath.Join(root, "top")}) {
-		t.Errorf("a repository root: %v", got)
+	if got := scan([]string{filepath.Join(root, "top")}, nil, 100, time.Minute); fmt.Sprint(got.found) != fmt.Sprint([]string{filepath.Join(root, "top")}) {
+		t.Errorf("a repository root: %v", got.found)
 	}
 
-	// The cap, the time budget and the context bound a scan.
+	// A root that is a symbolic link is resolved once: the paths found, and the skips, are the resolved ones, whichever
+	// spelling the skip uses.
+	alias := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(root, alias); err != nil {
+		t.Fatal(err)
+	}
+	got = scan([]string{alias}, []string{filepath.Join(alias, "state"), filepath.Join(alias, "group", "state2")}, 100, time.Minute)
+	want = []string{filepath.Join(root, "group", "deep"), filepath.Join(root, "group", "wt"), filepath.Join(root, "top")}
+	if fmt.Sprint(got.found) != fmt.Sprint(want) {
+		t.Errorf("a linked root: found %v\nwant  %v", got.found, want)
+	}
+	if got := scan([]string{alias, root}, skip, 100, time.Minute); len(got.found) != 3 {
+		t.Errorf("a root and its alias: %v", got.found)
+	}
+
+	// The cap, the time budget and the context bound a scan, and say so.
 	many := t.TempDir()
 	for i := range 10 {
 		mkdirs(t, many, fmt.Sprintf("r%02d/.git", i))
 	}
-	if got := scanLocalRepos(context.Background(), []string{many}, nil, 3, time.Minute); len(got) != 3 {
-		t.Errorf("cap 3: %v", got)
+	if got := scan([]string{many}, nil, 3, time.Minute); len(got.found) != 3 || !got.capped || got.cut {
+		t.Errorf("cap 3: %+v", got)
 	}
-	if got := scanLocalRepos(context.Background(), []string{many}, nil, 100, 0); len(got) != 0 {
-		t.Errorf("no time: %v", got)
+	if got := scan([]string{many}, nil, 100, 0); len(got.found) != 0 || !got.cut {
+		t.Errorf("no time: %+v", got)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if got := scanLocalRepos(ctx, []string{many}, nil, 100, time.Minute); len(got) != 0 {
-		t.Errorf("cancelled: %v", got)
+	if got := scanLocalRepos(ctx, []string{many}, nil, 100, time.Minute); len(got.found) != 0 || !got.cut {
+		t.Errorf("cancelled: %+v", got)
 	}
 	// A missing root is passed over.
-	if got := scanLocalRepos(context.Background(), []string{filepath.Join(many, "nope"), many}, nil, 100, time.Minute); len(got) != 10 {
-		t.Errorf("with a missing root: %d", len(got))
+	if got := scan([]string{filepath.Join(many, "nope"), many}, nil, 100, time.Minute); len(got.found) != 10 || got.cut {
+		t.Errorf("with a missing root: %+v", got)
+	}
+
+	// A folder with more entries than one batch of reads is read whole.
+	wide := t.TempDir()
+	for i := range 300 {
+		mkdirs(t, wide, fmt.Sprintf("r%03d/.git", i))
+	}
+	if got := scan([]string{wide}, nil, 1000, time.Minute); len(got.found) != 300 || got.cut || got.capped {
+		t.Errorf("300 repositories in one folder: %d found, %+v", len(got.found), got.cut)
+	}
+}
+
+// A scan cut short (by the time budget) never replaces the last complete list; the cut and the cap are each logged
+// once, not every scan.
+func TestLocalReposKeepTheLastCompleteList(t *testing.T) {
+	var logs strings.Builder
+	l := newLocalRepos([]string{"/r"}, nil, slog.New(slog.NewTextHandler(&logs, nil)))
+	steps := []struct {
+		res     scanResult
+		changed bool
+		want    string
+	}{
+		{scanResult{found: []string{"/r/a"}, cut: true}, true, "[/r/a]"},       // nothing complete yet: better than none
+		{scanResult{found: []string{"/r/a", "/r/b"}}, true, "[/r/a /r/b]"},     // complete
+		{scanResult{found: []string{"/r/a"}, cut: true}, false, "[/r/a /r/b]"}, // cut short: kept
+		{scanResult{found: nil, cut: true}, false, "[/r/a /r/b]"},              // again
+		{scanResult{found: []string{"/r/b"}, capped: true}, true, "[/r/b]"},    // complete, at the cap
+		{scanResult{found: []string{"/r/b", "/r/c"}, capped: true}, true, "[/r/b /r/c]"},
+	}
+	for i, s := range steps {
+		if changed := l.apply(s.res); changed != s.changed || fmt.Sprint(l.list()) != s.want {
+			t.Errorf("step %d: changed %v list %v, want %v %s", i, changed, l.list(), s.changed, s.want)
+		}
+	}
+	if n := strings.Count(logs.String(), "time budget"); n != 1 {
+		t.Errorf("the cut was logged %d times:\n%s", n, logs.String())
+	}
+	if n := strings.Count(logs.String(), "at most"); n != 1 {
+		t.Errorf("the cap was logged %d times:\n%s", n, logs.String())
+	}
+}
+
+// A scan stuck in a filesystem call (a dead network mount) does not hold up the shutdown: run returns once ctx is
+// done, and the scan's late result is dropped.
+func TestLocalReposRunDoesNotWaitForAStuckScan(t *testing.T) {
+	l := newLocalRepos([]string{"/r"}, nil, nil)
+	release := make(chan struct{})
+	started := make(chan struct{})
+	l.scan = func(context.Context) scanResult {
+		close(started)
+		<-release // ignores ctx, as a blocked syscall would
+		return scanResult{found: []string{"/r/late"}}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		l.run(ctx, func() { t.Error("a dropped result was reported") })
+	}()
+	<-started
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(waitTimeout):
+		t.Fatal("run waited for the stuck scan")
+	}
+	close(release)
+	time.Sleep(20 * time.Millisecond)
+	if got := l.list(); len(got) != 0 {
+		t.Errorf("the late result was kept: %v", got)
 	}
 }
 
 // A scan whose result differs calls changed; one that finds the same does not.
 func TestLocalReposRunReportsChanges(t *testing.T) {
-	root := t.TempDir()
+	root := realDir(t, t.TempDir())
 	mkdirs(t, root, "a/.git")
 	l := newLocalRepos([]string{root}, nil, nil)
 	l.every = 10 * time.Millisecond
@@ -237,6 +337,22 @@ func TestReposAppendLocalRepositories(t *testing.T) {
 		t.Error("a found repository was never used")
 	}
 
+	// A used folder spelled through a symbolic link is the found repository it resolves to: listed once.
+	real := realDir(t, t.TempDir())
+	mkdirs(t, real, "proj/.git")
+	alias := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(real, alias); err != nil {
+		t.Fatal(err)
+	}
+	putTickets(t, st, placedTicket("T-3", "", filepath.Join(alias, "proj"), t0.Add(-time.Hour)))
+	local.found = []string{filepath.Join(real, "proj")}
+	if got, err = newHubSource(d).Repos(); err != nil {
+		t.Fatal(err)
+	}
+	if names, _ := repoNames(got); slices.Contains(names, filepath.Join(real, "proj")) || !slices.Contains(names, filepath.Join(alias, "proj")) {
+		t.Errorf("a linked used folder and its found repository: %v", names)
+	}
+
 	// Local repositories have their own cap: they never push out a used place or a configured repository.
 	var tks []*core.Ticket
 	for i := range 60 {
@@ -277,7 +393,7 @@ func TestLocalReposReachTheDashboard(t *testing.T) {
 		t.Fatal(err)
 	}
 	w := startWeb(t, dir)
-	want := filepath.Join(roots, "proj")
+	want := filepath.Join(realDir(t, roots), "proj")
 	has := func(rs []*athenav1.RepoView) bool {
 		for _, r := range rs {
 			if r.Name == want && r.Kind == "git" && r.LastUsedAt == nil {
