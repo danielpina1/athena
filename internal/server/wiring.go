@@ -593,6 +593,8 @@ type webHooks struct {
 	now func() time.Time
 	// ready, when set, is called with the endpoint once it serves.
 	ready func(*webEndpoint)
+	// home is the home directory localRepoRoots expands "~/" against (default os.UserHomeDir()).
+	home string
 }
 
 func newWebEndpoint(stateDir string, cfg WebConfig, st *store.Store, eng *core.Engine, fx *effects.Runner, hooks webHooks,
@@ -663,6 +665,14 @@ func (w *webEndpoint) start(d *Dispatcher, n *node.Node, fx *effects.Runner, ver
 		defer w.wg.Done()
 		w.tls.Run(ctx)
 	}()
+	if d.local != nil {
+		// The scans run off the hub's loop; a result that differs reaches the dashboards through ReposChanged.
+		w.wg.Add(1)
+		go func() {
+			defer w.wg.Done()
+			d.local.run(ctx, w.hub.ReposChanged)
+		}()
+	}
 	if w.vapid != nil {
 		notifier := web.NewNotifier(web.NotifierConfig{Feed: w.hub, Store: w.st, Visible: w.presence.Visible, Wake: fx.Wake, Log: w.log})
 		w.wg.Add(1)

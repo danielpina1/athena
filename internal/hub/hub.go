@@ -79,7 +79,8 @@ type Source interface {
 	// Policy returns the current Policy revision (0 while nobody saved settings), its version and canonical JSON.
 	Policy() (revision int, version string, settingsJSON string, err error)
 	NodeStatus() node.Status
-	// Repos returns the known repositories and folders, the last used first, at most 50.
+	// Repos returns the known repositories and folders, the last used first, then the local git repositories found on
+	// disk. It must not block on I/O beyond the store: the hub reads it on its loop.
 	Repos() ([]*athenav1.RepoView, error)
 	// Notifications returns the notification kinds that exist and the ones the owner muted.
 	Notifications() (kinds, muted []string, err error)
@@ -105,6 +106,7 @@ type Hub struct {
 	overflowed atomic.Bool
 	wake       chan struct{}
 	nodeWake   chan struct{}
+	reposWake  chan struct{}
 	healthTick time.Duration
 
 	mu        sync.Mutex
@@ -141,7 +143,7 @@ func New(src Source, log *slog.Logger) *Hub {
 	return &Hub{
 		src: src, log: log, epoch: hex.EncodeToString(b[:]), now: time.Now,
 		in: make(chan store.Changes, changeBuffer), wake: make(chan struct{}, 1), nodeWake: make(chan struct{}, 1),
-		healthTick: healthEvery, subs: map[*Sub]struct{}{}, healthSince: map[string]healthState{},
+		reposWake: make(chan struct{}, 1), healthTick: healthEvery, subs: map[*Sub]struct{}{}, healthSince: map[string]healthState{},
 	}
 }
 
@@ -163,6 +165,10 @@ func (h *Hub) OnCommit(c store.Changes) {
 
 // NodeChanged tells the hub the node's slots, live Tickets or queue changed (wire it to node.Config.OnStatus).
 func (h *Hub) NodeChanged() { h.signal(h.nodeWake) }
+
+// ReposChanged tells the hub the Source's repositories may have changed outside a commit (a scan of the local
+// repositories found others); the loop reads them and publishes the list when it differs from the last published.
+func (h *Hub) ReposChanged() { h.signal(h.reposWake) }
 
 func (h *Hub) signal(ch chan struct{}) {
 	select {
@@ -212,6 +218,8 @@ func (h *Hub) run(ctx context.Context) {
 		case <-h.wake:
 		case <-h.nodeWake:
 			h.publishNode()
+		case <-h.reposWake:
+			h.publishRepos()
 		case next := <-probed:
 			h.publishHealth(next)
 		}

@@ -50,7 +50,12 @@ export default async function globalSetup() {
   const url = `http://localhost:${port}`;
   writeFileSync(
     join(state, "config.json"),
-    JSON.stringify({ web: { enabled: true, listen: `127.0.0.1:${port}`, tls: "off", host: "localhost" } }, null, 2),
+    // No local repository discovery: the picker lists only what the specs create, not this machine's repositories.
+    JSON.stringify(
+      { web: { enabled: true, listen: `127.0.0.1:${port}`, tls: "off", host: "localhost" }, localRepoRoots: [] },
+      null,
+      2,
+    ),
     { mode: 0o600 },
   );
   // A turn that never ends: the init line of a captured one, and no result.

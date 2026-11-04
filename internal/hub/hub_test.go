@@ -896,6 +896,24 @@ func TestReposInSnapshotAndDeltaOnlyOnChange(t *testing.T) {
 	none(t, sub)
 }
 
+// ReposChanged (a scan found other local repositories) publishes the list when it changed, and only then.
+func TestReposChangedPublishesOnlyAChange(t *testing.T) {
+	f := newFake()
+	f.setRepos(repoView("a/b", "github"))
+	h := start(t, f)
+	sub, _ := h.Subscribe(0, h.Epoch())
+	defer sub.Close()
+	h.ReposChanged()
+	none(t, sub)
+	f.setRepos(repoView("a/b", "github"), repoView("/src/x", "git"))
+	h.ReposChanged()
+	if r := next(t, sub).GetRepos().GetRepos(); len(r) != 2 || r[1].Name != "/src/x" || r[1].Kind != "git" {
+		t.Fatalf("repos delta = %v", r)
+	}
+	h.ReposChanged()
+	none(t, sub)
+}
+
 // A commit of a Ticket whose place is known and not newer than its last use does not even read the repos.
 func TestKnownPlacementSkipsReposRead(t *testing.T) {
 	f := newFake()

@@ -212,8 +212,10 @@ func (s hubSource) NodeStatus() node.Status {
 }
 
 // Repos lists where a task can be placed: the configured GitHub repositories and the repository or folder of each of
-// the newest Tickets, the last used first. A configured repository no Ticket used goes last, by name. A folder is a
-// git repository when it has a .git entry.
+// the newest Tickets, the last used first. A configured repository no Ticket used goes after them, by name; together
+// they are at most maxRepos. Then come the local git repositories the last scan found under the localRepoRoots and
+// not listed already, by name, at most maxLocalRepos (kind git, never used). A folder is a git repository when it has
+// a .git entry.
 func (s hubSource) Repos() ([]*athenav1.RepoView, error) {
 	places, err := s.d.st.RecentPlacements(repoTickets)
 	if err != nil {
@@ -269,12 +271,24 @@ func (s hubSource) Repos() ([]*athenav1.RepoView, error) {
 	if len(names) > maxRepos {
 		names = names[:maxRepos]
 	}
-	out := make([]*athenav1.RepoView, len(names))
+	out := make([]*athenav1.RepoView, len(names), len(names)+maxLocalRepos)
+	listed := make(map[string]bool, len(names))
 	for i, name := range names {
 		e := known[name]
+		listed[name] = true
 		out[i] = &athenav1.RepoView{Name: name, Kind: e.kind}
 		if !e.at.IsZero() {
 			out[i].LastUsedAt = timestamppb.New(e.at)
+		}
+	}
+	local := 0
+	for _, dir := range s.d.local.list() {
+		if local == maxLocalRepos {
+			break
+		}
+		if !listed[dir] {
+			local++
+			out = append(out, &athenav1.RepoView{Name: dir, Kind: "git"})
 		}
 	}
 	return out, nil
