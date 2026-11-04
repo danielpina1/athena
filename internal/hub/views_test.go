@@ -110,6 +110,8 @@ func TestTicketSummaryBranchAndRuntime(t *testing.T) {
 	}{
 		{"a GitHub repository", func(tk *core.Ticket) { tk.Repo = "o/r" }, "athena/t-0042", "claude"},
 		{"a git directory", func(tk *core.Ticket) { tk.Execution = &core.Execution{Directory: gitDir} }, "athena/t-0042", "claude"},
+		{"a repository with a plain folder", func(tk *core.Ticket) { tk.Repo, tk.Execution = "o/r", &core.Execution{Directory: plainDir} }, "", "claude"},
+		{"a subdirectory of a repository", func(tk *core.Ticket) { tk.Execution = &core.Execution{Directory: filepath.Join(gitDir, "pkg")} }, "", "claude"},
 		{"a plain folder", func(tk *core.Ticket) { tk.Execution = &core.Execution{Directory: plainDir, Runtime: "claude"} }, "", "claude"},
 		{"no placement", func(*core.Ticket) {}, "", "claude"},
 		{"another runtime", func(tk *core.Ticket) { tk.Repo, tk.Execution = "o/r", &core.Execution{Runtime: "codex"} }, "athena/t-0042", "codex"},

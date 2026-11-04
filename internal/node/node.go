@@ -1603,6 +1603,27 @@ func place(workRoot string, t core.Ticket) (placement, error) {
 
 func branchName(t core.Ticket) string { return branchPrefix + strings.ToLower(t.ID) }
 
+// WorktreeBranch is the branch of the Ticket's worktree (athena/<lowercased id>) in the cases a view can tell without
+// running git: the Ticket names a GitHub repository and no directory, or its directory has a .git entry (a repository's
+// top level). A repository with a plain-folder directory (place uses the folder itself) and a subdirectory of a
+// repository (place asks git) give "".
+func WorktreeBranch(t core.Ticket) string {
+	dir := ""
+	if t.Execution != nil {
+		dir = t.Execution.Directory
+	}
+	if dir == "" {
+		if t.Repo != "" {
+			return branchName(t)
+		}
+		return ""
+	}
+	if _, err := os.Lstat(filepath.Join(dir, ".git")); err == nil {
+		return branchName(t)
+	}
+	return ""
+}
+
 // prepare makes the session's directory and writes its settings and MCP config.
 func (n *Node) prepare(s *session) error {
 	p := s.place

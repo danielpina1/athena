@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"fmt"
+	"google.golang.org/protobuf/types/known/timestamppb"
 	"io"
 	"log/slog"
 	"sort"
@@ -31,6 +32,7 @@ type fakeSource struct {
 	settings  string
 	node      node.Status
 	repos     []*athenav1.RepoView
+	repoReads int
 	kinds     []string
 	muted     []string
 }
@@ -113,6 +115,7 @@ func (f *fakeSource) TicketAnsweredApprovals(ticketID string) ([]core.Approval, 
 func (f *fakeSource) Repos() ([]*athenav1.RepoView, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.repoReads++
 	return f.repos, nil
 }
 
@@ -871,6 +874,9 @@ func TestReposInSnapshotAndDeltaOnlyOnChange(t *testing.T) {
 
 	// A change publishes the whole list, once.
 	f.setRepos(repoView("/tmp/x", "dir"), repoView("a/b", "github"))
+	placed := ticket("T-1")
+	placed.Execution = &core.Execution{Directory: "/tmp/x"}
+	f.put(placed)
 	h.OnCommit(store.Changes{Tickets: []string{"T-1"}})
 	next(t, sub) // the Ticket
 	d := next(t, sub)
@@ -880,6 +886,40 @@ func TestReposInSnapshotAndDeltaOnlyOnChange(t *testing.T) {
 	h.OnCommit(store.Changes{Tickets: []string{"T-1"}})
 	next(t, sub)
 	none(t, sub)
+}
+
+// A commit of a Ticket whose place is known and not newer than its last use does not even read the repos.
+func TestKnownPlacementSkipsReposRead(t *testing.T) {
+	f := newFake()
+	used := &athenav1.RepoView{Name: "o/r", Kind: "github", LastUsedAt: timestamppb.New(epoch0.Add(time.Hour))}
+	f.setRepos(used)
+	h := start(t, f)
+	sub, _ := h.Subscribe(0, h.Epoch())
+	defer sub.Close()
+	tk := ticket("T-1")
+	tk.Repo = "o/r"
+	f.put(tk)
+	f.mu.Lock()
+	before := f.repoReads
+	f.mu.Unlock()
+	h.OnCommit(store.Changes{Tickets: []string{"T-1"}})
+	next(t, sub)
+	f.mu.Lock()
+	after := f.repoReads
+	f.mu.Unlock()
+	if after != before {
+		t.Errorf("repos were read %d times for a progress commit", after-before)
+	}
+	// A newer Ticket on it moves it up the list: read.
+	tk.ID, tk.CreatedAt = "T-2", epoch0.Add(2*time.Hour)
+	f.put(tk)
+	h.OnCommit(store.Changes{Tickets: []string{"T-2"}})
+	next(t, sub)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.repoReads == after {
+		t.Error("a newer Ticket on a known repository did not re-read the repos")
+	}
 }
 
 func TestNotificationsInSnapshotAndDeltaOnChange(t *testing.T) {

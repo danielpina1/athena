@@ -267,19 +267,20 @@ func (h *Hub) closeAll() {
 
 // apply reads the current state of every id one commit wrote and publishes one delta each.
 func (h *Hub) apply(c store.Changes) {
+	reposStale := false
 	for _, id := range c.Tickets {
 		t, st, err := h.src.Ticket(id)
 		if err != nil {
 			h.lost("read ticket", "id", id, "error", err)
 			return
 		}
+		reposStale = reposStale || h.placementNew(&t)
 		h.publish(&athenav1.Delta{Change: &athenav1.Delta_Ticket{Ticket: ticketSummary(&t, st)}})
 		if h.watched(id) {
 			h.sendDetail(id, h.detail(&t, st))
 		}
 	}
-	if len(c.Tickets) > 0 {
-		// A Ticket can have added a repository or a folder to the known ones, or moved one up the list.
+	if reposStale {
 		if !h.publishRepos() {
 			return
 		}
@@ -344,6 +345,33 @@ func (h *Hub) policyView() (*athenav1.PolicyView, error) {
 		return nil, err
 	}
 	return &athenav1.PolicyView{Revision: uint32(rev), Version: version, SettingsJson: settings}, nil
+}
+
+// placementNew reports whether the Ticket can change the known repositories: its repository or folder is not in the
+// last published list, or the Ticket is newer than that entry's last use (it moves up). Most commits are a running
+// Ticket's progress and answer false without reading the Source.
+func (h *Hub) placementNew(t *core.Ticket) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	known := func(name string) bool {
+		if name == "" {
+			return true
+		}
+		if h.repos == nil {
+			return false
+		}
+		for _, r := range h.repos.Repos {
+			if r.Name == name {
+				return r.LastUsedAt != nil && !t.CreatedAt.After(r.LastUsedAt.AsTime())
+			}
+		}
+		return false
+	}
+	dir := ""
+	if t.Execution != nil {
+		dir = t.Execution.Directory
+	}
+	return !known(t.Repo) || !known(dir)
 }
 
 // publishRepos publishes the known repositories when they differ from the last published. It reports false when the
@@ -655,7 +683,8 @@ func (h *Hub) Snapshot() (*athenav1.Snapshot, error) {
 	return s, nil
 }
 
-// boundTickets keeps every open Ticket and the 100 most recently ended, the most recently updated first.
+// boundTickets keeps every open Ticket and the 100 ended ones with the newest end time (Ended.At), then orders them by
+// updated_at, newest first.
 func boundTickets(all []core.Ticket) []core.Ticket {
 	var open, ended []core.Ticket
 	for _, t := range all {

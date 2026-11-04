@@ -186,14 +186,19 @@ func IssueEnrollToken(st *store.Store, ttl time.Duration) (string, error) {
 	if ttl <= 0 {
 		ttl = DefaultEnrollTTL
 	}
+	return issueEnrollTokenUntil(st, time.Now().Add(ttl))
+}
+
+// issueEnrollTokenUntil is IssueEnrollToken with the expiry given, so a caller that reports it reports the stored one.
+func issueEnrollTokenUntil(st *store.Store, expires time.Time) (string, error) {
 	token, hash, err := newSecret()
 	if err != nil {
 		return "", err
 	}
-	if err := st.PutEnrollToken(hash, time.Now().Add(ttl)); err != nil {
+	if err := st.PutEnrollToken(hash, expires); err != nil {
 		return "", err
 	}
-	slog.Info("web: enrollment token issued", "ttl", ttl.String())
+	slog.Info("web: enrollment token issued", "ttl", time.Until(expires).Round(time.Second).String())
 	return token, nil
 }
 

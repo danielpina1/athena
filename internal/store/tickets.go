@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"time"
 
@@ -197,7 +198,8 @@ func (s *Store) approvalsWhere(where string, args []any, limit int) (out []core.
 	return out, err
 }
 
-// RecentlyEnded returns the ended Tickets that were updated last, the most recently updated first; limit <= 0 returns
+// RecentlyEnded returns the ended Tickets with the newest updated_at, newest first (ordered by updated_at, not by the
+// time the Ticket ended); limit <= 0 returns
 // all. The order and the limit are the database's: only the rows returned are read.
 func (s *Store) RecentlyEnded(limit int) (out []core.Ticket, err error) {
 	q := `SELECT doc FROM tickets WHERE ended = 1 ORDER BY updated_at DESC, id DESC`
@@ -254,7 +256,9 @@ func (s *Store) RecentPlacements(limit int) (out []Placement, err error) {
 				continue
 			}
 			if p.At, err = time.Parse(time.RFC3339Nano, at); err != nil {
-				return fmt.Errorf("store: recent placements: created at %q: %w", at, err)
+				// One unreadable row must not fail the Snapshot of every client.
+				slog.Warn("store: recent placements: skipping a Ticket with an unreadable creation time", "created_at", at, "error", err)
+				continue
 			}
 			out = append(out, p)
 		}

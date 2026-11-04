@@ -190,7 +190,33 @@ func TestRecentPlacements(t *testing.T) {
 	if len(got) != 2 || got[0].Dir != "/tmp/x" || got[1].Repo != "c/d" || !got[1].At.Equal(t0) {
 		t.Errorf("placements = %+v", got)
 	}
+	plan := queryPlan(t, s, `SELECT doc FROM (SELECT doc FROM tickets ORDER BY updated_at DESC, id DESC LIMIT 200)`)
+	if !strings.Contains(plan, "tickets_updated") || strings.Contains(plan, "TEMP B-TREE") {
+		t.Errorf("recent placements are sorted outside the index:\n%s", plan)
+	}
 	if few, _ := s.RecentPlacements(1); len(few) != 0 {
 		t.Errorf("RecentPlacements(1) took the newest Ticket, which names no place; got %+v", few)
 	}
+}
+
+func TestRecentPlacementsSkipsAnUnreadableRow(t *testing.T) {
+	s, _ := openTemp(t)
+	good := placedAt("T-1", "c/d", t0)
+	put(t, s, good)
+	if err := s.Tx(func(tx *Tx) error {
+		_, err := tx.sql.Exec(`INSERT INTO tickets (id, ended, updated_at, doc) VALUES ('T-bad', 0, '2030-01-01T00:00:00Z', '{"id":"T-bad","repo":"x/y","createdAt":"nonsense"}')`)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.RecentPlacements(200)
+	if err != nil || len(got) != 1 || got[0].Repo != "c/d" {
+		t.Fatalf("placements = %+v, %v; want only c/d", got, err)
+	}
+}
+
+func placedAt(id, repo string, at time.Time) *core.Ticket {
+	tk := sampleTicket(id)
+	tk.Repo, tk.CreatedAt, tk.UpdatedAt, tk.Execution = repo, at, at, nil
+	return tk
 }

@@ -51,7 +51,7 @@ func (a *Auth) EnrollLink(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	expires := time.Now().Add(ttl)
-	token, err := IssueEnrollToken(a.st, ttl)
+	token, err := issueEnrollTokenUntil(a.st, expires)
 	if err != nil {
 		fail(w, http.StatusInternalServerError, "internal", "internal error")
 		return

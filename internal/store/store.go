@@ -136,7 +136,8 @@ var migrations = []string{
 		WHERE COALESCE(json_extract(doc, '$.answeredAt'), json_extract(doc, '$.createdAt')) IS NOT NULL;
 	CREATE INDEX approvals_answered ON approvals (answered_at, id);
 	CREATE INDEX approvals_ticket ON approvals (ticket_id);
-	CREATE INDEX tickets_ended_updated ON tickets (ended, updated_at, id);`,
+	CREATE INDEX tickets_ended_updated ON tickets (ended, updated_at, id);
+	CREATE INDEX tickets_updated ON tickets (updated_at, id);`,
 }
 
 const schemaKey = "schema"

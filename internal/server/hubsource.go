@@ -51,7 +51,17 @@ func (s hubSource) Tickets(endedLimit int) ([]core.Ticket, error) {
 	if err != nil {
 		return nil, err
 	}
-	return append(open, ended...), nil
+	// The two reads are two transactions: a Ticket that ended between them is in both lists.
+	seen := make(map[string]bool, len(open))
+	for _, t := range open {
+		seen[t.ID] = true
+	}
+	for _, t := range ended {
+		if !seen[t.ID] {
+			open = append(open, t)
+		}
+	}
+	return open, nil
 }
 
 func (s hubSource) Ticket(id string) (core.Ticket, core.Stage, error) { return s.d.eng.Ticket(id) }

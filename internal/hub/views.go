@@ -1,8 +1,6 @@
 package hub
 
 import (
-	"os"
-	"path/filepath"
 	"regexp"
 	"slices"
 	"sort"
@@ -74,22 +72,6 @@ func prURL(t *core.Ticket) string {
 // defaultRuntime is the runtime of a Ticket whose Execution does not name one: Claude Code is the only one.
 const defaultRuntime = "claude"
 
-// branchPrefix names the branch of a Ticket's worktree: athena/<lowercased ticket id> (the node's rule).
-const branchPrefix = "athena/"
-
-// placedInRepository reports whether the node gives the Ticket a worktree of a repository: it names a GitHub repository,
-// or works in a directory that has a .git entry. A Ticket in a plain folder (or none) has no branch.
-func placedInRepository(t *core.Ticket) bool {
-	if t.Repo != "" {
-		return true
-	}
-	if t.Execution == nil || t.Execution.Directory == "" {
-		return false
-	}
-	_, err := os.Lstat(filepath.Join(t.Execution.Directory, ".git"))
-	return err == nil
-}
-
 func ticketSummary(t *core.Ticket, st core.Stage) *athenav1.TicketSummary {
 	v := &athenav1.TicketSummary{
 		Id: t.ID, Title: t.Title, Stage: st.Stage, Action: st.Action, Repo: t.Repo,
@@ -104,9 +86,7 @@ func ticketSummary(t *core.Ticket, st core.Stage) *athenav1.TicketSummary {
 			v.Runtime = t.Execution.Runtime
 		}
 	}
-	if placedInRepository(t) {
-		v.Branch = branchPrefix + strings.ToLower(t.ID)
-	}
+	v.Branch = node.WorktreeBranch(*t)
 	if a := t.LatestAssignment(); a != nil && a.Model != "" {
 		v.Model = a.Model
 	}
