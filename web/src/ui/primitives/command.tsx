@@ -33,7 +33,11 @@ export function CommandDialog({
 
 export function CommandInput({ className, ...props }: ComponentProps<typeof CommandPrimitive.Input>) {
   return (
-    <div className="flex items-center gap-2 border-b border-line px-4" data-slot="command-input-wrapper">
+    <div
+      data-slot="command-input-wrapper"
+      // The input itself draws no outline; the row shows focus with an inset ring.
+      className="flex items-center gap-2 border-b border-line px-4 has-[input:focus-visible]:outline-2 has-[input:focus-visible]:-outline-offset-2 has-[input:focus-visible]:outline-accent-ink"
+    >
       <SearchIcon className="size-4 shrink-0 text-muted" aria-hidden />
       <CommandPrimitive.Input
         data-slot="command-input"

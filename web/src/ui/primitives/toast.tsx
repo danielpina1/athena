@@ -2,10 +2,13 @@ import { XIcon } from "lucide-react";
 import { useEffect, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 import { cn } from "@/ui/cn";
+import { subscribeModals, topModal } from "@/ui/primitives/dialog";
 import { usePortalContainer } from "@/ui/primitives/portal";
 
 // A small own toaster (no sonner): an ink slip at the bottom, above the phone's navigation. A toast confirms what
 // just happened in the words of the action that did it ("Approved"), and a failure says what to do next.
+// While a modal is open everything outside it is inert and under its backdrop, so the toasts render inside the
+// topmost open <dialog>, which is in the top layer.
 
 export type ToastTone = "default" | "danger";
 export type ToastInput = {
@@ -46,6 +49,7 @@ const snapshot = () => toasts;
 
 export function Toaster() {
   const list = useSyncExternalStore(subscribe, snapshot);
+  const modal = useSyncExternalStore(subscribeModals, topModal);
   const container = usePortalContainer();
   return createPortal(
     <section
@@ -59,7 +63,7 @@ export function Toaster() {
         <ToastItem key={t.id} toast={t} />
       ))}
     </section>,
-    container ?? document.body,
+    modal ?? container ?? document.body,
   );
 }
 

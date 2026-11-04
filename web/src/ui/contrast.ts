@@ -54,4 +54,16 @@ export const PAIRS: { fg: string; bg: string; kind: "text" | "line" }[] = [
   { fg: "--accent", bg: "--bg", kind: "line" },
   { fg: "--accent", bg: "--surface", kind: "line" },
   { fg: "--danger", bg: "--surface", kind: "line" },
+  // The focus outline (ruling R23) sits on every surface.
+  { fg: "--accent-ink", bg: "--surface", kind: "line" },
+  { fg: "--accent-ink", bg: "--surface-2", kind: "line" },
+  { fg: "--accent-ink", bg: "--stage", kind: "line" },
 ];
+
+/** A CSS hex colour as #RRGGBB, or null. Minifiers shorten #FFFFFF to #fff. */
+export function normalizeHex(value: string): string | null {
+  const v = value.trim();
+  const short = /^#([0-9a-f])([0-9a-f])([0-9a-f])$/i.exec(v);
+  if (short) return `#${short[1]}${short[1]}${short[2]}${short[2]}${short[3]}${short[3]}`.toUpperCase();
+  return /^#[0-9a-f]{6}$/i.test(v) ? v.toUpperCase() : null;
+}

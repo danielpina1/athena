@@ -83,6 +83,9 @@
  * stray `bg-blue-500` or `shadow-md` simply does not exist.
  */
 @theme inline {
+  /* The 4 px grid in pixels: rem-based spacing would scale with the 15/14 px root size (h-11 must be 44 px). */
+  --spacing: 4px;
+
   --color-*: initial;
   --color-bg: var(--bg);
   --color-surface: var(--surface);
@@ -202,9 +205,12 @@
     color: var(--bg);
   }
 
-  /* The only "shadow" in the system: a 2 px accent focus outline, offset 2 px. */
+  /*
+   * The only "shadow" in the system: a 2 px focus outline, offset 2 px, in --accent-ink (ruling R23: --accent is
+   * under 3:1 on the light theme's --surface-2 and --stage; --accent-ink keeps 3:1 on every surface).
+   */
   :focus-visible {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--accent-ink);
     outline-offset: 2px;
   }
 
@@ -220,6 +226,8 @@
   /* Precision scrollbars: thin, a --muted thumb on no track. scrollbar-color inherits; the width does not. */
   html {
     scrollbar-color: var(--muted) transparent;
+    /* The modal scroll lock hides the page scrollbar; a reserved gutter keeps the layout from shifting. */
+    scrollbar-gutter: stable;
   }
   [data-slot="scroll-area"] {
     scrollbar-width: thin;

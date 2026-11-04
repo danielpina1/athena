@@ -52,7 +52,9 @@ export function Confirm({ label, confirmLabel, onConfirm, onBlur, onKeyDown, cla
           onBlur?.(e);
         }}
         onKeyDown={(e) => {
+          // Esc disarms and nothing else: preventing the key's default keeps an enclosing modal from cancelling.
           if (e.key === "Escape" && armed) {
+            e.preventDefault();
             e.stopPropagation();
             disarm();
           }

@@ -11,7 +11,7 @@ import { Mono } from "@/ui/athena/Mono";
 import { RelativeTime } from "@/ui/athena/RelativeTime";
 import { StageBadge } from "@/ui/athena/StageBadge";
 import { Truncate } from "@/ui/athena/Truncate";
-import { contrastRatio, PAIRS } from "@/ui/contrast";
+import { contrastRatio, normalizeHex, PAIRS } from "@/ui/contrast";
 import { Button } from "@/ui/primitives/button";
 import {
   CommandDialog,
@@ -211,7 +211,7 @@ function Row({ label, children }: { label: string; children: ReactNode }) {
 function readTokens(el: HTMLElement | null): Record<string, string> {
   if (!el) return {};
   const style = getComputedStyle(el);
-  return Object.fromEntries(TOKENS.map((t) => [t, style.getPropertyValue(t).trim().toUpperCase()]));
+  return Object.fromEntries(TOKENS.map((t) => [t, normalizeHex(style.getPropertyValue(t)) ?? ""]));
 }
 
 function Colour({ el }: { el: HTMLElement | null }) {
@@ -493,8 +493,12 @@ function Overlays() {
             <Textarea aria-label="Answer" placeholder="Answer…" />
             <SheetFooter>
               <SheetClose asChild>
-                <Button variant="accent">Send answer</Button>
+                <Button variant="accent" onClick={() => toast({ title: "Answer sent" })}>
+                  Send answer
+                </Button>
               </SheetClose>
+              {/* Toasts raised while a modal is open render inside it, above its backdrop. */}
+              <Button onClick={() => toast({ title: "Draft saved" })}>Save draft</Button>
             </SheetFooter>
           </SheetContent>
         </Sheet>

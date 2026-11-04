@@ -9,7 +9,8 @@ export function TabsList({ className, ...props }: ComponentProps<typeof TabsPrim
   return (
     <TabsPrimitive.List
       data-slot="tabs-list"
-      className={cn("flex min-w-0 items-stretch gap-4 overflow-x-auto overflow-y-hidden border-b border-line-soft [scrollbar-width:none]", className)}
+      // Wraps on a narrow screen rather than scrolling sideways, like the toggle group.
+      className={cn("flex min-w-0 flex-wrap items-stretch gap-x-4 border-b border-line-soft", className)}
       {...props}
     />
   );
@@ -24,6 +25,8 @@ export function TabsTrigger({ className, ...props }: ComponentProps<typeof TabsP
         "transition-colors duration-(--motion-fast) hover:text-text",
         "data-[state=active]:border-text data-[state=active]:font-semibold data-[state=active]:text-text",
         "disabled:pointer-events-none disabled:opacity-40",
+        // Inside the trigger, so a neighbour or the list edge never clips it.
+        "focus-visible:-outline-offset-2",
         className,
       )}
       {...props}

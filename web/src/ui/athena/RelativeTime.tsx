@@ -1,4 +1,4 @@
-import { useSyncExternalStore } from "react";
+import { useState, useSyncExternalStore } from "react";
 import { cn } from "@/ui/cn";
 
 // "4m ago", refreshed once a minute by one timer that every RelativeTime on the page shares. It is a local clock
@@ -54,11 +54,17 @@ export function formatRelative(at: number, reference: number): string {
 
 export function RelativeTime({ at, className }: { at: Date | number; className?: string }) {
   const tick = useSyncExternalStore(subscribe, snapshot);
+  // The shared clock can be up to a second behind (and, before any tick, as old as the chunk); a fresh reading at
+  // mount keeps an exact boundary ("5m ago") from flooring one lower.
+  const [mountedAt] = useState(() => Date.now());
   const ms = typeof at === "number" ? at : at.getTime();
+  if (!Number.isFinite(ms)) {
+    return <span className={cn("tabular-nums", className)}>—</span>;
+  }
   const date = new Date(ms);
   return (
     <time dateTime={date.toISOString()} title={full.format(date)} className={cn("tabular-nums", className)}>
-      {formatRelative(ms, tick)}
+      {formatRelative(ms, Math.max(tick, mountedAt))}
     </time>
   );
 }

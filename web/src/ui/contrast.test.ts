@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { expect, test } from "vitest";
-import { contrastRatio, PAIRS, parseThemes } from "@/ui/contrast";
+import { contrastRatio, normalizeHex, PAIRS, parseThemes } from "@/ui/contrast";
 
 // Read from disk: Vitest stubs CSS imports, ?raw included.
 const css = readFileSync(join(import.meta.dirname, "tokens.css"), "utf8");
@@ -64,3 +64,14 @@ for (const name of ["light", "dark"] as const) {
     expect(failures).toEqual([]);
   });
 }
+
+test("spacing is a 4 px grid in pixels, not rem", () => {
+  const theme = /@theme inline \{([\s\S]*?)\n\}/.exec(css)?.[1] ?? "";
+  expect(theme).toMatch(/^\s*--spacing:\s*4px;/m);
+});
+
+test("normalizeHex expands minified colours", () => {
+  expect(normalizeHex("#fff")).toBe("#FFFFFF");
+  expect(normalizeHex(" #ff5a1f ")).toBe("#FF5A1F");
+  expect(normalizeHex("rgb(0 0 0)")).toBeNull();
+});

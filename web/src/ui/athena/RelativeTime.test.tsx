@@ -39,3 +39,18 @@ test("RelativeTime refreshes once a minute through a single shared timer", () =>
   unmount();
   expect(cleared).toHaveBeenCalledTimes(1);
 });
+
+test("an exact boundary is not floored one lower by a stale clock", () => {
+  // Prime the shared clock at NOW, then mount 999 ms later (inside its one-second tolerance) a row exactly five
+  // minutes old: the stale clock alone would say 4m.
+  const first = render(<RelativeTime at={NOW} />);
+  first.unmount();
+  vi.setSystemTime(NOW + 999);
+  render(<RelativeTime at={NOW + 999 - 5 * MIN} />);
+  expect(screen.getByText("5m ago")).toBeTruthy();
+});
+
+test("an invalid date renders a dash instead of throwing", () => {
+  render(<RelativeTime at={new Date("not a date")} />);
+  expect(screen.getByText("—")).toBeTruthy();
+});
