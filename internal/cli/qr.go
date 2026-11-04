@@ -1,8 +1,29 @@
 // A small QR Code encoder for `athena web enroll`: byte mode, error correction level M, versions 1 to 10 (up to 213
-// bytes), drawn with Unicode half-blocks. It is written for Athena from ISO/IEC 18004 (no code is copied); the
-// structure of the matrix construction follows the same well-known steps as Project Nayuki's MIT-licensed QR Code
-// generator library (https://www.nayuki.io/page/qr-code-generator-library), which was the reference for the tables'
-// layout. qr_test.go decodes what this produces, so the encoder is checked against the standard rather than itself.
+// bytes), drawn with Unicode half-blocks.
+//
+// This file is a Go translation, reduced to that scope, of Project Nayuki's QR Code generator library
+// (https://www.nayuki.io/page/qr-code-generator-library), which is MIT-licensed:
+//
+//	Copyright (c) Project Nayuki. (MIT License)
+//
+//	Permission is hereby granted, free of charge, to any person obtaining a copy of
+//	this software and associated documentation files (the "Software"), to deal in
+//	the Software without restriction, including without limitation the rights to
+//	use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+//	the Software, and to permit persons to whom the Software is furnished to do so,
+//	subject to the following conditions:
+//
+//	The above copyright notice and this permission notice shall be included in all
+//	copies or substantial portions of the Software.
+//
+//	THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+//	IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+//	FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+//	COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+//	IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+//	CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+//
+// The renderer and qr_test.go are Athena's own; the test decodes what the encoder produces from the matrix alone.
 package cli
 
 import (

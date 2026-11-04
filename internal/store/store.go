@@ -92,7 +92,7 @@ var migrations = []string{
 		created_at TEXT NOT NULL,
 		seen_at TEXT NOT NULL,
 		reauth_at TEXT NOT NULL,
-		passkey_id TEXT NOT NULL
+		passkey_id TEXT NOT NULL REFERENCES passkeys(id) ON DELETE CASCADE
 	);
 	CREATE INDEX web_sessions_passkey ON web_sessions (passkey_id);
 	CREATE TABLE enroll_tokens (

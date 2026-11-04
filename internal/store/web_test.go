@@ -241,8 +241,11 @@ func TestPasskeysAndSessions(t *testing.T) {
 		t.Fatalf("WebSessionsOf = %+v %v", list, err)
 	}
 	// Revoking a passkey ends its sessions and no others.
-	if err := s.DeletePasskey("p1"); err != nil {
-		t.Fatal(err)
+	if gone, err := s.DeletePasskey("p1"); err != nil || len(gone) != 1 || string(gone[0]) != "h1" {
+		t.Fatalf("DeletePasskey = %q %v", gone, err)
+	}
+	if err := s.PutWebSession(WebSession{Hash: []byte("h9"), CreatedAt: t0, SeenAt: t0, PasskeyID: "p1"}); err == nil {
+		t.Fatal("a session was stored for a deleted passkey")
 	}
 	if _, ok, _ := s.WebSession([]byte("h1")); ok {
 		t.Fatal("session of a revoked passkey survived")
@@ -254,11 +257,14 @@ func TestPasskeysAndSessions(t *testing.T) {
 
 func TestPruneWebSessions(t *testing.T) {
 	s, _ := openTemp(t)
+	if err := s.PutPasskey(Passkey{ID: "p", Name: "p", Credential: []byte{1}, CreatedAt: t0}); err != nil {
+		t.Fatal(err)
+	}
 	now := t0.Add(200 * 24 * time.Hour)
 	for _, ws := range []WebSession{
-		{Hash: []byte("live"), CreatedAt: now.Add(-10 * 24 * time.Hour), SeenAt: now.Add(-time.Hour)},
-		{Hash: []byte("idle"), CreatedAt: now.Add(-40 * 24 * time.Hour), SeenAt: now.Add(-31 * 24 * time.Hour)},
-		{Hash: []byte("absolute"), CreatedAt: now.Add(-91 * 24 * time.Hour), SeenAt: now.Add(-time.Hour)},
+		{Hash: []byte("live"), CreatedAt: now.Add(-10 * 24 * time.Hour), SeenAt: now.Add(-time.Hour), PasskeyID: "p"},
+		{Hash: []byte("idle"), CreatedAt: now.Add(-40 * 24 * time.Hour), SeenAt: now.Add(-31 * 24 * time.Hour), PasskeyID: "p"},
+		{Hash: []byte("absolute"), CreatedAt: now.Add(-91 * 24 * time.Hour), SeenAt: now.Add(-time.Hour), PasskeyID: "p"},
 	} {
 		if err := s.PutWebSession(ws); err != nil {
 			t.Fatal(err)

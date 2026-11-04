@@ -86,11 +86,7 @@ func TestPlainHTTPCookieOnLoopback(t *testing.T) {
 	if _, err := NewAuth(e.Store, "http://athena.test", "athena.test", nil); err == nil {
 		t.Fatal("plain http accepted for a non-loopback host")
 	}
-	a, err := NewAuth(e.Store, "http://127.0.0.1:8080", "127.0.0.1", nil)
-	if err != nil {
-		// WebAuthn refuses an IP as relying party id; "localhost" is what a loopback deployment uses.
-		a, err = NewAuth(e.Store, "http://localhost:8080", "localhost", nil)
-	}
+	a, err := NewAuth(e.Store, "http://localhost:8080", "localhost", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -390,4 +386,111 @@ func (w lockedWriter) Write(p []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.b.Write(p)
+}
+
+func TestRevokeBetweenVerificationAndSessionLeavesNoSession(t *testing.T) {
+	e := NewAuthEnv(t)
+	a := NewSoftAuthenticator(t, testOrigin, testRPID)
+	e.Enroll(a, "phone")
+	e.Auth.afterLoginVerified = func() {
+		if err := e.Auth.RevokePasskey(a.CredentialID()); err != nil {
+			t.Error(err)
+		}
+	}
+	begin := e.Do("POST", "/auth/login/begin", nil)
+	rec := e.Do("POST", "/auth/login/finish", a.Assert(t, begin.Body.Bytes()))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("login finishing as its passkey is revoked: %d %s", rec.Code, rec.Body)
+	}
+	if _, ok := e.Auth.Session(e.Request()); ok {
+		t.Fatal("usable session for a revoked passkey")
+	}
+	// Pruning far in the future deletes whatever rows exist; none may.
+	if n, err := e.Store.PruneWebSessions(e.Now().Add(1000 * 24 * time.Hour)); err != nil || n != 0 {
+		t.Fatalf("%d session rows, %v", n, err)
+	}
+}
+
+func TestRevokeReportsEverySessionItDeleted(t *testing.T) {
+	e := NewAuthEnv(t)
+	a := NewSoftAuthenticator(t, testOrigin, testRPID)
+	e.Enroll(a, "phone")
+	var hashes []string
+	for i := 0; i < 3; i++ {
+		e.DropCookies()
+		e.Login(a)
+		s, _ := e.Auth.Session(e.Request())
+		hashes = append(hashes, s.Hash)
+	}
+	var got []string
+	e.Auth.OnRevoke(func(h []string) { got = append(got, h...) })
+	if err := e.Auth.RevokePasskey(a.CredentialID()); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("reported %v, want the three sessions %v", got, hashes)
+	}
+}
+
+func TestNoUserVerificationRefused(t *testing.T) {
+	e := NewAuthEnv(t)
+	a := NewSoftAuthenticator(t, testOrigin, testRPID)
+	e.Enroll(a, "phone")
+
+	a.NoUV = true
+	begin := e.Do("POST", "/auth/login/begin", nil)
+	if rec := e.Do("POST", "/auth/login/finish", a.Assert(t, begin.Body.Bytes())); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("login without UV: %d", rec.Code)
+	}
+	a.NoUV = false
+	e.Login(a)
+	a.NoUV = true
+	e.Advance(10 * time.Minute)
+	begin = e.Do("POST", "/auth/reauth/begin", nil)
+	if rec := e.Do("POST", "/auth/reauth/finish", a.Assert(t, begin.Body.Bytes())); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("reauth without UV: %d", rec.Code)
+	}
+	if s, _ := e.Auth.Session(e.Request()); e.Auth.RecentReauth(s) {
+		t.Fatal("reauth window opened without UV")
+	}
+	token, _ := IssueEnrollToken(e.Store, 0)
+	b := NewSoftAuthenticator(t, testOrigin, testRPID)
+	b.NoUV = true
+	e.RegisterWith(b, token, "weak", http.StatusBadRequest)
+	if list, _ := e.Store.Passkeys(); len(list) != 1 {
+		t.Fatalf("%d passkeys, want 1", len(list))
+	}
+}
+
+func TestWrongOriginRegisterLeavesTokenUsable(t *testing.T) {
+	e := NewAuthEnv(t)
+	a := NewSoftAuthenticator(t, testOrigin, testRPID)
+	token, _ := IssueEnrollToken(e.Store, 0)
+	body := mustJSON(t, map[string]string{"token": token})
+	if rec := e.DoFrom("https://evil.test", "POST", "/auth/register/begin", body); rec.Code != http.StatusForbidden {
+		t.Fatalf("wrong origin: %d", rec.Code)
+	}
+	e.RegisterWith(a, token, "phone", http.StatusOK)
+}
+
+func TestRegisterExcludesEnrolledCredentialsAndCleansName(t *testing.T) {
+	e := NewAuthEnv(t)
+	a := NewSoftAuthenticator(t, testOrigin, testRPID)
+	e.Enroll(a, "\x1b[31mphone\x07"+strings.Repeat("é", 100))
+	list, _ := e.Store.Passkeys()
+	if want := "[31mphone" + strings.Repeat("é", 64-len("[31mphone")); list[0].Name != want {
+		t.Fatalf("name %q, want %q", list[0].Name, want)
+	}
+	token, _ := IssueEnrollToken(e.Store, 0)
+	begin := e.Do("POST", "/auth/register/begin", mustJSON(t, map[string]string{"token": token}))
+	var o struct {
+		PublicKey struct {
+			Exclude []struct {
+				ID string `json:"id"`
+			} `json:"excludeCredentials"`
+		} `json:"publicKey"`
+	}
+	if err := json.Unmarshal(begin.Body.Bytes(), &o); err != nil || len(o.PublicKey.Exclude) != 1 || o.PublicKey.Exclude[0].ID != a.CredentialID() {
+		t.Fatalf("excludeCredentials = %+v %v", o, err)
+	}
 }

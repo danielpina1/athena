@@ -233,3 +233,18 @@ func TestQRReedSolomonVector(t *testing.T) {
 		t.Fatalf("ECC = %v, want %v", got, want)
 	}
 }
+
+// TestQRAlignmentPositions pins the alignment pattern centers to the table in ISO/IEC 18004 Annex E.
+func TestQRAlignmentPositions(t *testing.T) {
+	for ver, want := range map[int][]int{1: nil, 2: {6, 18}, 3: {6, 22}, 6: {6, 34}, 7: {6, 22, 38}, 9: {6, 26, 46}, 10: {6, 28, 50}} {
+		got := newQR(ver).alignPositions()
+		if len(got) != len(want) {
+			t.Fatalf("version %d: %v, want %v", ver, got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("version %d: %v, want %v", ver, got, want)
+			}
+		}
+	}
+}

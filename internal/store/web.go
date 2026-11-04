@@ -136,9 +136,26 @@ func (s *Store) TouchPasskey(id string, at time.Time, credential []byte) error {
 	return nil
 }
 
-// DeletePasskey removes a Passkey and, in the same transaction, every web session it opened.
-func (s *Store) DeletePasskey(id string) error {
-	return s.Tx(func(tx *Tx) error {
+// DeletePasskey removes a Passkey and, in the same transaction, every web session it opened (the foreign key cascades),
+// and returns the hashes of those sessions. A Passkey that does not exist deletes nothing and returns none.
+func (s *Store) DeletePasskey(id string) ([][]byte, error) {
+	var hashes [][]byte
+	err := s.Tx(func(tx *Tx) error {
+		rows, err := tx.sql.Query(`SELECT hash FROM web_sessions WHERE passkey_id = ? ORDER BY created_at, hash`, id)
+		if err != nil {
+			return fmt.Errorf("store: delete passkey sessions: %w", err)
+		}
+		for rows.Next() {
+			var h []byte
+			if err := rows.Scan(&h); err != nil {
+				rows.Close()
+				return fmt.Errorf("store: delete passkey sessions: %w", err)
+			}
+			hashes = append(hashes, h)
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
 		if _, err := tx.sql.Exec(`DELETE FROM web_sessions WHERE passkey_id = ?`, id); err != nil {
 			return fmt.Errorf("store: delete passkey sessions: %w", err)
 		}
@@ -147,6 +164,10 @@ func (s *Store) DeletePasskey(id string) error {
 		}
 		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
+	return hashes, nil
 }
 
 // WebSession is a logged-in browser. Hash is the SHA-256 of the cookie value, which the store never sees.
@@ -159,7 +180,8 @@ type WebSession struct {
 	PasskeyID string
 }
 
-// PutWebSession inserts a web session, or replaces the one with the same hash.
+// PutWebSession inserts a web session, or replaces the one with the same hash. The session's Passkey must exist: a
+// revoke that committed first makes this fail (foreign key), so no session outlives its passkey.
 func (s *Store) PutWebSession(w WebSession) error {
 	_, err := s.db.Exec(`INSERT INTO web_sessions (hash, created_at, seen_at, reauth_at, passkey_id) VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT(hash) DO UPDATE SET created_at = excluded.created_at, seen_at = excluded.seen_at,

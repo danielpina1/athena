@@ -177,3 +177,25 @@ func (w syncWriter) Write(p []byte) (int, error) {
 	defer w.mu.Unlock()
 	return w.b.Write(p)
 }
+
+func TestWebEnrollTTLBounds(t *testing.T) {
+	dir, _ := webState(t, `{"web":{"host":"h.net"}}`)
+	for _, ttl := range []string{"0", "-5m", "25h"} {
+		if code, out, errs := runWeb(dir, "enroll", "--ttl", ttl); code != 1 || out != "" || !strings.Contains(errs, "--ttl") {
+			t.Fatalf("ttl %s: %d %q %q", ttl, code, out, errs)
+		}
+	}
+	if code, out, _ := runWeb(dir, "enroll", "--ttl", "2h"); code != 0 || !strings.Contains(out, "good for 2h0m0s") {
+		t.Fatalf("ttl 2h: %d %q", code, out)
+	}
+}
+
+func TestWebPasskeysStripsControlCharacters(t *testing.T) {
+	dir, st := webState(t, "")
+	if err := st.PutPasskey(store.Passkey{ID: "x", Name: "a\x1b[2Jb", Credential: []byte("{}"), CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	if _, out, _ := runWeb(dir, "passkeys"); strings.Contains(out, "\x1b") || !strings.Contains(out, "a[2Jb") {
+		t.Fatalf("%q", out)
+	}
+}

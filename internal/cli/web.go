@@ -10,6 +10,7 @@ import (
 	"strings"
 	"text/tabwriter"
 	"time"
+	"unicode"
 
 	"github.com/danielpina1/athena/internal/server"
 	"github.com/danielpina1/athena/internal/store"
@@ -17,6 +18,18 @@ import (
 )
 
 // --- web ---
+
+const maxEnrollTTL = 24 * time.Hour
+
+// safeText drops control characters, so a name read from the store cannot inject terminal escapes.
+func safeText(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, s)
+}
 
 // web runs `athena web enroll|passkeys|revoke`. They work on the store directly (SQLite lets them run beside the
 // server), like `athena github setup` works on the configuration: an enrollment token is just a row, and the server
@@ -88,9 +101,12 @@ func enrollURL(host, port, token string) string {
 }
 
 func (c *command) webEnroll(args []string) int {
-	ttl := c.fs.Duration("ttl", web.DefaultEnrollTTL, "how long the link is good")
+	ttl := c.fs.Duration("ttl", web.DefaultEnrollTTL, "how long the link is good (up to 24h)")
 	if _, code, ok := c.parse(args, 0, 0); !ok {
 		return code
+	}
+	if *ttl <= 0 || *ttl > maxEnrollTTL {
+		return c.fail(fmt.Errorf("athena web enroll: --ttl must be above 0 and at most %s", maxEnrollTTL))
 	}
 	host, port, err := webAddress(c.stateDir)
 	if err != nil {
@@ -147,7 +163,7 @@ func (c *command) webPasskeys(args []string) int {
 		if !p.LastUsedAt.IsZero() {
 			used = p.LastUsedAt.Local().Format("2006-01-02 15:04")
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", p.ID, p.Name, p.CreatedAt.Local().Format("2006-01-02 15:04"), used)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", p.ID, safeText(p.Name), p.CreatedAt.Local().Format("2006-01-02 15:04"), used)
 	}
 	w.Flush()
 	return 0
@@ -186,13 +202,10 @@ func (c *command) webRevoke(args []string) int {
 		return c.fail(fmt.Errorf("athena web revoke: %q matches %d passkeys; give more of the id", pos[0], len(match)))
 	}
 	p := match[0]
-	sessions, err := st.WebSessionsOf(p.ID)
+	sessions, err := st.DeletePasskey(p.ID)
 	if err != nil {
 		return c.fail(err)
 	}
-	if err := st.DeletePasskey(p.ID); err != nil {
-		return c.fail(err)
-	}
-	fmt.Fprintf(c.stdout, "revoked %q and ended %d session(s)\n", p.Name, len(sessions))
+	fmt.Fprintf(c.stdout, "revoked %q and ended %d session(s)\n", safeText(p.Name), len(sessions))
 	return 0
 }

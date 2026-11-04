@@ -39,6 +39,9 @@ type SoftAuthenticator struct {
 	credID     []byte
 	userHandle []byte
 	signCount  uint32
+
+	// NoUV clears the user-verification flag on everything the authenticator signs, as a key without a PIN or biometric.
+	NoUV bool
 }
 
 func NewSoftAuthenticator(t testing.TB, origin, rpID string) *SoftAuthenticator {
@@ -75,7 +78,7 @@ func (a *SoftAuthenticator) Create(t testing.TB, options []byte) []byte {
 	}
 	// authenticator data with attested credential data: rpIdHash, flags AT|UV|UP, counter, aaguid, id, COSE key
 	rp := sha256.Sum256([]byte(a.RPID))
-	ad := append(rp[:], 0x40|0x04|0x01, 0, 0, 0, 0)
+	ad := append(rp[:], a.flags(0x40), 0, 0, 0, 0)
 	ad = append(ad, make([]byte, 16)...)
 	ad = binary.BigEndian.AppendUint16(ad, uint16(len(a.credID)))
 	ad = append(ad, a.credID...)
@@ -110,7 +113,7 @@ func (a *SoftAuthenticator) Assert(t testing.TB, options []byte) []byte {
 	}
 	a.signCount++
 	rp := sha256.Sum256([]byte(a.RPID))
-	ad := append(rp[:], 0x04|0x01)
+	ad := append(rp[:], a.flags(0))
 	ad = binary.BigEndian.AppendUint32(ad, a.signCount)
 	cd := a.clientData(t, "webauthn.get", o.PublicKey.Challenge)
 	h := sha256.Sum256(cd)
@@ -128,6 +131,15 @@ func (a *SoftAuthenticator) Assert(t testing.TB, options []byte) []byte {
 			"userHandle":        b64.EncodeToString(a.userHandle),
 		},
 	})
+}
+
+// flags is UP plus UV (unless NoUV) plus extra.
+func (a *SoftAuthenticator) flags(extra byte) byte {
+	f := 0x01 | extra
+	if !a.NoUV {
+		f |= 0x04
+	}
+	return f
 }
 
 func (a *SoftAuthenticator) clientData(t testing.TB, typ, challenge string) []byte {

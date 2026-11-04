@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
@@ -66,6 +67,9 @@ type Auth struct {
 	mu         sync.Mutex // serializes session touches and reauths, so one cannot overwrite the other
 	ceremonies map[string]*ceremony
 	revokeFns  []func(sessionHashes []string)
+
+	// afterLoginVerified, when set (tests), runs between the verification of a login and the opening of its session.
+	afterLoginVerified func()
 }
 
 type ceremony struct {
@@ -156,16 +160,13 @@ func (a *Auth) revoked(hashes []string) {
 // RevokePasskey deletes a passkey and every session it opened, and reports the ended sessions to the OnRevoke
 // callbacks. A passkey that does not exist is not an error.
 func (a *Auth) RevokePasskey(id string) error {
-	sessions, err := a.st.WebSessionsOf(id)
+	sessions, err := a.st.DeletePasskey(id)
 	if err != nil {
 		return err
 	}
-	if err := a.st.DeletePasskey(id); err != nil {
-		return err
-	}
 	hashes := make([]string, len(sessions))
-	for i, s := range sessions {
-		hashes[i] = hex.EncodeToString(s.Hash)
+	for i, h := range sessions {
+		hashes[i] = hex.EncodeToString(h)
 	}
 	a.revoked(hashes)
 	return nil
@@ -231,11 +232,12 @@ func passkeyID(credentialID []byte) string { return base64.RawURLEncoding.Encode
 
 // --- ceremonies ---
 
-func (a *Auth) putCeremony(w http.ResponseWriter, c *ceremony) {
+// putCeremony stores the ceremony and sets its cookie; false means it answered with an error already.
+func (a *Auth) putCeremony(w http.ResponseWriter, c *ceremony) bool {
 	id, _, err := newSecret()
 	if err != nil {
 		fail(w, http.StatusInternalServerError, "internal", "internal error")
-		return
+		return false
 	}
 	now := a.now()
 	c.expires = now.Add(ceremonyTTL)
@@ -258,6 +260,7 @@ func (a *Auth) putCeremony(w http.ResponseWriter, c *ceremony) {
 	a.mu.Unlock()
 	http.SetCookie(w, &http.Cookie{Name: CeremonyCookie, Value: id, Path: "/auth", MaxAge: int(ceremonyTTL.Seconds()),
 		HttpOnly: true, Secure: a.secure, SameSite: http.SameSiteStrictMode})
+	return true
 }
 
 // takeCeremony removes and returns the ceremony the request's cookie names, if it is of the given kind and unexpired.
@@ -279,6 +282,20 @@ func (a *Auth) takeCeremony(w http.ResponseWriter, r *http.Request, kind string)
 }
 
 // --- registration ---
+
+// cleanName makes a passkey name fit to store and print: control characters dropped, at most maxNameLen characters.
+func cleanName(s string) string {
+	s = strings.TrimSpace(strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, s))
+	if r := []rune(s); len(r) > maxNameLen {
+		s = strings.TrimSpace(string(r[:maxNameLen]))
+	}
+	return s
+}
 
 // RegisterBegin starts enrolling a passkey. The body is {"token": ..., "name": ...}; the token is spent here, so a
 // ceremony that fails needs a new token.
@@ -308,20 +325,31 @@ func (a *Auth) RegisterBegin(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusUnauthorized, "unauthenticated", "invalid or expired enrollment token")
 		return
 	}
-	name := strings.TrimSpace(req.Name)
-	if len(name) > maxNameLen {
-		name = name[:maxNameLen]
-	}
+	name := cleanName(req.Name)
 	if name == "" {
 		name = "Passkey"
 	}
-	creation, session, err := a.wa.BeginRegistration(owner{})
+	existing, err := a.st.Passkeys()
+	if err != nil {
+		slog.Error("web: passkeys", "err", err)
+		fail(w, http.StatusInternalServerError, "internal", "internal error")
+		return
+	}
+	var have []webauthn.Credential
+	for _, p := range existing {
+		if cr, err := credentialOf(p); err == nil {
+			have = append(have, cr)
+		}
+	}
+	creation, session, err := a.wa.BeginRegistration(owner{}, webauthn.WithExclusions(webauthn.Credentials(have).CredentialDescriptors()))
 	if err != nil {
 		slog.Error("web: begin registration", "err", err)
 		fail(w, http.StatusInternalServerError, "internal", "internal error")
 		return
 	}
-	a.putCeremony(w, &ceremony{kind: "register", data: *session, name: name})
+	if !a.putCeremony(w, &ceremony{kind: "register", data: *session, name: name}) {
+		return
+	}
 	writeJSON(w, http.StatusOK, creation)
 }
 
@@ -346,7 +374,13 @@ func (a *Auth) RegisterFinish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := passkeyID(cred.ID)
-	if _, exists, err := a.st.Passkey(id); err != nil || exists {
+	_, exists, err := a.st.Passkey(id)
+	if err != nil {
+		slog.Error("web: passkey", "err", err)
+		fail(w, http.StatusInternalServerError, "internal", "internal error")
+		return
+	}
+	if exists {
 		fail(w, http.StatusConflict, "conflict", "passkey already enrolled")
 		return
 	}
@@ -371,7 +405,9 @@ func (a *Auth) LoginBegin(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, "internal", "internal error")
 		return
 	}
-	a.putCeremony(w, &ceremony{kind: "login", data: *session})
+	if !a.putCeremony(w, &ceremony{kind: "login", data: *session}) {
+		return
+	}
 	writeJSON(w, http.StatusOK, assertion)
 }
 
@@ -406,6 +442,9 @@ func (a *Auth) LoginFinish(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusUnauthorized, "unauthenticated", "login refused")
 		return
 	}
+	if a.afterLoginVerified != nil {
+		a.afterLoginVerified()
+	}
 	now := a.now()
 	if err := a.touchPasskey(loaded.ID, now, cred); err != nil {
 		slog.Error("web: touch passkey", "err", err)
@@ -418,6 +457,11 @@ func (a *Auth) LoginFinish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := a.st.PutWebSession(store.WebSession{Hash: hash, CreatedAt: now, SeenAt: now, ReauthAt: now, PasskeyID: loaded.ID}); err != nil {
+		// The passkey was revoked after the assertion verified: the store refuses a session without one.
+		if _, still, perr := a.st.Passkey(loaded.ID); perr == nil && !still {
+			fail(w, http.StatusUnauthorized, "unauthenticated", "login refused")
+			return
+		}
 		slog.Error("web: put session", "err", err)
 		fail(w, http.StatusInternalServerError, "internal", "internal error")
 		return
@@ -455,7 +499,9 @@ func (a *Auth) ReauthBegin(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, "internal", "internal error")
 		return
 	}
-	a.putCeremony(w, &ceremony{kind: "reauth", data: *session, sessionID: s.Hash})
+	if !a.putCeremony(w, &ceremony{kind: "reauth", data: *session, sessionID: s.Hash}) {
+		return
+	}
 	writeJSON(w, http.StatusOK, assertion)
 }
 
@@ -524,7 +570,7 @@ func (a *Auth) sessionCookie(value string, maxAge int) *http.Cookie {
 }
 
 // Session returns the session the request's cookie names, if it is live: unseen less than 30 days and created less
-// than 90 days ago, with its passkey still enrolled. A live session's seen time is refreshed.
+// than 90 days ago. Its passkey is still enrolled: the store deletes a passkey's sessions with it and refuses new ones. A live session's seen time is refreshed.
 func (a *Auth) Session(r *http.Request) (Session, bool) {
 	s, _, ok := a.session(r)
 	return s, ok
