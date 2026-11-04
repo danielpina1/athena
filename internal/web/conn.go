@@ -9,6 +9,8 @@ import (
 	"sync"
 	"time"
 
+	"google.golang.org/protobuf/proto"
+
 	"github.com/danielpina1/athena/internal/core"
 	"github.com/danielpina1/athena/internal/hub"
 	"github.com/danielpina1/athena/internal/link"
@@ -89,8 +91,10 @@ type Dashboard struct {
 	cmd     Commander
 	log     *slog.Logger
 	version string
-	// helloTimeout and linkOpts are fixed at creation; tests shorten them.
+	// helloTimeout, recheck and linkOpts are fixed at creation; tests shorten them. recheck is how often an open
+	// connection checks its session (a heartbeat).
 	helloTimeout time.Duration
+	recheck      time.Duration
 	linkOpts     link.Options
 
 	mu    sync.Mutex
@@ -104,7 +108,7 @@ func NewDashboard(cfg DashboardConfig) *Dashboard {
 		log = slog.Default()
 	}
 	d := &Dashboard{auth: cfg.Auth, hub: cfg.Hub, cmd: cfg.Commander, log: log, version: cfg.Version,
-		helloTimeout: HelloTimeout, conns: map[string]map[*conn]struct{}{}}
+		helloTimeout: HelloTimeout, recheck: heartbeat, conns: map[string]map[*conn]struct{}{}}
 	d.auth.OnRevoke(d.revoked)
 	return d
 }
@@ -155,7 +159,7 @@ func (d *Dashboard) ServeConn(w http.ResponseWriter, r *http.Request) {
 		return // Accept answered
 	}
 	c := &conn{d: d, r: r, lc: lc, resync: make(chan struct{}, 1), cmds: make(chan *athenav1.Command, commandQueue),
-		watching: map[string]bool{}}
+		details: make(chan detailMsg), watching: map[string]bool{}, sentDetail: map[string]time.Time{}}
 	d.add(s.Hash, c)
 	defer d.remove(s.Hash, c)
 	// A revoke between the check above and the registration would have found nothing to close.
@@ -175,6 +179,11 @@ type conn struct {
 	clientID string
 	resync   chan struct{} // cap 1: the client asked for a Snapshot
 	cmds     chan *athenav1.Command
+	// details carries a watch's first detail (or an unwatch) to the forwarder, the one goroutine that sends details.
+	details chan detailMsg
+	done    <-chan struct{} // closed when the connection ends; set before the goroutines start
+	// sentDetail is the updated_at of the last detail sent per Ticket (forwarder only): an older one is not sent.
+	sentDetail map[string]time.Time
 
 	endOnce sync.Once
 	cancel  context.CancelFunc // set before the goroutines start
@@ -205,6 +214,7 @@ func (c *conn) serve(ctx context.Context) {
 		return
 	}
 	c.clientID = hello.GetClientId()
+	c.done = ctx.Done()
 	sub, needSnapshot := c.d.hub.Subscribe(hello.GetCursor(), hello.GetEpoch())
 	c.mu.Lock()
 	c.sub, c.cancel = sub, cancel
@@ -226,14 +236,15 @@ func (c *conn) serve(ctx context.Context) {
 	}}})
 	floor := hello.GetCursor()
 	if needSnapshot {
-		if floor, ok = c.sendSnapshot(); !ok {
-			_ = c.lc.Close(closeInternal, "no snapshot")
+		var err error
+		if floor, err = c.sendSnapshot(); err != nil {
+			c.snapshotFailed(err)
 			return
 		}
 	}
 
 	var wg sync.WaitGroup
-	wg.Add(2)
+	wg.Add(3)
 	go func() {
 		defer wg.Done()
 		c.forward(ctx, floor)
@@ -241,6 +252,10 @@ func (c *conn) serve(ctx context.Context) {
 	go func() {
 		defer wg.Done()
 		c.runCommands(ctx)
+	}()
+	go func() {
+		defer wg.Done()
+		c.checkSession(ctx)
 	}()
 	err := c.sess.Run(ctx)
 	cancel()
@@ -251,9 +266,12 @@ func (c *conn) serve(ctx context.Context) {
 // readHello reads the first frame, which must be a Hello of this protocol from a well-formed client id. It returns
 // the Hello and its seq; a refusal is answered with an Error and the close.
 func (c *conn) readHello(ctx context.Context) (*athenav1.Hello, uint64, bool) {
-	hctx, cancel := context.WithTimeout(ctx, c.d.helloTimeout)
-	b, err := c.lc.Read(hctx)
-	cancel()
+	// Not a read deadline: a cancelled read drops the socket without a close frame. The timer closes properly.
+	late := time.AfterFunc(c.d.helloTimeout, func() { _ = c.lc.Close(link.CloseProtocol, "no hello in time") })
+	b, err := c.lc.Read(ctx)
+	if !late.Stop() {
+		return nil, 0, false
+	}
 	if err != nil {
 		_ = c.lc.Close(link.CloseProtocol, "no hello")
 		return nil, 0, false
@@ -273,6 +291,24 @@ func (c *conn) readHello(ctx context.Context) (*athenav1.Hello, uint64, bool) {
 		return h, f.GetSeq(), true
 	}
 	return nil, 0, false
+}
+
+// checkSession re-validates the session every recheck while the connection is open; the open connection counts as
+// the browser being seen. A session that ended (expired, or deleted behind Auth's back) closes the connection.
+func (c *conn) checkSession(ctx context.Context) {
+	t := time.NewTicker(c.d.recheck)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if !c.d.auth.connected(c.r) {
+				c.end(CloseSessionEnded, "session ended")
+				return
+			}
+		}
+	}
 }
 
 // validClientID keeps client ids to a plain alphabet without ':', so "<client_id>:<command_id>" names one command.
@@ -345,19 +381,85 @@ func (c *conn) closeSub() {
 	}
 }
 
-// sendSnapshot sends a fresh Snapshot and returns its cursor: the feed's deltas at or below it are in it already.
-func (c *conn) sendSnapshot() (uint64, bool) {
+// sendSnapshot sends a fresh Snapshot, trimmed to fit one frame, and returns its cursor: the feed's deltas at or
+// below it are in it already.
+func (c *conn) sendSnapshot() (uint64, error) {
 	snap, err := c.d.hub.Snapshot()
 	if err != nil {
 		c.d.log.Error("dashboard: snapshot", "client", c.clientID, "error", err)
 		c.sendError(CodeInternal, "no snapshot")
-		return 0, false
+		return 0, err
+	}
+	if before := len(snap.GetTickets()) + len(snap.GetApprovals()) + len(snap.GetDecisions()) + len(snap.GetTriggers()); !fitSnapshot(snap) {
+		c.d.log.Error("dashboard: snapshot too big for a frame even trimmed", "client", c.clientID)
+		c.sendError(CodeInternal, "no snapshot")
+		return 0, errors.New("snapshot too big")
+	} else if after := len(snap.GetTickets()) + len(snap.GetApprovals()) + len(snap.GetDecisions()) + len(snap.GetTriggers()); after < before {
+		c.d.log.Warn("dashboard: snapshot trimmed to fit a frame", "client", c.clientID, "records", before, "kept", after)
 	}
 	if err := c.sess.Send(athenav1.Channel_EVENTS, false, &athenav1.Frame{Body: &athenav1.Frame_Snapshot{Snapshot: snap}}); err != nil {
 		c.d.log.Error("dashboard: send snapshot", "client", c.clientID, "error", err)
-		return 0, false
+		return 0, err
 	}
-	return snap.GetCursor(), true
+	return snap.GetCursor(), nil
+}
+
+// snapshotFailed closes after a Snapshot could not be sent: with 1013 when the client is too far behind (it comes back
+// with its cursor), else 1011.
+func (c *conn) snapshotFailed(err error) {
+	if errors.Is(err, link.ErrBackpressure) {
+		go c.end(closeTryAgain, "too far behind")
+		return
+	}
+	go c.end(closeInternal, "no snapshot")
+}
+
+// maxSnapshot is the largest Snapshot frame body: Send needs room for the stamp.
+const maxSnapshot = link.MaxFrame - link.StampSlack
+
+// fitSnapshot makes s fit one frame: while it is too big, it halves the ended Tickets, the answered Approvals, the
+// Decisions and the Triggers, keeping the newest of each (the lists come newest first). Open Tickets, pending
+// Approvals, Threads, node, health and Policy stay. It reports false when even that does not fit.
+func fitSnapshot(s *athenav1.Snapshot) bool {
+	size := func() int {
+		return proto.Size(&athenav1.Frame{Channel: athenav1.Channel_EVENTS, Body: &athenav1.Frame_Snapshot{Snapshot: s}})
+	}
+	for size() > maxSnapshot {
+		ended, answered := 0, 0
+		for _, t := range s.Tickets {
+			if t.GetEndedAt() != nil {
+				ended++
+			}
+		}
+		for _, a := range s.Approvals {
+			if a.GetState() != core.ApprovalPending {
+				answered++
+			}
+		}
+		if ended+answered+len(s.Decisions)+len(s.Triggers) == 0 {
+			return false
+		}
+		s.Tickets = keepFirst(s.Tickets, ended/2, func(t *athenav1.TicketSummary) bool { return t.GetEndedAt() != nil })
+		s.Approvals = keepFirst(s.Approvals, answered/2, func(a *athenav1.ApprovalView) bool { return a.GetState() != core.ApprovalPending })
+		s.Decisions = s.Decisions[:len(s.Decisions)/2]
+		s.Triggers = s.Triggers[:len(s.Triggers)/2]
+	}
+	return true
+}
+
+// keepFirst keeps every element trim does not select, and the first n it does.
+func keepFirst[T any](list []T, n int, trim func(T) bool) []T {
+	out := list[:0]
+	for _, v := range list {
+		if trim(v) {
+			if n == 0 {
+				continue
+			}
+			n--
+		}
+		out = append(out, v)
+	}
+	return out
 }
 
 // forward sends the feed's deltas above floor (and every ticket_detail, seq 0), and a fresh Snapshot when the hub
@@ -373,6 +475,12 @@ func (c *conn) forward(ctx context.Context, floor uint64) {
 			if sub, floor, ok = c.resubscribe(); !ok {
 				return
 			}
+		case m := <-c.details:
+			if m.detail == nil {
+				delete(c.sentDetail, m.ticketID)
+			} else {
+				c.sendDetail(m.detail)
+			}
 		case d, open := <-sub.C():
 			if !open {
 				if !sub.Resync() { // the hub stopped, or the connection is ending
@@ -386,6 +494,10 @@ func (c *conn) forward(ctx context.Context, floor uint64) {
 				continue
 			}
 			if d.GetSeq() != 0 && d.GetSeq() <= floor {
+				continue
+			}
+			if td := d.GetTicketDetail(); td != nil {
+				c.sendDetail(td)
 				continue
 			}
 			if err := c.sess.Send(athenav1.Channel_EVENTS, false, &athenav1.Frame{Body: &athenav1.Frame_Delta{Delta: d}}); err != nil {
@@ -413,9 +525,9 @@ func (c *conn) resubscribe() (*hub.Sub, uint64, bool) {
 	}
 	c.mu.Unlock()
 	old.Close()
-	floor, ok := c.sendSnapshot()
-	if !ok {
-		go c.end(closeInternal, "no snapshot")
+	floor, err := c.sendSnapshot()
+	if err != nil {
+		c.snapshotFailed(err)
 		return nil, 0, false
 	}
 	for _, id := range ids {
@@ -426,7 +538,20 @@ func (c *conn) resubscribe() (*hub.Sub, uint64, bool) {
 	return sub, floor, true
 }
 
+// detailMsg is a watch's first detail for the forwarder, or (detail nil) an unwatch.
+type detailMsg struct {
+	ticketID string
+	detail   *athenav1.TicketDetail
+}
+
+// sendDetail sends a Ticket's detail unless one with a later updated_at went already: the first detail of a watch and
+// the feed's are read at different times, and an older one must not overwrite a newer one. Forwarder only.
 func (c *conn) sendDetail(td *athenav1.TicketDetail) {
+	id, at := td.GetSummary().GetId(), td.GetSummary().GetUpdatedAt().AsTime()
+	if last, ok := c.sentDetail[id]; ok && at.Before(last) {
+		return
+	}
+	c.sentDetail[id] = at
 	_ = c.sess.Send(athenav1.Channel_EVENTS, false, &athenav1.Frame{Body: &athenav1.Frame_Delta{Delta: &athenav1.Delta{
 		Change: &athenav1.Delta_TicketDetail{TicketDetail: td}}}})
 }
@@ -464,10 +589,12 @@ func (c *conn) handle(ctx context.Context, cmd *athenav1.Command) *athenav1.Comm
 	case *athenav1.Command_WatchTicket:
 		res = c.watch(a.WatchTicket.GetTicketId())
 	case *athenav1.Command_UnwatchTicket:
+		id := a.UnwatchTicket.GetTicketId()
 		c.mu.Lock()
-		delete(c.watching, a.UnwatchTicket.GetTicketId())
-		c.sub.Unwatch(a.UnwatchTicket.GetTicketId())
+		delete(c.watching, id)
+		c.sub.Unwatch(id)
 		c.mu.Unlock()
+		c.toForwarder(detailMsg{ticketID: id})
 		res = &athenav1.CommandResult{Ok: true}
 	case *athenav1.Command_Visibility:
 		res = &athenav1.CommandResult{Ok: true} // push suppression uses it (Task 10)
@@ -481,7 +608,8 @@ func (c *conn) handle(ctx context.Context, cmd *athenav1.Command) *athenav1.Comm
 	return res
 }
 
-// watch starts the ticket_detail deltas of a Ticket and sends its current detail, read after the watch starts.
+// watch starts the ticket_detail deltas of a Ticket and has the forwarder send its current detail, read after the
+// watch starts.
 func (c *conn) watch(ticketID string) *athenav1.CommandResult {
 	if ticketID == "" {
 		return &athenav1.CommandResult{Code: CodeInvalid, Message: "watch needs a ticket id"}
@@ -507,6 +635,14 @@ func (c *conn) watch(ticketID string) *athenav1.CommandResult {
 		c.d.log.Error("dashboard: ticket detail", "ticket", ticketID, "error", err)
 		return &athenav1.CommandResult{Code: CodeInternal, Message: "internal error"}
 	}
-	c.sendDetail(td)
+	c.toForwarder(detailMsg{ticketID: ticketID, detail: td})
 	return &athenav1.CommandResult{Ok: true}
+}
+
+// toForwarder hands m to the forwarder, unless the connection ends first.
+func (c *conn) toForwarder(m detailMsg) {
+	select {
+	case c.details <- m:
+	case <-c.done:
+	}
 }

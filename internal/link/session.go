@@ -39,9 +39,11 @@ const (
 	// maxUnacked bounds the durable frames in flight (sent and not acked, plus queued): a peer that pings but never
 	// acks makes durable Sends fail with ErrBackpressure instead of growing memory.
 	maxUnacked = 1024
-	// stampSlack is what Channel, Seq and Ack add to an encoded Frame at most: three fields, two with a 10-byte varint.
-	stampSlack = 24
 )
+
+// StampSlack is what Channel, Seq and Ack add to an encoded Frame at most: three fields, two with a 10-byte varint.
+// Send refuses a frame whose body leaves less room than that under MaxFrame.
+const StampSlack = 24
 
 // Resume carries a dropped Session's state into its successor on a new connection.
 type Resume struct {
@@ -160,8 +162,8 @@ func (s *Session) Send(ch athenav1.Channel, durable bool, f *athenav1.Frame) err
 	}
 	f.Channel = ch
 	f.Seq, f.Ack = 0, 0
-	if n := proto.Size(f); n > MaxFrame-stampSlack {
-		return fmt.Errorf("%w: %d bytes, over %d", ErrInvalid, n, MaxFrame-stampSlack)
+	if n := proto.Size(f); n > MaxFrame-StampSlack {
+		return fmt.Errorf("%w: %d bytes, over %d", ErrInvalid, n, MaxFrame-StampSlack)
 	}
 	s.mu.Lock()
 	if s.closed {

@@ -604,7 +604,7 @@ func TestNearLimitFrameIsRefusedOrCarried(t *testing.T) {
 	if err := a.Send(athenav1.Channel_CONTROL, true, big(MaxFrame)); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("MaxFrame-sized frame: %v", err)
 	}
-	if err := a.Send(athenav1.Channel_CONTROL, true, big(MaxFrame-stampSlack+1)); !errors.Is(err, ErrInvalid) {
+	if err := a.Send(athenav1.Channel_CONTROL, true, big(MaxFrame-StampSlack+1)); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("one over: %v", err)
 	}
 	if n := len(a.Unacked()); n != 0 {
@@ -617,7 +617,7 @@ func TestNearLimitFrameIsRefusedOrCarried(t *testing.T) {
 	b.mu.Lock()
 	b.recvSeq = 1 << 63
 	b.mu.Unlock()
-	if err := a.Send(athenav1.Channel_CONTROL, true, big(MaxFrame-stampSlack)); err != nil {
+	if err := a.Send(athenav1.Channel_CONTROL, true, big(MaxFrame-StampSlack)); err != nil {
 		t.Fatal(err)
 	}
 	eventually(t, "delivered", func() bool { return got.len() == 1 })

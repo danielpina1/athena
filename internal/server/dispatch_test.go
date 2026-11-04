@@ -1,10 +1,8 @@
 package server
 
 import (
+	"bytes"
 	"context"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net"
@@ -12,6 +10,8 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -24,15 +24,13 @@ import (
 	"github.com/danielpina1/athena/internal/pb/athenav1"
 	"github.com/danielpina1/athena/internal/store"
 	"github.com/danielpina1/athena/internal/web"
+	"github.com/danielpina1/athena/internal/web/webauthntest"
 )
 
 // The dashboard end to end: a real server (fake claude), its Dispatcher, a hub over the server's Source adapter and a
 // web.Dashboard behind a TLS test server. Task 11 wires these into Run; here the test builds them around it.
 
-const (
-	webOrigin  = "https://athena.test"
-	webPasskey = "pk-phone"
-)
+const webOrigin = "https://athena.test"
 
 type webServer struct {
 	*testServer
@@ -41,6 +39,9 @@ type webServer struct {
 	srv  *httptest.Server
 	down bool
 	stop func()
+	// skew moves the login's clock ahead of real time; authn is the owner's passkey once enrolled.
+	skew  atomic.Int64
+	authn *webauthntest.SoftAuthenticator
 }
 
 // startWeb starts the server in stateDir and its dashboard.
@@ -54,13 +55,16 @@ func startWeb(t *testing.T, stateDir string) *webServer {
 	d.st.OnCommit(w.hub.OnCommit)
 	ctx, cancel := context.WithCancel(context.Background())
 	w.hub.Start(ctx)
-	auth, err := web.NewAuth(d.st, webOrigin, "athena.test", nil)
+	auth, err := web.NewAuth(d.st, webOrigin, "athena.test", func() time.Time {
+		return time.Now().Add(time.Duration(w.skew.Load()))
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	d.SetAuth(auth)
 	dash := web.NewDashboard(web.DashboardConfig{Auth: auth, Hub: w.hub, Commander: d, Log: discardLogger(), Version: "test"})
 	mux := http.NewServeMux()
+	auth.Mount(mux)
 	mux.HandleFunc("GET /ws", dash.ServeConn)
 	w.srv = httptest.NewTLSServer(mux)
 	w.stop = func() {
@@ -77,23 +81,76 @@ func startWeb(t *testing.T, stateDir string) *webServer {
 	return w
 }
 
-// login stores a passkey and a session for it, as a finished login would, and returns the cookie value. reauthAt is
-// the session's last passkey assertion.
-func (w *webServer) login(reauthAt time.Time) string {
-	w.t.Helper()
-	if _, ok, _ := w.d.st.Passkey(webPasskey); !ok {
-		if err := w.d.st.PutPasskey(store.Passkey{ID: webPasskey, Name: "phone", Credential: []byte("{}"), CreatedAt: time.Now()}); err != nil {
-			w.t.Fatal(err)
+// browser is a signed-in browser: the cookies the login handlers set.
+type browser struct {
+	w       *webServer
+	cookies map[string]*http.Cookie
+}
+
+// post sends a POST with the configured Origin and the browser's cookies, keeps the cookies it sets and returns the
+// body; anything but 200 fails the test.
+func (b *browser) post(path string, body []byte) []byte {
+	t := b.w.t
+	t.Helper()
+	req, err := http.NewRequest("POST", b.w.srv.URL+path, bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Origin", webOrigin)
+	req.Header.Set("Content-Type", "application/json")
+	for _, c := range b.cookies {
+		req.AddCookie(c)
+	}
+	resp, err := b.w.srv.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	out, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("%s = %d %s", path, resp.StatusCode, out)
+	}
+	for _, c := range resp.Cookies() {
+		if c.MaxAge < 0 {
+			delete(b.cookies, c.Name)
+		} else {
+			b.cookies[c.Name] = c
 		}
 	}
-	raw := make([]byte, 32)
-	rand.Read(raw)
-	h := sha256.Sum256(raw)
-	now := time.Now()
-	if err := w.d.st.PutWebSession(store.WebSession{Hash: h[:], CreatedAt: now, SeenAt: now, ReauthAt: reauthAt, PasskeyID: webPasskey}); err != nil {
-		w.t.Fatal(err)
+	return out
+}
+
+// session is the session cookie's value.
+func (b *browser) session() string { return b.cookies[web.SessionCookie].Value }
+
+// reauth runs a passkey reauthentication for the browser's session.
+func (b *browser) reauth() {
+	b.w.t.Helper()
+	begin := b.post("/auth/reauth/begin", nil)
+	b.post("/auth/reauth/finish", b.w.authn.Assert(b.w.t, begin))
+}
+
+// login enrolls the software authenticator (the first time) and signs in with it through the login handlers.
+func (w *webServer) login() *browser {
+	w.t.Helper()
+	if w.authn == nil {
+		w.authn = webauthntest.New(w.t, webOrigin, "athena.test")
+		token, err := web.IssueEnrollToken(w.d.st, 0)
+		if err != nil {
+			w.t.Fatal(err)
+		}
+		reg := &browser{w: w, cookies: map[string]*http.Cookie{}}
+		body, _ := json.Marshal(map[string]string{"token": token, "name": "phone"})
+		begin := reg.post("/auth/register/begin", body)
+		reg.post("/auth/register/finish", w.authn.Create(w.t, begin))
 	}
-	return base64.RawURLEncoding.EncodeToString(raw)
+	b := &browser{w: w, cookies: map[string]*http.Cookie{}}
+	begin := b.post("/auth/login/begin", nil)
+	b.post("/auth/login/finish", w.authn.Assert(w.t, begin))
+	return b
 }
 
 // wsClient is a dashboard's end of the link.
@@ -210,7 +267,7 @@ func (w *webServer) tickets() []TicketSummary {
 func TestHelloWelcomeSnapshotThenDeltas(t *testing.T) {
 	newFakeEnv(t, openTurnFixture(t))
 	w := startWeb(t, newStateDir(t))
-	c := w.connect(w.login(time.Now()), phoneHello())
+	c := w.connect(w.login().session(), phoneHello())
 	if wl := c.welcome(); !wl.GetSnapshotFollows() || wl.GetEpoch() != w.hub.Epoch() {
 		t.Fatalf("welcome = %v", wl)
 	}
@@ -230,7 +287,7 @@ func TestServerRestartForcesSnapshot(t *testing.T) {
 	newFakeEnv(t, openTurnFixture(t))
 	dir := newStateDir(t)
 	w := startWeb(t, dir)
-	cookie := w.login(time.Now())
+	cookie := w.login().session()
 	c := w.connect(cookie, phoneHello())
 	epoch := c.welcome().GetEpoch()
 	cursor := c.snapshot().GetCursor()
@@ -254,7 +311,7 @@ func TestServerRestartForcesSnapshot(t *testing.T) {
 func TestRetriedCommandActsOnce(t *testing.T) {
 	newFakeEnv(t, openTurnFixture(t))
 	w := startWeb(t, newStateDir(t))
-	cookie := w.login(time.Now())
+	cookie := w.login().session()
 	c := w.connect(cookie, phoneHello())
 	c.welcome()
 	c.send(submitCmd("c1", "only once"))
@@ -319,28 +376,30 @@ func TestSensitiveCommandNeedsReauth(t *testing.T) {
 	}
 	sensitive := []*athenav1.Command{
 		setPolicy("p1", 0),
-		{Id: "k1", Action: &athenav1.Command_RevokePasskey{RevokePasskey: &athenav1.RevokePasskey{Id: webPasskey}}},
+		{Id: "k1", Action: &athenav1.Command_RevokePasskey{RevokePasskey: &athenav1.RevokePasskey{Id: "any"}}},
 		{Id: "u1", Action: &athenav1.Command_PushSubscribe{PushSubscribe: &athenav1.PushSubscribe{Endpoint: "https://push.test/x"}}},
 		{Id: "u2", Action: &athenav1.Command_PushUnsubscribe{PushUnsubscribe: &athenav1.PushUnsubscribe{Endpoint: "https://push.test/x"}}},
 		{Id: "u3", Action: &athenav1.Command_SetNotificationPrefs{SetNotificationPrefs: &athenav1.SetNotificationPrefs{}}},
 	}
-	stale := w.connect(w.login(time.Now().Add(-10*time.Minute)), phoneHello())
-	stale.welcome()
+	b := w.login()
+	w.skew.Store(int64(web.ReauthWindow + time.Minute)) // the login's assertion is too old now
+	c := w.connect(b.session(), phoneHello())
+	c.welcome()
 	for _, cmd := range sensitive {
-		if r := stale.do(cmd); r.GetCode() != web.CodeReauthRequired {
+		if r := c.do(cmd); r.GetCode() != web.CodeReauthRequired {
 			t.Fatalf("%s without reauth = %v", cmd.GetId(), r)
 		}
 	}
-	if r := stale.do(&athenav1.Command{Id: "l1", Action: &athenav1.Command_ListPasskeys{ListPasskeys: &athenav1.ListPasskeys{}}}); !r.GetOk() || len(r.GetPasskeys().GetPasskeys()) != 1 {
+	if r := c.do(&athenav1.Command{Id: "l1", Action: &athenav1.Command_ListPasskeys{ListPasskeys: &athenav1.ListPasskeys{}}}); !r.GetOk() || len(r.GetPasskeys().GetPasskeys()) != 1 {
 		t.Fatalf("list passkeys = %v", r)
 	}
 	if _, rev := w.d.policy.current(); rev != 0 {
 		t.Fatalf("policy revision %d after refused sets", rev)
 	}
 
-	// The same command id goes through once the session is fresh: a reauth_required result is not kept.
-	fresh := w.connect(w.login(time.Now()), phoneHello())
-	fresh.welcome()
+	// The same command id goes through after a reauthentication: a reauth_required result is not kept.
+	b.reauth()
+	fresh := c
 	if r := fresh.do(setPolicy("p1", 0)); !r.GetOk() || r.GetPolicyRevision() != 1 {
 		t.Fatalf("set policy = %v", r)
 	}
@@ -358,7 +417,7 @@ func TestInterruptReachesSession(t *testing.T) {
 	w := startWeb(t, newStateDir(t))
 	id := w.submit("long task")
 	w.running(id)
-	c := w.connect(w.login(time.Now()), phoneHello())
+	c := w.connect(w.login().session(), phoneHello())
 	c.welcome()
 	interrupt := func(cmdID, ticket string) *athenav1.CommandResult {
 		return c.do(&athenav1.Command{Id: cmdID, Action: &athenav1.Command_Interrupt{Interrupt: &athenav1.Interrupt{TicketId: ticket}}})
@@ -381,10 +440,10 @@ func TestInterruptReachesSession(t *testing.T) {
 
 func TestWebRevokeClosesConnections(t *testing.T) {
 	w := startWeb(t, newStateDir(t))
-	c := w.connect(w.login(time.Now()), phoneHello())
+	c := w.connect(w.login().session(), phoneHello())
 	c.welcome()
 	var out WebRevokeResult
-	w.ok(Request{Op: OpWebRevoke, ID: webPasskey}, &out)
+	w.ok(Request{Op: OpWebRevoke, ID: w.authn.CredentialID()}, &out)
 	if out.Sessions != 1 {
 		t.Fatalf("ended %d sessions", out.Sessions)
 	}
@@ -396,7 +455,7 @@ func TestWebRevokeClosesConnections(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("connection open 1 s after the revoke")
 	}
-	if r, err := call(w.stateDir, Request{Op: OpWebRevoke, ID: webPasskey}); err != nil || r.OK || !strings.Contains(r.Error, "not found") {
+	if r, err := call(w.stateDir, Request{Op: OpWebRevoke, ID: w.authn.CredentialID()}); err != nil || r.OK || !strings.Contains(r.Error, "not found") {
 		t.Fatalf("second revoke = %+v %v", r, err)
 	}
 }
@@ -471,5 +530,55 @@ func TestHubSourceRecentThreads(t *testing.T) {
 	}
 	if strings.Join(keys, " ") != "x:b x:a x:busy" {
 		t.Fatalf("recent threads = %v, want the newest Triggers' (stored) Threads, then the active", keys)
+	}
+}
+
+func TestConcurrentCopiesOfACommandActOnce(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "athena.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	eng := core.NewEngine(st.Repos(), nopExec{}, nil, nil)
+	tk, err := eng.SubmitOwnerTask("needs approval", core.TaskOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := eng.RequestApproval(core.Approval{TicketID: tk.ID, Tool: "Bash"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Dispatcher{st: st, eng: eng, log: discardLogger()}
+	var first atomic.Bool
+	d.beforeStore = func() {
+		if first.CompareAndSwap(false, true) {
+			time.Sleep(200 * time.Millisecond) // the first copy acted; the others arrive before its result is stored
+		}
+	}
+	// The old connection's copy and the reconnected client's resend, at once: answering twice would refuse one of them
+	// (the Approval is no longer pending) and could store that refusal as the result.
+	cmd := &athenav1.Command{Id: "a1", Action: &athenav1.Command_AnswerApproval{AnswerApproval: &athenav1.AnswerApproval{ApprovalId: a.ID, Approve: true}}}
+	const copies = 8
+	results := make([]*athenav1.CommandResult, copies)
+	var wg sync.WaitGroup
+	for i := range copies {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results[i] = d.Do(context.Background(), web.Origin{ClientID: "phone"}, proto.Clone(cmd).(*athenav1.Command))
+		}()
+	}
+	wg.Wait()
+	for i, r := range results {
+		if !r.GetOk() || !proto.Equal(r, results[0]) {
+			t.Fatalf("copy %d = %v, copy 0 = %v: want every copy ok and alike", i, r, results[0])
+		}
+	}
+	got, err := st.AnsweredApprovals(0)
+	if err != nil || len(got) != 1 || got[0].State != core.ApprovalApproved {
+		t.Fatalf("answered approvals = %+v %v", got, err)
+	}
+	if len(d.inflight.m) != 0 {
+		t.Fatalf("%d command locks left", len(d.inflight.m))
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -54,6 +55,45 @@ type Dispatcher struct {
 	auth atomic.Pointer[web.Auth]
 	// onPolicyChange, when set (tests), runs before the Engine hears of a Policy change; an error refuses it.
 	onPolicyChange func(from, to policy.Settings) error
+	// inflight serializes the copies of one Command (by client and command id) from lookup to stored result.
+	inflight keyLocks
+	// beforeStore, when set (tests), runs between acting on a Command and storing its result.
+	beforeStore func()
+}
+
+// keyLocks is a mutex per key, held only while someone uses it. The zero value is ready.
+type keyLocks struct {
+	mu sync.Mutex
+	m  map[string]*keyLock
+}
+
+type keyLock struct {
+	mu    sync.Mutex
+	users int
+}
+
+// lock locks key and returns its unlock.
+func (k *keyLocks) lock(key string) func() {
+	k.mu.Lock()
+	if k.m == nil {
+		k.m = map[string]*keyLock{}
+	}
+	l := k.m[key]
+	if l == nil {
+		l = &keyLock{}
+		k.m[key] = l
+	}
+	l.users++
+	k.mu.Unlock()
+	l.mu.Lock()
+	return func() {
+		l.mu.Unlock()
+		k.mu.Lock()
+		if l.users--; l.users == 0 {
+			delete(k.m, key)
+		}
+		k.mu.Unlock()
+	}
 }
 
 var _ web.Commander = (*Dispatcher)(nil)
@@ -163,42 +203,42 @@ func (d *Dispatcher) handleRequest(req Request) (any, error) {
 	}
 }
 
-func (c *Dispatcher) detail(id string) (TicketDetail, error) {
-	t, _, err := c.eng.Ticket(id)
+func (d *Dispatcher) detail(id string) (TicketDetail, error) {
+	t, _, err := d.eng.Ticket(id)
 	if err != nil {
 		return TicketDetail{}, err
 	}
-	d := TicketDetail{TicketSummary: summary(&t), Ended: t.Ended, Assignments: t.Assignments, Undelivered: len(t.Undelivered),
+	out := TicketDetail{TicketSummary: summary(&t), Ended: t.Ended, Assignments: t.Assignments, Undelivered: len(t.Undelivered),
 		Stats: t.Stats, Repo: t.Repo}
-	if d.Assignments == nil {
-		d.Assignments = []core.Assignment{}
+	if out.Assignments == nil {
+		out.Assignments = []core.Assignment{}
 	}
 	if t.Attention != nil {
-		d.Question = t.Attention.Question
+		out.Question = t.Attention.Question
 	}
 	if x := t.Execution; x != nil {
-		d.SourceDir, d.Runtime, d.Model = x.Directory, x.Runtime, x.Model
+		out.SourceDir, out.Runtime, out.Model = x.Directory, x.Runtime, x.Model
 	}
-	if d.Model == "" {
-		d.Model = c.model
+	if out.Model == "" {
+		out.Model = d.model
 	}
-	if wd, err := node.WorkingDir(c.workRoot, t); err == nil {
-		d.Dir = wd
+	if wd, err := node.WorkingDir(d.workRoot, t); err == nil {
+		out.Dir = wd
 	}
 	if t.PendingApproval != "" {
-		list, err := c.eng.PendingApprovals()
+		list, err := d.eng.PendingApprovals()
 		if err != nil {
 			return TicketDetail{}, err
 		}
 		for _, a := range list {
 			if a.ID == t.PendingApproval {
 				v := approvalView(a)
-				d.Approval = &v
+				out.Approval = &v
 				break
 			}
 		}
 	}
-	return d, nil
+	return out, nil
 }
 
 // --- dashboard commands ---
@@ -206,7 +246,8 @@ func (c *Dispatcher) detail(id string) (TicketDetail, error) {
 // Do carries out a dashboard's Command once: a (client, command id) with a stored result gets that result without
 // acting again; otherwise the result is stored after acting. Results that say nothing was done (reauth_required,
 // unauthenticated, unavailable, internal) are not stored, so the same Command can be sent again once that changes;
-// reads (ListPasskeys) are not stored either.
+// reads (ListPasskeys) are not stored either. Copies of one Command run one after the other, so a copy that arrives
+// while the first still acts waits and gets its result.
 func (d *Dispatcher) Do(_ context.Context, o web.Origin, c *athenav1.Command) *athenav1.CommandResult {
 	id := c.GetId()
 	switch {
@@ -222,6 +263,10 @@ func (d *Dispatcher) Do(_ context.Context, o web.Origin, c *athenav1.Command) *a
 		res.Id = id
 		return res
 	}
+	// A copy of the Command may be running (the old connection's, after a reconnect): it finishes first, and this one
+	// then finds its result.
+	unlock := d.inflight.lock(o.ClientID + "\x00" + id)
+	defer unlock()
 	if raw, ok, err := d.st.CommandResult(o.ClientID, id); err != nil {
 		d.log.Error("command result", "client", o.ClientID, "command", id, "error", err)
 		return &athenav1.CommandResult{Id: id, Code: web.CodeInternal, Message: "internal error"}
@@ -233,6 +278,9 @@ func (d *Dispatcher) Do(_ context.Context, o web.Origin, c *athenav1.Command) *a
 	switch res.GetCode() {
 	case web.CodeReauthRequired, web.CodeUnauthenticated, web.CodeUnavailable, web.CodeInternal:
 		return res
+	}
+	if d.beforeStore != nil {
+		d.beforeStore()
 	}
 	raw, err := proto.Marshal(res)
 	if err != nil {

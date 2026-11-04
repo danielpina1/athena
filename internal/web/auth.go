@@ -39,10 +39,12 @@ const (
 	ceremonyTTL = 5 * time.Minute
 	// maxCeremonies bounds the unfinished ceremonies held in memory; begin is open to anyone who can reach the port.
 	maxCeremonies = 256
-	// touchEvery is how stale a session's seen_at gets before a request writes it again.
-	touchEvery = time.Minute
-	maxBody    = 64 << 10
-	maxNameLen = 64
+	// touchEvery is how stale a session's seen_at gets before a request writes it again; connTouchEvery is the same
+	// for an open connection's periodic check.
+	touchEvery     = time.Minute
+	connTouchEvery = 10 * time.Minute
+	maxBody        = 64 << 10
+	maxNameLen     = 64
 )
 
 // ownerHandle is the WebAuthn user handle of the one owner; every passkey carries it.
@@ -137,7 +139,8 @@ func (a *Auth) Mount(mux *http.ServeMux) {
 }
 
 // OnRevoke registers f to be called with the hashes (Session.Hash) of the sessions that end because a passkey was
-// revoked (RevokePasskey) or the browser logged out (Logout), so the web server can close their open WebSockets. f runs
+// revoked (RevokePasskey), the browser logged out (Logout) or a lookup found them expired, so the web server can close
+// their open WebSockets. f runs
 // on the revoking goroutine and must not block. Register before serving.
 func (a *Auth) OnRevoke(f func(sessionHashes []string)) {
 	a.mu.Lock()
@@ -577,6 +580,20 @@ func (a *Auth) Session(r *http.Request) (Session, bool) {
 }
 
 func (a *Auth) session(r *http.Request) (Session, store.WebSession, bool) {
+	return a.sessionTouched(r, touchEvery)
+}
+
+// connected is Session for an open connection's periodic check: the connection counts as the browser being seen, so
+// a device left open does not idle out, but its seen time is written at most every connTouchEvery. The absolute
+// lifetime still ends it.
+func (a *Auth) connected(r *http.Request) bool {
+	_, _, ok := a.sessionTouched(r, connTouchEvery)
+	return ok
+}
+
+// sessionTouched looks the request's session up, refreshing its seen time when it is touchAfter old. An expired one
+// is deleted, and the OnRevoke callbacks hear of it, so its connections close.
+func (a *Auth) sessionTouched(r *http.Request, touchAfter time.Duration) (Session, store.WebSession, bool) {
 	ck, err := r.Cookie(SessionCookie)
 	if err != nil {
 		return Session{}, store.WebSession{}, false
@@ -586,21 +603,26 @@ func (a *Auth) session(r *http.Request) (Session, store.WebSession, bool) {
 		return Session{}, store.WebSession{}, false
 	}
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	ws, found, err := a.st.WebSession(hash)
 	if err != nil || !found {
+		a.mu.Unlock()
 		return Session{}, store.WebSession{}, false
 	}
 	now := a.now()
 	if now.Sub(ws.SeenAt) >= store.WebSessionIdle || now.Sub(ws.CreatedAt) >= store.WebSessionAbsolute {
-		_ = a.st.DeleteWebSession(hash)
+		err := a.st.DeleteWebSession(hash)
+		a.mu.Unlock()
+		if err == nil {
+			a.revoked([]string{hex.EncodeToString(hash)})
+		}
 		return Session{}, store.WebSession{}, false
 	}
-	if now.Sub(ws.SeenAt) >= touchEvery {
+	if now.Sub(ws.SeenAt) >= touchAfter {
 		if err := a.st.TouchWebSession(hash, now, ws.ReauthAt); err == nil {
 			ws.SeenAt = now
 		}
 	}
+	a.mu.Unlock()
 	return Session{Hash: hex.EncodeToString(hash), ReauthAt: ws.ReauthAt}, ws, true
 }
 

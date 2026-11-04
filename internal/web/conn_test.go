@@ -310,8 +310,8 @@ func TestHelloIsRequiredAndChecked(t *testing.T) {
 	// Silence: the server gives up after its hello timeout.
 	e = newConnEnv(t, func(d *Dashboard) { d.helloTimeout = 200 * time.Millisecond })
 	c = e.connect(nil)
-	if code := c.closed(connWait); code != link.CloseProtocol && code != -1 {
-		t.Fatalf("silent client: close %d", code)
+	if code := c.closed(connWait); code != link.CloseProtocol {
+		t.Fatalf("silent client: close %d, want %d", code, link.CloseProtocol)
 	}
 }
 
@@ -463,5 +463,120 @@ func TestResyncWatchAndConnectionFrames(t *testing.T) {
 	}
 	if r := c.do(&athenav1.Command{Action: &athenav1.Command_Visibility{Visibility: &athenav1.Visibility{}}}); r.GetCode() != CodeInvalid {
 		t.Fatalf("command without id: %v", r)
+	}
+}
+
+func fastRecheck(d *Dashboard) { d.recheck = 20 * time.Millisecond }
+
+func TestOpenConnectionClosesAtAbsoluteExpiry(t *testing.T) {
+	e := newConnEnv(t, fastRecheck)
+	t0 := time.Date(2026, 11, 4, 9, 0, 0, 0, time.UTC)
+	e.src.put(ticketAt("T-0001", t0))
+	c := e.connect(hello("phone"))
+	c.welcome()
+	if r := c.do(watch("w1", "T-0001")); !r.GetOk() { // it only watches from here on: no Command re-checks the session
+		t.Fatalf("watch: %v", r)
+	}
+	e.Advance(store.WebSessionAbsolute)
+	if code := c.closed(connWait); code != CloseSessionEnded {
+		t.Fatalf("close %d, want %d", code, CloseSessionEnded)
+	}
+}
+
+func TestOpenConnectionKeepsSessionSeen(t *testing.T) {
+	e := newConnEnv(t, fastRecheck)
+	c := e.connect(hello("phone"))
+	c.welcome()
+	hash, _ := hashOf(e.cookie)
+	e.Advance(store.WebSessionIdle - 24*time.Hour)
+	deadline := time.Now().Add(connWait)
+	for {
+		ws, ok, err := e.Store.WebSession(hash)
+		if err != nil || !ok {
+			t.Fatalf("session gone: %v %v", ok, err)
+		}
+		if ws.SeenAt.Equal(e.Now()) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("seen_at %v not refreshed to %v by the open connection", ws.SeenAt, e.Now())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// Past the idle limit counted from the login: the connection's touch keeps the session.
+	e.Advance(2 * 24 * time.Hour)
+	time.Sleep(100 * time.Millisecond) // several rechecks
+	select {
+	case err := <-c.done:
+		t.Fatalf("connection closed: %v", err)
+	default:
+	}
+	if _, ok := e.Auth.Session(e.Request()); !ok {
+		t.Fatal("session idled out while its connection was open")
+	}
+}
+
+func TestSnapshotTrimmedToOneFrame(t *testing.T) {
+	e := newConnEnv(t)
+	t0 := time.Date(2026, 11, 4, 9, 0, 0, 0, time.UTC)
+	big := strings.Repeat("x", 12<<10)
+	for i := range 100 { // the hub's bound of ended Tickets, 12 KiB each: over one frame
+		tk := ticketAt(fmt.Sprintf("T-%04d", i+1), t0.Add(time.Duration(i)*time.Minute))
+		tk.Title = big
+		tk.Ended = &core.Ended{Outcome: core.OutcomeCompleted, At: tk.UpdatedAt}
+		e.src.put(tk)
+	}
+	open := ticketAt("T-0999", t0)
+	e.src.put(open)
+	c := e.connect(hello("phone"))
+	c.welcome()
+	snap := c.snapshot()
+	var ended []string
+	sawOpen := false
+	for _, tk := range snap.GetTickets() {
+		if tk.GetEndedAt() == nil {
+			sawOpen = tk.GetId() == "T-0999"
+			continue
+		}
+		ended = append(ended, tk.GetId())
+	}
+	if !sawOpen || len(ended) == 0 || len(ended) >= 100 {
+		t.Fatalf("open kept %v, %d ended kept: want the open one and fewer than 100 ended", sawOpen, len(ended))
+	}
+	if ended[0] != "T-0100" {
+		t.Fatalf("newest ended kept first = %s, want T-0100 (the oldest go)", ended[0])
+	}
+
+	// A snapshot whose open Tickets alone are over a frame cannot be fitted.
+	s := &athenav1.Snapshot{Tickets: []*athenav1.TicketSummary{{Id: "T-1", Title: strings.Repeat("x", link.MaxFrame)}}}
+	if fitSnapshot(s) {
+		t.Fatal("fitted a snapshot of open tickets over a frame")
+	}
+}
+
+func TestOlderDetailNeverFollowsNewer(t *testing.T) {
+	e := newConnEnv(t)
+	t0 := time.Date(2026, 11, 4, 9, 0, 0, 0, time.UTC)
+	e.src.put(ticketAt("T-0001", t0.Add(2*time.Minute)))
+	c := e.connect(hello("phone"))
+	c.welcome()
+	c.snapshot()
+	if r := c.do(watch("w1", "T-0001")); !r.GetOk() {
+		t.Fatalf("watch: %v", r)
+	}
+	isDetail := func(f *athenav1.Frame) bool { return f.GetDelta().GetTicketDetail() != nil }
+	at := func(f *athenav1.Frame) time.Time {
+		return f.GetDelta().GetTicketDetail().GetSummary().GetUpdatedAt().AsTime()
+	}
+	if f := c.next("first detail", isDetail); !at(f).Equal(t0.Add(2 * time.Minute)) {
+		t.Fatalf("first detail at %v", at(f))
+	}
+	// A read older than what was sent (as a feed delta read before the watch's own read) is not sent.
+	e.src.put(ticketAt("T-0001", t0.Add(time.Minute)))
+	e.hub.OnCommit(store.Changes{Tickets: []string{"T-0001"}})
+	e.src.put(ticketAt("T-0001", t0.Add(3*time.Minute)))
+	e.hub.OnCommit(store.Changes{Tickets: []string{"T-0001"}})
+	if f := c.next("next detail", isDetail); !at(f).Equal(t0.Add(3 * time.Minute)) {
+		t.Fatalf("detail after the first is at %v, want the newer read only", at(f))
 	}
 }

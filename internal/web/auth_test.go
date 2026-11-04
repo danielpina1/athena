@@ -157,8 +157,7 @@ func TestLoginWrongOriginRefused(t *testing.T) {
 		}
 	}
 	// A client-data origin other than the configured one is refused by the verification even with the right header.
-	b := NewSoftAuthenticator(t, "https://evil.test", testRPID)
-	b.key, b.credID, b.userHandle = a.key, a.credID, a.userHandle
+	b := a.For("https://evil.test")
 	begin = e.Do("POST", "/auth/login/begin", nil)
 	if rec := e.Do("POST", "/auth/login/finish", b.Assert(t, begin.Body.Bytes())); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("assertion for another origin: %d", rec.Code)
@@ -337,7 +336,7 @@ func TestReauthWindow(t *testing.T) {
 	other := NewSoftAuthenticator(t, testOrigin, testRPID)
 	e.Advance(10 * time.Minute)
 	begin := e.Do("POST", "/auth/reauth/begin", nil)
-	other.userHandle = a.userHandle
+	other.SetUserHandle(a.UserHandle())
 	if rec := e.Do("POST", "/auth/reauth/finish", other.Assert(t, begin.Body.Bytes())); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("reauth with a stranger's assertion: %d", rec.Code)
 	}
