@@ -5,12 +5,14 @@ import (
 	"context"
 	"crypto/ecdh"
 	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net"
 	"net/http"
-	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -30,55 +32,73 @@ import (
 	"github.com/danielpina1/athena/internal/web/webauthntest"
 )
 
-// The dashboard end to end: a real server (fake claude), its Dispatcher, a hub over the server's Source adapter and a
-// web.Dashboard behind a TLS test server. Task 11 wires these into Run; here the test builds them around it.
+// The dashboard end to end: a real server (fake claude) with web.enabled, tls ca on 127.0.0.1 and an ephemeral port,
+// reached over HTTPS with the server's own CA as the only root.
 
-const webOrigin = "https://athena.test"
+const webHost = "athena.test"
 
 type webServer struct {
 	*testServer
-	d    *Dispatcher
-	hub  *hub.Hub
-	srv  *httptest.Server
-	down bool
-	stop func()
+	d  *Dispatcher
+	ep *webEndpoint
+	// hub is the endpoint's; origin its https://athena.test:<port>; base the URL the client dials (the loopback
+	// address, with athena.test as the TLS server name); client trusts only <stateDir>/pki/ca.pem.
+	hub    *hub.Hub
+	origin string
+	base   string
+	host   string
+	client *http.Client
+	down   bool
+	stop   func()
 	// skew moves the login's clock ahead of real time; authn is the owner's passkey once enrolled.
 	skew  atomic.Int64
 	authn *webauthntest.SoftAuthenticator
 }
 
-// startWeb starts the server in stateDir and its dashboard.
+// startWeb starts the server in stateDir with its dashboard's endpoint.
 func startWeb(t *testing.T, stateDir string) *webServer {
 	t.Helper()
+	return startWebWith(t, stateDir, nil)
+}
+
+// startWebWith is startWeb with the test configuration changed by mod.
+func startWebWith(t *testing.T, stateDir string, mod func(*Config)) *webServer {
+	t.Helper()
+	if err := SetupWeb(stateDir, WebConfig{Listen: "127.0.0.1:0", Host: webHost, TLS: "ca"}); err != nil {
+		t.Fatal(err)
+	}
+	w := &webServer{}
 	ready := make(chan *Dispatcher, 1)
-	ts := startServerWith(t, stateDir, func(c *Config) { c.dispatcherReady = func(d *Dispatcher) { ready <- d } })
-	d := <-ready
-	w := &webServer{testServer: ts, d: d}
-	w.hub = hub.New(newHubSource(d), discardLogger())
-	d.st.OnCommit(w.hub.OnCommit)
-	ctx, cancel := context.WithCancel(context.Background())
-	w.hub.Start(ctx)
-	auth, err := web.NewAuth(d.st, webOrigin, "athena.test", func() time.Time {
-		return time.Now().Add(time.Duration(w.skew.Load()))
+	eps := make(chan *webEndpoint, 1)
+	ts := startServerWith(t, stateDir, func(c *Config) {
+		c.dispatcherReady = func(d *Dispatcher) { ready <- d }
+		c.web.now = func() time.Time { return time.Now().Add(time.Duration(w.skew.Load())) }
+		c.web.ready = func(ep *webEndpoint) { eps <- ep }
+		if mod != nil {
+			mod(c)
+		}
 	})
+	w.testServer, w.d, w.ep = ts, <-ready, <-eps
+	w.hub, w.origin = w.ep.hub, w.ep.origin
+	_, port, _ := net.SplitHostPort(w.ep.l.Addr().String())
+	w.base, w.host = "https://127.0.0.1:"+port, net.JoinHostPort(webHost, port)
+	pemBytes, err := os.ReadFile(filepath.Join(stateDir, "pki", "ca.pem"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	d.SetAuth(auth)
-	dash := web.NewDashboard(web.DashboardConfig{Auth: auth, Hub: w.hub, Commander: d, Log: discardLogger(), Version: "test"})
-	mux := http.NewServeMux()
-	auth.Mount(mux)
-	mux.HandleFunc("GET /ws", dash.ServeConn)
-	w.srv = httptest.NewTLSServer(mux)
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(pemBytes) {
+		t.Fatal("ca.pem holds no certificate")
+	}
+	w.client = &http.Client{Timeout: waitTimeout, Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{RootCAs: roots, ServerName: webHost, MinVersion: tls.VersionTLS12}}}
 	w.stop = func() {
 		if w.down {
 			return
 		}
 		w.down = true
-		w.srv.Close()
-		cancel()
-		d.st.OnCommit(nil)
 		ts.stop()
+		w.client.CloseIdleConnections()
 	}
 	t.Cleanup(w.stop)
 	return w
@@ -95,16 +115,17 @@ type browser struct {
 func (b *browser) post(path string, body []byte) []byte {
 	t := b.w.t
 	t.Helper()
-	req, err := http.NewRequest("POST", b.w.srv.URL+path, bytes.NewReader(body))
+	req, err := http.NewRequest("POST", b.w.base+path, bytes.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Header.Set("Origin", webOrigin)
+	req.Header.Set("Origin", b.w.origin)
 	req.Header.Set("Content-Type", "application/json")
 	for _, c := range b.cookies {
 		req.AddCookie(c)
 	}
-	resp, err := b.w.srv.Client().Do(req)
+	req.Host = b.w.host
+	resp, err := b.w.client.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,7 +161,7 @@ func (b *browser) reauth() {
 func (w *webServer) login() *browser {
 	w.t.Helper()
 	if w.authn == nil {
-		w.authn = webauthntest.New(w.t, webOrigin, "athena.test")
+		w.authn = webauthntest.New(w.t, w.origin, webHost)
 		token, err := web.IssueEnrollToken(w.d.st, 0)
 		if err != nil {
 			w.t.Fatal(err)
@@ -170,12 +191,12 @@ func (w *webServer) connect(cookie string, hello *athenav1.Hello) *wsClient {
 	t := w.t
 	t.Helper()
 	h := http.Header{}
-	h.Set("Origin", webOrigin)
+	h.Set("Origin", w.origin)
 	h.Set("Cookie", web.SessionCookie+"="+cookie)
 	ctx, cancel := context.WithTimeout(context.Background(), waitTimeout)
 	defer cancel()
-	c, resp, err := websocket.Dial(ctx, "wss"+strings.TrimPrefix(w.srv.URL, "https")+"/ws", &websocket.DialOptions{
-		HTTPClient: w.srv.Client(), HTTPHeader: h, Host: "athena.test", Subprotocols: []string{link.Subprotocol},
+	c, resp, err := websocket.Dial(ctx, "wss"+strings.TrimPrefix(w.base, "https")+"/ws", &websocket.DialOptions{
+		HTTPClient: w.client, HTTPHeader: h, Host: w.host, Subprotocols: []string{link.Subprotocol},
 		CompressionMode: websocket.CompressionNoContextTakeover,
 	})
 	if err != nil {
@@ -482,6 +503,7 @@ func TestWebRevokeClosesConnections(t *testing.T) {
 	}
 	select {
 	case err := <-c.done:
+		c.done <- err // for the cleanup's close
 		if code := websocket.CloseStatus(err); code != web.CloseSessionEnded {
 			t.Fatalf("close %d", code)
 		}

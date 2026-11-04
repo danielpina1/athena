@@ -88,15 +88,81 @@ func TestWebEnrollWithoutWebConfig(t *testing.T) {
 }
 
 func TestWebEnrollLinkOmitsDefaultPort(t *testing.T) {
-	if got := enrollURL("h.net", "", "T"); got != "https://h.net/enroll#T" {
+	if got := enrollURL("https://h.net", "T"); got != "https://h.net/enroll#T" {
 		t.Fatal(got)
 	}
 	dir, _ := webState(t, `{"web":{"host":"h.net","listen":":443"}}`)
 	if _, out, _ := runWeb(dir, "enroll"); !strings.Contains(out, "https://h.net/enroll#") {
 		t.Fatalf("port 443 shown: %s", out)
 	}
-	if got := enrollURL("fd00::1", "8443", "T"); got != "https://[fd00::1]:8443/enroll#T" {
-		t.Fatal(got)
+	dir, _ = webState(t, `{"web":{"host":"localhost","listen":"127.0.0.1:8080","tls":"off"}}`)
+	if _, out, _ := runWeb(dir, "enroll"); !strings.Contains(out, "http://localhost:8080/enroll#") {
+		t.Fatalf("tls off link: %s", out)
+	}
+}
+
+func TestWebSetupStatusAndCA(t *testing.T) {
+	dir, st := webState(t, `{"router":{"model":"opus"}}`)
+	code, out, errs := runWeb(dir, "setup", "--host", "Athena.Home.Arpa", "--ip", "10.8.0.1", "--listen", "10.8.0.1:8443")
+	if code != 0 || !strings.Contains(out, "https://athena.home.arpa:8443") || !strings.Contains(out, "CA fingerprint") ||
+		strings.Contains(out, "every interface") {
+		t.Fatalf("setup: %d %q %s", code, out, errs)
+	}
+	cfg, err := server.LoadConfig(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w := cfg.Web; !cfg.WebOn() || w.Host != "athena.home.arpa" || w.TLS != "ca" || len(w.IPs) != 1 || cfg.Router.Model != "opus" {
+		t.Fatalf("config after setup: %+v %+v", cfg.Web, cfg.Router)
+	}
+	if err := st.PutPasskey(store.Passkey{ID: "p1", Name: "phone", Credential: []byte("{}"), CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+
+	code, out, errs = runWeb(dir, "ca")
+	if code != 0 {
+		t.Fatalf("ca: %d %s", code, errs)
+	}
+	fp := strings.TrimSpace(strings.TrimPrefix(strings.Split(out, "\n")[0], "fingerprint (SHA-256):"))
+	if len(fp) != 95 || !strings.Contains(out, filepath.Join(dir, "pki", "ca.pem")) {
+		t.Fatalf("ca output:\n%s", out)
+	}
+	profile, err := os.ReadFile(filepath.Join(dir, "pki", "athena-ca.mobileconfig"))
+	if err != nil || !strings.Contains(string(profile), "PayloadContent") {
+		t.Fatalf("profile: %v", err)
+	}
+
+	code, out, errs = runWeb(dir, "status")
+	for _, want := range []string{"https://athena.home.arpa:8443 (enabled)", "TLS:", "ca:", fp, "Passkeys:", "1", "server not running"} {
+		if code != 0 || !strings.Contains(out, want) {
+			t.Fatalf("status lacks %q: %d %q %s", want, code, out, errs)
+		}
+	}
+
+	// A new host does not silently reuse the CA made for the old one.
+	if code, _, errs := runWeb(dir, "setup", "--host", "other.home.arpa"); code != 1 || !strings.Contains(errs, "athena.home.arpa") {
+		t.Fatalf("setup with another host: %d %s", code, errs)
+	}
+	// Switching to ACME keeps the host; without the terms agreed it says how to agree.
+	code, out, errs = runWeb(dir, "setup", "--tls", "acme", "--acme-provider", "exec", "--acme-email", "me@example.com", "--listen", ":8443")
+	if code != 0 || !strings.Contains(out, "--acme-agree-tos") || !strings.Contains(out, "every interface") {
+		t.Fatalf("acme setup: %d %q %s", code, out, errs)
+	}
+	if code, out, _ := runWeb(dir, "setup", "--acme-agree-tos"); code != 0 || strings.Contains(out, "--acme-agree-tos") {
+		t.Fatalf("agree: %d %q", code, out)
+	}
+	if cfg, _ := server.LoadConfig(dir); !cfg.Web.ACME.AgreeTOS || cfg.Web.Host != "athena.home.arpa" || cfg.Web.ACME.Provider != "exec" {
+		t.Fatalf("acme config %+v", cfg.Web)
+	}
+	if code, _, errs := runWeb(dir, "ca"); code != 1 || !strings.Contains(errs, "mode ca") {
+		t.Fatalf("ca in acme mode: %d %s", code, errs)
+	}
+	// Errors name the field.
+	if code, _, errs := runWeb(t.TempDir(), "setup"); code != 1 || !strings.Contains(errs, "web.host") {
+		t.Fatalf("setup without host: %d %s", code, errs)
+	}
+	if code, _, errs := runWeb(t.TempDir(), "setup", "--host", "h.test", "--tls", "off"); code != 1 || !strings.Contains(errs, "web.tls off") {
+		t.Fatalf("tls off on every interface: %d %s", code, errs)
 	}
 }
 
@@ -222,5 +288,13 @@ func TestWebRevokeThroughRunningServer(t *testing.T) {
 	}
 	if _, ok, _ := st.Passkey("CCCCphone"); ok {
 		t.Fatal("passkey survived")
+	}
+
+	// status asks the running server, which serves no dashboard: its web part is not enabled.
+	if err := os.WriteFile(filepath.Join(dir, server.ConfigFile), []byte(`{"web":{"host":"h.test"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, out, errs := runWeb(dir, "status"); code != 0 || !strings.Contains(out, "(disabled") || !strings.Contains(out, "does not serve the dashboard") {
+		t.Fatalf("status: %d %q %s", code, out, errs)
 	}
 }

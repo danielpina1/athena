@@ -6,16 +6,21 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/danielpina1/athena/internal/node"
+	"github.com/danielpina1/athena/internal/pki"
 	"github.com/danielpina1/athena/internal/sources/github"
+	"github.com/danielpina1/athena/internal/web"
 )
 
 // ConfigFile is the server's configuration in the state directory, written 0600 by `athena github setup`:
@@ -23,10 +28,12 @@ import (
 //	{"github": {"appId", "slug", "keyFile", "installationId", "repos": [], "intervalSeconds": 30, "receiveAll": []},
 //	 "router": {"model": "haiku"}, "evalTimeoutSeconds": 600,
 //	 "sandbox": {"enabled": true, "required": false, "allowedDomains": [], "allowWrite": [],
-//	             "weakerNetworkIsolation": false, "caFile": ""}}
+//	             "weakerNetworkIsolation": false, "caFile": ""},
+//	 "web": {"enabled": false, "listen": ":8443", "host": "", "ips": [], "tls": "ca",
+//	         "acme": {"email", "provider", "resolvers": [], "directory", "agreeTos": false}, "pushContact": ""}}
 //
 // It holds the path of the GitHub App's private key, never the key. Without the file, or without its github part,
-// the server runs owner tasks only: no Source, no router.
+// the server runs owner tasks only: no Source, no router. Without an enabled web part there is no dashboard endpoint.
 const ConfigFile = "config.json"
 
 // Defaults of the configuration.
@@ -34,6 +41,8 @@ const (
 	DefaultRouterModel        = "haiku"
 	DefaultEvalTimeoutSeconds = 600
 	DefaultIntervalSeconds    = 30
+	DefaultWebListen          = ":8443"
+	DefaultWebTLS             = "ca"
 )
 
 // FileConfig is <stateDir>/config.json.
@@ -42,7 +51,12 @@ type FileConfig struct {
 	Router             RouterConfig  `json:"router"`
 	EvalTimeoutSeconds int           `json:"evalTimeoutSeconds"`
 	Sandbox            SandboxConfig `json:"sandbox"`
+	// Web is the dashboard's HTTPS endpoint, written by `athena web setup`; nil (left out) is off.
+	Web *WebConfig `json:"web,omitempty"`
 }
+
+// WebOn reports whether the server serves the dashboard.
+func (c FileConfig) WebOn() bool { return c.Web != nil && c.Web.Enabled }
 
 // SandboxConfig is Claude Code's sandbox for worker sessions (node.SandboxConfig). Every field is optional.
 type SandboxConfig struct {
@@ -165,6 +179,11 @@ func LoadConfig(stateDir string) (FileConfig, error) {
 	if err := c.Sandbox.validate(); err != nil {
 		return FileConfig{}, fmt.Errorf("config: %s: %w", path, err)
 	}
+	if c.Web != nil {
+		if err := c.Web.validate(); err != nil {
+			return FileConfig{}, fmt.Errorf("config: %s: %w", path, err)
+		}
+	}
 	return c.withDefaults(), nil
 }
 
@@ -183,6 +202,10 @@ func (c FileConfig) withDefaults() FileConfig {
 		g.Repos = slices.Clone(g.Repos)
 		g.ReceiveAll = slices.Clone(g.ReceiveAll)
 		c.GitHub = &g
+	}
+	if c.Web != nil {
+		w := c.Web.withDefaults()
+		c.Web = &w
 	}
 	return c
 }
@@ -401,4 +424,180 @@ func listOrNone(l []string) string {
 		return "no repository"
 	}
 	return strings.Join(l, ", ")
+}
+
+// WebConfig is the dashboard's HTTPS endpoint. The owner reaches it at https://<host>[:<port of listen>], which is
+// also the origin the passkeys and the push tokens are bound to.
+type WebConfig struct {
+	Enabled bool `json:"enabled"`
+	// Listen is the address the endpoint binds (default ":8443"); the VPN interface's address keeps it off the LAN.
+	Listen string `json:"listen"`
+	// Host is the DNS name the owner's devices use; required when Enabled.
+	Host string `json:"host"`
+	// IPs are the addresses the own CA's certificate also names (mode ca).
+	IPs []string `json:"ips"`
+	// TLS is ca (Athena's own CA, the default), acme (a public certificate through DNS-01) or off (plain HTTP, only on
+	// a loopback listen address with host localhost).
+	TLS  string        `json:"tls"`
+	ACME WebACMEConfig `json:"acme"`
+	// PushContact is an address push services may use to reach the owner (mailto: or https:). The VAPID token names
+	// the dashboard's origin as its subject (ruling R27), so nothing sends this yet.
+	PushContact string `json:"pushContact,omitempty"`
+}
+
+// WebACMEConfig is mode acme: the DNS provider (cloudflare, exec or httpreq, credentials in lego's environment
+// variables), the account's contact, optional recursive resolvers and directory, and the owner's agreement to the
+// certificate authority's terms, without which no account is registered.
+type WebACMEConfig struct {
+	Email     string   `json:"email,omitempty"`
+	Provider  string   `json:"provider,omitempty"`
+	Resolvers []string `json:"resolvers,omitempty"`
+	Directory string   `json:"directory,omitempty"`
+	AgreeTOS  bool     `json:"agreeTos"`
+}
+
+var dnsNameRe = regexp.MustCompile(`^(?i)[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$`)
+
+func (w WebConfig) withDefaults() WebConfig {
+	if w.Listen == "" {
+		w.Listen = DefaultWebListen
+	}
+	if w.TLS == "" {
+		w.TLS = DefaultWebTLS
+	}
+	w.Host = strings.ToLower(w.Host)
+	w.IPs = slices.Clone(w.IPs)
+	w.ACME.Resolvers = slices.Clone(w.ACME.Resolvers)
+	return w
+}
+
+// validate checks the web part; each error names the field. Host is required only when the endpoint is enabled.
+func (w WebConfig) validate() error {
+	w = w.withDefaults()
+	host, port, err := net.SplitHostPort(w.Listen)
+	if err != nil {
+		return fmt.Errorf("web.listen %q is not host:port (for example :8443 or 10.8.0.1:8443)", w.Listen)
+	}
+	if n, err := strconv.Atoi(port); err != nil || n < 0 || n > 65535 {
+		return fmt.Errorf("web.listen %q: the port must be a number from 0 to 65535", w.Listen)
+	}
+	switch {
+	case w.Host == "" && w.Enabled:
+		return errors.New("web.host is required when web.enabled is true (the DNS name your devices use)")
+	case w.Host != "" && net.ParseIP(w.Host) != nil:
+		return fmt.Errorf("web.host %q must be a DNS name, not an address (addresses go in web.ips)", w.Host)
+	case w.Host != "" && (len(w.Host) > 253 || !dnsNameRe.MatchString(w.Host)):
+		return fmt.Errorf("web.host %q is not a DNS name", w.Host)
+	}
+	seen := map[string]bool{}
+	for _, s := range w.IPs {
+		ip := net.ParseIP(s)
+		if ip == nil {
+			return fmt.Errorf("web.ips entry %q is not an IP address", s)
+		}
+		if seen[ip.String()] {
+			return fmt.Errorf("web.ips entry %q is listed twice", s)
+		}
+		seen[ip.String()] = true
+	}
+	switch w.TLS {
+	case "ca":
+	case "acme":
+		switch w.ACME.Provider {
+		case "cloudflare", "exec", "httpreq":
+		case "":
+			return errors.New("web.acme.provider is required when web.tls is acme (cloudflare, exec or httpreq)")
+		default:
+			return fmt.Errorf("web.acme.provider %q is not cloudflare, exec or httpreq", w.ACME.Provider)
+		}
+		if w.ACME.Email != "" && !strings.Contains(w.ACME.Email, "@") {
+			return fmt.Errorf("web.acme.email %q is not an email address", w.ACME.Email)
+		}
+		if d := w.ACME.Directory; d != "" {
+			if u, err := url.Parse(d); err != nil || u.Scheme != "https" || u.Host == "" {
+				return fmt.Errorf("web.acme.directory %q is not an https URL", d)
+			}
+		}
+	case "off":
+		if ip := net.ParseIP(host); host != "localhost" && (ip == nil || !ip.IsLoopback()) {
+			return fmt.Errorf("web.tls off is allowed only on a loopback web.listen (127.0.0.1:%s), not %q", port, w.Listen)
+		}
+		if w.Host != "" && w.Host != "localhost" {
+			return fmt.Errorf("web.host must be localhost when web.tls is off, not %q", w.Host)
+		}
+	default:
+		return fmt.Errorf("web.tls %q is not ca, acme or off", w.TLS)
+	}
+	if c := w.PushContact; c != "" {
+		if u, err := url.Parse(c); err != nil || (u.Scheme != "mailto" && u.Scheme != "https") || (u.Opaque == "" && u.Host == "") {
+			return fmt.Errorf("web.pushContact %q is not a mailto: or https: URL", c)
+		}
+	}
+	return nil
+}
+
+// URL is where the owner reaches the dashboard: the origin for the port of Listen.
+func (w WebConfig) URL() string {
+	_, port, _ := net.SplitHostPort(w.withDefaults().Listen)
+	return w.origin(port)
+}
+
+// origin is https://<host>[:<port>] (http:// when TLS is off); a scheme's default port is left out, as browsers do.
+func (w WebConfig) origin(port string) string {
+	w = w.withDefaults()
+	scheme := "https"
+	if w.TLS == "off" {
+		scheme = "http"
+	}
+	if port == "" || (scheme == "https" && port == "443") || (scheme == "http" && port == "80") {
+		return scheme + "://" + w.Host
+	}
+	return scheme + "://" + net.JoinHostPort(w.Host, port)
+}
+
+// tlsConfig is the web package's view of the certificate settings.
+func (w WebConfig) tlsConfig() web.TLSConfig {
+	w = w.withDefaults()
+	c := web.TLSConfig{Mode: w.TLS, Host: w.Host, Listen: w.Listen, ACME: web.ACMEConfig{Email: w.ACME.Email,
+		Provider: w.ACME.Provider, Resolvers: w.ACME.Resolvers, Directory: w.ACME.Directory, AgreeTOS: w.ACME.AgreeTOS}}
+	for _, s := range w.IPs {
+		c.IPs = append(c.IPs, net.ParseIP(s))
+	}
+	return c
+}
+
+// ParsedIPs is IPs as addresses; LoadConfig has checked each.
+func (w WebConfig) ParsedIPs() []net.IP {
+	var out []net.IP
+	for _, s := range w.IPs {
+		if ip := net.ParseIP(s); ip != nil {
+			out = append(out, ip)
+		}
+	}
+	return out
+}
+
+// SetupWeb records the web part in <stateDir>/config.json, enabled, keeping the rest of the file. In mode ca it first
+// creates Athena's CA, or checks that the existing one was made for this host and these addresses, so a mismatch is
+// refused here rather than at the server's start. The server reads the configuration when it starts.
+func SetupWeb(stateDir string, w WebConfig) error {
+	w.Enabled = true
+	w = w.withDefaults()
+	if err := w.validate(); err != nil {
+		return fmt.Errorf("web setup: %w", err)
+	}
+	if w.TLS == "ca" {
+		if err := ensurePrivateDir(stateDir); err != nil {
+			return err
+		}
+		if _, err := pki.LoadOrCreateCA(web.CADir(stateDir), w.Host, w.ParsedIPs()); err != nil {
+			return fmt.Errorf("web setup: %w", err)
+		}
+	}
+	c, err := LoadConfig(stateDir)
+	if err != nil {
+		return err
+	}
+	c.Web = &w
+	return SaveConfig(stateDir, c)
 }

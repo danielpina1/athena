@@ -22,6 +22,7 @@ import (
 
 const (
 	tlsDirName = "tls"
+	caDirName  = "pki"
 	certFile   = "server.pem"
 	keyFile    = "server.key"
 
@@ -104,7 +105,7 @@ func NewTLSManager(stateDir string, c TLSConfig, o Obtainer, log *slog.Logger, n
 		return nil, fmt.Errorf("web: %w", err)
 	}
 	if mode == "ca" {
-		ca, err := pki.LoadOrCreateCA(filepath.Join(stateDir, "pki"), c.Host, c.IPs)
+		ca, err := pki.LoadOrCreateCA(CADir(stateDir), c.Host, c.IPs)
 		if err != nil {
 			return nil, err
 		}
@@ -123,6 +124,18 @@ func NewTLSManager(stateDir string, c TLSConfig, o Obtainer, log *slog.Logger, n
 	}
 	return m, nil
 }
+
+// CADir is where mode ca keeps Athena's CA (ca.pem, ca.key) under the state directory.
+func CADir(stateDir string) string { return filepath.Join(stateDir, caDirName) }
+
+// CertFile is the certificate the web listener presents, under the state directory.
+func CertFile(stateDir string) string { return filepath.Join(stateDir, tlsDirName, certFile) }
+
+// Mode is the TLS mode: ca, acme or off.
+func (m *TLSManager) Mode() string { return m.mode }
+
+// CA is Athena's CA in mode ca, nil otherwise.
+func (m *TLSManager) CA() *pki.CA { return m.ca }
 
 // loopbackListen reports whether addr (host:port) binds only to the loopback interface. An empty or wildcard host
 // listens on every interface and is not loopback.

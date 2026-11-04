@@ -45,8 +45,9 @@ type CA struct {
 }
 
 // LoadOrCreateCA loads the CA from dir (ca.key, ca.pem), creating it on first use. The CA is constrained to host (and
-// its subdomains) and to exactly ips. An existing CA is returned as it is: host and ips only matter when it is created.
-// dir is 0700 and ca.key is 0600; a ca.key open to group or others is refused.
+// its subdomains) and to exactly ips. An existing CA made for another host or another set of addresses is refused
+// with an error naming the difference and the fix, never reused or replaced silently: a new CA breaks every installed
+// profile. dir is 0700 and ca.key is 0600; a ca.key open to group or others is refused.
 func LoadOrCreateCA(dir string, host string, ips []net.IP) (*CA, error) {
 	host = strings.ToLower(host)
 	if host == "" || net.ParseIP(host) != nil || strings.ContainsAny(host, " *") {

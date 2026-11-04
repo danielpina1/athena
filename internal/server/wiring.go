@@ -6,20 +6,24 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/danielpina1/athena/internal/core"
 	"github.com/danielpina1/athena/internal/effects"
+	"github.com/danielpina1/athena/internal/hub"
 	"github.com/danielpina1/athena/internal/metrics"
 	"github.com/danielpina1/athena/internal/node"
 	"github.com/danielpina1/athena/internal/policy"
 	"github.com/danielpina1/athena/internal/sources"
 	"github.com/danielpina1/athena/internal/sources/github"
 	"github.com/danielpina1/athena/internal/store"
+	"github.com/danielpina1/athena/internal/web"
 )
 
 // The parts `athena server` wires between the store and the node: the GitHub App and Source, the Policy, the node's
@@ -545,4 +549,166 @@ func resumeAssessments(eng *core.Engine, fx *effects.Runner, log *slog.Logger) {
 	for _, id := range resumed {
 		log.Warn("startup: queued the missing assessment of an undelivered eval", "eval", id)
 	}
+}
+
+// --- the dashboard's endpoint ---
+
+// webShutdown bounds the wait for the web requests in flight at shutdown.
+const webShutdown = 5 * time.Second
+
+// webEndpoint is the dashboard's HTTPS endpoint and what feeds it. newWebEndpoint (before the effects runner starts)
+// binds the listener, so a busy port fails the start, prepares the certificate and the push key, and registers the
+// Pusher; start (once the Dispatcher exists) runs the hub, the login, the Notifier and the listener.
+type webEndpoint struct {
+	cfg    WebConfig
+	origin string
+	st     *store.Store
+	log    *slog.Logger
+	now    func() time.Time
+
+	l        net.Listener
+	tls      *web.TLSManager
+	vapid    *web.VAPID // nil without an https origin: no push
+	pusher   *web.Pusher
+	presence *web.Presence
+
+	// set by start
+	hub    *hub.Hub
+	auth   *web.Auth
+	dash   *web.Dashboard
+	srv    *web.Server
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
+
+	stopOnce sync.Once
+}
+
+// webHooks are the tests' ways into the endpoint; the zero value is production.
+type webHooks struct {
+	// pushClient sends the pushes (default: a client with a 20 s timeout).
+	pushClient *http.Client
+	// now is the login's clock (default time.Now).
+	now func() time.Time
+	// ready, when set, is called with the endpoint once it serves.
+	ready func(*webEndpoint)
+}
+
+func newWebEndpoint(stateDir string, cfg WebConfig, st *store.Store, eng *core.Engine, fx *effects.Runner, hooks webHooks,
+	log *slog.Logger) (_ *webEndpoint, err error) {
+	log = log.With("component", "web")
+	l, err := net.Listen("tcp", cfg.Listen)
+	if err != nil {
+		return nil, fmt.Errorf("server: web listen %s: %w", cfg.Listen, err)
+	}
+	defer func() {
+		if err != nil {
+			l.Close()
+		}
+	}()
+	// The origin names the bound port: the configured one, or the one the system chose for port 0.
+	_, port, _ := net.SplitHostPort(l.Addr().String())
+	w := &webEndpoint{cfg: cfg, origin: cfg.origin(port), st: st, log: log, now: hooks.now, l: l,
+		presence: web.NewPresence(nil)}
+	if w.now == nil {
+		w.now = time.Now
+	}
+	var obt web.Obtainer
+	if cfg.TLS == "acme" {
+		if obt, err = web.NewLegoObtainer(stateDir, cfg.tlsConfig().ACME); err != nil {
+			return nil, err
+		}
+	}
+	if w.tls, err = web.NewTLSManager(stateDir, cfg.tlsConfig(), obt, log, time.Now); err != nil {
+		return nil, err
+	}
+	if strings.HasPrefix(w.origin, "https://") {
+		// The tokens' subject is the dashboard's own origin (ruling R27).
+		if w.vapid, err = web.LoadOrCreateVAPID(stateDir, w.origin); err != nil {
+			return nil, err
+		}
+		w.pusher = web.NewPusher(web.PusherConfig{Store: st, VAPID: w.vapid, Client: hooks.pushClient, Log: log,
+			Stage: func(ticketID string) (core.Stage, error) {
+				_, stage, err := eng.Ticket(ticketID)
+				return stage, err
+			},
+			Visible: w.presence.Visible,
+		})
+		w.pusher.Register(fx)
+	}
+	return w, nil
+}
+
+// start runs the hub over the Dispatcher's reads, the certificate's renewals, the push Notifier and the listener.
+func (w *webEndpoint) start(d *Dispatcher, n *node.Node, fx *effects.Runner, version string, hubRef *atomic.Pointer[hub.Hub]) error {
+	src := newHubSource(d)
+	src.tls = w.tls
+	w.hub = hub.New(src, w.log)
+	auth, err := web.NewAuth(w.st, w.origin, w.cfg.Host, w.now)
+	if err != nil {
+		return err
+	}
+	w.auth = auth
+	ctx, cancel := context.WithCancel(context.Background())
+	w.cancel = cancel
+	w.st.OnCommit(w.hub.OnCommit)
+	hubRef.Store(w.hub)
+	w.hub.Start(ctx)
+	d.SetAuth(auth)
+	w.dash = web.NewDashboard(web.DashboardConfig{Auth: auth, Hub: w.hub, Commander: d, Streams: n, Presence: w.presence,
+		Log: w.log, Version: version})
+	w.wg.Add(1)
+	go func() {
+		defer w.wg.Done()
+		w.tls.Run(ctx)
+	}()
+	if w.vapid != nil {
+		notifier := web.NewNotifier(web.NotifierConfig{Feed: w.hub, Store: w.st, Visible: w.presence.Visible, Wake: fx.Wake, Log: w.log})
+		w.wg.Add(1)
+		go func() {
+			defer w.wg.Done()
+			notifier.Run(ctx, nil)
+		}()
+	}
+	w.srv = web.NewServer(web.ServerConfig{Auth: auth, Dashboard: w.dash, VAPID: w.vapid, CA: w.tls.CA(), TLS: w.tls.Config(), Log: w.log})
+	w.wg.Add(1)
+	go func() {
+		defer w.wg.Done()
+		if err := w.srv.Serve(w.l); err != nil {
+			w.log.Error("web: listener stopped", "error", err)
+		}
+	}()
+	w.log.Info("dashboard serving", "url", w.origin, "listen", w.l.Addr().String(), "tls", w.tls.Mode())
+	return nil
+}
+
+// stop closes the listener, ends the dashboard connections and stops the Notifier, the renewals and the hub, so
+// nothing of the web part touches the store after it returns. It is idempotent and safe before start.
+func (w *webEndpoint) stop() {
+	if w == nil {
+		return
+	}
+	w.stopOnce.Do(func() {
+		if w.srv == nil {
+			w.l.Close()
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), webShutdown)
+		if err := w.srv.Shutdown(ctx); err != nil {
+			w.log.Warn("web: shutdown", "error", err)
+		}
+		cancel()
+		w.st.OnCommit(nil)
+		w.cancel()
+		w.wg.Wait()
+	})
+}
+
+// status is web.status: the URL, the certificate's health and the open connections.
+func (w *webEndpoint) status() WebStatusResult {
+	ok, msg, notAfter := w.tls.Health()
+	out := WebStatusResult{Serving: true, URL: w.origin, TLS: w.tls.Mode(), TLSOK: ok, TLSMessage: msg, Clients: w.dash.Connections()}
+	if !notAfter.IsZero() {
+		out.CertNotAfter = &notAfter
+	}
+	return out
 }

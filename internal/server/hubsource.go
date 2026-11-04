@@ -9,18 +9,22 @@ import (
 	"github.com/danielpina1/athena/internal/node"
 	"github.com/danielpina1/athena/internal/policy"
 	"github.com/danielpina1/athena/internal/store"
+	"github.com/danielpina1/athena/internal/web"
 )
 
 // recentTriggerThreads is how many of the newest Triggers name the recent Threads: Threads keep no time of their own.
 const recentTriggerThreads = 200
 
 // hubSource is what the hub reads: the Engine's reads, the store's for what the Engine does not list, and the
-// Dispatcher's health and Policy.
-type hubSource struct{ d *Dispatcher }
+// Dispatcher's health and Policy. tls, when set, adds the web certificate to the health.
+type hubSource struct {
+	d   *Dispatcher
+	tls *web.TLSManager
+}
 
 var _ hub.Source = hubSource{}
 
-func newHubSource(d *Dispatcher) hubSource { return hubSource{d} }
+func newHubSource(d *Dispatcher) hubSource { return hubSource{d: d} }
 
 func (s hubSource) Tickets(includeEnded bool) ([]core.Ticket, error) {
 	return s.d.eng.Tickets(includeEnded)
@@ -141,6 +145,10 @@ func (s hubSource) Health() []hub.HealthItem {
 	}
 	for kind, msg := range h.Effects {
 		out = append(out, hub.HealthItem{Name: "effects:" + kind, Message: msg})
+	}
+	if s.tls != nil {
+		ok, msg, _ := s.tls.Health()
+		out = append(out, hub.HealthItem{Name: "tls", OK: ok, Message: msg})
 	}
 	return out
 }

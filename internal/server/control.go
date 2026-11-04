@@ -46,6 +46,8 @@ const (
 	OpPolicySet   = "policy.set"
 	// OpWebRevoke revokes a passkey (ID) inside the server, so its open dashboard connections close.
 	OpWebRevoke = "web.revoke"
+	// OpWebStatus reports the dashboard's endpoint: its URL, its certificate and the open connections.
+	OpWebStatus = "web.status"
 )
 
 // Request is one control request; Op says which of its fields count.

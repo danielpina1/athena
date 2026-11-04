@@ -54,6 +54,8 @@ type Dispatcher struct {
 	node *node.Node
 	// auth ends the open connections of a revoked passkey; until SetAuth (no web server) revoking works on the store.
 	auth atomic.Pointer[web.Auth]
+	// web is the dashboard's endpoint, nil when it is off; set before the control socket serves.
+	web *webEndpoint
 	// onPolicyChange, when set (tests), runs before the Engine hears of a Policy change; an error refuses it.
 	onPolicyChange func(from, to policy.Settings) error
 	// inflight serializes the copies of one Command (by client and command id) from lookup to stored result.
@@ -199,6 +201,11 @@ func (d *Dispatcher) handleRequest(req Request) (any, error) {
 			return nil, err
 		}
 		return WebRevokeResult{Sessions: n}, nil
+	case OpWebStatus:
+		if d.web == nil {
+			return WebStatusResult{}, nil
+		}
+		return d.web.status(), nil
 	default:
 		return nil, userErrorf("unknown op %q", req.Op)
 	}
@@ -500,6 +507,21 @@ func (d *Dispatcher) passkeys() (*athenav1.PasskeyList, error) {
 		out.Passkeys = append(out.Passkeys, v)
 	}
 	return out, nil
+}
+
+// WebStatusResult answers web.status. Serving is false when the server runs without the endpoint (web.enabled
+// false); the rest is then empty.
+type WebStatusResult struct {
+	Serving bool   `json:"serving"`
+	URL     string `json:"url,omitempty"`
+	TLS     string `json:"tls,omitempty"`
+	// TLSOK and TLSMessage are the certificate's health; CertNotAfter is the expiry of the one served (none in mode
+	// off, or before ACME got one).
+	TLSOK        bool       `json:"tlsOk,omitempty"`
+	TLSMessage   string     `json:"tlsMessage,omitempty"`
+	CertNotAfter *time.Time `json:"certNotAfter,omitempty"`
+	// Clients is the number of open dashboard connections.
+	Clients int `json:"clients"`
 }
 
 // WebRevokeResult answers web.revoke: how many sessions the revoked passkey had.

@@ -17,10 +17,12 @@ import (
 	"slices"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/danielpina1/athena/internal/core"
 	"github.com/danielpina1/athena/internal/effects"
+	"github.com/danielpina1/athena/internal/hub"
 	"github.com/danielpina1/athena/internal/metrics"
 	"github.com/danielpina1/athena/internal/node"
 	"github.com/danielpina1/athena/internal/outbox"
@@ -66,9 +68,12 @@ type Config struct {
 
 	// dispatcherReady, when set (tests), is called with the Dispatcher before the control socket serves.
 	dispatcherReady func(*Dispatcher)
+	// web are the tests' ways into the dashboard's endpoint.
+	web webHooks
 }
 
-// Run serves until ctx is done, then shuts down: it stops accepting control connections, stops the Sources (and
+// Run serves until ctx is done, then shuts down: it stops the dashboard's endpoint (its listener, its connections, the
+// push Notifier and the hub), stops accepting control connections, stops the Sources (and
 // waits for their last poll), the Evals' ticker and the router, drains the effects runner (waiting effects resume on the next start), closes the node
 // (sessions end and resume on the next start), waits for the node socket to close and closes the store.
 //
@@ -77,7 +82,9 @@ type Config struct {
 // Engine (Wake is the runner's, relays whenever the App exists) → GitHub Source (once the check passed) → Outbox
 // (reply) → router (assessment, relay, notice) → node socket → startup recovery (Evals, a pending Policy change,
 // Assignments) → runner, Sources, router, ticker. A check that failed is retried in the background (30 s doubling to
-// 10 min); when it passes the Source starts and the default Policy allows the installation's account.
+// 10 min); when it passes the Source starts and the default Policy allows the installation's account. With web.enabled
+// the dashboard's listener is bound and its certificate and push key prepared before the runner starts (the Pusher is
+// one of its handlers), and it serves once the Dispatcher exists, before the control socket does.
 func Run(ctx context.Context, cfg Config) (err error) {
 	if cfg.StateDir == "" {
 		return errors.New("server: StateDir is required")
@@ -190,6 +197,20 @@ func Run(ctx context.Context, cfg Config) (err error) {
 		}
 	}
 
+	// The hub, made once the Dispatcher exists, hears of the node's changes through hubRef.
+	var hubRef atomic.Pointer[hub.Hub]
+	if fileCfg.WebOn() {
+		onStatus := ncfg.OnStatus
+		ncfg.OnStatus = func() {
+			if onStatus != nil {
+				onStatus()
+			}
+			if h := hubRef.Load(); h != nil {
+				h.NodeChanged()
+			}
+		}
+	}
+
 	// The Node needs the Engine and the Engine its Executor: the Node is made first and given the Engine after.
 	n := node.New(ncfg, nil)
 	nodeClosed := false
@@ -229,6 +250,13 @@ func Run(ctx context.Context, cfg Config) (err error) {
 		host = router.New(router.Config{Bin: ncfg.AthenaBin, StateDir: stateDir, Model: fileCfg.Router.Model,
 			Socket: ncfg.SocketPath, ClaudeBinary: ncfg.ClaudeBinary, KV: st, Policy: pc.settings}, eng, fx, sourceReg, logger)
 		n.SetRouter(host)
+	}
+	var webEP *webEndpoint
+	if fileCfg.WebOn() {
+		if webEP, err = newWebEndpoint(stateDir, *fileCfg.Web, st, eng, fx, cfg.web, logger); err != nil {
+			return err
+		}
+		defer webEP.stop()
 	}
 	expirePendingApprovals(eng, logger)
 
@@ -325,6 +353,15 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	if err := c.resumePolicyChange(); err != nil {
 		logger.Error("startup: tell the pending policy change", "error", err)
 	}
+	if webEP != nil {
+		if err := webEP.start(c, n, fx, version, &hubRef); err != nil {
+			return err
+		}
+		c.web = webEP
+		if cfg.web.ready != nil {
+			cfg.web.ready(webEP)
+		}
+	}
 	if cfg.dispatcherReady != nil {
 		cfg.dispatcherReady(c)
 	}
@@ -365,6 +402,8 @@ func Run(ctx context.Context, cfg Config) (err error) {
 		runErr = fmt.Errorf("server: node socket stopped: %v", serr)
 	}
 	logger.Info("athena server stopping")
+	// The dashboard's connections end first: they act through the Dispatcher, and the hub reads the store.
+	webEP.stop()
 	l.Close()
 	<-acceptDone
 	ctrlCancel()

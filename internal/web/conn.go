@@ -47,6 +47,7 @@ const (
 const (
 	// CloseSessionEnded: the login the connection rode on was revoked, logged out or expired.
 	CloseSessionEnded = 4002
+	closeGoingAway    = 1001
 	closeInternal     = 1011
 	closeTryAgain     = 1013
 )
@@ -108,6 +109,9 @@ type Dashboard struct {
 
 	mu    sync.Mutex
 	conns map[string]map[*conn]struct{} // by Session.Hash
+	// closed refuses new connections once Close began; serving counts the ServeConn calls still running.
+	closed  bool
+	serving sync.WaitGroup
 }
 
 // NewDashboard returns a Dashboard; it registers with cfg.Auth to hear of ended sessions.
@@ -134,13 +138,59 @@ func (d *Dashboard) revoked(hashes []string) {
 	}
 }
 
-func (d *Dashboard) add(hash string, c *conn) {
+// add registers an upgraded connection; false after Close began, when the caller ends it at once.
+func (d *Dashboard) add(hash string, c *conn) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if d.closed {
+		return false
+	}
 	if d.conns[hash] == nil {
 		d.conns[hash] = map[*conn]struct{}{}
 	}
 	d.conns[hash][c] = struct{}{}
+	return true
+}
+
+// enter counts a ServeConn call in; false after Close began.
+func (d *Dashboard) enter() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.closed {
+		return false
+	}
+	d.serving.Add(1)
+	return true
+}
+
+// Connections is the number of open dashboard connections.
+func (d *Dashboard) Connections() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	n := 0
+	for _, cs := range d.conns {
+		n += len(cs)
+	}
+	return n
+}
+
+// Close ends every open connection with 1001 (going away: the client comes back with its cursor), refuses new ones
+// and waits until every ServeConn returned. An upgraded connection is the HTTP server's no more, so its Shutdown
+// does not do this.
+func (d *Dashboard) Close() {
+	d.mu.Lock()
+	d.closed = true
+	var open []*conn
+	for _, cs := range d.conns {
+		for c := range cs {
+			open = append(open, c)
+		}
+	}
+	d.mu.Unlock()
+	for _, c := range open {
+		go c.end(closeGoingAway, "server shutting down")
+	}
+	d.serving.Wait()
 }
 
 func (d *Dashboard) remove(hash string, c *conn) {
@@ -155,6 +205,11 @@ func (d *Dashboard) remove(hash string, c *conn) {
 // ServeConn upgrades a signed-in browser to the link and serves it until it closes. A request whose Origin is not the
 // configured one is refused with 403, one without a live session with 401, both before the upgrade.
 func (d *Dashboard) ServeConn(w http.ResponseWriter, r *http.Request) {
+	if !d.enter() {
+		fail(w, http.StatusServiceUnavailable, CodeUnavailable, "server shutting down")
+		return
+	}
+	defer d.serving.Done()
 	if !d.auth.checkOrigin(w, r) {
 		return
 	}
@@ -170,7 +225,10 @@ func (d *Dashboard) ServeConn(w http.ResponseWriter, r *http.Request) {
 	c := &conn{d: d, r: r, lc: lc, resync: make(chan struct{}, 1), cmds: make(chan *athenav1.Command, commandQueue),
 		details: make(chan detailMsg), watching: map[string]bool{}, sentDetail: map[string]time.Time{},
 		streams: map[string]*streamer{}, creditWake: make(chan struct{})}
-	d.add(s.Hash, c)
+	if !d.add(s.Hash, c) {
+		c.end(closeGoingAway, "server shutting down")
+		return
+	}
 	defer d.remove(s.Hash, c)
 	if d.presence != nil {
 		defer d.presence.Forget(c)
