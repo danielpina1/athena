@@ -9,6 +9,10 @@ import (
 // policyBlock is the settings block that holds the Policy's revisions; saving one is reported as Changes.Policy.
 const policyBlock = "policy"
 
+// NotificationsBlock is the settings block that holds the owner's notification preferences; saving one is reported as
+// Changes.Notifications.
+const NotificationsBlock = "notifications"
+
 // ErrStaleRevision is returned by SaveSettings when the base revision is not the block's current one.
 var ErrStaleRevision = errors.New("store: settings revision is stale")
 
@@ -49,6 +53,9 @@ func (s *Store) SaveSettings(block string, baseRevision int, doc string) (int, e
 		rev = cur + 1
 		if _, err := tx.sql.Exec(`INSERT INTO settings (block, revision, doc) VALUES (?, ?, ?)`, block, rev, doc); err != nil {
 			return fmt.Errorf("store: save settings %q: %w", block, err)
+		}
+		if block == NotificationsBlock {
+			tx.changes.Notifications = true
 		}
 		if block == policyBlock {
 			tx.changes.Policy = true

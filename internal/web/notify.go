@@ -25,7 +25,7 @@ import (
 
 const (
 	// NotificationsBlock is the settings block holding the owner's notification preferences.
-	NotificationsBlock = "notifications"
+	NotificationsBlock = store.NotificationsBlock
 	// sentPrefix prefixes the kv keys that remember the entries already handled.
 	sentPrefix = "push.sent."
 	// visibleFor is how long a Visibility report keeps a client counted as looking at the dashboard.

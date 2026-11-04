@@ -33,7 +33,7 @@ type connSource struct {
 
 func (s *connSource) put(t core.Ticket) { s.mu.Lock(); s.tickets[t.ID] = t; s.mu.Unlock() }
 
-func (s *connSource) Tickets(bool) ([]core.Ticket, error) {
+func (s *connSource) Tickets(int) ([]core.Ticket, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var out []core.Ticket
@@ -55,6 +55,11 @@ func (s *connSource) Ticket(id string) (core.Ticket, core.Stage, error) {
 
 func (*connSource) PendingApprovals() ([]core.Approval, error)     { return nil, nil }
 func (*connSource) AnsweredApprovals(int) ([]core.Approval, error) { return nil, nil }
+func (*connSource) TicketAnsweredApprovals(string) ([]core.Approval, error) {
+	return nil, nil
+}
+func (*connSource) Repos() ([]*athenav1.RepoView, error)       { return nil, nil }
+func (*connSource) Notifications() ([]string, []string, error) { return nil, nil, nil }
 func (*connSource) Approval(string) (core.Approval, error) {
 	return core.Approval{}, errors.New("none")
 }
@@ -1013,6 +1018,25 @@ func TestFitDetailTrimsACopyAndEnds(t *testing.T) {
 	}
 	if out.Timeline[len(out.Timeline)-1] != many.Timeline[599] || len(many.Timeline) != 600 {
 		t.Fatal("trim must keep the newest entries and leave the input as it was")
+	}
+}
+
+func TestDetailTrimmedFlag(t *testing.T) {
+	small := &athenav1.TicketDetail{Summary: &athenav1.TicketSummary{Id: "T-1"},
+		Timeline: []*athenav1.TimelineEntry{{Kind: "input", Text: "hi"}}}
+	if out, ok := fitDetail(small); !ok || out != small || out.TimelineTrimmed {
+		t.Fatalf("a detail that fits: ok %v, same message %v, trimmed %v", ok, out == small, out.GetTimelineTrimmed())
+	}
+	many := &athenav1.TicketDetail{Summary: &athenav1.TicketSummary{Id: "T-2"}}
+	for i := 0; i < 600; i++ {
+		many.Timeline = append(many.Timeline, &athenav1.TimelineEntry{Kind: "input", Text: strings.Repeat("y", 4096)})
+	}
+	out, ok := fitDetail(many)
+	if !ok || !out.TimelineTrimmed {
+		t.Fatalf("a trimmed detail: ok %v, trimmed %v", ok, out.GetTimelineTrimmed())
+	}
+	if many.TimelineTrimmed {
+		t.Fatal("the hub's shared detail must not be marked")
 	}
 }
 

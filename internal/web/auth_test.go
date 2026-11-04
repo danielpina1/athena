@@ -70,10 +70,14 @@ func TestEnrollAndLogin(t *testing.T) {
 	info := e.Do("GET", "/auth/session", nil)
 	var got struct {
 		Authenticated    bool      `json:"authenticated"`
+		PasskeyID        string    `json:"passkeyId"`
 		ReauthValidUntil time.Time `json:"reauthValidUntil"`
 	}
 	if err := json.Unmarshal(info.Body.Bytes(), &got); err != nil || !got.Authenticated || !got.ReauthValidUntil.Equal(e.Now().Add(5*time.Minute)) {
 		t.Fatalf("session info = %s", info.Body)
+	}
+	if got.PasskeyID != a.CredentialID() {
+		t.Fatalf("session info passkeyId = %q, want the signed-in passkey %q", got.PasskeyID, a.CredentialID())
 	}
 	e.Do("POST", "/auth/logout", nil)
 	if _, ok := e.Auth.Session(e.Request()); ok {
@@ -491,5 +495,26 @@ func TestRegisterExcludesEnrolledCredentialsAndCleansName(t *testing.T) {
 	}
 	if err := json.Unmarshal(begin.Body.Bytes(), &o); err != nil || len(o.PublicKey.Exclude) != 1 || o.PublicKey.Exclude[0].ID != a.CredentialID() {
 		t.Fatalf("excludeCredentials = %+v %v", o, err)
+	}
+}
+
+// The passkeyId of /auth/session is the passkey this session signed in with, not another enrolled one.
+func TestSessionInfoNamesTheSignedInPasskey(t *testing.T) {
+	e := NewAuthEnv(t)
+	laptop := NewSoftAuthenticator(t, testOrigin, testRPID)
+	phone := NewSoftAuthenticator(t, testOrigin, testRPID)
+	e.Enroll(laptop, "laptop")
+	e.Enroll(phone, "phone")
+	e.Login(phone)
+	var got struct {
+		PasskeyID string `json:"passkeyId"`
+	}
+	if err := json.Unmarshal(e.Do("GET", "/auth/session", nil).Body.Bytes(), &got); err != nil || got.PasskeyID != phone.CredentialID() || got.PasskeyID == laptop.CredentialID() {
+		t.Fatalf("passkeyId = %q (%v), want the phone's %q", got.PasskeyID, err, phone.CredentialID())
+	}
+	// Signed out: no passkey is named.
+	e.DropCookies()
+	if body := e.Do("GET", "/auth/session", nil).Body.String(); strings.Contains(body, "passkeyId") {
+		t.Fatalf("signed-out session info names a passkey: %s", body)
 	}
 }

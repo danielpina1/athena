@@ -55,6 +55,8 @@ var ownerHandle = []byte("athena-owner")
 type Session struct {
 	Hash     string
 	ReauthAt time.Time
+	// PasskeyID is the passkey the session signed in with.
+	PasskeyID string
 }
 
 // Auth is the owner's passkey login: enrollment, sessions and re-authentication. Its handlers are plain
@@ -136,6 +138,7 @@ func (a *Auth) Mount(mux *http.ServeMux) {
 	mux.HandleFunc("POST /auth/reauth/finish", a.ReauthFinish)
 	mux.HandleFunc("POST /auth/logout", a.Logout)
 	mux.HandleFunc("GET /auth/session", a.SessionInfo)
+	mux.HandleFunc("POST /auth/enroll-link", a.EnrollLink)
 }
 
 // OnRevoke registers f to be called with the hashes (Session.Hash) of the sessions that end because a passkey was
@@ -623,7 +626,7 @@ func (a *Auth) sessionTouched(r *http.Request, touchAfter time.Duration) (Sessio
 		}
 	}
 	a.mu.Unlock()
-	return Session{Hash: hex.EncodeToString(hash), ReauthAt: ws.ReauthAt}, ws, true
+	return Session{Hash: hex.EncodeToString(hash), ReauthAt: ws.ReauthAt, PasskeyID: ws.PasskeyID}, ws, true
 }
 
 // RecentReauth reports whether a passkey assertion vouched for the session within the last 5 minutes.
@@ -648,15 +651,18 @@ func (a *Auth) Logout(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"authenticated": false})
 }
 
-// SessionInfo answers GET /auth/session with {authenticated, reauthValidUntil}; the second is present only while the
+// SessionInfo answers GET /auth/session with {authenticated, passkeyId, reauthValidUntil}; passkeyId is the passkey the
+// session signed in with (so a device list can mark the current one), reauthValidUntil is present only while the
 // re-authentication window is open.
 func (a *Auth) SessionInfo(w http.ResponseWriter, r *http.Request) {
 	out := struct {
 		Authenticated    bool       `json:"authenticated"`
+		PasskeyID        string     `json:"passkeyId,omitempty"`
 		ReauthValidUntil *time.Time `json:"reauthValidUntil,omitempty"`
 	}{}
 	if s, ok := a.Session(r); ok {
 		out.Authenticated = true
+		out.PasskeyID = s.PasskeyID
 		if a.RecentReauth(s) {
 			until := s.ReauthAt.Add(ReauthWindow)
 			out.ReauthValidUntil = &until

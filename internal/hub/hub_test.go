@@ -30,6 +30,9 @@ type fakeSource struct {
 	revision  int
 	settings  string
 	node      node.Status
+	repos     []*athenav1.RepoView
+	kinds     []string
+	muted     []string
 }
 
 func newFake() *fakeSource {
@@ -42,15 +45,22 @@ var epoch0 = time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
 
 func (f *fakeSource) put(t core.Ticket) { f.mu.Lock(); f.tickets[t.ID] = t; f.mu.Unlock() }
 
-func (f *fakeSource) Tickets(includeEnded bool) ([]core.Ticket, error) {
+func (f *fakeSource) Tickets(endedLimit int) ([]core.Ticket, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	var out []core.Ticket
+	var out, ended []core.Ticket
 	for _, t := range f.tickets {
-		if includeEnded || t.Ended == nil {
+		if t.Ended == nil {
 			out = append(out, t)
+		} else {
+			ended = append(ended, t)
 		}
 	}
+	sort.Slice(ended, func(i, j int) bool { return ended[i].UpdatedAt.After(ended[j].UpdatedAt) })
+	if len(ended) > endedLimit {
+		ended = ended[:endedLimit]
+	}
+	out = append(out, ended...)
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out, nil
 }
@@ -92,6 +102,29 @@ func (f *fakeSource) AnsweredApprovals(limit int) ([]core.Approval, error) {
 	return sortedBy(f.approvals, func(a, b core.Approval) bool { return a.ID > b.ID },
 		func(a core.Approval) bool { return a.State != core.ApprovalPending }, limit), nil
 }
+
+func (f *fakeSource) TicketAnsweredApprovals(ticketID string) ([]core.Approval, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return sortedBy(f.approvals, func(a, b core.Approval) bool { return a.ID > b.ID },
+		func(a core.Approval) bool { return a.State != core.ApprovalPending && a.TicketID == ticketID }, 0), nil
+}
+
+func (f *fakeSource) Repos() ([]*athenav1.RepoView, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.repos, nil
+}
+
+func (f *fakeSource) setRepos(r ...*athenav1.RepoView) { f.mu.Lock(); f.repos = r; f.mu.Unlock() }
+
+func (f *fakeSource) Notifications() ([]string, []string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.kinds, f.muted, nil
+}
+
+func (f *fakeSource) setMuted(m ...string) { f.mu.Lock(); f.muted = m; f.mu.Unlock() }
 
 func (f *fakeSource) Approval(id string) (core.Approval, error) {
 	f.mu.Lock()
@@ -807,5 +840,64 @@ func TestWaitJoinsReadsInFlight(t *testing.T) {
 		case <-time.After(2 * time.Second):
 			t.Fatalf("%s: Wait did not return after the read", what)
 		}
+	}
+}
+
+func repoView(name, kind string) *athenav1.RepoView {
+	return &athenav1.RepoView{Name: name, Kind: kind}
+}
+
+func TestReposInSnapshotAndDeltaOnlyOnChange(t *testing.T) {
+	f := newFake()
+	f.setRepos(repoView("a/b", "github"))
+	h := start(t, f)
+	snap, err := h.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Repos) != 1 || snap.Repos[0].Name != "a/b" {
+		t.Fatalf("snapshot repos = %v", snap.Repos)
+	}
+	sub, _ := h.Subscribe(0, h.Epoch())
+	defer sub.Close()
+
+	// A Ticket commit that leaves the list as it was publishes the Ticket alone.
+	f.put(ticket("T-1"))
+	h.OnCommit(store.Changes{Tickets: []string{"T-1"}})
+	if d := next(t, sub); d.GetTicket() == nil {
+		t.Fatalf("first delta = %v", d)
+	}
+	none(t, sub)
+
+	// A change publishes the whole list, once.
+	f.setRepos(repoView("/tmp/x", "dir"), repoView("a/b", "github"))
+	h.OnCommit(store.Changes{Tickets: []string{"T-1"}})
+	next(t, sub) // the Ticket
+	d := next(t, sub)
+	if r := d.GetRepos().GetRepos(); len(r) != 2 || r[0].Name != "/tmp/x" || r[0].Kind != "dir" {
+		t.Fatalf("repos delta = %v", d)
+	}
+	h.OnCommit(store.Changes{Tickets: []string{"T-1"}})
+	next(t, sub)
+	none(t, sub)
+}
+
+func TestNotificationsInSnapshotAndDeltaOnChange(t *testing.T) {
+	f := newFake()
+	f.kinds = []string{"approval", "answer"}
+	h := start(t, f)
+	snap, _ := h.Snapshot()
+	if got := snap.Notifications; len(got.Kinds) != 2 || len(got.Muted) != 0 {
+		t.Fatalf("snapshot notifications = %v", got)
+	}
+	sub, _ := h.Subscribe(0, h.Epoch())
+	defer sub.Close()
+	h.OnCommit(store.Changes{Notifications: true}) // a save that changed nothing
+	none(t, sub)
+	f.setMuted("answer")
+	h.OnCommit(store.Changes{Notifications: true})
+	d := next(t, sub)
+	if n := d.GetNotifications(); len(n.GetMuted()) != 1 || n.Muted[0] != "answer" || len(n.Kinds) != 2 {
+		t.Fatalf("notifications delta = %v", d)
 	}
 }

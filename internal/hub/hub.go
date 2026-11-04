@@ -53,12 +53,15 @@ type HealthItem struct {
 // Source is what the hub reads. The Engine and the Store implement the ticket, approval, trigger, thread and decision
 // reads (the server adapts them); tests use a fake. Every read returns the current committed state.
 type Source interface {
-	// Tickets returns the open Tickets, or every Ticket when includeEnded is set.
-	Tickets(includeEnded bool) ([]core.Ticket, error)
+	// Tickets returns every open Ticket and the endedLimit most recently ended ones. The limit is the Source's to
+	// apply (in the database): a long history must not be read to be thrown away.
+	Tickets(endedLimit int) ([]core.Ticket, error)
 	Ticket(id string) (core.Ticket, core.Stage, error)
 	PendingApprovals() ([]core.Approval, error)
 	// AnsweredApprovals returns the most recently answered (not pending) Approvals, newest first.
 	AnsweredApprovals(limit int) ([]core.Approval, error)
+	// TicketAnsweredApprovals returns one Ticket's Approvals that are not pending, newest answered first.
+	TicketAnsweredApprovals(ticketID string) ([]core.Approval, error)
 	Approval(id string) (core.Approval, error)
 	// RecentTriggers returns the newest Triggers, newest first.
 	RecentTriggers(limit int) ([]core.Trigger, error)
@@ -76,6 +79,10 @@ type Source interface {
 	// Policy returns the current Policy revision (0 while nobody saved settings), its version and canonical JSON.
 	Policy() (revision int, version string, settingsJSON string, err error)
 	NodeStatus() node.Status
+	// Repos returns the known repositories and folders, the last used first, at most 50.
+	Repos() ([]*athenav1.RepoView, error)
+	// Notifications returns the notification kinds that exist and the ones the owner muted.
+	Notifications() (kinds, muted []string, err error)
 }
 
 type ringEntry struct {
@@ -108,6 +115,8 @@ type Hub struct {
 	health      *athenav1.Health
 	healthSince map[string]healthState
 	node        *athenav1.NodeStatus
+	repos       *athenav1.RepoList
+	notifs      *athenav1.NotificationPrefsView
 	closed      bool // the hub has stopped: Subscribe returns closed feeds
 
 	// running counts the loop and the health probe; Wait waits for both after ctx is done.
@@ -163,8 +172,15 @@ func (h *Hub) signal(ch chan struct{}) {
 // Start runs the hub until ctx is done. It takes the first health reading before it returns.
 func (h *Hub) Start(ctx context.Context) {
 	health, n := h.probeHealth(), nodeStatus(h.src.NodeStatus())
+	// The first reads of the repos and the notification prefs only seed "what was last published"; a failure leaves it
+	// empty, and the first change publishes.
+	var repos *athenav1.RepoList
+	if r, err := h.src.Repos(); err == nil {
+		repos = &athenav1.RepoList{Repos: r}
+	}
+	notifs, _ := h.notificationsView()
 	h.mu.Lock()
-	h.health, h.node = health, n
+	h.health, h.node, h.repos, h.notifs = health, n, repos, notifs
 	h.mu.Unlock()
 	h.running.Add(2) // the loop and its probe
 	go h.run(ctx)
@@ -262,6 +278,12 @@ func (h *Hub) apply(c store.Changes) {
 			h.sendDetail(id, h.detail(&t, st))
 		}
 	}
+	if len(c.Tickets) > 0 {
+		// A Ticket can have added a repository or a folder to the known ones, or moved one up the list.
+		if !h.publishRepos() {
+			return
+		}
+	}
 	for _, id := range c.Approvals {
 		a, err := h.src.Approval(id)
 		if err != nil {
@@ -294,6 +316,11 @@ func (h *Hub) apply(c store.Changes) {
 		}
 		h.publish(&athenav1.Delta{Change: &athenav1.Delta_Decision{Decision: decisionView(&d)}})
 	}
+	if c.Notifications {
+		if !h.publishNotifications() {
+			return
+		}
+	}
 	if c.Policy {
 		if p, err := h.policyView(); err != nil {
 			h.lost("read policy", "error", err)
@@ -317,6 +344,51 @@ func (h *Hub) policyView() (*athenav1.PolicyView, error) {
 		return nil, err
 	}
 	return &athenav1.PolicyView{Revision: uint32(rev), Version: version, SettingsJson: settings}, nil
+}
+
+// publishRepos publishes the known repositories when they differ from the last published. It reports false when the
+// Source could not be read (the hub then resyncs everyone).
+func (h *Hub) publishRepos() bool {
+	repos, err := h.src.Repos()
+	if err != nil {
+		h.lost("read repos", "error", err)
+		return false
+	}
+	next := &athenav1.RepoList{Repos: repos}
+	h.mu.Lock()
+	same := h.repos != nil && proto.Equal(h.repos, next)
+	h.repos = next
+	h.mu.Unlock()
+	if !same {
+		h.publish(&athenav1.Delta{Change: &athenav1.Delta_Repos{Repos: next}})
+	}
+	return true
+}
+
+func (h *Hub) notificationsView() (*athenav1.NotificationPrefsView, error) {
+	kinds, muted, err := h.src.Notifications()
+	if err != nil {
+		return nil, err
+	}
+	return &athenav1.NotificationPrefsView{Kinds: kinds, Muted: muted}, nil
+}
+
+// publishNotifications publishes the notification preferences when they differ from the last published; false when
+// the Source could not be read.
+func (h *Hub) publishNotifications() bool {
+	next, err := h.notificationsView()
+	if err != nil {
+		h.lost("read notification prefs", "error", err)
+		return false
+	}
+	h.mu.Lock()
+	same := h.notifs != nil && proto.Equal(h.notifs, next)
+	h.notifs = next
+	h.mu.Unlock()
+	if !same {
+		h.publish(&athenav1.Delta{Change: &athenav1.Delta_Notifications{Notifications: next}})
+	}
+	return true
 }
 
 func (h *Hub) publishNode() {
@@ -514,7 +586,7 @@ func (h *Hub) Snapshot() (*athenav1.Snapshot, error) {
 	h.mu.Unlock()
 	s := &athenav1.Snapshot{Cursor: cursor}
 
-	tickets, err := h.src.Tickets(true)
+	tickets, err := h.src.Tickets(endedTickets)
 	if err != nil {
 		return nil, err
 	}
@@ -574,6 +646,12 @@ func (h *Hub) Snapshot() (*athenav1.Snapshot, error) {
 	if s.Policy, err = h.policyView(); err != nil {
 		return nil, err
 	}
+	if s.Repos, err = h.src.Repos(); err != nil {
+		return nil, err
+	}
+	if s.Notifications, err = h.notificationsView(); err != nil {
+		return nil, err
+	}
 	return s, nil
 }
 
@@ -620,5 +698,10 @@ func (h *Hub) detail(t *core.Ticket, st core.Stage) *athenav1.TicketDetail {
 			pending = &a
 		}
 	}
-	return ticketDetail(t, st, origin, pending)
+	// Without the answered Approvals the timeline lacks them; that is better than no detail at all.
+	answered, err := h.src.TicketAnsweredApprovals(t.ID)
+	if err != nil {
+		h.log.Warn("hub: detail: answered approvals", "ticket", t.ID, "error", err)
+	}
+	return ticketDetail(t, st, origin, pending, answered)
 }

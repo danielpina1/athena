@@ -110,9 +110,14 @@ func (tx *Tx) PutApproval(a *core.Approval) error {
 	if err != nil {
 		return fmt.Errorf("store: encode approval %q: %w", a.ID, err)
 	}
-	_, err = tx.sql.Exec(`INSERT INTO approvals (id, state, ticket_id, doc) VALUES (?, ?, ?, ?)
-		ON CONFLICT(id) DO UPDATE SET state = excluded.state, ticket_id = excluded.ticket_id, doc = excluded.doc`,
-		a.ID, a.State, a.TicketID, string(doc))
+	answered := a.CreatedAt
+	if a.AnsweredAt != nil {
+		answered = *a.AnsweredAt
+	}
+	_, err = tx.sql.Exec(`INSERT INTO approvals (id, state, ticket_id, doc, answered_at) VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET state = excluded.state, ticket_id = excluded.ticket_id, doc = excluded.doc,
+			answered_at = excluded.answered_at`,
+		a.ID, a.State, a.TicketID, string(doc), answered.UTC().Format(timeLayout))
 	if err != nil {
 		return fmt.Errorf("store: put approval %q: %w", a.ID, err)
 	}
@@ -152,12 +157,26 @@ func (tx *Tx) PendingApprovals() ([]*core.Approval, error) {
 	return out, nil
 }
 
-// AnsweredApprovals returns the Approvals no longer pending (answered or expired), the most recently answered first;
-// limit <= 0 returns all. It reads in a transaction of its own. The table keeps no answer column, so the rows are
-// sorted here by the document's own times (one without an answer time by its creation).
-func (s *Store) AnsweredApprovals(limit int) (out []core.Approval, err error) {
+// AnsweredApprovals returns the Approvals no longer pending (answered or expired), the most recently answered first
+// (one without an answer time counts by its creation); limit <= 0 returns all. The order and the limit are the
+// database's: only the rows returned are read. It reads in a transaction of its own.
+func (s *Store) AnsweredApprovals(limit int) ([]core.Approval, error) {
+	return s.approvalsWhere(`state != ?`, []any{core.ApprovalPending}, limit)
+}
+
+// TicketAnsweredApprovals returns one Ticket's Approvals that are no longer pending, the most recently answered first.
+func (s *Store) TicketAnsweredApprovals(ticketID string) ([]core.Approval, error) {
+	return s.approvalsWhere(`state != ? AND ticket_id = ?`, []any{core.ApprovalPending, ticketID}, 0)
+}
+
+func (s *Store) approvalsWhere(where string, args []any, limit int) (out []core.Approval, err error) {
+	q := `SELECT doc FROM approvals WHERE ` + where + ` ORDER BY answered_at DESC, id DESC`
+	if limit > 0 {
+		q += ` LIMIT ?`
+		args = append(args, limit)
+	}
 	err = s.Tx(func(tx *Tx) error {
-		rows, err := tx.sql.Query(`SELECT doc FROM approvals WHERE state != ?`, core.ApprovalPending)
+		rows, err := tx.sql.Query(q, args...)
 		if err != nil {
 			return fmt.Errorf("store: answered approvals: %w", err)
 		}
@@ -175,25 +194,74 @@ func (s *Store) AnsweredApprovals(limit int) (out []core.Approval, err error) {
 		}
 		return rows.Err()
 	})
-	if err != nil {
-		return nil, err
+	return out, err
+}
+
+// RecentlyEnded returns the ended Tickets that were updated last, the most recently updated first; limit <= 0 returns
+// all. The order and the limit are the database's: only the rows returned are read.
+func (s *Store) RecentlyEnded(limit int) (out []core.Ticket, err error) {
+	q := `SELECT doc FROM tickets WHERE ended = 1 ORDER BY updated_at DESC, id DESC`
+	var args []any
+	if limit > 0 {
+		q += ` LIMIT ?`
+		args = append(args, limit)
 	}
-	answered := func(a *core.Approval) time.Time {
-		if a.AnsweredAt != nil {
-			return *a.AnsweredAt
+	err = s.Tx(func(tx *Tx) error {
+		rows, err := tx.sql.Query(q, args...)
+		if err != nil {
+			return fmt.Errorf("store: recently ended tickets: %w", err)
 		}
-		return a.CreatedAt
-	}
-	sort.SliceStable(out, func(i, j int) bool {
-		if ti, tj := answered(&out[i]), answered(&out[j]); !ti.Equal(tj) {
-			return ti.After(tj)
+		defer rows.Close()
+		for rows.Next() {
+			var doc string
+			if err := rows.Scan(&doc); err != nil {
+				return fmt.Errorf("store: recently ended tickets: %w", err)
+			}
+			t, err := decodeTicket(doc)
+			if err != nil {
+				return err
+			}
+			out = append(out, *t)
 		}
-		return out[i].ID > out[j].ID
+		return rows.Err()
 	})
-	if limit > 0 && len(out) > limit {
-		out = out[:limit]
-	}
-	return out, nil
+	return out, err
+}
+
+// Placement is where a Ticket was placed: its repository (owner/name) and/or directory, and when it was created.
+type Placement struct {
+	Repo, Dir string
+	At        time.Time
+}
+
+// RecentPlacements returns the placements of the limit most recently updated Tickets that name a repository or a
+// directory, newest created first. It reads two JSON fields of each row, not the whole document.
+func (s *Store) RecentPlacements(limit int) (out []Placement, err error) {
+	err = s.Tx(func(tx *Tx) error {
+		rows, err := tx.sql.Query(`SELECT COALESCE(json_extract(doc, '$.repo'), ''), COALESCE(json_extract(doc, '$.execution.directory'), ''),
+				COALESCE(json_extract(doc, '$.createdAt'), '') FROM (SELECT doc FROM tickets ORDER BY updated_at DESC, id DESC LIMIT ?)`, limit)
+		if err != nil {
+			return fmt.Errorf("store: recent placements: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var p Placement
+			var at string
+			if err := rows.Scan(&p.Repo, &p.Dir, &at); err != nil {
+				return fmt.Errorf("store: recent placements: %w", err)
+			}
+			if p.Repo == "" && p.Dir == "" {
+				continue
+			}
+			if p.At, err = time.Parse(time.RFC3339Nano, at); err != nil {
+				return fmt.Errorf("store: recent placements: created at %q: %w", at, err)
+			}
+			out = append(out, p)
+		}
+		return rows.Err()
+	})
+	sort.SliceStable(out, func(i, j int) bool { return out[i].At.After(out[j].At) })
+	return out, err
 }
 
 // putDoc upserts a JSON document into one of the (id, doc) tables; table is a constant, never user input.
