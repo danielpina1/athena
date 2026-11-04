@@ -299,3 +299,51 @@ func TestReplyWithoutAddressedChannelRefused(t *testing.T) {
 	wantUserError(t, "attention of a repo task", err)
 	eq(t, "still no reply queued", len(h.replyEffects()), before)
 }
+
+// The owner's message in the dashboard has no channel: an acknowledgement or answer naming its Trigger would land on
+// the Ticket's own thread (a GitHub issue), so it is refused, and nothing is queued.
+func TestOwnerMessageNeedsNoAckOrAnswer(t *testing.T) {
+	h := newEvals(t)
+	a := h.sourced("c:1")
+	h.must(h.eng.AddPersonInput(a, "Also rename the button."))
+	tk := h.ticket(a)
+	owner := tk.Inputs[len(tk.Inputs)-1].TriggerID
+	if owner == "" {
+		t.Fatal("the owner's Input names no Trigger")
+	}
+	before := len(h.replyEffects())
+	for _, purpose := range []string{PurposeAcknowledgement, PurposeAnswer} {
+		_, err := h.eng.Reply(ReplyRequest{TicketID: a, TriggerID: owner, Purpose: purpose, Text: "On it."})
+		wantUserError(t, purpose+" of the owner's message", err)
+		if err != nil && !strings.Contains(err.Error(), "messages from the owner need no "+purpose) {
+			t.Errorf("refusal = %q", err)
+		}
+	}
+	eq(t, "no reply queued", len(h.replyEffects()), before)
+}
+
+// A hand-back of the owner's message would drop it: an owner Trigger has no Thread to queue it on. It is refused.
+func TestOwnerMessageCannotBeHandedBack(t *testing.T) {
+	h := newEvals(t)
+	a := h.sourced("c:1")
+	h.must(h.eng.AddPersonInput(a, "Also redo the billing page."))
+	tk := h.ticket(a)
+	owner := tk.Inputs[len(tk.Inputs)-1].TriggerID
+	queued, err := h.eng.Handback(a, owner, "beyond this ticket")
+	wantUserError(t, "hand-back of the owner's message", err)
+	if err != nil && !strings.Contains(err.Error(), "messages from the owner can't be handed back") {
+		t.Errorf("refusal = %q", err)
+	}
+	if queued {
+		t.Error("the owner's message was queued")
+	}
+	var tr *Trigger
+	h.must(h.repos.Tx(func(tx Tx) error {
+		var err error
+		tr, err = tx.GetTrigger(owner)
+		return err
+	}))
+	if _, back := tr.Disposition.HandedBack[a]; back {
+		t.Error("the refused hand-back was recorded")
+	}
+}

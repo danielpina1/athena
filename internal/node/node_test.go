@@ -1396,7 +1396,7 @@ func TestTriggerInputCard(t *testing.T) {
 		strings.Repeat("é", 600) + "…\n[cut: 600 of 700 characters shown; read the rest with gh on o/r#3]",
 		"[input i3: ci]\ntrigger_id: github:checksuite:5\nfrom: ci (bot)\n",
 		"thread: o/r@main (github:o/r@main)\n",
-		"[input i4: message from the owner]\nowner text\n",
+		"[input i4: message from the owner (not on GitHub)]\nowner text\n",
 		"[input i5: note]\nNote: T-2 found the root cause\n",
 	} {
 		if !strings.Contains(got, want) {
@@ -1429,7 +1429,8 @@ func TestInputLabelFallback(t *testing.T) {
 		{ID: "c", Kind: core.InputTrigger, TriggerID: "missing", Text: "t", Human: true},
 		{ID: "d", Kind: core.InputText, Text: "t", Human: true},
 	}}
-	for id, want := range map[string]string{"a": "message from the owner", "b": "message", "c": "message", "d": "message from the owner"} {
+	for id, want := range map[string]string{"a": "message from the owner (not on GitHub)", "b": "message", "c": "message",
+		"d": "message from the owner (not on GitHub)"} {
 		got := renderInputs(tk, []string{id}, lookup)
 		if !strings.HasPrefix(got, "[input "+id+": "+want+"]\n") {
 			t.Errorf("input %s: %q, want label %q", id, got, want)

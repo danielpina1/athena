@@ -1484,10 +1484,11 @@ func renderInputs(t core.Ticket, ids []string, trigger func(id string) (core.Tri
 					continue
 				}
 			}
-			// Only the owner's own Inputs say so: a Trigger of the owner Source, or a person Input without a Trigger.
+			// Only the owner's own Inputs say so: a Trigger of the owner Source, or a person Input without a Trigger. They
+			// come from the dashboard or `athena reply`, carry no trigger_id and are answered in the session's output.
 			from := "message"
 			if in.Human && (in.TriggerID == "" || (found && tr.Source == core.OwnerActor.Source)) {
-				from = "message from the owner"
+				from = "message from the owner (not on GitHub)"
 			}
 			fmt.Fprintf(&b, "[input %s: %s]\n%s\n\n", in.ID, from, in.Text)
 		}

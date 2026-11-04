@@ -135,6 +135,24 @@ added to the home screen, and only over a certificate it trusts: in mode `ca`, i
 (step 3a). Push subscription lives in plan 4's dashboard; the server side (stage-entry notifications for Tickets
 waiting on you and for Approvals) runs already.
 
+## 6. Local repositories for New task
+
+New task lists your local git repositories under **Local repositories**, besides the ones Tickets already used. The
+server looks for them in the folders of `localRepoRoots` in `~/.athena/config.json` (restart the server after a
+change):
+
+```json
+{
+  "localRepoRoots": ["~/code", "/srv/git"]
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `localRepoRoots` | Absolute paths, or paths starting with `~/`. Each folder, its children and its grandchildren are searched for a git repository (a `.git` directory or file), not below a repository found, skipping hidden folders, `node_modules`, `vendor`, symbolic links and Athena's state directory. A root that is itself a symbolic link is resolved once, and the repositories are listed by their resolved paths. Left out, it is the existing ones of `~/Developer`, `~/code`, `~/src`, `~/repos`, `~/Projects` and `~/Desktop`; `[]` turns the listing off. At most 200 repositories, in at most 5 seconds a scan; a scan cut short by the time keeps the last complete list (the server log says so once). The server searches in the background at start and every 3 minutes. |
+
+The dashboard shows these paths only to the signed-in owner. Typing any absolute path in New task still works.
+
 ## Safety notes
 
 - **Bind to the VPN address.** The listener is reachable by anything that can reach its port, and anyone who reaches it

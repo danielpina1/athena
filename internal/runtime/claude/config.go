@@ -46,6 +46,23 @@ type settingsFile struct {
 	Env     map[string]string        `json:"env"`
 	Hooks   map[string][]hookMatcher `json:"hooks"`
 	Sandbox *sandboxSettings         `json:"sandbox,omitempty"`
+	// Attribution is always empty: a session's commits and pull requests carry no Claude Code trailer, footer or
+	// session link. IncludeCoAuthoredBy false is the older, deprecated form of the same, for a Claude Code that predates
+	// attribution; a newer one reads attribution and ignores it (checked against Claude Code 2.1.280).
+	Attribution         attributionSettings `json:"attribution"`
+	IncludeCoAuthoredBy bool                `json:"includeCoAuthoredBy"`
+	// IncludeGitInstructions false leaves Claude Code's built-in commit and pull request workflow out of the system
+	// prompt (checked against Claude Code 2.1.280): its own PR template would compete with the worker prompt's. It also
+	// drops the git status snapshot a session starts with; the worker prompt has the worker run git status itself.
+	IncludeGitInstructions bool `json:"includeGitInstructions"`
+}
+
+// attributionSettings is Claude Code's "attribution" block: an empty commit or pr hides that attribution, and
+// sessionUrl false leaves out the claude.ai session link.
+type attributionSettings struct {
+	Commit     string `json:"commit"`
+	PR         string `json:"pr"`
+	SessionURL bool   `json:"sessionUrl"`
 }
 
 // Sandbox turns on Claude Code's sandbox for a session's Bash commands (and every process they start): writes only to

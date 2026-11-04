@@ -356,6 +356,12 @@ func Run(ctx context.Context, cfg Config) (err error) {
 		logger.Error("startup: tell the pending policy change", "error", err)
 	}
 	if webEP != nil {
+		// The dashboard lists the local git repositories under localRepoRoots, never the state directory's own.
+		home := cfg.web.home
+		if home == "" {
+			home, _ = os.UserHomeDir()
+		}
+		c.local = newLocalRepos(fileCfg.localRepoRoots(home), []string{stateDir, ncfg.WorkRoot}, logger)
 		if err := webEP.start(c, n, fx, version, &hubRef); err != nil {
 			return err
 		}

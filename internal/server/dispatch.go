@@ -57,6 +57,8 @@ type Dispatcher struct {
 	auth atomic.Pointer[web.Auth]
 	// web is the dashboard's endpoint, nil when it is off; set before the control socket serves.
 	web *webEndpoint
+	// local finds the local git repositories the dashboard lists; nil when the dashboard or the listing is off.
+	local *localRepos
 	// onPolicyChange, when set (tests), runs before the Engine hears of a Policy change; an error refuses it.
 	onPolicyChange func(from, to policy.Settings) error
 	// inflight serializes the copies of one Command (by client and command id) from lookup to stored result.

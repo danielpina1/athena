@@ -172,6 +172,10 @@ func (o *op) reply(r ReplyRequest) (string, error) {
 		if tr == nil {
 			return "", userErrorf("trigger %s not found", r.TriggerID)
 		}
+		// The owner's messages have no channel: an acknowledgement or answer would land on the Ticket's own thread.
+		if tr.Source == ownerSource && (r.Purpose == PurposeAcknowledgement || r.Purpose == PurposeAnswer) {
+			return "", userErrorf("messages from the owner need no %s: answer in your session, which the owner reads live", r.Purpose)
+		}
 	}
 	// A result or attention may name a Trigger to reply where it was written: only one that reached the Ticket.
 	if tr != nil && (r.Purpose == PurposeResult || r.Purpose == PurposeAttention) && !reachedTicket(t, tr.ID, true) {
