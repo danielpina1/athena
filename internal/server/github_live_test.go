@@ -26,6 +26,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -36,6 +37,9 @@ import (
 )
 
 // liveGHSkip is the message of the skip when the variables are unset.
+// liveGHBudget is the time the whole test may wait; docs/dev/github-app.md documents go test -timeout 30m.
+const liveGHBudget = 25 * time.Minute
+
 const liveGHSkip = "set ATHENA_LIVE_GITHUB=1 and ATHENA_LIVE_REPO to run"
 
 // liveTokenRe matches the token shapes Athena redacts: ghs_, ghu_, gho_, ghp_ and github_pat_.
@@ -135,13 +139,18 @@ func TestLiveGitHubMention(t *testing.T) {
 	if os.Getenv("ATHENA_LIVE_GITHUB") != "1" || repo == "" {
 		t.Skip(liveGHSkip)
 	}
+	// The test was asked for: a missing tool is a failure, not a skip.
 	claudeBin, err := exec.LookPath("claude")
 	if err != nil {
-		t.Skip("claude is not on PATH")
+		t.Fatal("ATHENA_LIVE_GITHUB=1 is set but claude is not on PATH")
 	}
 	if _, err := exec.LookPath("gh"); err != nil {
-		t.Skip("gh is not on PATH: the issue is created as the owner")
+		t.Fatal("ATHENA_LIVE_GITHUB=1 is set but gh is not on PATH: the issue is created as the owner")
 	}
+	// One deadline for every wait below, inside the documented go test -timeout 30m (the server's stop and the cleanup
+	// follow it).
+	deadline := time.Now().Add(liveGHBudget)
+	left := func() time.Duration { return time.Until(deadline) }
 	appID, err1 := strconv.ParseInt(os.Getenv("ATHENA_LIVE_APP_ID"), 10, 64)
 	inst, err2 := strconv.ParseInt(os.Getenv("ATHENA_LIVE_INSTALLATION"), 10, 64)
 	slug, key := os.Getenv("ATHENA_LIVE_APP_SLUG"), os.Getenv("ATHENA_LIVE_APP_KEY")
@@ -163,7 +172,7 @@ func TestLiveGitHubMention(t *testing.T) {
 	botLogin := slug + "[bot]"
 
 	s := startLiveIn(t, claudeBin, stateDir)
-	eventually(t, "the github source is healthy and the router runs", func() bool {
+	await(t, min(time.Minute, left()), "the github source is healthy and the router runs", func() bool {
 		h := s.health()
 		return h.Router.State == "running" && len(h.Sources) == 1 && h.Sources[0].Error == ""
 	})
@@ -177,8 +186,10 @@ func TestLiveGitHubMention(t *testing.T) {
 	t.Logf("policy revision %d saved: mode auto, allowed %s", set.Revision, owner)
 
 	// 1. The owner opens an issue that mentions the App.
-	title := "athena live test " + time.Now().UTC().Format("20060102-150405")
-	body := "@" + slug + " create a file hello.txt containing hi and open a PR"
+	now := time.Now().UTC()
+	file := fmt.Sprintf("hello-%d.txt", now.Unix()) // a new name each run, so a second run still produces a diff
+	title := "athena live test " + now.Format("20060102-150405")
+	body := "@" + slug + " create a file " + file + " containing hi and open a PR"
 	url := liveOwnerGH(t, "issue", "create", "--repo", repo, "--title", title, "--body", body)
 	number, err := strconv.Atoi(url[strings.LastIndex(url, "/")+1:])
 	if err != nil {
@@ -214,7 +225,7 @@ func TestLiveGitHubMention(t *testing.T) {
 	// touches hello.txt.
 	thread := github.ThreadKey(repo, number)
 	var ticket string
-	await(t, 10*time.Minute, "a Ticket on "+thread, func() bool {
+	await(t, left(), "a Ticket on "+thread, func() bool {
 		for _, th := range s.threads() {
 			if th.Key == thread && len(th.Tickets) > 0 {
 				ticket, _, _ = strings.Cut(th.Tickets[0], "(")
@@ -228,7 +239,7 @@ func TestLiveGitHubMention(t *testing.T) {
 	t.Logf("ticket %s, branch %s", ticket, branch)
 
 	var ack liveComment
-	await(t, 10*time.Minute, "an acknowledgement by "+botLogin, func() bool {
+	await(t, left(), "an acknowledgement by "+botLogin, func() bool {
 		cs, err := gh.botComments(number, botLogin)
 		if err != nil {
 			t.Logf("comments: %v", err)
@@ -243,7 +254,7 @@ func TestLiveGitHubMention(t *testing.T) {
 	t.Logf("acknowledgement comment %d", ack.ID)
 
 	var pull int
-	await(t, 10*time.Minute, "a pull request from "+branch+" touching hello.txt", func() bool {
+	await(t, left(), "a pull request from "+branch+" touching "+file, func() bool {
 		var prs []struct {
 			Number int `json:"number"`
 			Head   struct {
@@ -266,7 +277,7 @@ func TestLiveGitHubMention(t *testing.T) {
 				return false
 			}
 			for _, f := range files {
-				if f.Filename == "hello.txt" {
+				if f.Filename == file {
 					pull = p.Number
 					return true
 				}
@@ -276,20 +287,27 @@ func TestLiveGitHubMention(t *testing.T) {
 	})
 	t.Logf("pull request #%d", pull)
 
-	// Exactly one acknowledgement so far, on the issue and on the pull request together.
-	for _, n := range []int{number, pull} {
-		cs, err := gh.botComments(n, botLogin)
-		if err != nil {
-			t.Fatal(err)
+	checkBotComments := func(when string) {
+		t.Helper()
+		var cs []liveComment
+		for _, n := range []int{number, pull} {
+			l, err := gh.botComments(n, botLogin)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cs = append(cs, l...)
 		}
-		before := 0
-		if n == number {
-			before = 1
+		sort.Slice(cs, func(i, j int) bool { return cs[i].ID < cs[j].ID })
+		// The bot's comments cannot be told apart by purpose from their bodies, so the rule is the same on both sides
+		// of the merge: the first one is the acknowledgement and never changes, and at most one more may exist, a result.
+		if len(cs) == 0 || cs[0].ID != ack.ID || cs[0].Body != ack.Body || len(cs) > 2 {
+			t.Fatalf("%d bot comments %s; want the acknowledgement, unchanged, plus at most one result", len(cs), when)
 		}
-		if len(cs) != before {
-			t.Fatalf("%d comments by %s on #%d before the merge, want %d", len(cs), botLogin, n, before)
+		for _, c := range cs[1:] {
+			t.Logf("%s: later comment %d by the bot (a result, not a second acknowledgement): %d bytes", when, c.ID, len(c.Body))
 		}
 	}
+	checkBotComments("before the merge")
 
 	// 3. The merge, through the API with the App's token.
 	if _, err := gh.do(http.MethodPut, fmt.Sprintf("/repos/%s/pulls/%d/merge", repo, pull), map[string]string{"merge_method": "squash"}, nil); err != nil {
@@ -297,21 +315,11 @@ func TestLiveGitHubMention(t *testing.T) {
 	}
 
 	// 4. The Ticket ends merged.
-	await(t, 5*time.Minute, "the Ticket to end merged", func() bool { return s.detail(ticket).Stage == "ended:merged" })
+	await(t, left(), "the Ticket to end merged", func() bool { return s.detail(ticket).Stage == "ended:merged" })
 
-	// 5. No second acknowledgement: after a few more polls, the first comment is unchanged and the bot wrote at most
-	// the one result message besides it.
+	// 5. No second acknowledgement: after a few more polls the same rule still holds.
 	time.Sleep(35 * time.Second)
-	cs, err := gh.botComments(number, botLogin)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(cs) == 0 || cs[0].ID != ack.ID || cs[0].Body != ack.Body || len(cs) > 2 {
-		t.Fatalf("%d bot comments on the issue after the merge; want the acknowledgement, unchanged, plus at most a result", len(cs))
-	}
-	for _, c := range cs[1:] {
-		t.Logf("later comment %d by the bot (a result, not a second acknowledgement): %d bytes", c.ID, len(c.Body))
-	}
+	checkBotComments("after the merge")
 
 	// No token or key in athena logs, the transcripts or the server log.
 	for _, l := range s.logLines(t, ticket) {

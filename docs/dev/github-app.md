@@ -171,19 +171,24 @@ You can also give Athena work yourself, in a configured repository, without a me
 - **Observe is the default; `auto` is a choice.** Nothing starts work or writes to GitHub until you set `"mode": "auto"`.
 - **Workers run as your OS user.** They have your files, your shell and your network. Athena confines them with rules
   (the Ticket's directory, blocked commands, no credential files, an Approval for anything else), but a script can do
-  what a named path cannot, so the file-level isolation is **best effort**, not a security boundary. Harden it:
-  - Turn on Claude Code's sandbox (`/sandbox` in Claude Code). Note that Athena starts workers with its own generated
-    settings file and without your user settings, so check that the sandbox applies to workers before relying on it.
-  - Optionally, run the server as a **dedicated, restricted OS user** that owns only `~/.athena` and its own `claude`
-    login, and nothing else you care about (or a VM or container). This is the only complete answer.
+  what a named path cannot, so the file-level isolation is **best effort**, not a security boundary.
+  - **Claude Code's sandbox does not protect workers today.** Athena starts workers with `--settings <generated file>
+    --setting-sources ""`, and the generated settings do not enable the sandbox, so your own `/sandbox` setting is
+    ignored. Athena does not enable the sandbox for workers and does not load your sandbox setting. Setting it in
+    worker settings is a planned follow-up.
+  - Until then the effective isolation is a **dedicated, restricted OS user** that owns only `~/.athena` and its own
+    `claude` login and nothing else you care about, or a **VM or container**. Run the whole server there.
 - **A worker can obtain its own Assignment's token.** To push and open its pull request, a worker asks Athena for a
   token through a credential helper. It is short-lived (about an hour at most), limited to the single repository of the
   Ticket and to the worker permissions above, minted per Assignment, held in memory and never written to SQLite, logs,
-  prompts or transcripts. A worker can therefore act on that repository as the bot until the token expires. It
-  cannot reach your other repositories or your own credentials, and it cannot read the App's private key, which only the
-  server reads.
-- **The private key** stays `0600` in a directory only you can read. If it leaks, delete the key on the App's page and
-  generate another; the installation tokens expire on their own.
+  prompts or transcripts. A worker can therefore act on that repository as the bot until the token expires.
+- **The private key is not out of a worker's reach.** Athena's rules deny workers the credential paths (the key, your
+  `~/.ssh`, `~/.claude` and the like), but those rules are not a boundary: a worker runs as your OS user, as the server
+  does, so a determined script can read any 0600 file that user can read, the App's private key included. The
+  restricted-user option keeps *your other* files, keys and logins away from workers, but not the App key itself, which
+  the server (and so that user) must read. Limit the damage: install the App only on repositories you can afford to
+  have written to, and if you suspect a leak delete the key on the App's page and generate another; installation tokens
+  expire on their own. Keep the key `0600` in a directory only that user can read.
 
 ## Troubleshooting
 
@@ -198,7 +203,7 @@ You can also give Athena work yourself, in a configured repository, without a me
 ## Live end-to-end test
 
 The test creates an issue in a **sandbox repository** that mentions the App, waits for the acknowledgement and a pull
-request from `athena/<ticket>` that adds `hello.txt`, merges that pull request through the API with the App's token,
+request from `athena/<ticket>` that adds a file `hello-<unix time>.txt` (a new name each run, so a second run still produces a diff), merges that pull request through the API with the App's token,
 waits for the Ticket to end `merged`, checks that no token or key reached `athena logs`, the transcripts or the server
 log, and cleans up by closing the issue and deleting the branch. It uses the real `claude` (haiku), costs a few cents,
 and merges a real pull request: point it only at a repository you do not mind changing.
@@ -209,8 +214,9 @@ The server runs in a fresh temp state dir, configured from these variables; your
     ATHENA_LIVE_GITHUB=1 ATHENA_LIVE_REPO=yourlogin/sandbox \
     ATHENA_LIVE_APP_ID=123456 ATHENA_LIVE_APP_SLUG=athena-yourname \
     ATHENA_LIVE_APP_KEY=$HOME/.athena/github-app.pem ATHENA_LIVE_INSTALLATION=7654321 \
-    go test -tags live -run LiveGitHub -v -timeout 25m ./internal/server
+    go test -tags live -run LiveGitHub -v -timeout 30m ./internal/server
 
 With `ATHENA_LIVE_GITHUB` or `ATHENA_LIVE_REPO` unset it skips with `set ATHENA_LIVE_GITHUB=1 and ATHENA_LIVE_REPO to
-run`. The test saves its own Policy in the temp state dir (mode `auto`, your `gh` login allowed). Run it with the
+run`. When `ATHENA_LIVE_GITHUB=1` is set, a missing `claude`, `gh` or App variable fails the test instead of skipping it. The whole test (server start, acknowledgement,
+pull request, merge and the Ticket's end) shares one 25-minute deadline, inside the documented `-timeout 30m`. The test saves its own Policy in the temp state dir (mode `auto`, your `gh` login allowed). Run it with the
 default branch of the sandbox free of required checks or reviews, or the merge step will be refused.

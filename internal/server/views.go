@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"regexp"
 	"sort"
 	"strconv"
@@ -267,16 +268,39 @@ type PolicySetResult struct {
 	Notified []string `json:"notified"`
 }
 
+// decodeSettings reads a settings document in either form: the bare settings, or the output of `policy show`
+// ({"revision", "version", "settings": {...}}), whose revision and version are ignored. Unknown fields are refused at
+// either level.
+func decodeSettings(raw json.RawMessage) (policy.Settings, error) {
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &top); err != nil {
+		return policy.Settings{}, err
+	}
+	if inner, ok := top["settings"]; ok {
+		for k := range top {
+			if k != "settings" && k != "revision" && k != "version" {
+				return policy.Settings{}, fmt.Errorf("unknown field %q", k)
+			}
+		}
+		raw = inner
+	}
+	var s policy.Settings
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&s); err != nil {
+		return policy.Settings{}, err
+	}
+	return s, nil
+}
+
 // policySet validates and saves a settings document as a cli revision, then tells the Engine (tell), atomically with
 // the save and retried if the tell fails (policyCache.change).
 func (c *control) policySet(raw json.RawMessage) (PolicySetResult, error) {
 	if len(bytes.TrimSpace(raw)) == 0 {
 		return PolicySetResult{}, userErrorf("policy set needs a settings document")
 	}
-	var s policy.Settings
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&s); err != nil {
+	s, err := decodeSettings(raw)
+	if err != nil {
 		return PolicySetResult{}, userErrorf("the settings are not valid JSON: %v", err)
 	}
 	if err := policy.Validate(s); err != nil {

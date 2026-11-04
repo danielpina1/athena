@@ -532,6 +532,20 @@ func TestPolicySetNotifiesAffectedTicket(t *testing.T) {
 		})
 		return notes == 1
 	})
+	s.ok(Request{Op: OpPolicyShow}, &show)
+	// The output of `policy show` is accepted as it is (revision and version are ignored), and unknown fields are
+	// refused at either level.
+	shown, _ := json.Marshal(show)
+	var same PolicySetResult
+	s.ok(Request{Op: OpPolicySet, Policy: shown}, &same)
+	if same.Version != show.Version {
+		t.Fatalf("policy show fed to policy set = %+v, want version %s", same, show.Version)
+	}
+	for _, bad := range []string{`{"revision":1,"settings":{"mode":"observe","bogus":1}}`, `{"settings":{"mode":"observe"},"bogus":1}`} {
+		if r, err := call(dir, Request{Op: OpPolicySet, Policy: json.RawMessage(bad)}); err != nil || r.OK || !strings.Contains(r.Error, "bogus") {
+			t.Fatalf("settings %s = %+v %v, want refused", bad, r, err)
+		}
+	}
 	s.stop()
 	st, err := store.Open(filepath.Join(dir, "athena.db"))
 	if err != nil {
@@ -539,7 +553,7 @@ func TestPolicySetNotifiesAffectedTicket(t *testing.T) {
 	}
 	defer st.Close()
 	hist, err := policy.NewStore(st, policy.Defaults(nil)).History(0)
-	if err != nil || len(hist) != 2 || hist[0].Origin != policy.OriginCLI || hist[0].Revision != 2 {
+	if err != nil || len(hist) != 3 || hist[0].Origin != policy.OriginCLI || hist[0].Revision != 3 {
 		t.Errorf("history = %+v %v", hist, err)
 	}
 }
