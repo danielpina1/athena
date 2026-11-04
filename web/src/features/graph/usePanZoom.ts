@@ -30,6 +30,28 @@ export function zoomAt(view: View, factor: number, cx: number, cy: number): View
 
 const easeOut = (t: number) => 1 - (1 - t) ** 3;
 
+/** How far inside the edge a revealed box lands. */
+const REVEAL_PAD = 16;
+
+/**
+ * view panned the least that brings `box` (model coordinates) inside a vw × vh viewport, REVEAL_PAD from its edges,
+ * when any of it is off-screen; view itself when the box is already in view. A box bigger than the viewport keeps its left (top) edge in view.
+ */
+export function reveal(view: View, box: { x: number; y: number; w: number; h: number }, vw: number, vh: number): View {
+  if (vw <= 0 || vh <= 0) return view;
+  const shift = (offset: number, pos: number, size: number, len: number) => {
+    const a = offset + pos * view.k;
+    const b = a + size * view.k;
+    // Only a box that is (partly) off-screen moves; it then lands REVEAL_PAD inside.
+    if (a < 0) return REVEAL_PAD - a;
+    if (b > len) return Math.max(REVEAL_PAD - a, len - REVEAL_PAD - b);
+    return 0;
+  };
+  const dx = shift(view.x, box.x, box.w, vw);
+  const dy = shift(view.y, box.y, box.h, vh);
+  return dx === 0 && dy === 0 ? view : { ...view, x: view.x + dx, y: view.y + dy };
+}
+
 /** The lowest start zoom: a 12.5 px title stays at least 11 px on the screen. */
 export const READABLE_ZOOM = 0.88;
 
@@ -93,6 +115,16 @@ export function usePanZoom(
     go(zoomAt(current.current, factor, cx, cy));
   };
   const reset = useCallback(() => go(homeRef.current()), [go]);
+  /** Pans the least that brings `box` into view (easing unless reduced motion). */
+  const revealBox = useCallback(
+    (box: { x: number; y: number; w: number; h: number }) => {
+      const el = ref.current;
+      if (!el) return;
+      const to = reveal(current.current, box, el.clientWidth, el.clientHeight);
+      if (to !== current.current) go(to);
+    },
+    [ref, go],
+  );
 
   useShortcut("+", () => zoomBy(STEP));
   useShortcut("=", () => zoomBy(STEP));
@@ -183,5 +215,5 @@ export function usePanZoom(
     };
   }, [ref, setView]);
 
-  return { view, setView, reset, zoomBy, wasDrag: () => moved.current };
+  return { view, setView, reset, zoomBy, revealBox, wasDrag: () => moved.current };
 }

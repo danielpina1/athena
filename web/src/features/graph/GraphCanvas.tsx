@@ -6,8 +6,9 @@
 //    contradicts its name, and they are clipped to the node: wide glyphs (W, CJK) never draw past its edge.
 //  - `hidden` (the phone, where a visually hidden list is what a screen reader reads): the SVG is aria-hidden and its
 //    nodes leave the tab order; taps still open them.
-//  - The SVG itself takes focus (tabIndex -1) when the node a closed pane came from is gone.
-import { useCallback, useId, useLayoutEffect, useMemo, useRef } from "react";
+//  - The SVG itself takes focus (tabIndex -1, with a focus ring) when the node a closed pane came from is gone.
+//  - A newly selected node that is off-screen is panned into view, the least distance (a jump under reduced motion).
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef } from "react";
 import { ticketRoute } from "@/app/search";
 import { cn } from "@/ui/cn";
 import { Box, EDGE, LOOK, Line, Markers, stageOf } from "./draw";
@@ -17,9 +18,11 @@ import { startView, usePanZoom, type View } from "./usePanZoom";
 /** Characters of a title that fit a node (176 px at 12.5 px), and of its id and stage line; the clip does the rest. */
 const TITLE_CHARS = 22;
 const META_CHARS = 26;
-/** The clip's right margin inside a node, and beside a running node's ring. */
+/** The clip's right margin inside a node, and beside a running node's ring (cx = w − 12, r = 4). */
 const CLIP_MARGIN = 6;
-const RING_MARGIN = 22;
+const RING_MARGIN = 28;
+/** A cut title fades out over this many px before the clip's edge, rather than ending in a sliced glyph. */
+const FADE = 12;
 
 export type CanvasProps = {
   model: GraphModel;
@@ -129,6 +132,7 @@ function Node({
         data-node-text={node.id}
         transform={`translate(${x} ${y})`}
         clipPath={`url(#${clip})`}
+        mask={`url(#${clip}-fade)`}
         pointerEvents="none"
       >
         <text x={12} y={21} fontSize={12.5} fontWeight={600} className={cn("font-sans", s.text)}>
@@ -150,7 +154,7 @@ export function GraphCanvas({ model, selected, reducedMotion, phone, hidden, onO
   const width = model.width;
   const right = useMemo(() => model.nodes.reduce((r, n) => Math.max(r, n.x + n.w + 16), 0), [model]);
   const home = useCallback((): View => startView(ref.current?.clientWidth ?? 0, right, phone), [right, phone]);
-  const { view, setView, wasDrag } = usePanZoom(ref, { home, reducedMotion });
+  const { view, setView, wasDrag, revealBox } = usePanZoom(ref, { home, reducedMotion });
   const placed = useRef(false);
   useLayoutEffect(() => {
     if (placed.current) return;
@@ -159,6 +163,16 @@ export function GraphCanvas({ model, selected, reducedMotion, phone, hidden, onO
   }, [home, setView]);
 
   const byId = useMemo(() => new Map(model.nodes.map((n) => [n.id, n])), [model]);
+  // A newly selected Ticket (a click, or ?ticket= on load) is brought into view if it is off-screen: once per
+  // selection, not again while the model changes under it (the replay).
+  const latest = useRef({ byId, revealBox });
+  useEffect(() => {
+    latest.current = { byId, revealBox };
+  });
+  useEffect(() => {
+    const n = latest.current.byId.get(selected);
+    if (n) latest.current.revealBox(n);
+  }, [selected]);
   const spread = useMemo(() => offsets(model.edges), [model]);
   const byLane = useMemo(() => {
     const m = new Map<string, GNode[]>();
@@ -180,7 +194,9 @@ export function GraphCanvas({ model, selected, reducedMotion, phone, hidden, onO
       aria-hidden={hidden || undefined}
       aria-label={hidden ? undefined : `Task graph: ${model.nodes.length} Tickets in ${model.lanes.length} lanes`}
       className={cn(
-        "block h-full w-full cursor-grab touch-none bg-bg outline-none select-none active:cursor-grabbing",
+        "block h-full w-full cursor-grab touch-none bg-bg select-none active:cursor-grabbing",
+        // The canvas takes focus when a closed pane's node is gone: it shows where focus is.
+        "outline-none focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-text",
         className,
       )}
     >
@@ -189,11 +205,38 @@ export function GraphCanvas({ model, selected, reducedMotion, phone, hidden, onO
         <clipPath id={clip}>
           <rect x={0} y={0} width={size.w - CLIP_MARGIN} height={size.h} />
         </clipPath>
-        {/* A running node's title stops short of its ring. */}
+        {/* A running node's title stops well clear of its ring. */}
         <clipPath id={ringClip}>
           <rect x={0} y={0} width={size.w - RING_MARGIN} height={size.h / 2} />
           <rect x={0} y={size.h / 2} width={size.w - CLIP_MARGIN} height={size.h / 2} />
         </clipPath>
+        {/* The same boxes as luminance masks that fade their last FADE px: a cut title ends softly. */}
+        {[
+          { id: clip, top: size.w - CLIP_MARGIN },
+          { id: ringClip, top: size.w - RING_MARGIN },
+        ].map((m) => (
+          <g key={m.id}>
+            <linearGradient id={`${m.id}-fade-top`} gradientUnits="userSpaceOnUse" x1={m.top - FADE} x2={m.top} y1={0} y2={0}>
+              <stop offset={0} stopColor="white" />
+              <stop offset={1} stopColor="black" />
+            </linearGradient>
+            <linearGradient
+              id={`${m.id}-fade-bottom`}
+              gradientUnits="userSpaceOnUse"
+              x1={size.w - CLIP_MARGIN - FADE}
+              x2={size.w - CLIP_MARGIN}
+              y1={0}
+              y2={0}
+            >
+              <stop offset={0} stopColor="white" />
+              <stop offset={1} stopColor="black" />
+            </linearGradient>
+            <mask id={`${m.id}-fade`} maskUnits="userSpaceOnUse" x={0} y={0} width={size.w} height={size.h}>
+              <rect x={0} y={0} width={m.top} height={size.h / 2} fill={`url(#${m.id}-fade-top)`} />
+              <rect x={0} y={size.h / 2} width={size.w - CLIP_MARGIN} height={size.h / 2} fill={`url(#${m.id}-fade-bottom)`} />
+            </mask>
+          </g>
+        ))}
       </defs>
       <g data-viewport transform={`translate(${view.x} ${view.y}) scale(${view.k})`}>
         <g aria-hidden>
@@ -241,7 +284,7 @@ export function GraphCanvas({ model, selected, reducedMotion, phone, hidden, onO
       </g>
       {/* The lane labels follow the lanes up and down at the screen's left edge, with a halo over whatever passes
           under them. */}
-      <g data-lane-labels aria-hidden transform={`translate(0 ${view.y})`}>
+      <g data-lane-labels aria-hidden pointerEvents="none" transform={`translate(0 ${view.y})`}>
         {model.lanes.map((l) => (
           <g key={l.id}>
             <title>{l.title}</title>

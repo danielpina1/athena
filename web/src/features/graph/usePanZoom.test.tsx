@@ -1,7 +1,7 @@
 import { act, fireEvent, render } from "@testing-library/react";
 import { useRef } from "react";
 import { describe, expect, test } from "vitest";
-import { MAX_ZOOM, MIN_ZOOM, startView, usePanZoom, zoomAt } from "./usePanZoom";
+import { MAX_ZOOM, MIN_ZOOM, reveal, startView, usePanZoom, zoomAt } from "./usePanZoom";
 
 function Probe({ onClick }: { onClick?: () => void }) {
   const ref = useRef<SVGSVGElement>(null);
@@ -39,6 +39,15 @@ describe("usePanZoom", () => {
     // The desktop shows the newest (right) end when they still do not fit.
     const desk = startView(500, 1168, false);
     expect(desk.x).toBeCloseTo(500 - 1168 * desk.k);
+  });
+
+  test("reveal pans the least that brings a box into view, and nothing when it is in view", () => {
+    const v = { x: 0, y: 0, k: 1 };
+    expect(reveal(v, { x: 10, y: 10, w: 50, h: 20 }, 300, 200)).toBe(v);
+    // Off to the right: its right edge lands 16 px inside.
+    expect(reveal(v, { x: 400, y: 10, w: 50, h: 20 }, 300, 200)).toEqual({ x: -166, y: 0, k: 1 });
+    // Off to the left and below, at 2×.
+    expect(reveal({ x: 0, y: 0, k: 2 }, { x: -50, y: 150, w: 10, h: 10 }, 300, 200)).toEqual({ x: 116, y: -136, k: 2 });
   });
 
   test("a two-finger pinch zooms around its middle, and is never a click", () => {

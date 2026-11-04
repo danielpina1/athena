@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter } from "react-router";
+import { MemoryRouter, useNavigate } from "react-router";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { LayoutProvider, type Layout } from "@/app/Panes";
 import { Where } from "@/app/testkit";
@@ -31,15 +31,36 @@ const tickets = [
 const threads = [{ key: T, queued: 0, decisions: 1, tickets: ["T-1(own)", "T-2"] }];
 const approvals = [{ id: "A-1", ticketId: "T-3", state: "pending", createdAt: at(120_000) }];
 
-function renderGraph(path = "/graph", mode: Layout = "desktop") {
+/** A button that goes to `to`, as a link elsewhere on the page or a deep link would. */
+function GoTo({ to }: { to: string }) {
+  const navigate = useNavigate();
+  return (
+    <button type="button" onClick={() => navigate(to)}>
+      Go to {to}
+    </button>
+  );
+}
+
+function renderGraph(path = "/graph", mode: Layout = "desktop", goTo?: string) {
   return render(
     <LayoutProvider value={mode}>
       <MemoryRouter initialEntries={[path]}>
         <Graph />
         <Where />
+        {goTo && <GoTo to={goTo} />}
       </MemoryRouter>
     </LayoutProvider>,
   );
+}
+
+/** Makes the canvas (and every SVG root) measure width × height. Returns the undo. */
+function stubCanvasSize(width: number, height: number) {
+  Object.defineProperty(SVGSVGElement.prototype, "clientWidth", { configurable: true, get: () => width });
+  Object.defineProperty(SVGSVGElement.prototype, "clientHeight", { configurable: true, get: () => height });
+  return () => {
+    delete (SVGSVGElement.prototype as { clientWidth?: number }).clientWidth;
+    delete (SVGSVGElement.prototype as { clientHeight?: number }).clientHeight;
+  };
 }
 const where = () => screen.getByTestId("where").textContent;
 const node = (id: string) => document.querySelector<SVGAElement>(`svg [data-node="${id}"]`)!;
@@ -118,7 +139,74 @@ describe("Graph", () => {
       expect(Number(r.getAttribute("x"))).toBeGreaterThanOrEqual(0);
       expect(Number(r.getAttribute("x")) + Number(r.getAttribute("width"))).toBeLessThanOrEqual(Number(box.getAttribute("width")));
       expect(Number(r.getAttribute("height"))).toBeLessThanOrEqual(Number(box.getAttribute("height")));
+      // The cut ends in a fade, not a sliced glyph: a mask whose gradient runs out before the clip's edge.
+      const maskRef = /^url\(#(.+)\)$/.exec(g.getAttribute("mask") ?? "")?.[1];
+      const mask = document.getElementById(maskRef ?? "")!;
+      expect(mask?.tagName.toLowerCase(), id).toBe("mask");
+      const fill = /^url\(#(.+)\)$/.exec(mask.querySelector("rect")!.getAttribute("fill") ?? "")?.[1];
+      expect(document.getElementById(fill ?? "")?.tagName.toLowerCase()).toBe("lineargradient");
     }
+    // A running node's title stops well clear of its ring (cx = w − 12, r = 4).
+    const ring = document.getElementById(
+      /^url\(#(.+)\)$/.exec(document.querySelector('svg [data-node-text="T-W"]')!.getAttribute("clip-path") ?? "")![1],
+    )!;
+    expect(Number(ring.querySelector("rect")!.getAttribute("width"))).toBeLessThanOrEqual(176 - 28);
+  });
+
+  test("the lane labels let taps through to the nodes under them", () => {
+    renderGraph();
+    expect(document.querySelector("svg [data-lane-labels]")!.getAttribute("pointer-events")).toBe("none");
+  });
+
+  test("a selected Ticket off-screen is brought into view", () => {
+    // Reduced motion: the pan is a jump, not an animation.
+    stubReducedMotion(true);
+    const undo = stubCanvasSize(300, 200);
+    try {
+      // T-4, the newest, sits far to the right; opened by its link, the canvas pans just enough to show it.
+      renderGraph("/graph?ticket=T-1");
+      const view = () => {
+        const m = /translate\(([-\d.]+) ([-\d.]+)\) scale\(([\d.]+)\)/.exec(transform() ?? "")!;
+        return { x: Number(m[1]), y: Number(m[2]), k: Number(m[3]) };
+      };
+      const inView = (id: string) => {
+        const box = node(id).querySelector("rect[data-box]")!;
+        const v = view();
+        const x = v.x + Number(box.getAttribute("x")) * v.k;
+        const y = v.y + Number(box.getAttribute("y")) * v.k;
+        const w = Number(box.getAttribute("width")) * v.k;
+        const h = Number(box.getAttribute("height")) * v.k;
+        return x >= 0 && y >= 0 && x + w <= 300 && y + h <= 200;
+      };
+      expect(inView("T-1")).toBe(true);
+      fireEvent.click(node("T-4"));
+      expect(where()).toBe("/graph?ticket=T-4");
+      expect(inView("T-4")).toBe(true);
+    } finally {
+      undo();
+    }
+  });
+
+  test("a pane opened by a link gives focus back to its own node, not an earlier one", async () => {
+    renderGraph("/graph", "desktop", "/graph?ticket=T-3");
+    await userEvent.click(node("T-1"));
+    await userEvent.keyboard("{Escape}");
+    expect(document.activeElement).toBe(node("T-1"));
+    await userEvent.click(screen.getByRole("button", { name: "Go to /graph?ticket=T-3" }));
+    expect(screen.getByRole("complementary", { name: "Ticket" })).toBeTruthy();
+    await userEvent.keyboard("{Escape}");
+    expect(document.activeElement).toBe(node("T-3"));
+  });
+
+  test("while the replay plays on the phone the hidden list stays, with every Ticket", () => {
+    stubReducedMotion(true);
+    vi.useFakeTimers();
+    renderGraph("/graph", "phone");
+    fireEvent.click(screen.getByRole("button", { name: "Replay" }));
+    expect(node("T-4")).toBeNull();
+    const list = document.querySelector("[data-hidden-list]");
+    expect(list).toBeTruthy();
+    for (const t of tickets) expect(list!.querySelector(`[data-list-node="${t.id}"]`), t.id).toBeTruthy();
   });
 
   test("the phone starts at the left edge with readable titles and the lane labels in view", () => {

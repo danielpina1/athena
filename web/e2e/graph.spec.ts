@@ -140,12 +140,26 @@ test("six Tickets in lanes by repository, opened from the graph and the list, li
       await page.setViewportSize({ width: 375, height: 812 });
       await page.reload();
       await expect(node(page, ids[3])).toBeVisible();
-      const replay = await page.getByRole("button", { name: "Replay" }).boundingBox();
-      const nav = await page.getByRole("navigation", { name: "Main" }).boundingBox();
-      expect(replay && nav && replay.y + replay.height <= nav.y, `Replay ${JSON.stringify(replay)} above nav ${JSON.stringify(nav)}`).toBe(true);
+      const replayAboveNav = async (size: string) => {
+        const replay = await page.getByRole("button", { name: "Replay" }).boundingBox();
+        const nav = await page.getByRole("navigation", { name: "Main" }).boundingBox();
+        expect(
+          replay && nav && replay.y + replay.height <= nav.y,
+          `${size}: Replay ${JSON.stringify(replay)} above nav ${JSON.stringify(nav)}`,
+        ).toBe(true);
+      };
+      await replayAboveNav("375×812");
       const scroll = await page.evaluate(() => document.documentElement.scrollHeight - window.innerHeight);
-      expect(scroll).toBeLessThanOrEqual(1);
+      expect(scroll).toBe(0);
       await expect(page).toHaveScreenshot("graph-375-light.png", { mask: volatile(page) });
+      // A short phone, and one on its side: the page scrolls, and the scrubber stays above the navigation.
+      for (const [width, height] of [
+        [375, 600],
+        [812, 375],
+      ]) {
+        await page.setViewportSize({ width, height });
+        await replayAboveNav(`${width}×${height}`);
+      }
 
       await node(page, ids[3]).click();
       await expect(page).toHaveURL(new RegExp(`/tickets/${ids[3]}$`));

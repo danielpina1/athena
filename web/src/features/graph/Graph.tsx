@@ -37,11 +37,13 @@ const KEYS = ["groupBy", "needsYou", "view", "ticket"] as const;
 const REDUCED_MOTION = "(prefers-reduced-motion: reduce)";
 
 /**
- * The phone's graph view: at least the viewport less the top bar (48 px) and the bottom navigation (57 px) and their
- * safe areas (PhoneShell), so the scrubber sits just above the navigation. An open legend makes it taller, and the
- * page then scrolls from the header and the legend.
+ * The phone's graph view: at least the viewport less the top bar (48 px and its 1 px border) and the bottom
+ * navigation (57 px) and their safe areas (PhoneShell), so the scrubber sits just above the navigation. An open
+ * legend, or a short screen, makes it taller; the page then scrolls, and the scrubber stays stuck above the
+ * navigation (SCRUBBER_STICKY).
  */
-const PHONE_FILL = "min-h-[calc(100dvh_-_105px_-_env(safe-area-inset-top)_-_env(safe-area-inset-bottom))]";
+const PHONE_FILL = "min-h-[calc(100dvh_-_106px_-_env(safe-area-inset-top)_-_env(safe-area-inset-bottom))]";
+const SCRUBBER_STICKY = "sticky bottom-[calc(57px+env(safe-area-inset-bottom))] z-[1]";
 
 /** The node a closed pane should give focus back to, or the canvas when it is gone. */
 function focusNode(id: string) {
@@ -75,41 +77,63 @@ export function Graph() {
   // While the replay plays, `at` snaps to 1/200 of the window: frames within a step reuse one layout.
   const modelAt = replay.playing ? snapToStep(at, range.start, range.end) : at;
 
-  const model = useMemo(
+  // The picture as it is now; the replay's picture at `modelAt` is computed only while one is shown. The phone's
+  // hidden list keeps the live one during the replay: the same object throughout, so it stays mounted (a screen
+  // reader's place in it is kept) and costs nothing per frame.
+  const liveModel = useMemo(
     () =>
       layout(tickets.values(), threads.values(), decisions.values(), {
         groupBy,
         now: new Date(range.end),
-        ...(modelAt !== null && { at: new Date(modelAt) }),
         needsYou,
         needsYouOnly,
         repos,
         machine,
       }),
+    [tickets, threads, decisions, groupBy, range.end, needsYou, needsYouOnly, repos, machine],
+  );
+  const pastModel = useMemo(
+    () =>
+      modelAt === null
+        ? null
+        : layout(tickets.values(), threads.values(), decisions.values(), {
+            groupBy,
+            now: new Date(range.end),
+            at: new Date(modelAt),
+            needsYou,
+            needsYouOnly,
+            repos,
+            machine,
+          }),
     [tickets, threads, decisions, groupBy, range.end, modelAt, needsYou, needsYouOnly, repos, machine],
   );
+  const model = pastModel ?? liveModel;
+  const listModel = replay.playing ? liveModel : model;
 
   const [hovered, setHovered] = useState<string | null>(null);
   const shown = model.nodes.find((n) => n.id === (hovered ?? selected));
   const laneTitle = model.lanes.find((l) => l.id === shown?.lane)?.title ?? "";
 
-  // Closing the pane gives focus back to the node that opened it.
+  // Closing the pane gives focus back to the node of the Ticket it showed, however it was opened (a node, a link, the
+  // URL). The remembered node is cleared when the pane closes by any route.
   const opener = useRef("");
   const refocus = useRef(false);
   const open = (id: string) => {
     if (!desktop) return navigate(ticketRoute(id));
-    opener.current = id;
     set("ticket", id);
   };
   const close = () => {
     refocus.current = true;
-    opener.current ||= selected;
     set("ticket", "");
   };
   useEffect(() => {
-    if (selected || !refocus.current) return;
+    if (selected) {
+      opener.current = selected;
+      return;
+    }
+    if (refocus.current) focusNode(opener.current);
     refocus.current = false;
-    focusNode(opener.current);
+    opener.current = "";
   }, [selected]);
   useShortcut("Escape", close, { when: () => !!selected && !topModal() });
 
@@ -204,16 +228,14 @@ export function Graph() {
     return (
       <div className={`flex min-w-0 flex-col ${PHONE_FILL}`}>
         {header}
-        {/* What a screen reader reads (the picture is aria-hidden here); shown when a keyboard reaches it. Left out
-            while the replay plays, which redraws it every step. */}
-        {!replay.playing && (
-          <div data-hidden-list className="sr-only focus-within:not-sr-only">
-            <GraphList model={model} />
-          </div>
-        )}
+        {/* What a screen reader reads (the picture is aria-hidden here); shown when a keyboard reaches it. While the
+            replay plays it keeps showing every Ticket as it is now. */}
+        <div data-hidden-list className="sr-only focus-within:not-sr-only">
+          <GraphList model={listModel} />
+        </div>
         {/* Absolute: the column's height is a minimum, so a percentage height would not resolve. */}
         <div className="relative min-h-60 flex-1">{canvas(true, "absolute inset-0")}</div>
-        <div className="shrink-0">{scrubber}</div>
+        <div className={`shrink-0 ${SCRUBBER_STICKY}`}>{scrubber}</div>
         <details className="group shrink-0 border-t border-line">
           <summary className="flex min-h-11 cursor-pointer items-center px-4 font-mono text-xs tracking-wider text-muted uppercase">
             Legend
