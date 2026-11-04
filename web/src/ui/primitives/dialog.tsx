@@ -166,6 +166,11 @@ export function Modal({
       pushModal(dialog);
       // showModal focuses the first focusable element; a child marked data-autofocus (a search field) wins.
       dialog.querySelector<HTMLElement>("[data-autofocus]")?.focus();
+    } else if (open && dialog.open && !modals.includes(dialog)) {
+      // Already shown but off the stack: StrictMode's simulated unmount ran the cleanup below on a dialog that
+      // stayed open. Put it back, or toasts would render under its backdrop.
+      shown.current = dialog;
+      pushModal(dialog);
     } else if (!open && dialog.open) {
       dialog.close();
       shown.current = null;

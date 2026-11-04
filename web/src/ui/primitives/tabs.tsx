@@ -10,7 +10,7 @@ export function TabsList({ className, ...props }: ComponentProps<typeof TabsPrim
     <TabsPrimitive.List
       data-slot="tabs-list"
       // Wraps on a narrow screen rather than scrolling sideways, like the toggle group.
-      className={cn("flex min-w-0 flex-wrap items-stretch gap-x-4 border-b border-line-soft", className)}
+      className={cn("flex min-w-0 flex-wrap items-stretch gap-x-2 border-b border-line-soft", className)}
       {...props}
     />
   );
@@ -21,7 +21,7 @@ export function TabsTrigger({ className, ...props }: ComponentProps<typeof TabsP
     <TabsPrimitive.Trigger
       data-slot="tabs-trigger"
       className={cn(
-        "inline-flex h-11 shrink-0 items-center gap-2 border-b-2 border-transparent text-body font-medium text-muted lg:h-9",
+        "inline-flex h-11 shrink-0 items-center gap-2 border-b-2 border-transparent px-2 text-body font-medium text-muted lg:h-9",
         "transition-colors duration-(--motion-fast) hover:text-text",
         "data-[state=active]:border-text data-[state=active]:font-semibold data-[state=active]:text-text",
         "disabled:pointer-events-none disabled:opacity-40",

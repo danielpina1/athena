@@ -1,10 +1,17 @@
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { useState } from "react";
+import { StrictMode, useState } from "react";
 import { expect, test } from "vitest";
 import { Confirm } from "@/ui/athena/Confirm";
 import { Button } from "@/ui/primitives/button";
-import { Dialog, DialogContent, DialogDescription, DialogTitle, DialogTrigger } from "@/ui/primitives/dialog";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogTitle,
+  DialogTrigger,
+  topModal,
+} from "@/ui/primitives/dialog";
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "@/ui/primitives/sheet";
 import { toast, Toaster } from "@/ui/primitives/toast";
 
@@ -170,6 +177,10 @@ test("a toast raised while a sheet is open renders inside the sheet and is click
   const region = screen.getByRole("region", { name: "Notifications" });
   // Inside the open modal <dialog>, so in the top layer, above the backdrop and not inert.
   expect(sheet.contains(region)).toBe(true);
+  // At the top of the modal, clear of the sheet's primary action at the bottom.
+  expect(region.dataset.placement).toBe("top");
+  expect(region.className).toMatch(/\btop-/);
+  expect(region.className).not.toMatch(/\bbottom-/);
   await user.click(within(region).getByRole("button", { name: "Undo" }));
   expect(undone).toBe(1);
   expect((sheet as HTMLDialogElement).open).toBe(true);
@@ -177,6 +188,7 @@ test("a toast raised while a sheet is open renders inside the sheet and is click
   cancel(sheet);
   expect(document.body.contains(screen.getByRole("region", { name: "Notifications" }))).toBe(true);
   expect(sheet.contains(screen.getByRole("region", { name: "Notifications" }))).toBe(false);
+  expect(screen.getByRole("region", { name: "Notifications" }).dataset.placement).toBe("bottom");
 });
 
 test("Esc on an armed Confirm inside a dialog disarms without cancelling the dialog", async () => {
@@ -198,4 +210,18 @@ test("Esc on an armed Confirm inside a dialog disarms without cancelling the dia
   });
   expect(keydown.defaultPrevented).toBe(true);
   expect(screen.getByRole("button", { name: "Stop" })).toBeTruthy();
+});
+
+test("a dialog open at mount under StrictMode stays the top modal", () => {
+  render(
+    <StrictMode>
+      <Dialog defaultOpen>
+        <DialogContent>
+          <DialogTitle>Open at mount</DialogTitle>
+        </DialogContent>
+      </Dialog>
+    </StrictMode>,
+  );
+  const dialog = screen.getByRole("dialog", { name: "Open at mount" });
+  expect(topModal()).toBe(dialog);
 });

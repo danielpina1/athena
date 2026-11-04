@@ -54,9 +54,14 @@ export function Toaster() {
   return createPortal(
     <section
       aria-label="Notifications"
+      // Inside a modal the toasts go to the top, clear of a sheet's actions at the bottom.
+      data-placement={modal ? "top" : "bottom"}
       className={cn(
         "pointer-events-none fixed inset-x-0 z-[60] flex flex-col items-center gap-2 px-4",
-        "bottom-[calc(env(safe-area-inset-bottom)+5rem)] lg:inset-x-auto lg:right-6 lg:bottom-6 lg:items-end lg:px-0",
+        "lg:inset-x-auto lg:right-6 lg:items-end lg:px-0",
+        modal
+          ? "top-[calc(env(safe-area-inset-top)+1rem)] lg:top-6"
+          : "bottom-[calc(env(safe-area-inset-bottom)+5rem)] lg:bottom-6",
       )}
     >
       {list.map((t) => (
