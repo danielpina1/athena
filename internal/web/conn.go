@@ -652,7 +652,8 @@ func (c *conn) sendDetail(td *athenav1.TicketDetail) {
 		return
 	}
 	c.sentDetail[id] = at
-	if !fitDetail(td) {
+	td, ok := fitDetail(td)
+	if !ok {
 		c.d.log.Error("dashboard: ticket detail too big for a frame even trimmed", "client", c.clientID, "ticket", id)
 		return
 	}
@@ -662,21 +663,27 @@ func (c *conn) sendDetail(td *athenav1.TicketDetail) {
 	}
 }
 
-// fitDetail makes td fit one frame: while it is too big, it drops the older half of the timeline (oldest first), so
-// the newest entries stay. It reports false when even an empty timeline does not fit.
-func fitDetail(td *athenav1.TicketDetail) bool {
-	size := func() int {
+// fitDetail returns a detail that fits one frame: while it is too big, it drops the older half of the timeline (oldest
+// first, rounding up so one entry goes too), so the newest entries stay. The hub hands the same detail to every
+// watcher, so td is never modified: a trimmed detail is a new message sharing td's entries. It reports false when even
+// an empty timeline does not fit.
+func fitDetail(td *athenav1.TicketDetail) (*athenav1.TicketDetail, bool) {
+	size := func(d *athenav1.TicketDetail) int {
 		return proto.Size(&athenav1.Frame{Channel: athenav1.Channel_EVENTS, Body: &athenav1.Frame_Delta{Delta: &athenav1.Delta{
-			Change: &athenav1.Delta_TicketDetail{TicketDetail: td}}}})
+			Change: &athenav1.Delta_TicketDetail{TicketDetail: d}}}})
 	}
-	for size() > maxSnapshot {
-		n := len(td.Timeline)
+	if size(td) <= maxSnapshot {
+		return td, true
+	}
+	out := &athenav1.TicketDetail{Summary: td.GetSummary(), Timeline: td.GetTimeline(), Threads: td.GetThreads()}
+	for size(out) > maxSnapshot {
+		n := len(out.Timeline)
 		if n == 0 {
-			return false
+			return nil, false
 		}
-		td.Timeline = td.Timeline[n/2:]
+		out.Timeline = out.Timeline[(n+1)/2:]
 	}
-	return true
+	return out, true
 }
 
 // runCommands runs the Commands one at a time, in the order they came. A Command that started finishes even when the

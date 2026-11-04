@@ -976,8 +976,43 @@ func TestOversizedDetailKeepsNewestTimeline(t *testing.T) {
 
 func TestFitDetail(t *testing.T) {
 	td := &athenav1.TicketDetail{Summary: &athenav1.TicketSummary{Id: "T-1", Title: strings.Repeat("x", link.MaxFrame)}}
-	if fitDetail(td) {
+	if _, ok := fitDetail(td); ok {
 		t.Fatal("fitted a detail whose summary is over a frame")
+	}
+}
+
+// A summary near a frame plus one entry must end (the single entry goes), and the shared input stays untouched.
+func TestFitDetailTrimsACopyAndEnds(t *testing.T) {
+	entry := &athenav1.TimelineEntry{Kind: "input", Text: strings.Repeat("e", 4096)}
+	big := &athenav1.TicketDetail{Summary: &athenav1.TicketSummary{Id: "T-1", Title: strings.Repeat("x", maxSnapshot-1024)},
+		Timeline: []*athenav1.TimelineEntry{entry}}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		out, ok := fitDetail(big)
+		if !ok || len(out.GetTimeline()) != 0 {
+			t.Errorf("fit = %v with %d entries, want ok with none", ok, len(out.GetTimeline()))
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("fitDetail did not end with one oversized entry")
+	}
+	if len(big.Timeline) != 1 {
+		t.Fatalf("input timeline changed to %d entries", len(big.Timeline))
+	}
+
+	many := &athenav1.TicketDetail{Summary: &athenav1.TicketSummary{Id: "T-2"}}
+	for i := 0; i < 600; i++ {
+		many.Timeline = append(many.Timeline, &athenav1.TimelineEntry{Kind: "input", Text: strings.Repeat("y", 4096)})
+	}
+	out, ok := fitDetail(many)
+	if !ok || len(out.Timeline) == 0 || len(out.Timeline) >= 600 {
+		t.Fatalf("fit = %v with %d entries", ok, len(out.GetTimeline()))
+	}
+	if out.Timeline[len(out.Timeline)-1] != many.Timeline[599] || len(many.Timeline) != 600 {
+		t.Fatal("trim must keep the newest entries and leave the input as it was")
 	}
 }
 

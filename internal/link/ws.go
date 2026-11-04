@@ -13,7 +13,8 @@ import (
 // Subprotocol is the WebSocket subprotocol of the link.
 const Subprotocol = "athena.v1"
 
-// Conn is a message connection carrying one encoded Frame per message.
+// Conn is a message connection carrying one encoded Frame per message. Write must be safe to call concurrently with
+// itself (a refusal is written from the read side while the write loop runs); Read is called from one goroutine.
 type Conn interface {
 	Read(ctx context.Context) ([]byte, error)
 	Write(ctx context.Context, b []byte) error
