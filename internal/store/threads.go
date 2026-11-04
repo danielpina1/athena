@@ -184,6 +184,14 @@ func (tx *Tx) KVSet(key, value string) error {
 	return nil
 }
 
+// KVDelete removes the plain string stored under key, if any.
+func (tx *Tx) KVDelete(key string) error {
+	if _, err := tx.sql.Exec(`DELETE FROM kv WHERE key = ?`, key); err != nil {
+		return fmt.Errorf("store: kv delete %q: %w", key, err)
+	}
+	return nil
+}
+
 // KVList returns the plain strings stored under keys that start with prefix, by key.
 func (tx *Tx) KVList(prefix string) (map[string]string, error) {
 	rows, err := tx.sql.Query(`SELECT key, value FROM kv WHERE substr(key, 1, ?) = ?`, utf8.RuneCountInString(prefix), prefix)

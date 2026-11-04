@@ -3,6 +3,9 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/ecdh"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net"
@@ -406,8 +409,38 @@ func TestSensitiveCommandNeedsReauth(t *testing.T) {
 	if r := fresh.do(setPolicy("p2", 0)); r.GetCode() != web.CodeConflict {
 		t.Fatalf("set policy on a stale base = %v", r)
 	}
-	if r := fresh.do(sensitive[2]); r.GetCode() != web.CodeUnavailable {
+	ua, err := ecdh.P256().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sub := &athenav1.PushSubscribe{Endpoint: "https://push.test/x", P256Dh: base64.RawURLEncoding.EncodeToString(ua.PublicKey().Bytes()),
+		Auth: base64.RawURLEncoding.EncodeToString(make([]byte, 16))}
+	if r := fresh.do(&athenav1.Command{Id: "u1", Action: &athenav1.Command_PushSubscribe{PushSubscribe: &athenav1.PushSubscribe{Endpoint: "https://push.test/x"}}}); r.GetCode() != web.CodeInvalid {
+		t.Fatalf("push subscribe without keys = %v", r)
+	}
+	if r := fresh.do(&athenav1.Command{Id: "u1b", Action: &athenav1.Command_PushSubscribe{PushSubscribe: &athenav1.PushSubscribe{Endpoint: "http://push.test/x", P256Dh: sub.P256Dh, Auth: sub.Auth}}}); r.GetCode() != web.CodeInvalid {
+		t.Fatalf("push subscribe over http = %v", r)
+	}
+	if r := fresh.do(&athenav1.Command{Id: "u1c", Action: &athenav1.Command_PushSubscribe{PushSubscribe: sub}}); !r.GetOk() {
 		t.Fatalf("push subscribe = %v", r)
+	}
+	if subs, _ := w.d.st.PushSubscriptions(); len(subs) != 1 || subs[0].Endpoint != sub.Endpoint {
+		t.Fatalf("subscriptions %v", subs)
+	}
+	if r := fresh.do(&athenav1.Command{Id: "u3b", Action: &athenav1.Command_SetNotificationPrefs{SetNotificationPrefs: &athenav1.SetNotificationPrefs{Muted: []string{"review", "failed"}}}}); !r.GetOk() {
+		t.Fatalf("prefs = %v", r)
+	}
+	if m, _ := web.MutedKinds(w.d.st); len(m) != 2 {
+		t.Fatalf("muted %v", m)
+	}
+	if r := fresh.do(&athenav1.Command{Id: "u3c", Action: &athenav1.Command_SetNotificationPrefs{SetNotificationPrefs: &athenav1.SetNotificationPrefs{Muted: []string{"nope"}}}}); r.GetCode() != web.CodeInvalid {
+		t.Fatalf("bad prefs = %v", r)
+	}
+	if r := fresh.do(&athenav1.Command{Id: "u2b", Action: &athenav1.Command_PushUnsubscribe{PushUnsubscribe: &athenav1.PushUnsubscribe{Endpoint: sub.Endpoint}}}); !r.GetOk() {
+		t.Fatalf("unsubscribe = %v", r)
+	}
+	if subs, _ := w.d.st.PushSubscriptions(); len(subs) != 0 {
+		t.Fatalf("subscriptions %v", subs)
 	}
 	fresh.next("policy delta", func(f *athenav1.Frame) bool { return f.GetDelta().GetPolicy().GetRevision() == 1 })
 }

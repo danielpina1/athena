@@ -81,7 +81,9 @@ type DashboardConfig struct {
 	Commander Commander
 	// Streams serves the sessions' output; nil answers every stream_open unavailable.
 	Streams Streams
-	Log     *slog.Logger
+	// Presence hears the clients' Visibility reports (push suppression); nil ignores them.
+	Presence *Presence
+	Log      *slog.Logger
 	// Version is the server version the Welcome names.
 	Version string
 }
@@ -92,6 +94,8 @@ type Dashboard struct {
 	hub     *hub.Hub
 	cmd     Commander
 	streams Streams
+	// presence is nil without push.
+	presence *Presence
 	// streamCredit is the STREAM credit a connection starts with, before any grant.
 	streamCredit uint64
 	log          *slog.Logger
@@ -112,7 +116,7 @@ func NewDashboard(cfg DashboardConfig) *Dashboard {
 	if log == nil {
 		log = slog.Default()
 	}
-	d := &Dashboard{auth: cfg.Auth, hub: cfg.Hub, cmd: cfg.Commander, streams: cfg.Streams, log: log, version: cfg.Version,
+	d := &Dashboard{auth: cfg.Auth, hub: cfg.Hub, cmd: cfg.Commander, streams: cfg.Streams, presence: cfg.Presence, log: log, version: cfg.Version,
 		streamCredit: InitialStreamCredit, helloTimeout: HelloTimeout, recheck: heartbeat, conns: map[string]map[*conn]struct{}{}}
 	d.auth.OnRevoke(d.revoked)
 	return d
@@ -168,6 +172,9 @@ func (d *Dashboard) ServeConn(w http.ResponseWriter, r *http.Request) {
 		streams: map[string]*streamer{}, creditWake: make(chan struct{})}
 	d.add(s.Hash, c)
 	defer d.remove(s.Hash, c)
+	if d.presence != nil {
+		defer d.presence.Forget(c)
+	}
 	// A revoke between the check above and the registration would have found nothing to close.
 	if _, ok := d.auth.Session(r); !ok {
 		c.end(CloseSessionEnded, "session ended")
@@ -619,7 +626,10 @@ func (c *conn) handle(ctx context.Context, cmd *athenav1.Command) *athenav1.Comm
 		c.toForwarder(detailMsg{ticketID: id})
 		res = &athenav1.CommandResult{Ok: true}
 	case *athenav1.Command_Visibility:
-		res = &athenav1.CommandResult{Ok: true} // push suppression uses it (Task 10)
+		if c.d.presence != nil {
+			c.d.presence.Report(c, a.Visibility.GetVisible())
+		}
+		res = &athenav1.CommandResult{Ok: true}
 	default:
 		res = c.d.cmd.Do(ctx, Origin{ClientID: c.clientID, Sensitive: c.d.auth.RecentReauth(s)}, cmd)
 		if res == nil {

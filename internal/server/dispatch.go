@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net/url"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -376,16 +377,45 @@ func (d *Dispatcher) act(o web.Origin, c *athenav1.Command) *athenav1.CommandRes
 		if _, err := d.revokePasskey(a.RevokePasskey.GetId()); err != nil {
 			return d.failure(err)
 		}
-	case *athenav1.Command_PushSubscribe, *athenav1.Command_PushUnsubscribe, *athenav1.Command_SetNotificationPrefs:
+	case *athenav1.Command_PushSubscribe:
 		if !o.Sensitive {
 			return proto.Clone(reauthRequired).(*athenav1.CommandResult)
 		}
-		return &athenav1.CommandResult{Code: web.CodeUnavailable, Message: "push notifications are not available yet"}
+		if err := d.pushSubscribe(a.PushSubscribe); err != nil {
+			return d.failure(err)
+		}
+	case *athenav1.Command_PushUnsubscribe:
+		if !o.Sensitive {
+			return proto.Clone(reauthRequired).(*athenav1.CommandResult)
+		}
+		if err := d.st.DeletePushSubscription(a.PushUnsubscribe.GetEndpoint()); err != nil {
+			return d.failure(err)
+		}
+	case *athenav1.Command_SetNotificationPrefs:
+		if !o.Sensitive {
+			return proto.Clone(reauthRequired).(*athenav1.CommandResult)
+		}
+		if err := web.SaveMutedKinds(d.st, a.SetNotificationPrefs.GetMuted()); err != nil {
+			return d.failure(err)
+		}
 	default:
 		// WatchTicket, UnwatchTicket and Visibility belong to the connection, which answers them itself.
 		return &athenav1.CommandResult{Code: web.CodeInvalid, Message: "not a command the server carries out"}
 	}
 	return ok
+}
+
+// pushSubscribe stores a browser's push subscription after checking it is one a push service can serve: an https
+// endpoint and the browser's P-256 key and 16-byte auth secret.
+func (d *Dispatcher) pushSubscribe(p *athenav1.PushSubscribe) error {
+	u, err := url.Parse(p.GetEndpoint())
+	if err != nil || u.Scheme != "https" || u.Host == "" || len(p.GetEndpoint()) > 2048 {
+		return userErrorf("the push endpoint must be an https URL")
+	}
+	if !web.ValidSubscriptionKeys(p.GetP256Dh(), p.GetAuth()) {
+		return userErrorf("the push subscription keys are not valid")
+	}
+	return d.st.PutPushSubscription(store.PushSubscription{Endpoint: p.GetEndpoint(), P256dh: p.GetP256Dh(), Auth: p.GetAuth(), CreatedAt: time.Now()})
 }
 
 // failure turns an error into a refused result: a UserError's message with its code, anything else internal (its

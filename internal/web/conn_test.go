@@ -890,3 +890,29 @@ func TestPendingStaysBounded(t *testing.T) {
 		t.Fatalf("after node gap: %d items, skipFrom %d", len(p.items), p.skipFrom)
 	}
 }
+
+func TestVisibilityReachesPresence(t *testing.T) {
+	p := NewPresence(nil)
+	e := newConnEnv(t, func(d *Dashboard) { d.presence = p })
+	c := e.connect(hello("phone"))
+	c.welcome()
+	c.snapshot()
+	vis := func(id string, v bool) *athenav1.Command {
+		return &athenav1.Command{Id: id, Action: &athenav1.Command_Visibility{Visibility: &athenav1.Visibility{Visible: v}}}
+	}
+	if r := c.do(vis("v1", true)); !r.GetOk() || !p.Visible() {
+		t.Fatalf("visible: %v %v", r, p.Visible())
+	}
+	if r := c.do(vis("v2", false)); !r.GetOk() || p.Visible() {
+		t.Fatalf("hidden: %v %v", r, p.Visible())
+	}
+	c.do(vis("v3", true))
+	c.close()
+	deadline := time.Now().Add(5 * time.Second)
+	for p.Visible() && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if p.Visible() {
+		t.Error("a closed connection still counts as visible")
+	}
+}
