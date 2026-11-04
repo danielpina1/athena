@@ -3,6 +3,7 @@ package router
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"strings"
 	"testing"
@@ -11,6 +12,7 @@ import (
 	"github.com/danielpina1/athena/internal/core"
 	"github.com/danielpina1/athena/internal/node"
 	"github.com/danielpina1/athena/internal/policy"
+	"github.com/danielpina1/athena/internal/sources"
 )
 
 // callSocket sends one request line to a socket and decodes one response line.
@@ -333,3 +335,43 @@ func TestTicketTools(t *testing.T) {
 }
 
 var _ node.RouterHandler = (*Host)(nil)
+
+func TestReferencedTickets(t *testing.T) {
+	e := newEnv(t)
+	e.accept("github:issuecomment:1", "github:o/r#1")
+	e.accept("github:issuecomment:2", "github:o/r#2")
+	pr := e.accept("github:issuecomment:3", "github:o/r#12")
+	if pr.ID != "T-0003" {
+		t.Fatalf("ticket = %s", pr.ID)
+	}
+	tr := explicit("github:issuecomment:5", "github:o/r#5")
+	tr.Text = "@athena the change in #12 broke this; see also https://github.com/O/R/pull/12 and other/repo#3"
+	e.receive(tr)
+	e.must(e.eng.EvaluateDue())
+	v, err := e.eng.Candidate(tr.ID)
+	e.must(err)
+	raw, err := e.host.candidateCard(v)
+	e.must(err)
+	var card struct {
+		Referenced []struct {
+			TicketID string `json:"ticket_id"`
+		} `json:"referenced_tickets"`
+	}
+	e.must(json.Unmarshal([]byte(raw), &card))
+	if len(card.Referenced) != 1 || card.Referenced[0].TicketID != "T-0003" {
+		t.Fatalf("referenced_tickets = %+v in %s", card.Referenced, raw)
+	}
+}
+
+func TestEvalReadUnreadable(t *testing.T) {
+	batch := []core.Trigger{{ID: "b:1"}}
+	failing := func(string) (core.Trigger, error) { return core.Trigger{}, errors.New("disk on fire") }
+	got := readOne("b:1", sources.ContextWindow{}, batch, failing)
+	if got.Error == "" || got.Text != "" {
+		t.Fatalf("read of an unreadable batch trigger = %+v, want an error entry", got)
+	}
+	got = readOne("x:9", sources.ContextWindow{}, batch, failing)
+	if got.Error == "" {
+		t.Fatalf("read of an unknown id = %+v", got)
+	}
+}

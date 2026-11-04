@@ -464,55 +464,59 @@ func (h *Host) evalRead(ctx context.Context, raw json.RawMessage) (any, error) {
 		return nil, err
 	}
 	w := h.window(ctx, v, tr.ID)
-	type readMsg struct {
-		ID    string `json:"id"`
-		From  string `json:"from,omitempty"`
-		Text  string `json:"text,omitempty"`
-		Chars int    `json:"chars,omitempty"`
-		Note  string `json:"note,omitempty"`
-		Error string `json:"error,omitempty"`
-	}
 	out := make([]readMsg, 0, len(args.IDs))
 	for _, id := range args.IDs {
-		var msg *sources.Msg
-		var stub *sources.Stub
-		for i := range w.win.Messages {
-			if w.win.Messages[i].ID == id {
-				msg = &w.win.Messages[i]
-			}
-		}
-		for i := range w.win.Stubs {
-			if w.win.Stubs[i].ID == id {
-				stub = &w.win.Stubs[i]
-			}
-		}
-		inBatch := slices.ContainsFunc(v.Triggers, func(t core.Trigger) bool { return t.ID == id })
-		if msg == nil && stub == nil && !inBatch {
-			out = append(out, readMsg{ID: id, Error: "not a message of this candidate's window or batch"})
-			continue
-		}
-		// A stored Trigger has the message whole.
-		if t, err := h.eng.Trigger(id); err == nil {
-			c := cutTo(t.Text, readChars)
-			out = append(out, readMsg{ID: id, From: t.Actor.ID, Text: c.Text, Chars: c.Chars})
-			continue
-		}
-		switch {
-		case msg != nil:
-			r := readMsg{ID: id, From: msg.From, Text: msg.Text, Chars: msg.Chars}
-			if msg.Chars > 0 {
-				r.Note = "Only the window's cut of this message is available."
-			}
-			out = append(out, r)
-		default:
-			out = append(out, readMsg{ID: id, From: stub.From, Text: stub.Preview,
-				Note: "Only the window's preview of this message is available."})
-		}
+		out = append(out, readOne(id, w.win, v.Triggers, h.eng.Trigger))
 	}
 	return struct {
 		TriggerID string    `json:"trigger_id"`
 		Messages  []readMsg `json:"messages"`
 	}{tr.ID, out}, nil
+}
+
+// readMsg is one message eval_read returns, or why it cannot.
+type readMsg struct {
+	ID    string `json:"id"`
+	From  string `json:"from,omitempty"`
+	Text  string `json:"text,omitempty"`
+	Chars int    `json:"chars,omitempty"`
+	Note  string `json:"note,omitempty"`
+	Error string `json:"error,omitempty"`
+}
+
+// readOne reads one message of a candidate's window or batch: a stored Trigger whole, else what the window has of it.
+func readOne(id string, win sources.ContextWindow, batch []core.Trigger, lookup func(string) (core.Trigger, error)) readMsg {
+	var msg *sources.Msg
+	var stub *sources.Stub
+	for i := range win.Messages {
+		if win.Messages[i].ID == id {
+			msg = &win.Messages[i]
+		}
+	}
+	for i := range win.Stubs {
+		if win.Stubs[i].ID == id {
+			stub = &win.Stubs[i]
+		}
+	}
+	inBatch := slices.ContainsFunc(batch, func(t core.Trigger) bool { return t.ID == id })
+	if msg == nil && stub == nil && !inBatch {
+		return readMsg{ID: id, Error: "not a message of this candidate's window or batch"}
+	}
+	t, err := lookup(id)
+	switch {
+	case err == nil:
+		c := cutTo(t.Text, readChars)
+		return readMsg{ID: id, From: t.Actor.ID, Text: c.Text, Chars: c.Chars}
+	case msg != nil:
+		r := readMsg{ID: id, From: msg.From, Text: msg.Text, Chars: msg.Chars}
+		if msg.Chars > 0 {
+			r.Note = "Only the window's cut of this message is available."
+		}
+		return r
+	case stub != nil:
+		return readMsg{ID: id, From: stub.From, Text: stub.Preview, Note: "Only the window's preview of this message is available."}
+	}
+	return readMsg{ID: id, Error: "this message cannot be read now: " + cut(err.Error(), 200) + "; retry"}
 }
 
 // evalDecide records an assessment: the Policy turns it into the Decision (observe mode records would-accept).

@@ -55,6 +55,9 @@ type Options struct {
 	// Tools, when set, is passed as --tools: the built-in tools the session has. A pointer to "" disables every
 	// built-in tool (`--tools ""`, checked against Claude Code 2.1.280: its init lists no tools, MCP tools stay).
 	Tools *string
+	// ReplayUserMessages passes --replay-user-messages: each user message comes back as a UserEcho once a turn takes
+	// it in.
+	ReplayUserMessages bool
 }
 
 // buildArgs returns the argument list for o.
@@ -70,6 +73,9 @@ func buildArgs(o Options) []string {
 	}
 	if o.Tools != nil {
 		args = append(args, "--tools", *o.Tools)
+	}
+	if o.ReplayUserMessages {
+		args = append(args, "--replay-user-messages")
 	}
 	// Always passed: with --setting-sources "" the --settings file is the only
 	// source of hooks, so a session without it would run without Athena's hooks.

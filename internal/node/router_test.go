@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/danielpina1/athena/internal/metrics"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -27,7 +28,7 @@ func (f *fakeRouter) CallTool(_ context.Context, tool string, args json.RawMessa
 	f.mu.Lock()
 	f.calls = append(f.calls, tool+" "+string(args))
 	f.mu.Unlock()
-	if tool == "fail" {
+	if tool == "note" {
 		return nil, &toolErr{"refused here"}
 	}
 	return map[string]any{"tool": tool}, nil
@@ -92,7 +93,8 @@ func TestRouterOpsNeedToken(t *testing.T) {
 	if !resp.OK || string(resp.Result) != `{"tool":"route"}` {
 		t.Fatalf("with the token: %+v", resp)
 	}
-	if err := callNode(sock, RouterRequest{Op: OpRouter, Token: r.token, Tool: "fail"}, &resp); err != nil {
+	resp = RouterResponse{}
+	if err := callNode(sock, RouterRequest{Op: OpRouter, Token: r.token, Tool: "note"}, &resp); err != nil {
 		t.Fatal(err)
 	}
 	if resp.OK || resp.Error != "refused here" {
@@ -210,5 +212,35 @@ func TestRouterMCPForwardsTools(t *testing.T) {
 	res, err = cs2.CallTool(ctx, &mcp.CallToolParams{Name: "read", Arguments: map[string]any{"resource": "tickets"}})
 	if err != nil || !res.IsError {
 		t.Fatalf("stale token: %v %+v", err, res)
+	}
+}
+
+func TestRouterMetricLabelValidated(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "athm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	reg := metrics.NewRegistry()
+	n := New(Config{StateDir: t.TempDir(), SocketPath: filepath.Join(dir, "n.sock"), AthenaBin: "/usr/bin/true", Metrics: reg}, nil)
+	defer n.Close()
+	r := &fakeRouter{token: "tok"}
+	n.SetRouter(r)
+	if resp := n.handleRouter(context.Background(), RouterRequest{Token: "tok", Tool: "evil\nlabel"}); resp.OK {
+		t.Fatalf("an unknown tool ran: %+v", resp)
+	}
+	n.handleRouter(context.Background(), RouterRequest{Token: "tok", Tool: "route", Args: json.RawMessage(`{}`)})
+	var labels []string
+	for _, h := range reg.Snapshot(0).Histograms {
+		if h.Name == "mcp_tool_seconds" {
+			labels = append(labels, h.Labels["tool"])
+		}
+	}
+	slices.Sort(labels)
+	if !slices.Equal(labels, []string{"router_route", "router_unknown"}) {
+		t.Fatalf("tool labels = %q", labels)
+	}
+	if len(r.calls) != 1 {
+		t.Fatalf("calls = %v, want only route", r.calls)
 	}
 }

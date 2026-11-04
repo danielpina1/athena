@@ -654,3 +654,12 @@ func TestBuildArgsTools(t *testing.T) {
 		t.Fatal("--tools passed without Options.Tools")
 	}
 }
+
+func TestBuildArgsReplayUserMessages(t *testing.T) {
+	if !slices.Contains(buildArgs(Options{SettingsPath: "s", MCPConfigPath: "m", ReplayUserMessages: true}), "--replay-user-messages") {
+		t.Fatal("--replay-user-messages missing")
+	}
+	if slices.Contains(buildArgs(Options{SettingsPath: "s", MCPConfigPath: "m"}), "--replay-user-messages") {
+		t.Fatal("--replay-user-messages passed unasked")
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"time"
 )
 
@@ -75,9 +76,18 @@ func (n *Node) handleRouter(ctx context.Context, req RouterRequest) RouterRespon
 		n.log.Warn("router op without the router token", "tool", req.Tool)
 		return RouterResponse{Error: denyNotRouter}
 	}
+	// The tool name becomes a metric label only once it is known to be one of the router's.
+	label := "router_unknown"
+	known := slices.Contains(RouterTools(), req.Tool)
+	if known {
+		label = "router_" + req.Tool
+	}
 	if n.reg != nil {
 		start := time.Now()
-		defer func() { n.reg.Histogram("mcp_tool_seconds", "tool", "router_"+req.Tool).Observe(time.Since(start)) }()
+		defer func() { n.reg.Histogram("mcp_tool_seconds", "tool", label).Observe(time.Since(start)) }()
+	}
+	if !known {
+		return RouterResponse{Error: fmt.Sprintf("unknown router tool %q", req.Tool)}
 	}
 	res, err := h.CallTool(ctx, req.Tool, req.Args)
 	if err != nil {

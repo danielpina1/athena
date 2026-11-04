@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -20,7 +21,9 @@ import (
 	"github.com/danielpina1/athena/internal/effects"
 	"github.com/danielpina1/athena/internal/node"
 	"github.com/danielpina1/athena/internal/policy"
+	"github.com/danielpina1/athena/internal/runtime/claude"
 	"github.com/danielpina1/athena/internal/sources"
+	"github.com/danielpina1/athena/internal/sources/github"
 	"github.com/danielpina1/athena/internal/store"
 	"github.com/danielpina1/athena/prompts"
 )
@@ -86,6 +89,9 @@ func (fakeSource) Name() string                  { return "github" }
 func (fakeSource) Listens(string) bool           { return true }
 func (fakeSource) Run(ctx context.Context) error { <-ctx.Done(); return nil }
 func (fakeSource) Health() error                 { return nil }
+func (fakeSource) References(text, thread string) []string {
+	return github.ParseReferences(text, thread)
+}
 func (fakeSource) Context(_ context.Context, thread, triggerID string) (sources.ContextWindow, error) {
 	return sources.ContextWindow{
 		Messages: []sources.Msg{
@@ -110,6 +116,9 @@ type env struct {
 	stdinLog string
 	argsLog  string
 	cancel   context.CancelFunc
+	// wake is the current Runner's Wake, so the Engine wakes a Runner made by restart.
+	wake atomic.Pointer[effects.Runner]
+	log  *slog.Logger
 }
 
 func newEnv(t *testing.T) *env {
@@ -130,9 +139,10 @@ func newEnv(t *testing.T) *env {
 	e.settings.Rules = []policy.Rule{{Name: "copy-fixes", Instructions: "typo and wording fixes", Enabled: true},
 		{Name: "off-rule", Instructions: "never", Enabled: false}}
 	e.fx = effects.New(st, nil)
+	e.wake.Store(e.fx)
 	pol := policy.New(e.settings, e.reg, time.Minute)
 	e.eng = core.NewEngineWith(st.Repos(), nopExec{}, core.Options{
-		Policy: func() core.Policy { return pol }, Scope: e.reg, Wake: e.fx.Wake, Relays: true,
+		Policy: func() core.Policy { return pol }, Scope: e.reg, Wake: func() { e.wake.Load().Wake() }, Relays: true,
 	})
 	sockDir, err := os.MkdirTemp("/tmp", "athrt")
 	if err != nil {
@@ -144,8 +154,8 @@ func newEnv(t *testing.T) *env {
 		Socket: filepath.Join(sockDir, "n.sock"), ClaudeBinary: fakeClaude(t), KV: st,
 		Policy: func() (policy.Settings, error) { return e.settings, nil },
 	}
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	e.host = New(e.cfg, e.eng, e.fx, e.reg, log)
+	e.log = slog.New(slog.NewTextHandler(io.Discard, nil))
+	e.host = New(e.cfg, e.eng, e.fx, e.reg, e.log)
 	e.host.restartDelay = func(int) time.Duration { return 0 }
 	t.Cleanup(func() {
 		if e.cancel != nil {
@@ -431,8 +441,8 @@ func TestRouterResumesSession(t *testing.T) {
 func TestRouterRestartsAfterCrash(t *testing.T) {
 	e := newEnv(t)
 	t.Setenv("ATHENA_FAKE_EXIT_MID_TURN_ONCE", filepath.Join(t.TempDir(), "crashed"))
-	e.start()
 	tk := e.accept("github:issuecomment:1", "github:o/r#1")
+	e.start()
 	e.must(e.eng.FileReport(tk.ID, core.ReportInput{State: core.ReportBlocked, Summary: "stuck"}))
 	e.eventually("a restart", func() bool { return len(e.invocations()) == 2 })
 	invs := e.invocations()
@@ -486,5 +496,122 @@ func TestRouterToolTokenRequired(t *testing.T) {
 	r := call(tok)
 	if !r.OK || !strings.Contains(string(r.Result), `"items"`) {
 		t.Fatalf("with the token: %+v", r)
+	}
+}
+
+// restart stops the Host and its Runner, as a server shutdown does, and starts a new Host and Runner on the same store.
+func (e *env) restart() {
+	e.t.Helper()
+	e.host.Stop()
+	e.cancel()
+	_ = e.fx.Drain(time.Second)
+	e.fx = effects.New(e.st, nil)
+	e.wake.Store(e.fx)
+	e.host = New(e.cfg, e.eng, e.fx, e.reg, e.log)
+	e.host.restartDelay = func(int) time.Duration { return 0 }
+	e.start()
+}
+
+// noResultFixture is a turn that starts and never ends: the message is echoed but no Result follows.
+func noResultFixture(t *testing.T) string {
+	t.Helper()
+	raw, err := os.ReadFile(claudeFixture(t, "simple-turn.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(t.TempDir(), "no-result.jsonl")
+	first, _, _ := strings.Cut(string(raw), "\n")
+	if err := os.WriteFile(p, []byte(first+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func count(msgs []string, sub string) int {
+	n := 0
+	for _, m := range msgs {
+		n += strings.Count(m, sub)
+	}
+	return n
+}
+
+func TestUnconfirmedSurviveRestart(t *testing.T) {
+	e := newEnv(t)
+	t.Setenv("ATHENA_FAKE_FIXTURE", noResultFixture(t))
+	tk := e.accept("github:issuecomment:1", "github:o/r#1")
+	e.start()
+	e.must(e.eng.FileReport(tk.ID, core.ReportInput{State: core.ReportBlocked, Summary: "need the deploy key"}))
+	e.eventually("the relay", func() bool { return count(e.messages(), "need the deploy key") == 1 })
+	e.eventually("the relay row to go", func() bool {
+		rows, _ := e.fx.Pending(core.EffectRelay)
+		return len(rows) == 0
+	})
+	e.restart()
+	e.eventually("the resend", func() bool { return len(e.messages()) == 2 })
+	time.Sleep(200 * time.Millisecond)
+	msgs := e.messages()
+	if len(msgs) != 2 || !strings.HasPrefix(msgs[1], recoveryNote) || count(msgs, "need the deploy key") != 2 {
+		t.Fatalf("messages = %q, want the relay resent once", msgs)
+	}
+	// A further restart still finds it unconfirmed, and resends it once, without a second recovery note.
+	e.restart()
+	e.eventually("the second resend", func() bool { return len(e.messages()) == 3 })
+	if msgs := e.messages(); strings.Count(msgs[2], recoveryNote) != 1 || count(msgs[2:], "need the deploy key") != 1 {
+		t.Fatalf("second resend = %q", msgs[2])
+	}
+}
+
+func TestResultClearsOnlyTakenMessages(t *testing.T) {
+	e := newEnv(t)
+	e.host.sent("m1")
+	e.host.sent("m2")
+	e.host.observe(claude.UserEcho{Text: "m1"})
+	e.host.observe(claude.Result{SessionID: "s"})
+	if got := e.host.pendingTexts(); !slices.Equal(got, []string{"m2"}) {
+		t.Fatalf("unconfirmed = %q, want m2 kept: it was not taken before the Result", got)
+	}
+	raw, ok, err := e.st.KVGet(unconfirmedKey)
+	e.must(err)
+	if !ok || !strings.Contains(raw, "m2") || strings.Contains(raw, `"m1"`) {
+		t.Fatalf("kv %s = %s", unconfirmedKey, raw)
+	}
+	e.host.observe(claude.UserEcho{Text: "m2"})
+	e.host.observe(claude.Result{SessionID: "s"})
+	if got := e.host.pendingTexts(); len(got) != 0 {
+		t.Fatalf("unconfirmed = %q, want none", got)
+	}
+}
+
+func TestNoticesSurviveHostRestart(t *testing.T) {
+	e := newEnv(t)
+	tk := e.accept("github:issuecomment:1", "github:o/r#1")
+	e.start()
+	e.must(e.eng.Unsubscribe("github:o/r#1"))
+	time.Sleep(100 * time.Millisecond)
+	e.restart()
+	e.must(e.eng.FileReport(tk.ID, core.ReportInput{State: core.ReportBlocked, Summary: "stuck"}))
+	e.eventually("the relay", func() bool { return len(e.messages()) == 1 })
+	if msg := e.messages()[0]; !strings.Contains(msg, core.NoticeThreadUnsubscribed) || !strings.Contains(msg, `"stuck"`) {
+		t.Fatalf("message = %s, want the held notice and the relay", msg)
+	}
+}
+
+func TestRecoveryResendNoDuplicate(t *testing.T) {
+	e := newEnv(t)
+	t.Setenv("ATHENA_FAKE_EXIT_MID_TURN_ONCE", filepath.Join(t.TempDir(), "crashed"))
+	e.host.restartDelay = func(int) time.Duration { return 300 * time.Millisecond }
+	tk := e.accept("github:issuecomment:1", "github:o/r#1")
+	e.start()
+	e.must(e.eng.FileReport(tk.ID, core.ReportInput{State: core.ReportBlocked, Summary: "first"}))
+	e.eventually("the crash", func() bool {
+		return len(e.invocations()) == 1 && count(e.messages(), `"first"`) == 1 && e.host.Health() != nil
+	})
+	// While the session restarts, the next relay waits for it.
+	e.must(e.eng.FileReport(tk.ID, core.ReportInput{State: core.ReportFailed, Summary: "second"}))
+	e.eventually("both after the restart", func() bool { return count(e.messages(), `"second"`) >= 1 && len(e.messages()) >= 3 })
+	time.Sleep(200 * time.Millisecond)
+	msgs := e.messages()
+	if count(msgs, `"second"`) != 1 || count(msgs, `"first"`) != 2 || !strings.HasPrefix(msgs[1], recoveryNote) {
+		t.Fatalf("messages = %q, want the resend first and each relay once more at most", msgs)
 	}
 }

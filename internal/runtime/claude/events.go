@@ -34,6 +34,11 @@ type ToolResult struct {
 	IsError   bool
 }
 
+// UserEcho is a user message the session took into its conversation, echoed back with --replay-user-messages
+// (checked against Claude Code 2.1.280: a message sent mid-turn is echoed only when a turn takes it in, not when it is
+// read).
+type UserEcho struct{ Text string }
+
 // Result ends a turn. A session emits one Result per turn (messages that
 // arrive mid-turn are folded into the running turn).
 type Result struct {
@@ -62,6 +67,7 @@ func (Init) isEvent()          {}
 func (AssistantText) isEvent() {}
 func (ToolUse) isEvent()       {}
 func (ToolResult) isEvent()    {}
+func (UserEcho) isEvent()      {}
 func (Result) isEvent()        {}
 func (Unknown) isEvent()       {}
 
@@ -69,6 +75,7 @@ type envelope struct {
 	Type      string `json:"type"`
 	Subtype   string `json:"subtype"`
 	SessionID string `json:"session_id"`
+	IsReplay  bool   `json:"isReplay"`
 	Message   *struct {
 		Content json.RawMessage `json:"content"`
 	} `json:"message"`
@@ -124,6 +131,12 @@ func ParseEvents(line []byte) ([]Event, error) {
 		return []Event{Init{SessionID: in.SessionID, Model: in.Model, CWD: in.CWD, Tools: in.Tools}}, nil
 
 	case "assistant", "user":
+		if env.Type == "user" && env.IsReplay && env.Message != nil && len(env.Message.Content) > 0 && env.Message.Content[0] == '"' {
+			var text string
+			if json.Unmarshal(env.Message.Content, &text) == nil {
+				return []Event{UserEcho{Text: text}}, nil
+			}
+		}
 		blocks := contentBlocks(env)
 		var evs []Event
 		for _, b := range blocks {

@@ -11,6 +11,7 @@ import (
 	"unicode/utf16"
 
 	"github.com/danielpina1/athena/internal/core"
+	"github.com/danielpina1/athena/internal/sources"
 )
 
 // Cards: compact, bounded projections of Tickets, Triggers and Decisions for the router, and the candidate, relay and
@@ -201,6 +202,10 @@ func (h *Host) candidateCard(v core.CandidateView) (string, error) {
 		return "", fmt.Errorf("router: eval %s: primary trigger %s is not in its batch", v.Eval.ID, v.Eval.Primary)
 	}
 	cards, total := related(v.Tickets)
+	referenced, err := h.referenced(v)
+	if err != nil {
+		return "", err
+	}
 	next := "Route it with route by trigger_id: accept, attach, stop or ignore."
 	if v.Eval.Strength != core.StrengthExplicit {
 		next = "Assess it with eval and eval_decide, or ignore it with route (ignored_from_card) when the card already shows it touches no enabled rule."
@@ -215,14 +220,62 @@ func (h *Host) candidateCard(v core.CandidateView) (string, error) {
 		RelatedTickets []ticketCard      `json:"related_tickets"`
 		TicketsTotal   int               `json:"tickets_total"`
 		DeliveredTo    []string          `json:"delivered_to,omitempty"`
+		Referenced     []ticketCard      `json:"referenced_tickets,omitempty"`
 		HandedBack     map[string]string `json:"handed_back,omitempty"`
 		Next           string            `json:"next"`
 	}{"candidate", primary.ID, v.Eval.Strength, v.Thread.Key, v.Thread.Label, lines, cards, total,
-		primary.Disposition.Reached, v.HandedBack, next}
+		primary.Disposition.Reached, referenced, v.HandedBack, next}
 	if len(card.HandedBack) == 0 {
 		card.HandedBack = nil
 	}
 	return encode(card)
+}
+
+// referenced returns the Tickets subscribed to the Threads the batch's Triggers name (the issues and pull requests a
+// GitHub comment links), once each and at most eight, as their Source finds them; a Source that finds none names none.
+func (h *Host) referenced(v core.CandidateView) ([]ticketCard, error) {
+	var out []ticketCard
+	seen := map[string]bool{}
+	threads := map[string]bool{v.Thread.Key: true}
+	for _, tr := range v.Triggers {
+		if len(tr.Threads) == 0 {
+			continue
+		}
+		source, _, _ := strings.Cut(tr.Threads[0], ":")
+		finder, ok := h.reg.Source(source).(sources.References)
+		if !ok {
+			continue
+		}
+		for _, key := range finder.References(tr.Text, tr.Threads[0]) {
+			if threads[key] {
+				continue
+			}
+			threads[key] = true
+			th, err := h.eng.Thread(key)
+			var ue *core.UserError
+			if errors.As(err, &ue) {
+				continue
+			}
+			if err != nil {
+				return nil, err
+			}
+			for _, s := range th.Subscriptions {
+				if seen[s.TicketID] || len(out) == relatedTickets {
+					continue
+				}
+				t, _, err := h.eng.Ticket(s.TicketID)
+				if errors.As(err, &ue) {
+					continue
+				}
+				if err != nil {
+					return nil, err
+				}
+				seen[s.TicketID] = true
+				out = append(out, cardOf(t))
+			}
+		}
+	}
+	return out, nil
 }
 
 // renderRelay renders a relay from the state current now; "" drops one that no longer applies.

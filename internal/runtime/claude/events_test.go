@@ -204,3 +204,18 @@ func TestParseErrorResultFixture(t *testing.T) {
 		t.Fatalf("errors = %q", r.Errors)
 	}
 }
+
+func TestParseUserEcho(t *testing.T) {
+	evs, err := ParseEvents([]byte(`{"type":"user","message":{"role":"user","content":"say BANANA"},"isReplay":true,"session_id":"s"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(evs) != 1 || evs[0] != (UserEcho{Text: "say BANANA"}) {
+		t.Fatalf("events = %#v, want the echo", evs)
+	}
+	// A user message that is not a replay is no echo.
+	evs, _ = ParseEvents([]byte(`{"type":"user","message":{"role":"user","content":"hi"}}`))
+	if _, ok := evs[0].(UserEcho); ok {
+		t.Fatal("a non-replay user line parsed as an echo")
+	}
+}

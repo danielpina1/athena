@@ -59,6 +59,13 @@ type ThreadContext interface {
 	Context(ctx context.Context, thread, triggerID string) (ContextWindow, error)
 }
 
+// References is the optional part of a Source that finds the Threads a message names, such as the issues and pull
+// requests a GitHub comment links, as Thread keys; thread is the message's primary Thread. A Source without it names
+// none.
+type References interface {
+	References(text, thread string) []string
+}
+
 // ContextWindow is a Thread as an assessor reads it: messages in full (cut, with Chars set to the original length)
 // and the rest as stubs.
 type ContextWindow struct {

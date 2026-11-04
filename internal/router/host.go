@@ -14,7 +14,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -98,16 +97,18 @@ type Host struct {
 	token   string // the running process's token; empty while none runs
 	sess    *claude.Session
 	up      chan struct{} // closed while sess is set; replaced when it is cleared
-	// unconfirmed holds the messages sent since the session's last turn ended: a crash may have lost them, so a
-	// restarted session gets them again (plan 1's crash policy for unread Inputs).
-	unconfirmed []string
 	stopped bool
 	health  error
 	cancel  context.CancelFunc
 	done    chan struct{}
 
-	// sendMu makes one message at a time: the held notices it takes ride exactly one message.
+	// sendMu makes one message at a time: the held notices it takes ride exactly one message, and a starting
+	// session's resend goes before any other.
 	sendMu sync.Mutex
+
+	// unMu guards unconfirmed, the messages that may not be in the session's conversation yet (unconfirmed.go).
+	unMu        sync.Mutex
+	unconfirmed []sentMsg
 
 	// windows caches, by Eval id, the Thread window an assessment loaded.
 	winMu   sync.Mutex
@@ -157,6 +158,9 @@ func (h *Host) Start(ctx context.Context) error {
 	if h.done != nil {
 		return errors.New("router: already started")
 	}
+	if err := h.loadUnconfirmed(); err != nil {
+		return err
+	}
 	ctx, h.cancel = context.WithCancel(ctx)
 	h.done = make(chan struct{})
 	go h.supervise(ctx)
@@ -204,7 +208,7 @@ func (h *Host) dir() string { return filepath.Join(h.cfg.StateDir, "router") }
 func (h *Host) supervise(ctx context.Context) {
 	defer close(h.done)
 	for crashes := 0; ; {
-		cause := h.runOnce(ctx, &crashes, crashes > 0)
+		cause := h.runOnce(ctx, &crashes)
 		if h.isStopped() || ctx.Err() != nil {
 			return
 		}
@@ -218,7 +222,7 @@ func (h *Host) supervise(ctx context.Context) {
 				h.log.Error("clear router session id", "error", err)
 			}
 			pause = h.restartDelay(freshPause)
-			crashes = 1 // the fresh session still gets the messages the last one may have lost
+			crashes = 0
 		} else {
 			h.log.Warn("router session ended unexpectedly; resuming", "restart", crashes, "cause", cause)
 		}
@@ -245,8 +249,8 @@ func (h *Host) setHealth(err error) {
 }
 
 // runOnce starts one router process with a fresh token, follows its events until it exits, and says why it ended.
-// A turn that ends resets crashes. A recovering process first gets the messages the last one may have lost.
-func (h *Host) runOnce(ctx context.Context, crashes *int, recovering bool) string {
+// A turn that ends resets crashes. The process first gets the messages that may not have reached the last one.
+func (h *Host) runOnce(ctx context.Context, crashes *int) string {
 	token, err := newToken()
 	if err != nil {
 		return err.Error()
@@ -282,30 +286,26 @@ func (h *Host) runOnce(ctx context.Context, crashes *int, recovering bool) strin
 		Tools:              &noTools,
 		Env: []string{"ATHENA_ROLE=" + node.RoleRouter, "ATHENA_ROUTER_TOKEN=" + token,
 			"ATHENA_SOCKET=" + h.cfg.Socket},
-		TranscriptPath: filepath.Join(h.cfg.StateDir, "transcripts", "router.jsonl"),
+		TranscriptPath:     filepath.Join(h.cfg.StateDir, "transcripts", "router.jsonl"),
+		ReplayUserMessages: true,
 	})
 	if err != nil {
 		h.clearSession(nil)
 		return "start claude: " + err.Error()
 	}
+	// The resend goes before any waiting message: it is written before the session is published, under sendMu.
+	h.sendMu.Lock()
+	h.resend(sess)
 	h.mu.Lock()
 	h.sess, h.health = sess, nil
 	close(h.up)
 	h.mu.Unlock()
-	h.log.Info("router session started", "resume", resume != "", "recovering", recovering)
-	if recovering {
-		h.resend(sess)
-	}
+	h.sendMu.Unlock()
+	h.log.Info("router session started", "resume", resume != "")
 	for ev := range sess.Events() {
-		switch e := ev.(type) {
-		case claude.Init:
-			h.keepSession(e.SessionID)
-		case claude.Result:
-			h.keepSession(e.SessionID)
+		h.observe(ev)
+		if e, ok := ev.(claude.Result); ok {
 			*crashes = 0
-			h.mu.Lock()
-			h.unconfirmed = nil
-			h.mu.Unlock()
 			if e.IsError {
 				h.log.Warn("router turn failed", "subtype", e.Subtype, "errors", redact.String(strings.Join(e.Errors, "; ")))
 			}
@@ -322,21 +322,6 @@ func (h *Host) runOnce(ctx context.Context, crashes *int, recovering bool) strin
 		cause += ": " + lines[len(lines)-1]
 	}
 	return cause
-}
-
-// resend sends a restarted session the messages its crashed predecessor may not have taken in, as one message.
-func (h *Host) resend(sess *claude.Session) {
-	h.sendMu.Lock()
-	defer h.sendMu.Unlock()
-	h.mu.Lock()
-	lost := slices.Clone(h.unconfirmed)
-	h.mu.Unlock()
-	if len(lost) == 0 {
-		return
-	}
-	if err := sess.Send(recoveryNote + "\n" + strings.Join(lost, "\n")); err != nil {
-		h.log.Warn("resend to the restarted router session", "error", err)
-	}
 }
 
 // clearSession forgets the session (if it is still the current one) and its token.
@@ -389,13 +374,20 @@ func (h *Host) keepSession(id string) {
 // --- Messages ---
 
 // deliver sends one message to the router session: the held notices first, one JSON document per line, then text.
-// The notices it carried are settled once the message is written; a crash in between sends them again.
+// The message is kept as unconfirmed before it is written, then the notices it carried are settled; until the session
+// takes it into a turn that ends, every start sends it again.
 func (h *Host) deliver(ctx context.Context, text string) error {
+	// Wait for the session outside sendMu, which a starting session takes for its resend.
+	if _, err := h.session(ctx); err != nil {
+		return err
+	}
 	h.sendMu.Lock()
 	defer h.sendMu.Unlock()
-	sess, err := h.session(ctx)
-	if err != nil {
-		return err
+	h.mu.Lock()
+	sess := h.sess
+	h.mu.Unlock()
+	if sess == nil {
+		return errNotRunning
 	}
 	held, err := h.fx.Pending(core.EffectNotice)
 	if err != nil {
@@ -413,12 +405,15 @@ func (h *Host) deliver(ctx context.Context, text string) error {
 		}
 	}
 	b.WriteString(text)
-	if err := sess.Send(b.String()); err != nil {
+	msg := b.String()
+	// Kept before it is written, so its row and the notices it carries can be settled once it is.
+	if err := h.sent(msg); err != nil {
+		return err
+	}
+	if err := sess.Send(msg); err != nil {
+		h.unsent(msg)
 		return fmt.Errorf("router: send: %w", err)
 	}
-	h.mu.Lock()
-	h.unconfirmed = append(h.unconfirmed, b.String())
-	h.mu.Unlock()
 	for _, n := range held {
 		if _, err := h.fx.Complete(core.EffectNotice, n.Key, n.Payload); err != nil {
 			h.log.Error("settle a delivered notice", "key", n.Key, "error", err)

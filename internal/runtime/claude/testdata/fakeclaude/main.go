@@ -19,6 +19,9 @@
 //	                               it missing creates it and exits 3 right after that replay
 //	ATHENA_FAKE_IGNORE_STDIN_CLOSE when set, keep running after stdin reaches EOF
 //	ATHENA_FAKE_NO_READ_STDIN      when set, never read stdin (a hung child)
+//
+// With --replay-user-messages among its arguments it echoes each user line as the real CLI does when it takes the
+// message into a turn ({"type":"user",...,"isReplay":true}), before replaying for it.
 package main
 
 import (
@@ -80,6 +83,10 @@ func main() {
 		stdinLog = f
 	}
 
+	replayUser := false
+	for _, a := range os.Args[1:] {
+		replayUser = replayUser || a == "--replay-user-messages"
+	}
 	out := bufio.NewWriter(os.Stdout)
 	replayed := false
 	r := bufio.NewReaderSize(os.Stdin, 1<<20)
@@ -90,6 +97,9 @@ func main() {
 				_, _ = stdinLog.WriteString(strings.TrimRight(line, "\n") + "\n")
 			}
 			if !strings.Contains(line, `"control_request"`) {
+				if replayUser {
+					echo(out, line)
+				}
 				if !replayed {
 					replayed = true
 					replay(out, exitMidTurn)
@@ -161,4 +171,20 @@ func replayLater(out *bufio.Writer) {
 			os.Exit(3)
 		}
 	}
+}
+
+// echo writes the replay of a user line.
+func echo(out *bufio.Writer, line string) {
+	var in struct {
+		Message struct {
+			Content any `json:"content"`
+		} `json:"message"`
+	}
+	if json.Unmarshal([]byte(line), &in) != nil {
+		return
+	}
+	b, _ := json.Marshal(map[string]any{"type": "user", "isReplay": true,
+		"message": map[string]any{"role": "user", "content": in.Message.Content}})
+	_, _ = out.Write(append(b, '\n'))
+	_ = out.Flush()
 }
