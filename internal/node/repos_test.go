@@ -62,7 +62,7 @@ func TestCloneUsesHelperNotURL(t *testing.T) {
 	n := testNode(t)
 	state := n.cfg.StateDir
 	ctx := context.Background()
-	dir, def, err := n.EnsureClone(ctx, "O/R", fakeToken)
+	dir, def, _, err := n.EnsureClone(ctx, "O/R", fakeToken)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,8 +71,8 @@ func TestCloneUsesHelperNotURL(t *testing.T) {
 	}
 	// The configured URL, before insteadOf rewrites it to the stand-in.
 	mirror := MirrorDir(state, "o/r")
-	if got := git(t, mirror, "config", "--get", "remote.origin.url"); got != "https://github.com/o/r.git" {
-		t.Fatalf("mirror origin = %q, want the plain https URL", got)
+	if b, err := os.ReadFile(filepath.Join(mirror, "config")); err != nil || string(b) != mirrorConfig {
+		t.Fatalf("mirror config = %q, %v; want the node's fixed config", b, err)
 	}
 	if got := git(t, dir, "config", "--get", "remote.origin.pushurl"); got != "https://github.com/o/r.git" {
 		t.Fatalf("clone push URL = %q, want the plain https URL", got)
@@ -95,7 +95,7 @@ func TestCloneUsesHelperNotURL(t *testing.T) {
 	// A second call fetches: a commit pushed meanwhile is on origin/trunk.
 	git(t, work, "commit", "-q", "--allow-empty", "-m", "later")
 	git(t, work, "push", "-q", "origin", "trunk")
-	if _, _, err := n.EnsureClone(ctx, "o/r", fakeToken); err != nil {
+	if _, _, _, err := n.EnsureClone(ctx, "o/r", fakeToken); err != nil {
 		t.Fatal(err)
 	}
 	if got, want := git(t, dir, "rev-parse", "origin/trunk"), git(t, work, "rev-parse", "HEAD"); got != want {
@@ -105,7 +105,7 @@ func TestCloneUsesHelperNotURL(t *testing.T) {
 
 func TestCloneRefusesBadRepository(t *testing.T) {
 	for _, repo := range []string{"", "o", "o/r/x", "../r", "o/..", "o/r;rm", "-o/r x"} {
-		if _, _, err := testNode(t).EnsureClone(context.Background(), repo, fakeToken); err == nil {
+		if _, _, _, err := testNode(t).EnsureClone(context.Background(), repo, fakeToken); err == nil {
 			t.Errorf("EnsureClone(%q) succeeded", repo)
 		}
 	}
@@ -115,13 +115,13 @@ func TestWorktreeFromDefaultBranch(t *testing.T) {
 	_, work := fakeGitHub(t, "o/r")
 	n := testNode(t)
 	ctx := context.Background()
-	if _, _, err := n.EnsureClone(ctx, "o/r", fakeToken); err != nil {
+	if _, _, _, err := n.EnsureClone(ctx, "o/r", fakeToken); err != nil {
 		t.Fatal(err)
 	}
 	// The default branch moves after the clone; the next worktree starts from where it is now.
 	git(t, work, "commit", "-q", "--allow-empty", "-m", "newer trunk")
 	git(t, work, "push", "-q", "origin", "trunk")
-	clone, def, err := n.EnsureClone(ctx, "o/r", fakeToken)
+	clone, def, _, err := n.EnsureClone(ctx, "o/r", fakeToken)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +167,7 @@ func TestCloneIgnoresPlantedHooks(t *testing.T) {
 	_, work := fakeGitHub(t, "o/r")
 	n := testNode(t)
 	ctx := context.Background()
-	clone, def, err := n.EnsureClone(ctx, "o/r", fakeToken)
+	clone, def, _, err := n.EnsureClone(ctx, "o/r", fakeToken)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +182,7 @@ func TestCloneIgnoresPlantedHooks(t *testing.T) {
 
 	git(t, work, "commit", "-q", "--allow-empty", "-m", "later")
 	git(t, work, "push", "-q", "origin", "trunk")
-	if _, _, err := n.EnsureClone(ctx, "o/r", fakeToken); err != nil {
+	if _, _, _, err := n.EnsureClone(ctx, "o/r", fakeToken); err != nil {
 		t.Fatal(err)
 	}
 	wt2 := filepath.Join(t.TempDir(), "wt2")
@@ -206,7 +206,7 @@ func TestCloneFetchNotRedirected(t *testing.T) {
 	_, work := fakeGitHub(t, "o/r")
 	n := testNode(t)
 	ctx := context.Background()
-	clone, _, err := n.EnsureClone(ctx, "o/r", fakeToken)
+	clone, _, _, err := n.EnsureClone(ctx, "o/r", fakeToken)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,7 +223,7 @@ func TestCloneFetchNotRedirected(t *testing.T) {
 
 	git(t, work, "commit", "-q", "--allow-empty", "-m", "real later")
 	git(t, work, "push", "-q", "origin", "trunk")
-	if _, _, err := n.EnsureClone(ctx, "o/r", fakeToken); err != nil {
+	if _, _, _, err := n.EnsureClone(ctx, "o/r", fakeToken); err != nil {
 		t.Fatal(err)
 	}
 	if got, want := git(t, clone, "rev-parse", "refs/remotes/origin/trunk"), git(t, work, "rev-parse", "HEAD"); got != want {
@@ -242,7 +242,7 @@ func TestOwnerSSHInsteadOfIgnored(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	n := testNode(t)
-	clone, _, err := n.EnsureClone(context.Background(), "o/r", fakeToken)
+	clone, _, _, err := n.EnsureClone(context.Background(), "o/r", fakeToken)
 	if err != nil {
 		t.Fatalf("clone with the owner's SSH rewrite: %v", err)
 	}
@@ -349,7 +349,7 @@ func TestMirrorFetchIgnoresPlantedHTTPConfig(t *testing.T) {
 	_, work := fakeGitHub(t, "o/r")
 	n := testNode(t)
 	ctx := context.Background()
-	clone, _, err := n.EnsureClone(ctx, "o/r", fakeToken)
+	clone, _, _, err := n.EnsureClone(ctx, "o/r", fakeToken)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -362,7 +362,7 @@ func TestMirrorFetchIgnoresPlantedHTTPConfig(t *testing.T) {
 	git(t, work, "push", "-q", "origin", "trunk")
 
 	calls := wrapGit(t)
-	if _, _, err := n.EnsureClone(ctx, "o/r", fakeToken); err != nil {
+	if _, _, _, err := n.EnsureClone(ctx, "o/r", fakeToken); err != nil {
 		t.Fatal(err)
 	}
 	if got, want := git(t, clone, "rev-parse", "refs/remotes/origin/trunk"), git(t, work, "rev-parse", "HEAD"); got != want {
@@ -375,7 +375,8 @@ func TestMirrorFetchIgnoresPlantedHTTPConfig(t *testing.T) {
 		}
 		bearing++
 		args := strings.Join(c.args, " ")
-		if !strings.Contains(args, mirror) || strings.Contains(args, clone+" ") || strings.HasSuffix(args, clone) {
+		onMirror := c.env["GIT_DIR"] == mirror || (slices.Contains(c.args, "clone") && strings.HasSuffix(args, mirror))
+		if !onMirror || strings.Contains(args, clone+" ") || strings.HasSuffix(args, clone) {
 			t.Errorf("a token-bearing git ran on %q, want only the mirror %s", args, mirror)
 		}
 		cfg := c.config()
@@ -405,11 +406,11 @@ func TestCloneFetchFromMirrorHasNoToken(t *testing.T) {
 	fakeGitHub(t, "o/r")
 	n := testNode(t)
 	calls := wrapGit(t)
-	clone, _, err := n.EnsureClone(context.Background(), "o/r", fakeToken)
+	clone, _, _, err := n.EnsureClone(context.Background(), "o/r", fakeToken)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := n.EnsureClone(context.Background(), "o/r", fakeToken); err != nil {
+	if _, _, _, err := n.EnsureClone(context.Background(), "o/r", fakeToken); err != nil {
 		t.Fatal(err)
 	}
 	mirror := MirrorDir(n.cfg.StateDir, "o/r")
@@ -442,7 +443,7 @@ func TestCloneFetchFromMirrorHasNoToken(t *testing.T) {
 func TestWorktreePushTargetsGitHub(t *testing.T) {
 	fakeGitHub(t, "O/R")
 	n := testNode(t)
-	clone, def, err := n.EnsureClone(context.Background(), "O/R", fakeToken)
+	clone, def, _, err := n.EnsureClone(context.Background(), "O/R", fakeToken)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -455,5 +456,132 @@ func TestWorktreePushTargetsGitHub(t *testing.T) {
 	}
 	if got := git(t, wt, "remote", "get-url", "origin"); got != MirrorDir(n.cfg.StateDir, "o/r") {
 		t.Fatalf("fetch URL = %q, want the mirror", got)
+	}
+}
+
+// evilRepo makes a bare repository at <dir>/o/r.git: a copy of the real one (so it has its history) plus an evil
+// commit on trunk, and returns that commit.
+func evilRepo(t *testing.T, realBare string) (dir, evilSHA string) {
+	t.Helper()
+	dir = t.TempDir()
+	bare := filepath.Join(dir, "o", "r.git")
+	git(t, dir, "clone", "-q", "--bare", realBare, bare)
+	w := t.TempDir()
+	git(t, w, "clone", "-q", bare, ".")
+	git(t, w, "commit", "-q", "--allow-empty", "-m", "evil")
+	git(t, w, "push", "-q", "origin", "HEAD:trunk")
+	return dir, git(t, w, "rev-parse", "HEAD")
+}
+
+// A worker can reach the mirror's own files by path: what it plants in the mirror's config (a remote URL or proxy
+// for the fetch URL, a CA file, an include) or as a commondir is gone before the next token-bearing fetch.
+func TestMirrorConfigRewrittenBeforeTokenFetch(t *testing.T) {
+	root, work := fakeGitHub(t, "o/r")
+	n := testNode(t)
+	ctx := context.Background()
+	if _, _, _, err := n.EnsureClone(ctx, "o/r", fakeToken); err != nil {
+		t.Fatal(err)
+	}
+	mirror := MirrorDir(n.cfg.StateDir, "o/r")
+	evil, evilSHA := evilRepo(t, filepath.Join(root, "o", "r.git"))
+	evilURL := "file://" + evil + "/o/r.git"
+	inc := filepath.Join(t.TempDir(), "inc")
+	if err := os.WriteFile(inc, []byte("[remote \"https://github.com/o/r.git\"]\n\turl = "+evilURL+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := filepath.Join(mirror, "config")
+	for _, kv := range [][2]string{
+		{"remote.https://github.com/o/r.git.url", evilURL},
+		{"remote.https://github.com/o/r.git.proxy", "http://127.0.0.1:9"},
+		{"http.sslCAInfo", "/tmp/evil-ca.pem"},
+		{"include.path", inc},
+	} {
+		git(t, root, "config", "--file", cfg, kv[0], kv[1])
+	}
+	if err := os.WriteFile(filepath.Join(mirror, "commondir"), []byte(filepath.Join(evil, "o", "r.git")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	git(t, work, "commit", "-q", "--allow-empty", "-m", "real later")
+	git(t, work, "push", "-q", "origin", "trunk")
+	want := git(t, work, "rev-parse", "HEAD")
+
+	calls := wrapGit(t)
+	_, _, base, err := n.EnsureClone(ctx, "o/r", fakeToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if base != want || base == evilSHA {
+		t.Fatalf("base = %s, want the real %s (evil %s)", base, want, evilSHA)
+	}
+	b, err := os.ReadFile(cfg)
+	if err != nil || string(b) != mirrorConfig {
+		t.Fatalf("mirror config = %q, %v; want it rewritten to %q", b, err, mirrorConfig)
+	}
+	if _, err := os.Stat(filepath.Join(mirror, "commondir")); !os.IsNotExist(err) {
+		t.Fatalf("the planted commondir is still there: %v", err)
+	}
+	cmd := exec.Command("git", "rev-parse", "refs/heads/trunk")
+	cmd.Env = append(os.Environ(), "GIT_DIR="+mirror)
+	if out, err := cmd.Output(); err != nil || strings.TrimSpace(string(out)) != want {
+		t.Fatalf("mirror trunk = %s %v, want %s", out, err, want)
+	}
+	seen := false
+	for _, c := range calls() {
+		if c.tokenBearing() && slices.Contains(c.args, "fetch") {
+			seen = true
+			if got, ok := c.config()["remote.https://github.com/o/r.git.proxy"]; !ok || got != "" {
+				t.Errorf("token-bearing fetch: remote.<url>.proxy = %q (set %v), want it pinned to \"\"", got, ok)
+			}
+		}
+	}
+	if !seen {
+		t.Fatal("no token-bearing fetch seen")
+	}
+}
+
+// A worker's insteadOf for the mirror's path in the shared clone's config does not change the next worktree's base:
+// it is the commit the mirror's default branch names; a fetch redirected elsewhere fails the launch instead.
+func TestWorktreeBaseFromMirror(t *testing.T) {
+	root, work := fakeGitHub(t, "o/r")
+	n := testNode(t)
+	ctx := context.Background()
+	clone, _, _, err := n.EnsureClone(ctx, "o/r", fakeToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mirror := MirrorDir(n.cfg.StateDir, "o/r")
+	evil, evilSHA := evilRepo(t, filepath.Join(root, "o", "r.git"))
+	git(t, clone, "config", "url.file://"+evil+"/o/r.git.insteadOf", mirror)
+	git(t, work, "commit", "-q", "--allow-empty", "-m", "real later")
+	git(t, work, "push", "-q", "origin", "trunk")
+	want := git(t, work, "rev-parse", "HEAD")
+	_, def, base, err := n.EnsureClone(ctx, "o/r", fakeToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if base != want {
+		t.Fatalf("base = %s, want the mirror's %s (evil %s)", base, want, evilSHA)
+	}
+	wt := filepath.Join(t.TempDir(), "wt")
+	if err := ensureWorktree(clone, wt, "athena/t-0009", base, cloneGitEnv(clone, "o/r")); err != nil {
+		t.Fatal(err)
+	}
+	if got := git(t, wt, "rev-parse", "HEAD"); got != want || def != "trunk" {
+		t.Fatalf("worktree HEAD = %s (default %q), want %s on trunk", got, def, want)
+	}
+	// A remote named by the mirror's path, if git takes it, redirects the fetch itself: the mirror's commit is then
+	// missing, and the launch fails rather than starting from the worker's history.
+	git(t, clone, "config", "--unset", "url.file://"+evil+"/o/r.git.insteadOf")
+	git(t, clone, "config", "remote."+mirror+".url", "file://"+evil+"/o/r.git")
+	git(t, work, "commit", "-q", "--allow-empty", "-m", "real even later")
+	git(t, work, "push", "-q", "origin", "trunk")
+	later := git(t, work, "rev-parse", "HEAD")
+	if _, _, base, err := n.EnsureClone(ctx, "o/r", fakeToken); err == nil && base != later {
+		t.Fatalf("EnsureClone with a redirected clone fetch set base %s, want %s or a failure", base, later)
+	} else if err == nil {
+		// git did not take the remote for the path: the fetch reached the mirror, and the clone has its commit.
+		if got := git(t, clone, "rev-parse", "refs/remotes/origin/trunk"); got != later {
+			t.Fatalf("clone origin/trunk = %s, want %s", got, later)
+		}
 	}
 }

@@ -63,6 +63,47 @@ func MirrorDir(stateDir, repo string) string {
 	return filepath.Join(stateDir, "mirrors", owner, name+".git")
 }
 
+// mirrorConfig is the whole config of a mirror, rewritten before each of the node's git calls on it: a worker can
+// reach the mirror's files by path, so nothing it writes there (a remote, a proxy, a CA file, an include) survives.
+// A bare repository needs nothing else; the fetches name their URL and refspec.
+const mirrorConfig = "[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = true\n"
+
+// mirrorStray are entries of a git directory that would make git read config or another repository from elsewhere
+// (a linked worktree's commondir and gitdir, worktree config, a nested .git that local transports try first) or
+// define remotes outside config (remotes/, branches/); a mirror has none of them, so the node removes any it finds.
+// The rest of the directory carries no config: info/ holds attributes, exclude and the like, which a bare fetch does
+// not read; objects/ and refs/ hold data, and hooks never run (core.hooksPath).
+var mirrorStray = []string{".git", "commondir", "gitdir", "config.worktree", "remotes", "branches"}
+
+// sanitizeMirror rewrites a mirror's config to mirrorConfig, atomically, and removes mirrorStray.
+func sanitizeMirror(mirror string) error {
+	for _, name := range mirrorStray {
+		if err := os.RemoveAll(filepath.Join(mirror, name)); err != nil {
+			return err
+		}
+	}
+	return writeFileAtomic(filepath.Join(mirror, "config"), mirrorConfig)
+}
+
+// mirrorGit runs git on a mirror: its config is made the node's first, and the repository is named by GIT_DIR, so no
+// discovery (a planted .git) chooses another.
+func mirrorGit(ctx context.Context, mirror string, env []string, args ...string) (string, error) {
+	if err := sanitizeMirror(mirror); err != nil {
+		return "", fmt.Errorf("reset the mirror's config: %w", err)
+	}
+	return runGit(ctx, "", append(env, "GIT_DIR="+mirror), args...)
+}
+
+// writeFileAtomic replaces path with body (0600) through a rename, which also replaces a symlink rather than follow it.
+func writeFileAtomic(path, body string) error {
+	tmp := path + ".athena-tmp"
+	_ = os.Remove(tmp)
+	if err := os.WriteFile(tmp, []byte(body), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
 // cloneURL is a repository's remote: the https URL, lower-case, without credentials.
 func cloneURL(repo string) string {
 	return "https://" + githubHost + "/" + strings.ToLower(repo) + ".git"
@@ -127,7 +168,7 @@ func mirrorGitEnv(mirror, repo string, auth *nodeAuth) []string {
 		{"protocol.file.allow", "never"}, {"protocol.git.allow", "never"}, {"protocol.ssh.allow", "never"},
 		{"protocol.ext.allow", "never"},
 		{"http.sslVerify", "true"}, {"http." + u + ".sslVerify", "true"},
-		{"http.proxy", proxy}, {"http." + u + ".proxy", proxy},
+		{"http.proxy", proxy}, {"http." + u + ".proxy", proxy}, {"remote." + u + ".proxy", proxy},
 		{"http.curloptResolve", ""}, {"http." + u + ".curloptResolve", ""},
 		{"credential.helper", ""}, // no helper of anyone else answers for the node
 	}...)
@@ -141,26 +182,22 @@ func mirrorGitEnv(mirror, repo string, auth *nodeAuth) []string {
 	return withGitConfig(env, append(cfg, nodeGitExtra...))
 }
 
-// cloneGitEnv is the environment of the node's git on the worktrees' clone: no system config, no credential helper and
-// no token, only the file protocol (the mirror), hooks and fsmonitor off. The owner's global config still applies (the
-// checkout of a worktree needs its filters).
+// cloneGitEnv is the environment of the node's git on the worktrees' clone: the clone's node-written system file
+// (which maps the mirror's path to itself), no credential helper and no token, only the file protocol (the mirror),
+// hooks and fsmonitor off. The owner's global config still applies (the checkout of a worktree needs its filters).
 func cloneGitEnv(clone, repo string) []string {
-	env := append(nodeGitBaseEnv(), "GIT_CONFIG_NOSYSTEM=1")
+	env := append(nodeGitBaseEnv(), "GIT_CONFIG_SYSTEM="+systemConfig(clone))
 	return withGitConfig(env, append(slices.Clone(noHooks), [][2]string{
 		{"protocol.allow", "never"}, {"protocol.file.allow", "always"}, {"credential.helper", ""},
 	}...))
 }
 
-// writeSystemConfig writes a mirror's system config: the clone URL rewritten to githubTarget, which is the URL itself
-// outside tests. Being read first, it wins over every insteadOf of the same length in later config.
-func writeSystemConfig(mirror, repo string) error {
+// writeSystemConfig writes the system config of the node's git on dir: from rewritten to to. Being read first, it wins
+// over every insteadOf of the same length in later config. For a mirror it maps the clone URL to githubTarget (the URL
+// itself outside tests); for the clone, the mirror's path to itself.
+func writeSystemConfig(dir, from, to string) error {
 	q := func(s string) string { return strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(s) }
-	body := fmt.Sprintf("[url \"%s\"]\n\tinsteadOf = %s\n", q(githubTarget(repo)), cloneURL(repo))
-	tmp := systemConfig(mirror) + ".tmp"
-	if err := os.WriteFile(tmp, []byte(body), 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, systemConfig(mirror))
+	return writeFileAtomic(systemConfig(dir), fmt.Sprintf("[url \"%s\"]\n\tinsteadOf = %s\n", q(to), q(from)))
 }
 
 // nodeGrant is a token the node's helper may fetch, for one repository, while one git call runs.
@@ -180,57 +217,69 @@ func (n *Node) grantNode(repo, tok string) (nonce string, revoke func()) {
 	return nonce, func() { n.grants.Delete(nonce) }
 }
 
-// EnsureClone brings the node's copies of repo (owner/name) up to date and returns the worktrees' clone and the
-// remote's default branch: it clones or fetches the mirror from GitHub with tok, through the node's credential helper
-// (tok is never in a config, a URL, an argument or an environment), then clones or fetches the clone from the mirror
-// with no credential at all.
-func (n *Node) EnsureClone(ctx context.Context, repo, tok string) (clone, defaultBranch string, err error) {
+// EnsureClone brings the node's copies of repo (owner/name) up to date and returns the worktrees' clone, the remote's
+// default branch and base, the commit the mirror's default branch names, which new worktrees start from. It clones or
+// fetches the mirror from GitHub with tok, through the node's credential helper (tok is never in a config, a URL, an
+// argument or an environment), then clones or fetches the clone from the mirror with no credential at all, and checks
+// the clone has base: a fetch a worker redirected fails the launch rather than set its base.
+func (n *Node) EnsureClone(ctx context.Context, repo, tok string) (clone, defaultBranch, base string, err error) {
 	if _, _, err := splitRepo(repo); err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	if n.cfg.StateDir == "" {
-		return "", "", fmt.Errorf("no state directory for repository clones")
+		return "", "", "", fmt.Errorf("no state directory for repository clones")
 	}
 	mirror, clone := MirrorDir(n.cfg.StateDir, repo), CloneDir(n.cfg.StateDir, repo)
 	unlock := lockRepo(clone)
 	defer unlock()
 	for _, d := range []string{filepath.Dir(mirror), filepath.Dir(clone)} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
-			return "", "", err
+			return "", "", "", err
 		}
 	}
-	if err := writeSystemConfig(mirror, repo); err != nil {
-		return "", "", err
+	if err := writeSystemConfig(mirror, cloneURL(repo), githubTarget(repo)); err != nil {
+		return "", "", "", err
+	}
+	if err := writeSystemConfig(clone, mirror, mirror); err != nil {
+		return "", "", "", err
 	}
 	if err := n.syncMirror(ctx, mirror, repo, tok); err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
-	// The mirror is the node's own: its HEAD, not the clone's, names the default branch.
-	defaultBranch, err = runGit(ctx, mirror, mirrorGitEnv(mirror, repo, nil), "symbolic-ref", "--quiet", "--short", "HEAD")
+	// The mirror is the node's own: its HEAD names the default branch, and its ref the base.
+	menv := mirrorGitEnv(mirror, repo, nil)
+	defaultBranch, err = mirrorGit(ctx, mirror, menv, "symbolic-ref", "--quiet", "--short", "HEAD")
 	if err != nil || defaultBranch == "" {
-		return "", "", fmt.Errorf("cannot tell the default branch of %s: %v", repo, err)
+		return "", "", "", fmt.Errorf("cannot tell the default branch of %s: %v", repo, err)
+	}
+	base, err = mirrorGit(ctx, mirror, menv, "rev-parse", "--verify", "refs/heads/"+defaultBranch+"^{commit}")
+	if err != nil {
+		return "", "", "", fmt.Errorf("the mirror of %s has no %s: %w", repo, defaultBranch, err)
 	}
 	env := cloneGitEnv(clone, repo)
 	if _, err := os.Stat(filepath.Join(clone, ".git")); err != nil {
 		_ = os.RemoveAll(clone)
 		if _, err := runGit(ctx, "", env, "clone", "--quiet", mirror, clone); err != nil {
 			_ = os.RemoveAll(clone)
-			return "", "", fmt.Errorf("clone %s from its mirror: %w", repo, err)
+			return "", "", "", fmt.Errorf("clone %s from its mirror: %w", repo, err)
 		}
 	} else if _, err := runGit(ctx, clone, env, "fetch", "--quiet", "--prune", mirror, "+refs/heads/*:refs/remotes/origin/*"); err != nil {
-		return "", "", fmt.Errorf("fetch %s from its mirror: %w", repo, err)
+		return "", "", "", fmt.Errorf("fetch %s from its mirror: %w", repo, err)
+	}
+	if _, err := runGit(ctx, clone, env, "cat-file", "-e", base+"^{commit}"); err != nil {
+		return "", "", "", fmt.Errorf("the clone of %s lacks the mirror's %s commit %s after its fetch: %w", repo, defaultBranch, base, err)
 	}
 	// Fetches come from the mirror; a worker's git push goes to GitHub, with its session's own token.
 	if _, err := runGit(ctx, clone, env, "config", "remote.origin.url", mirror); err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	if _, err := runGit(ctx, clone, env, "config", "remote.origin.pushurl", cloneURL(repo)); err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	if err := os.Chmod(clone, 0o700); err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
-	return clone, defaultBranch, nil
+	return clone, defaultBranch, base, nil
 }
 
 // syncMirror clones the mirror from GitHub the first time and fetches it otherwise, with the token through a nonce
@@ -246,8 +295,12 @@ func (n *Node) syncMirror(ctx context.Context, mirror, repo, tok string) error {
 			_ = os.RemoveAll(mirror)
 			return fmt.Errorf("clone %s: %w", repo, err)
 		}
-	} else if _, err := runGit(ctx, mirror, env, "fetch", "--quiet", "--prune", cloneURL(repo), "+refs/heads/*:refs/heads/*"); err != nil {
+	} else if _, err := mirrorGit(ctx, mirror, env, "fetch", "--quiet", "--prune", cloneURL(repo), "+refs/heads/*:refs/heads/*"); err != nil {
 		return fmt.Errorf("fetch %s: %w", repo, err)
+	}
+	revoke()
+	if err := sanitizeMirror(mirror); err != nil {
+		return err
 	}
 	return os.Chmod(mirror, 0o700)
 }
@@ -308,11 +361,11 @@ func (n *Node) prepareGitHub(s *session) error {
 	if err != nil {
 		return err
 	}
-	clone, def, err := n.EnsureClone(n.ctx, p.github, tok)
+	clone, _, base, err := n.EnsureClone(n.ctx, p.github, tok)
 	if err != nil {
 		return err
 	}
 	unlock := lockRepo(clone)
 	defer unlock()
-	return ensureWorktree(clone, p.workDir, branchName(s.t), "origin/"+def, cloneGitEnv(clone, p.github))
+	return ensureWorktree(clone, p.workDir, branchName(s.t), base, cloneGitEnv(clone, p.github))
 }

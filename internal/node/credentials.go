@@ -222,7 +222,7 @@ func (n *Node) handleCredential(ctx context.Context, req CredentialRequest) Cred
 }
 
 // handleNodeCredential answers the helper of one of the node's own git calls, by its nonce, for that call's
-// repository on https://github.com only.
+// repository on https://github.com only, and once: the answer uses the nonce up.
 func (n *Node) handleNodeCredential(req CredentialRequest) CredentialResponse {
 	v, ok := n.grants.Load(req.Nonce)
 	if req.Nonce == "" || !ok {
@@ -233,6 +233,10 @@ func (n *Node) handleNodeCredential(req CredentialRequest) CredentialResponse {
 	if !strings.EqualFold(req.Protocol, "https") || !strings.EqualFold(req.Host, githubHost) || !samePath(req.Path, g.repo) {
 		n.log.Warn("node credential refused: not the clone's repository", "repo", g.repo, "protocol", req.Protocol, "host", req.Host)
 		return CredentialResponse{Error: "credentials are only for https://" + githubHost + "/" + g.repo}
+	}
+	// One answer per nonce (R27): git asks once per call, and a copy of the nonce seen meanwhile is worth nothing.
+	if !n.grants.CompareAndDelete(req.Nonce, g) {
+		return CredentialResponse{Error: "unknown or expired nonce"}
 	}
 	return CredentialResponse{OK: true, Token: string(g.token), Repo: g.repo}
 }

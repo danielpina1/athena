@@ -688,15 +688,14 @@ func TestNodeGitHasNoTokenInEnvOrArgs(t *testing.T) {
 func TestCloneHelperRefusesOtherHost(t *testing.T) {
 	h := newGHHarness(t, &fakeCreds{}, nil)
 	nonce, revoke := h.n.grantNode("o/r", fakeToken)
+	defer revoke()
 	helper := func(nonce, req string) string {
 		var out bytes.Buffer
 		env := []string{"ATHENA_SOCKET=" + h.cfg.SocketPath}
 		RunGitCredential([]string{"--node", nonce, "get"}, strings.NewReader(req), &out, io.Discard, env)
 		return out.String()
 	}
-	if got := helper(nonce, "protocol=https\nhost=github.com\npath=o/r.git\n"); got != "username=x-access-token\npassword="+fakeToken+"\n" {
-		t.Fatalf("own repository: %q", got)
-	}
+	own := "protocol=https\nhost=github.com\npath=o/r.git\n"
 	for _, req := range []string{
 		"protocol=https\nhost=evil.example\npath=o/r.git\n",
 		"protocol=https\nhost=github.com\npath=o/s.git\n",
@@ -707,11 +706,19 @@ func TestCloneHelperRefusesOtherHost(t *testing.T) {
 			t.Errorf("request %q answered %q", req, got)
 		}
 	}
-	if got := helper("not-a-nonce", "protocol=https\nhost=github.com\npath=o/r.git\n"); got != "" {
+	if got := helper("not-a-nonce", own); got != "" {
 		t.Errorf("a made-up nonce got %q", got)
 	}
-	revoke()
-	if got := helper(nonce, "protocol=https\nhost=github.com\npath=o/r.git\n"); got != "" {
+	// A refused request does not use the nonce up; the first answer does (R27).
+	if got := helper(nonce, own); got != "username=x-access-token\npassword="+fakeToken+"\n" {
+		t.Fatalf("own repository: %q", got)
+	}
+	if got := helper(nonce, own); got != "" {
+		t.Errorf("a second use of the nonce got %q", got)
+	}
+	again, revokeAgain := h.n.grantNode("o/r", fakeToken)
+	revokeAgain()
+	if got := helper(again, own); got != "" {
 		t.Errorf("a revoked nonce got %q", got)
 	}
 	// git asks the node's helper only for https://github.com: a helper that would answer anything is never asked
