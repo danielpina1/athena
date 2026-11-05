@@ -148,3 +148,11 @@ test("task list items show a box that says whether they are done", () => {
   expect(items[1].textContent).toBe("Not done: send it");
   expect(items[2].textContent).toBe("plain item");
 });
+
+test("in the log, #### and deeper headings stay at ### size", () => {
+  const c = md("### Three\n\n#### Four\n\n###### Six");
+  const [three, four, six] = [...c.querySelectorAll("[data-md=heading]")];
+  expect(four.className).toBe(three.className);
+  expect(six.className).toBe(three.className);
+  expect(c.querySelector("h1, h2, h3, h4, h5, h6")).toBeNull();
+});

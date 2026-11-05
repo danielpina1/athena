@@ -59,6 +59,26 @@ test("the mark carries the link's state after the banner's delay, in words after
   }
 });
 
+test("before the link has ever connected, the mark never says Connected", () => {
+  vi.useFakeTimers();
+  try {
+    const link = fakeLink("connecting");
+    const view = render(<AthenaMark link={link}>Athena</AthenaMark>);
+    const el = view.container.querySelector("[data-mark]")!;
+    expect(el.getAttribute("data-link")).toBe("connecting");
+    expect(view.container.textContent).toBe("Athena, Connecting");
+    act(() => link.set("offline"));
+    expect(view.container.textContent).toBe("Athena, Offline");
+    act(() => link.set("open"));
+    expect(view.container.textContent).toBe("Athena, Connected");
+    // After a first connect, a blip is hidden for the banner's delay.
+    act(() => link.set("connecting"));
+    expect(view.container.textContent).toBe("Athena, Connected");
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
 test("offline has a cue besides its colour: a slash through a hollow mark", () => {
   const css = readFileSync(join(import.meta.dirname, "..", "index.css"), "utf8");
   const offline = /\.athena-mark\[data-link="offline"\]::before,\s*\.athena-mark\[data-link="signedOut"\]::before\s*\{([^}]*)\}/.exec(css)?.[1] ?? "";

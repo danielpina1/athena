@@ -35,7 +35,7 @@ const clock = new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-d
  * retrying" (a connecting attempt is the retrying) instead of changing on every flip. lastUpdate is when the last
  * data frame came (LinkClient.onFrame never passes Ping or Pong).
  */
-type Health = { status: LinkStatus; downSince?: number; late: boolean; sawOffline: boolean; lastUpdate?: number };
+type Health = { status: LinkStatus; downSince?: number; late: boolean; sawOffline: boolean; lastUpdate?: number; everOpen: boolean };
 
 const isDown = (s: LinkStatus) => s === "connecting" || s === "offline";
 
@@ -45,7 +45,7 @@ const watchers = new WeakMap<LinkSource, { get(): Health; subscribe(cb: () => vo
 function watch(link: LinkSource) {
   let w = watchers.get(link);
   if (w) return w;
-  let health: Health = { status: link.status, late: false, sawOffline: false };
+  let health: Health = { status: link.status, late: false, sawOffline: false, everOpen: link.status === "open" };
   let timer: ReturnType<typeof setTimeout> | undefined;
   const listeners = new Set<() => void>();
   const set = (next: Health) => {
@@ -56,7 +56,7 @@ function watch(link: LinkSource) {
     if (!isDown(status)) {
       clearTimeout(timer);
       timer = undefined;
-      set({ ...health, status, downSince: undefined, late: false, sawOffline: false });
+      set({ ...health, status, downSince: undefined, late: false, sawOffline: false, everOpen: health.everOpen || status === "open" });
       return;
     }
     const sawOffline = health.sawOffline || status === "offline";
@@ -87,13 +87,14 @@ function watch(link: LinkSource) {
 }
 
 /**
- * The link's status as the shell shows it (Athena's mark): a drop shorter than BANNER_DELAY_MS, the banner's own
- * delay, still shows open, so a reconnect blip flashes nothing.
+ * The link's status as the shell shows it (Athena's mark): once the link has been open, a drop shorter than
+ * BANNER_DELAY_MS, the banner's own delay, still shows open, so a reconnect blip flashes nothing. Before the first
+ * open it is the link's own status: the mark never says Connected before it has been.
  */
 export function useShownLinkStatus(link: LinkSource): LinkStatus {
   const w = watch(link);
-  const { status, late } = useSyncExternalStore(w.subscribe, w.get);
-  return isDown(status) && !late ? "open" : status;
+  const { status, late, everOpen } = useSyncExternalStore(w.subscribe, w.get);
+  return everOpen && isDown(status) && !late ? "open" : status;
 }
 
 /**
