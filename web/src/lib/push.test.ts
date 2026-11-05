@@ -244,6 +244,45 @@ describe("after sign-in", () => {
     expect(pushState()).toBe("on");
   });
 
+  test("a start that finds the session live sends no PushSubscribe and asks for no step-up", async () => {
+    // The session (and so its subscription on the server) outlived the page: a reload, or the installed app opened
+    // again. Its step-up window closed long ago, so a PushSubscribe would be refused for a passkey prompt.
+    permission = "granted";
+    current = fakeSub();
+    const server = new FakeServer();
+    const runtime = createRuntime({
+      url: "ws://athena.test/ws",
+      clientId: "abcdefghijklmnop",
+      WebSocketImpl: server.WebSocket,
+      indexedDB: new IDBFactory(),
+    });
+    made.push(runtime);
+    actions.setOutbox(runtime.outbox);
+    const reauth = vi.fn(async () => false); // the owner cancels the prompt, if one comes
+    runtime.outbox.setReauthHandler(reauth);
+    fakeFetch({
+      "GET /auth/session": { json: { authenticated: true, reauthValidUntil: new Date(Date.now() - 3600_000).toISOString() } },
+    });
+    render(createElement(SessionGate, { runtime, children: createElement("p", null, "the app") }));
+    await screen.findByText("the app");
+    server.welcome();
+    await waitFor(() => expect(runtime.client.status).toBe("open"));
+    await waitFor(() => expect(pushState()).toBe("on"));
+    await runtime.outbox.settled();
+    // The server refuses any PushSubscribe for want of a step-up.
+    for (const c of server.socket.sent("command")) {
+      if (c.action.case !== "pushSubscribe") continue;
+      server.socket.push({ body: { case: "commandResult", value: { id: c.id, ok: false, code: "reauth_required" } } }, { durable: true });
+    }
+    await runtime.outbox.settled();
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(server.socket.sent("command").map((c) => c.action.case)).not.toContain("pushSubscribe");
+    expect(reauth).not.toHaveBeenCalled();
+    // The server still holds this session's subscription: the setting says on.
+    expect(pushState()).toBe("on");
+  });
+
   test("never prompts and sends nothing without permission or a subscription", async () => {
     // Permission not granted: nothing, and no prompt.
     current = fakeSub();

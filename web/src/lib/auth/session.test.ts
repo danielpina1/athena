@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { useAthena } from "@/lib/store/state";
-import { bindSession, createEnrollLink, enroll, getSession, reauth, signIn, signOut } from "./session";
+import { bindSession, createEnrollLink, enroll, getSession, reauth, requestSignOut, signIn, signOut } from "./session";
 import { ASSERTION, CREATION, expectedAttestation, fakeCredentials, fakeFetch } from "./testkit";
 
 beforeEach(() => {
@@ -123,4 +123,30 @@ test("createEnrollLink asks for a link and returns it with its expiry", async ()
 
   fakeFetch({ "POST /auth/enroll-link": { status: 403, json: { code: "reauth_required", error: "confirm with your passkey first" } } });
   await expect(createEnrollLink()).rejects.toMatchObject({ code: "reauth_required", status: 403 });
+});
+
+test("the owner's Sign out goes through the app's own sign-out when one is bound", async () => {
+  const { calls } = fakeFetch({ "POST /auth/logout": { json: { authenticated: false } } });
+  const clear = vi.fn();
+  const onSignOut = vi.fn(async () => {});
+  bindSession({ outbox: { clear }, onSignOut });
+  await requestSignOut();
+  // The runtime's sign-out does the logout itself (and stops the link first): nothing is done twice here.
+  expect(onSignOut).toHaveBeenCalledTimes(1);
+  expect(calls).toEqual([]);
+  expect(clear).not.toHaveBeenCalled();
+
+  onSignOut.mockRejectedValueOnce(new Error("logout refused"));
+  await expect(requestSignOut()).rejects.toThrow("logout refused");
+});
+
+test("without a bound sign-out, the owner's Sign out logs out and clears the queue and the state", async () => {
+  const { calls } = fakeFetch({ "POST /auth/logout": { json: { authenticated: false } } });
+  const clear = vi.fn();
+  bindSession({ outbox: { clear } });
+  useAthena.setState({ epoch: "e1" });
+  await requestSignOut();
+  expect(calls.map((c) => c.path)).toEqual(["/auth/logout"]);
+  expect(clear).toHaveBeenCalledTimes(1);
+  expect(useAthena.getState().epoch).toBe("");
 });

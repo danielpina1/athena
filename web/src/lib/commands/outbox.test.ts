@@ -504,6 +504,54 @@ describe("Outbox", () => {
     expect(link.ids()).toEqual([]);
   });
 
+  test("a session ender a reload brought back is still dropped when the session ends", async () => {
+    // Queued offline, then the page reloads (or a second tab loads the record): the flag comes back with it.
+    const before = new Outbox(idb, () => false);
+    void before.submit(revokeMe, { endsSession: true });
+    void before.submit(reply());
+    await before.settled();
+
+    const link = new FakeLink();
+    const after = new Outbox(idb, link.send);
+    await after.settled();
+    expect(after.pending().map((c) => c.action.case)).toEqual(["revokePasskey", "reply"]);
+    after.dropSessionEnders();
+    await after.settled();
+    // The other command stays, and goes out after the next sign-in; the revoke never does.
+    link.connect(after);
+    await after.settled();
+    expect(link.actions().map((a) => a?.case)).toEqual(["reply"]);
+    const again = new Outbox(idb, () => true);
+    await again.settled();
+    expect(again.pending().map((c) => c.action.case)).toEqual(["reply"]);
+  });
+
+  test("a session ending before the reload's commands are loaded still drops their session enders", async () => {
+    const before = new Outbox(idb, () => false);
+    void before.submit(revokeMe, { endsSession: true });
+    void before.submit(reply());
+    await before.settled();
+
+    // The start-up check says signed out before IndexedDB answered.
+    const after = new Outbox(idb, () => true);
+    after.dropSessionEnders();
+    await after.settled();
+    expect(after.pending().map((c) => c.action.case)).toEqual(["reply"]);
+  });
+
+  test("an explicit sign-out before the reload's commands are loaded forgets them too", async () => {
+    const before = new Outbox(idb, () => false);
+    void before.submit(reply());
+    await before.settled();
+    const link = new FakeLink();
+    const after = new Outbox(idb, link.send);
+    after.clear();
+    link.connect(after);
+    await after.settled();
+    expect(after.pending()).toEqual([]);
+    expect(link.ids()).toEqual([]);
+  });
+
   test("without IndexedDB the outbox still works in memory", async () => {
     const broken = { open: () => { throw new Error("blocked"); } } as unknown as IDBFactory;
     const reportError = vi.fn();

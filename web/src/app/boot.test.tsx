@@ -5,7 +5,9 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { createRuntime, type Runtime, SIGNED_OUT_NOTICE } from "@/app/boot";
 import { cancelReauth, requestReauth } from "@/features/auth/ReauthDialog";
 import { SessionGate } from "@/app/SessionGate";
+import { requestSignOut } from "@/lib/auth/session";
 import { ASSERTION, fakeCredentials, fakeFetch } from "@/lib/auth/testkit";
+import { Outbox } from "@/lib/commands/outbox";
 import { FakeServer } from "@/lib/link/fakeServer";
 import { useAthena } from "@/lib/store/state";
 
@@ -17,13 +19,13 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-function setup() {
+function setup(indexedDB: IDBFactory = new IDBFactory()) {
   const server = new FakeServer();
   const runtime = createRuntime({
     url: "ws://athena.test/ws",
     clientId: "abcdefghijklmnop",
     WebSocketImpl: server.WebSocket,
-    indexedDB: new IDBFactory(),
+    indexedDB,
   });
   made.push(runtime);
   return { server, runtime };
@@ -125,6 +127,69 @@ test("an explicit sign out clears the queue and resumes from an empty store", as
   server.welcome("e2");
   const hello = server.socket.sent("hello")[0];
   expect([hello.epoch, hello.cursor]).toEqual(["", 0n]);
+});
+
+test("an explicit sign out in another tab forgets this tab's queue too", async () => {
+  const here = setup();
+  const other = setup(); // another tab of the app, on the same device
+  fakeFetch({
+    "GET /auth/session": { json: { authenticated: true } },
+    "POST /auth/logout": { json: { authenticated: false } },
+  });
+  gate(here.runtime);
+  await screen.findByText("the app");
+  here.server.welcome();
+  await waitFor(() => expect(here.runtime.client.status).toBe("open"));
+  const rollback = vi.fn();
+  const waiting = here.runtime.outbox.submit({ case: "reply", value: { ticketId: "T-1", text: "hi" } }, { rollback });
+  await here.runtime.outbox.settled();
+
+  await other.runtime.checkSession();
+  await act(() => other.runtime.signOut());
+  // Nothing may be sent for this device again: not from this tab either, after its next sign-in.
+  expect((await waiting).code).toBe("unauthenticated");
+  expect(rollback).toHaveBeenCalledTimes(1);
+  expect(here.runtime.outbox.pending()).toEqual([]);
+});
+
+test("a session that expires in another tab leaves this tab's queue alone", async () => {
+  const here = setup();
+  const other = setup();
+  fakeFetch({ "GET /auth/session": { json: { authenticated: true } } });
+  gate(here.runtime);
+  await screen.findByText("the app");
+  here.server.welcome();
+  void here.runtime.outbox.submit({ case: "reply", value: { ticketId: "T-1", text: "hi" } });
+  await here.runtime.outbox.settled();
+
+  await other.runtime.checkSession();
+  other.server.welcome();
+  act(() => other.server.socket.serverClose(4002));
+  await other.runtime.outbox.settled();
+  await new Promise((r) => setTimeout(r, 10));
+  expect(here.runtime.outbox.pending().map((c) => c.action.case)).toEqual(["reply"]);
+});
+
+test("the owner's Sign out button goes through the runtime: link stopped, queue and state cleared", async () => {
+  const { server, runtime } = setup();
+  const { calls } = fakeFetch({
+    "GET /auth/session": { json: { authenticated: true } },
+    "POST /auth/logout": { json: { authenticated: false } },
+  });
+  gate(runtime);
+  await screen.findByText("the app");
+  server.welcome("e1");
+  useAthena.setState({ epoch: "e1", cursor: 3n });
+  const waiting = runtime.outbox.submit({ case: "reply", value: { ticketId: "T-1", text: "hi" } });
+  await runtime.outbox.settled();
+
+  await act(() => requestSignOut()); // what Settings › Devices calls
+  expect(calls.filter((c) => c.path === "/auth/logout")).toHaveLength(1);
+  expect((await waiting).code).toBe("unauthenticated");
+  expect(runtime.outbox.pending()).toEqual([]);
+  expect(useAthena.getState().epoch).toBe("");
+  expect(runtime.client.status).toBe("offline");
+  expect(await screen.findByRole("button", { name: "Sign in with passkey" })).toBeTruthy();
 });
 
 test("three failed connects check the session", async () => {
@@ -247,6 +312,27 @@ test("close 4002 drops a revoke of this device, so it is never replayed after si
   server.welcome();
   await runtime.outbox.settled();
   expect(server.socket.sent("command")).toHaveLength(0);
+});
+
+test("a page that starts signed out drops a revoke of this device a reload brought back", async () => {
+  // The revoke was queued offline and the page closed; the session ended meanwhile (expiry, or a sign-out elsewhere).
+  const idb = new IDBFactory();
+  const earlier = new Outbox(idb, () => false);
+  void earlier.submit({ case: "revokePasskey", value: { id: "P-me" } }, { endsSession: true });
+  void earlier.submit({ case: "reply", value: { ticketId: "T-1", text: "hi" } });
+  await earlier.settled();
+
+  const { server, runtime } = setup(idb);
+  fakeFetch({ "GET /auth/session": { json: { authenticated: false } }, ...signInRoutes });
+  fakeCredentials();
+  const user = userEvent.setup();
+  gate(runtime);
+  await user.click(await screen.findByRole("button", { name: "Sign in with passkey" }));
+  await screen.findByText("the app");
+  server.welcome();
+  await runtime.outbox.settled();
+  // The fresh sign-in gets the reply, never the revoke that would sign it straight out again.
+  expect(server.socket.sent("command").map((c) => c.action.case)).toEqual(["reply"]);
 });
 
 test("an explicit sign out leaves no step-up request behind", async () => {

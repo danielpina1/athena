@@ -1,7 +1,8 @@
 // Web Push on this device: whether it can, may and does get notifications, and turning them on or off. A subscription
 // is made with the server's VAPID key (GET /push/key) and given to the server with PushSubscribe; plan 3 ties it to
 // the web session, so after every sign-in the app sends the existing one again (resubscribePush), quietly: it never
-// asks for permission and never subscribes a device the owner turned off.
+// asks for permission and never subscribes a device the owner turned off. A start that finds the session still live
+// sends nothing (readPushState): the server has the subscription already.
 import type { CommandResult } from "@/gen/athena/v1/commands_pb";
 import * as actions from "@/lib/commands/actions";
 
@@ -150,7 +151,8 @@ export async function disablePush(): Promise<PushState> {
 
 /**
  * After a sign-in: gives the server this device's existing subscription again, when notifications are allowed.
- * Never prompts and never makes a new subscription; any failure is silent (the setting shows the state).
+ * Never prompts for permission and never makes a new subscription; any failure is silent (the setting shows the
+ * state). Only a fresh sign-in may call it: its step-up window is open, so PushSubscribe needs no passkey prompt.
  */
 export async function resubscribePush(): Promise<void> {
   try {
@@ -161,6 +163,21 @@ export async function resubscribePush(): Promise<void> {
     if (sub && !(await actions.pushSubscribe(sub.toJSON())).ok) changed(false);
   } catch {
     // quiet: the Notifications setting offers to turn it on again
+  }
+}
+
+/**
+ * A start that found the session live (a reload, the installed app opened again): the server still holds this
+ * session's subscription, so nothing is sent, which would need a passkey step-up. The setting just reads this
+ * device's subscription.
+ */
+export async function readPushState(): Promise<void> {
+  try {
+    if (!supported() || Notification.permission !== "granted") return;
+    const sub = await (await registration())?.pushManager.getSubscription();
+    changed(sub != null);
+  } catch {
+    // quiet: the setting stays off until the owner turns it on
   }
 }
 

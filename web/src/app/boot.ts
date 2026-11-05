@@ -7,7 +7,7 @@ import { AuthError, getSession, bindSession, signOut as endSession } from "@/lib
 import { setOutbox } from "@/lib/commands/actions";
 import { connectOutbox, linkSender, Outbox } from "@/lib/commands/outbox";
 import { LinkClient } from "@/lib/link/client";
-import { resubscribePush } from "@/lib/push";
+import { readPushState, resubscribePush } from "@/lib/push";
 import { connectStreams } from "@/lib/stream/useSessionStream";
 import { connectStore, useAthena } from "@/lib/store/state";
 import { appUpdates } from "@/lib/update";
@@ -18,6 +18,9 @@ export type Phase = { kind: "checking" } | { kind: "signedOut"; notice?: string 
 
 export const SIGNED_OUT_NOTICE = "You were signed out on this device.";
 export const SERVER_ERROR_NOTICE = "Athena's server had an error. Try again in a moment.";
+/** The other tabs of this origin hear this tab's explicit sign-out on it. */
+const TABS_CHANNEL = "athena";
+type TabMessage = { kind: "signedOut" };
 /** Link attempts that fail before a Welcome, in a row, after which the session is checked. */
 export const FAILURES_BEFORE_CHECK = 3;
 
@@ -32,7 +35,10 @@ export type Runtime = {
   signedIn(): void;
   /** Stops the link and the listeners; for tests and teardown. */
   dispose(): void;
-  /** Explicit sign-out: ends the session, forgets the queue and the state. Throws if the server did not take it. */
+  /**
+   * Explicit sign-out: ends the session, forgets the queue and the state, here and in the other tabs. Throws if the
+   * server did not take it.
+   */
   signOut(): Promise<void>;
 };
 
@@ -115,13 +121,29 @@ export function createRuntime(opts: RuntimeOptions): Runtime {
   // The server refused a command as unauthenticated: the session is gone though the link had not noticed yet.
   outbox.setSignOutHandler(() => leave(SIGNED_OUT_NOTICE));
 
-  const connect = () => {
+  // An explicit sign-out in another tab means nothing may be sent for this device again: this tab forgets its queue
+  // too (its link gets the 4002 and shows sign-in). An expiry or a revoke elsewhere is not told here: leave() keeps it.
+  const tabs = typeof BroadcastChannel === "undefined" ? undefined : new BroadcastChannel(TABS_CHANNEL);
+  if (tabs) {
+    tabs.onmessage = (ev: MessageEvent<TabMessage>) => {
+      if (ev.data?.kind !== "signedOut") return;
+      outbox.clear();
+      if (phase() === "signedIn") leave(SIGNED_OUT_NOTICE);
+    };
+  }
+
+  /**
+   * Connects with the session. signedIn is a fresh sign-in: plan 3 ended the device's push subscription with the old
+   * session, so this one is given it again (its step-up window is open, no prompt). A start that found the session
+   * live sends nothing, which would need a passkey step-up for an action the owner never took: the server still has
+   * it.
+   */
+  const connect = (signedIn: boolean) => {
     resetCount();
     client.stop();
     client.start();
     setPhase({ kind: "signedIn" });
-    // Plan 3 ends a push subscription with its session: this session is given the device's again.
-    void resubscribePush();
+    void (signedIn ? resubscribePush() : readPushState());
   };
 
   // The start-up check failed (no network, or a server error): ask again when the network is back or the page is shown.
@@ -166,10 +188,13 @@ export function createRuntime(opts: RuntimeOptions): Runtime {
         try {
           if ((await getSession()).signedIn) {
             // Already showing the offline shell: its link is running and reconnects on its own.
-            if (phase() !== "signedIn") connect();
+            if (phase() !== "signedIn") connect(false);
           } else if (phase() === "signedIn") {
             leave(SIGNED_OUT_NOTICE); // the offline shell, and the session ended meanwhile
           } else {
+            // A reload's (or another tab's) revoke of this device, queued before the session ended: never replayed
+            // into the sign-in that follows, as leave() does.
+            outbox.dropSessionEnders();
             setPhase({ kind: "signedOut" });
           }
         } catch (e) {
@@ -181,7 +206,7 @@ export function createRuntime(opts: RuntimeOptions): Runtime {
           } else if (navigator.serviceWorker?.controller) {
             // No network, in the installed app (the service worker served this page from its cache): the app, with
             // the link's "unreachable" banner, until the server answers.
-            if (phase() !== "signedIn") connect();
+            if (phase() !== "signedIn") connect(false);
           } else {
             setPhase({ kind: "signedOut", notice: "Could not reach Athena. Check your connection." });
           }
@@ -190,7 +215,7 @@ export function createRuntime(opts: RuntimeOptions): Runtime {
       })();
       return checked;
     },
-    signedIn: connect,
+    signedIn: () => connect(true),
     async signOut() {
       client.stop();
       try {
@@ -202,10 +227,12 @@ export function createRuntime(opts: RuntimeOptions): Runtime {
       cancelReauth(); // no stale step-up request survives into the next login
       resetCount();
       setPhase({ kind: "signedOut" });
+      tabs?.postMessage({ kind: "signedOut" } satisfies TabMessage);
     },
     dispose() {
       client.stop();
       unwatchOnline();
+      tabs?.close();
     },
   };
   return runtime;

@@ -57,8 +57,11 @@ const DB_NAME = "athena";
 const DB_VERSION = 1;
 const STORE = "outbox";
 
-/** One stored command, as IndexedDB holds it. */
-type Stored = { id: string; bytes: Uint8Array; createdAt: number };
+/**
+ * One stored command, as IndexedDB holds it. endsSession goes with it, so a reload or another tab that loads it still
+ * drops it when the session ends (absent in records written before it was kept: false).
+ */
+type Stored = { id: string; bytes: Uint8Array; createdAt: number; endsSession?: boolean };
 
 /** The commands that belong to the connection: never stored, re-sent on every open from what is tracked. */
 const CONNECTION_ACTIONS = new Set<Command["action"]["case"]>(["watchTicket", "unwatchTicket", "visibility"]);
@@ -87,7 +90,8 @@ type Entry = {
   endsSession?: boolean;
   /**
    * It reached the server and no answer since says it was not carried out: the server may have run it. False until
-   * sent, and again after a reauth_required or unauthenticated answer (nothing was done).
+   * sent, and again after a reauth_required or unauthenticated answer (nothing was done). A command a reload brought
+   * back starts true: whether the page before sent it is not known.
    */
   mayHaveRun?: boolean;
   rollback?: (s: AthenaState) => void;
@@ -121,6 +125,12 @@ export class Outbox {
   /** IndexedDB writes, one after another in the order they were made, so a delete never overtakes its put. */
   private work: Promise<void> = Promise.resolve();
   private readonly loaded: Promise<void>;
+  /** The reload's commands are in entries. */
+  private isLoaded = false;
+  /** The session ended before they were: their session enders are dropped as they are read. */
+  private endedBeforeLoad = false;
+  /** An explicit sign-out came before they were: they are forgotten as they are read. */
+  private clearedBeforeLoad = false;
 
   /** send puts a command on the link; it returns false when the link is not open (nothing was sent). */
   constructor(db: IDBFactory, send: (cmd: Command) => boolean | void, opts: OutboxOptions = {}) {
@@ -140,6 +150,13 @@ export class Outbox {
       for (const rec of stored) {
         order++;
         if (this.entries.has(rec.id)) continue;
+        // An explicit sign-out came first (its clear removes the records next), or the session ended first: as if
+        // they had been here.
+        if (this.clearedBeforeLoad) continue;
+        if (this.endedBeforeLoad && rec.endsSession) {
+          await del(db, rec.id);
+          continue;
+        }
         let cmd: Command;
         try {
           cmd = fromBinary(CommandSchema, rec.bytes);
@@ -157,8 +174,11 @@ export class Outbox {
           sentOn: 0,
           held: false,
           stepUps: 0,
+          endsSession: rec.endsSession === true,
+          mayHaveRun: true,
         });
       }
+      this.isLoaded = true;
       this.expire();
     });
   }
@@ -258,10 +278,12 @@ export class Outbox {
    * The session ended (signed out by the server, or this device revoked): forgets the commands whose success would end
    * a session (endsSession), so the next sign-in does not replay them. Each resolves with what is known: `not_done`
    * when the server cannot have carried it out (never sent, held for a step-up, or answered unauthenticated or
-   * reauth_required since it was last sent), `signed_out` when it was sent and no answer came, so it may have run.
-   * Every other command stays for after the sign-in.
+   * reauth_required since it was last sent), `signed_out` when it was sent and no answer came, so it may have run (a
+   * command a reload brought back counts as sent). Every other command stays for after the sign-in. Before the reload's
+   * commands are loaded, theirs are dropped as they are read.
    */
   dropSessionEnders(): void {
+    if (!this.isLoaded) this.endedBeforeLoad = true;
     for (const e of this.sorted()) {
       if (!e.endsSession) continue;
       const maybe = e.mayHaveRun === true && !e.held;
@@ -279,6 +301,7 @@ export class Outbox {
    * waiting submit resolves unauthenticated, after its rollback.
    */
   clear(): void {
+    if (!this.isLoaded) this.clearedBeforeLoad = true;
     for (const e of this.sorted()) this.finish(e, failure(e.cmd.id, "unauthenticated", "signed out"));
     this.watching.clear();
     this.visible = undefined;
@@ -325,6 +348,7 @@ export class Outbox {
     let persisted = this.loaded;
     if (stored) {
       const rec: Stored = { id: cmd.id, bytes: toBinary(CommandSchema, cmd), createdAt: e.createdAt };
+      if (opts.endsSession) rec.endsSession = true;
       persisted = this.work = this.write((db) => put(db, rec));
     }
     void persisted.then(() => {
