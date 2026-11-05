@@ -6,7 +6,7 @@ import { LinkClient } from "@/lib/link/client";
 import { FakeServer } from "@/lib/link/fakeServer";
 import { useAthena } from "@/lib/store/state";
 import { newCommandId } from "./ids";
-import { connectOutbox, EXPIRE_AFTER_MS, linkSender, Outbox, type Action } from "./outbox";
+import { connectOutbox, EXPIRE_AFTER_MS, linkSender, lockPresence, Outbox, type Action, type TabPresence } from "./outbox";
 
 let idb: IDBFactory;
 
@@ -659,6 +659,80 @@ describe("Outbox", () => {
     expect(link.ids()).toHaveLength(2);
     for (const id of link.ids()) outbox.onResult(fail(id, "unauthenticated"));
     expect(signOut).toHaveBeenCalledTimes(2);
+  });
+});
+
+/** Tabs the test opens and closes by hand. */
+function fakeTabs() {
+  const open = new Set<string>();
+  let n = 0;
+  return {
+    open(): TabPresence {
+      const id = `tab-${++n}`;
+      open.add(id);
+      return { id, alive: async () => new Set(open), exclusive: (fn) => fn() };
+    },
+    close(t: TabPresence): void {
+      open.delete(t.id);
+    },
+  };
+}
+
+describe("Outbox across tabs", () => {
+  const setPolicy: Action = { case: "setPolicy", value: { baseRevision: 3, settingsJson: "{}" } };
+
+  test("a second tab leaves an open tab's commands alone and adopts them once that tab is gone", async () => {
+    const tabs = fakeTabs();
+    const first = tabs.open();
+    const a = new Outbox(idb, () => false, { presence: first }); // offline: its command waits
+    void a.submit(setPolicy);
+    await a.settled();
+    const [id] = a.pending().map((c) => c.id);
+
+    // A second tab opens while the first is still open: the sensitive command is not its to send, so no step-up
+    // is asked for there.
+    const link = new FakeLink();
+    const b = new Outbox(idb, link.send, { presence: tabs.open() });
+    const reauth = vi.fn(async () => true);
+    b.setReauthHandler(reauth);
+    link.connect(b);
+    await b.settled();
+    expect(link.ids()).toEqual([]);
+    expect(b.pending()).toEqual([]);
+
+    // The first tab closes: on its next open the second adopts the orphan and sends it, by the same id.
+    tabs.close(first);
+    link.drop();
+    link.connect(b);
+    await b.settled();
+    expect(link.ids()).toEqual([id]);
+
+    // It owns it now: a third tab leaves it alone while the second is open.
+    const third = new FakeLink();
+    const c = new Outbox(idb, third.send, { presence: tabs.open() });
+    third.connect(c);
+    await c.settled();
+    expect(third.ids()).toEqual([]);
+    expect(reauth).not.toHaveBeenCalled();
+  });
+
+  test("lockPresence knows the tabs from their Web Locks, and adopts everything without them", async () => {
+    const held = new Set<string>();
+    const locks = {
+      request: (name: string, cb: () => Promise<unknown>) => {
+        held.add(name);
+        return cb();
+      },
+      query: async () => ({ held: [...held].map((name) => ({ name, mode: "exclusive" as const })) }),
+    } as unknown as LockManager;
+    const one = lockPresence(locks);
+    const two = lockPresence(locks);
+    expect(one.id).not.toBe(two.id);
+    expect(await one.alive()).toEqual(new Set([one.id, two.id]));
+    const ran = vi.fn(async () => {});
+    await one.exclusive(ran);
+    expect(ran).toHaveBeenCalled();
+    expect(await lockPresence(undefined).alive()).toBeUndefined();
   });
 });
 
