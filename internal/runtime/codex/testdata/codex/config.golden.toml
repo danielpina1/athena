@@ -1,0 +1,69 @@
+# Athena's Codex configuration. The Athena node writes this file; do not edit it, a change is overwritten.
+# Per-session values (the MCP server's args and env) are -c overrides when a session starts. Codex records
+# below, under [hooks.state], that Athena trusts the hooks it wrote here.
+
+model = "gpt-5-codex"
+approval_policy = "on-request"
+approvals_reviewer = "user"
+sandbox_mode = "workspace-write"
+check_for_update_on_startup = false
+background_terminal_max_timeout = 1800000
+
+[analytics]
+enabled = false
+
+[shell_environment_policy]
+inherit = "all"
+
+[features]
+apps = false
+plugins = false
+remote_plugin = false
+browser_use = false
+browser_use_external = false
+computer_use = false
+in_app_browser = false
+multi_agent = false
+image_generation = false
+memories = false
+realtime_conversation = false
+
+[mcp_servers.athena]
+command = "/opt/athena/bin/athena"
+args = ["mcp"]
+default_tools_approval_mode = "approve"
+
+[[hooks.PreToolUse]]
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "/opt/athena/bin/athena hook --runtime codex PreToolUse"
+timeout = 2100
+async = false
+
+[[hooks.PermissionRequest]]
+[[hooks.PermissionRequest.hooks]]
+type = "command"
+command = "/opt/athena/bin/athena hook --runtime codex PermissionRequest"
+timeout = 2100
+async = false
+
+[[hooks.PostToolUse]]
+[[hooks.PostToolUse.hooks]]
+type = "command"
+command = "/opt/athena/bin/athena hook --runtime codex PostToolUse"
+timeout = 30
+async = false
+
+[[hooks.Stop]]
+[[hooks.Stop.hooks]]
+type = "command"
+command = "/opt/athena/bin/athena hook --runtime codex Stop"
+timeout = 30
+async = false
+
+[[hooks.SessionStart]]
+[[hooks.SessionStart.hooks]]
+type = "command"
+command = "/opt/athena/bin/athena hook --runtime codex SessionStart"
+timeout = 30
+async = false

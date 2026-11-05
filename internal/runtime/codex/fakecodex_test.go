@@ -77,10 +77,20 @@ type fakeProc struct {
 // startFake runs `fakecodex app-server`; env is the ATHENA_FAKE_CODEX_* knobs.
 func startFake(t *testing.T, env ...string) *fakeProc {
 	t.Helper()
+	return startFakeWith(t, nil, env...)
+}
+
+// startFakeWith is startFake with prepare run on its CODEX_HOME before the process starts (so --strict-config sees
+// what prepare wrote).
+func startFakeWith(t *testing.T, prepare func(home string), env ...string) *fakeProc {
+	t.Helper()
 	dir := t.TempDir()
 	p := &fakeProc{t: t, events: make(chan rt.Event, 256), requests: make(chan Message, 16), exited: make(chan error, 1), home: filepath.Join(dir, "codex-home"), rpcLog: filepath.Join(dir, "rpc.jsonl")}
 	if err := os.MkdirAll(p.home, 0o700); err != nil {
 		t.Fatal(err)
+	}
+	if prepare != nil {
+		prepare(p.home)
 	}
 	cmd := exec.Command(fakeBinary(t), "app-server", "--listen", "stdio://", "--strict-config")
 	cmd.Dir = dir
@@ -544,12 +554,60 @@ func TestFakecodexExitMidTurnAndLoggedOut(t *testing.T) {
 	}
 }
 
-// The fakecodex of Task 3 knows only app-server; other commands are added by the tasks that need them.
+// fakecodex knows app-server, --version and login; any other command is refused.
 func TestFakecodexRefusesOtherCommands(t *testing.T) {
-	err := exec.Command(fakeBinary(t), "--version").Run()
+	err := exec.Command(fakeBinary(t), "exec", "hello").Run()
 	var ee *exec.ExitError
 	if !errors.As(err, &ee) || ee.ExitCode() != 2 {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestFakecodexVersionAndLogin(t *testing.T) {
+	cmd := exec.Command(fakeBinary(t), "--version")
+	cmd.Env = []string{"ATHENA_FAKE_CODEX_VERSION=0.161.2"}
+	if out, err := cmd.Output(); err != nil || string(out) != "codex-cli 0.161.2\n" {
+		t.Fatalf("--version = %q, %v", out, err)
+	}
+	if out, err := exec.Command(fakeBinary(t), "--version").Output(); err != nil || string(out) != "codex-cli "+VerifiedVersion+"\n" {
+		t.Fatalf("default --version = %q, %v", out, err)
+	}
+	dir := t.TempDir()
+	argsLog := filepath.Join(dir, "args.json")
+	cmd = exec.Command(fakeBinary(t), "login", "--with-api-key")
+	cmd.Env = []string{"CODEX_HOME=" + filepath.Join(dir, "home"), "ATHENA_FAKE_CODEX_ARGS_LOG=" + argsLog}
+	cmd.Stdin = strings.NewReader("sk-fixture-not-a-key\n")
+	out, err := cmd.CombinedOutput()
+	if err != nil || strings.Contains(string(out), "sk-fixture") {
+		t.Fatalf("login = %q, %v", out, err)
+	}
+	b, err := os.ReadFile(argsLog)
+	if err != nil || strings.Contains(string(b), "sk-fixture") {
+		t.Fatalf("args log = %q, %v", b, err)
+	}
+	var rec struct {
+		Args      []string
+		CodexHome string
+	}
+	if err := json.Unmarshal(b, &rec); err != nil || !reflect.DeepEqual(rec.Args, []string{"login", "--with-api-key"}) || rec.CodexHome != filepath.Join(dir, "home") {
+		t.Fatalf("args log = %+v, %v", rec, err)
+	}
+}
+
+// Without a readable protocol.json fakecodex refuses to serve unchecked, unless told to (ATHENA_FAKE_CODEX_PROTOCOL=off).
+func TestFakecodexNeedsItsProtocol(t *testing.T) {
+	run := func(proto string) error {
+		cmd := exec.Command(fakeBinary(t), "app-server", "--listen", "stdio://")
+		cmd.Env = []string{"CODEX_HOME=" + t.TempDir(), "ATHENA_FAKE_CODEX_PROTOCOL=" + proto}
+		cmd.Stdin = strings.NewReader("")
+		return cmd.Run()
+	}
+	var ee *exec.ExitError
+	if err := run(filepath.Join(t.TempDir(), "missing.json")); !errors.As(err, &ee) || ee.ExitCode() != 5 {
+		t.Fatalf("missing protocol.json: err = %v, want exit 5", err)
+	}
+	if err := run("off"); err != nil {
+		t.Fatalf("protocol off: %v", err)
 	}
 }
 
@@ -564,7 +622,8 @@ func TestFakecodexRejectsInvalidParams(t *testing.T) {
 		params       any
 	}{
 		{"null params", "account/read", json.RawMessage("null")},
-		{"missing params", "hooks/list", json.RawMessage("[]")},
+		// No case leaves params out: Conn always sends them ({} for nil).
+		{"params not an object", "hooks/list", json.RawMessage("[]")},
 		{"missing required field", "thread/resume", map[string]any{}},
 		{"turn/start without input", "turn/start", map[string]any{"threadId": "t"}},
 	} {

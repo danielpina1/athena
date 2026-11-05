@@ -1,7 +1,8 @@
 // Command fakecodex stands in for the `codex` binary in tests. It speaks the app-server protocol over stdio
 // (`fakecodex app-server ...`) from fixtures: it answers the requests Athena makes, and replays a fixture of server
-// notifications (the lines the real server printed, one JSON object per line) when a turn starts. Other commands
-// (`--version`, `login`) are added by the tests that need them.
+// notifications (the lines the real server printed, one JSON object per line) when a turn starts. `fakecodex --version`
+// prints "codex-cli <version>", and `fakecodex login [--with-api-key]` logs its arguments (ATHENA_FAKE_CODEX_ARGS_LOG),
+// reads and drops the key from stdin with --with-api-key, and says it logged in. Any other command exits 2.
 //
 // Behaviour is driven by environment variables so other packages can reuse it, as fakeclaude does:
 //
@@ -15,17 +16,29 @@
 //	ATHENA_FAKE_CODEX_ARGS_LOG       file receiving {"args":[...],"codexHome":"...","env":{ATHENA_*}} as JSON
 //	ATHENA_FAKE_CODEX_EXIT_MID_TURN  when set, the first turn replays half its fixture, then the process exits 3
 //	ATHENA_FAKE_CODEX_HOOKS          what hooks/list says of the hooks in $CODEX_HOME/config.toml: "trusted" (the
-//	                                 default), "untrusted" (they also do not run), or "foreign" (trusted, plus an
-//	                                 enabled hook of a repository's .codex)
+//	                                 default); "untrusted" (untrusted until config/batchWrite records their trust, as
+//	                                 Codex does, in config.toml; "modified" when a recorded hash is not theirs);
+//	                                 "never-trusted" (untrusted whatever is written); or "foreign" (trusted, plus an
+//	                                 enabled hook of a repository's .codex). A hook that is not trusted does not run.
 //	ATHENA_FAKE_CODEX_LOGGED_OUT     when set, account/read says there is no account and the rate limits are refused
+//	ATHENA_FAKE_CODEX_VERSION        the version --version prints (default 0.160.1)
 //	ATHENA_FAKE_CODEX_PROTOCOL       path of protocol.json (default: testdata/codex/protocol.json of the source tree it
 //	                                 was built from); every request it knows is checked against it, as the real server
 //	                                 does: params must be an object where the method needs params, with the required
-//	                                 fields present, or the answer is -32600
+//	                                 fields present, or the answer is -32600. When the file cannot be read, app-server
+//	                                 exits 5 rather than run unchecked, unless the variable is "off".
 //
 // It answers initialize, thread/start (thread id thr_fixture_<ATHENA_TICKET>, announced by a thread/started
-// notification), thread/resume, turn/start (during a turn it steers into it, as the real server does), turn/steer, turn/interrupt (the turn ends "interrupted"), hooks/list,
-// config/batchWrite, account/read (acct_fixture) and account/rateLimits/read; any other request gets a -32601 error.
+// notification), thread/resume, turn/start (during a turn it steers into it, as the real server does), turn/steer,
+// turn/interrupt (the turn ends "interrupted"), hooks/list, config/batchWrite (it records only the
+// hooks.state."<key>".trusted_hash edits), account/read (acct_fixture) and account/rateLimits/read; any other request
+// gets a -32601 error.
+//
+// Hooks are listed as Codex lists them: key "<config path>:<snake_event>:<group>:<handler>", source "user", and a
+// currentHash of the event and command. Trust is recorded as Codex records it, at the end of config.toml:
+//
+//	[hooks.state."<key>"]
+//	trusted_hash = "<currentHash>"
 //
 // Fixtures are real server lines with the placeholder ids thr_fixture_0001 and turn_fixture_0001, which fakecodex
 // replaces by the thread's and the turn's. Its own thread/started replaces the fixture's. The text and client id of
@@ -35,16 +48,19 @@
 //	{"fake":"request","method":"item/commandExecution/requestApproval","params":{...}}
 //	    sends that server request (ids from 1000), waits for the client's answer and logs it
 //	{"fake":"hook","event":"PreToolUse","input":{...}}
-//	    runs the commands config.toml names for that event (it parses only `[[hooks.<Event>]]` matcher groups holding
-//	    `[[hooks.<Event>.hooks]]` handlers with `type = "command"` and `command = "..."`; with --strict-config any other
-//	    hooks shape stops the process at start, as Codex does) with the input on stdin, and drops the next item (its item/started and item/completed) when
-//	    a hook denies it: exit code 2, or stdout with "permissionDecision":"deny" or "decision":"block"
+//	    runs the trusted commands config.toml names for that event (it parses only `[[hooks.<Event>]]` matcher groups
+//	    holding `[[hooks.<Event>.hooks]]` handlers with `type = "command"` and `command = "..."`; with --strict-config
+//	    any other hooks shape stops the process at start, as Codex does) with the input on stdin, and drops the next
+//	    item (its item/started and item/completed) when a hook denies it: exit code 2, or stdout with
+//	    "permissionDecision":"deny" or "decision":"block"
 package main
 
 import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -53,6 +69,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -68,7 +85,19 @@ const (
 func main() {
 	args := os.Args[1:]
 	logArgs(args)
-	if len(args) == 0 || args[0] != "app-server" {
+	switch {
+	case len(args) == 1 && args[0] == "--version":
+		v := os.Getenv("ATHENA_FAKE_CODEX_VERSION")
+		if v == "" {
+			v = version
+		}
+		fmt.Printf("codex-cli %s\n", v)
+		return
+	case len(args) > 0 && args[0] == "login":
+		login(args[1:])
+		return
+	case len(args) > 0 && args[0] == "app-server":
+	default:
 		fmt.Fprintf(os.Stderr, "fakecodex: unsupported command %q\n", strings.Join(args, " "))
 		os.Exit(2)
 	}
@@ -77,6 +106,21 @@ func main() {
 		os.Exit(1)
 	}
 	newServer().serve(os.Stdin)
+}
+
+// login is `codex login [--with-api-key]`: its arguments are already logged; with --with-api-key it reads the key from
+// stdin, as Codex does, and drops it.
+func login(args []string) {
+	for _, a := range args {
+		if a != "--with-api-key" {
+			fmt.Fprintf(os.Stderr, "fakecodex: login: unknown argument %q\n", a)
+			os.Exit(2)
+		}
+		if _, err := io.Copy(io.Discard, os.Stdin); err != nil {
+			os.Exit(1)
+		}
+	}
+	fmt.Println("Successfully logged in")
 }
 
 func logArgs(args []string) {
@@ -318,6 +362,10 @@ func (s *server) request(w wire) {
 		}
 		s.reply(w.ID, map[string]any{"data": []any{map[string]any{"cwd": cwd, "errors": []any{}, "warnings": []any{}, "hooks": hookList(home, cwd)}}})
 	case "config/batchWrite":
+		if err := applyTrustEdits(home, w.Params); err != nil {
+			s.replyError(w.ID, -32603, "config/batchWrite: "+err.Error())
+			return
+		}
 		s.reply(w.ID, map[string]any{"status": "ok", "version": "fixture", "filePath": filepath.Join(home, "config.toml")})
 	case "account/read":
 		if os.Getenv("ATHENA_FAKE_CODEX_LOGGED_OUT") != "" {
@@ -560,8 +608,37 @@ func rewriteUser(line []byte, echo userEcho) []byte {
 	return b
 }
 
-// hook is one command of $CODEX_HOME/config.toml.
-type hook struct{ event, command string }
+// hook is one handler of $CODEX_HOME/config.toml: its event, command, and where it is (its matcher group among the
+// event's, and its place in the group), which make its key.
+type hook struct {
+	event, command string
+	group, handler int
+}
+
+// key is the hook's key as Codex makes it: "<config path>:<snake_event>:<group>:<handler>".
+func (h hook) key(home string) string {
+	return fmt.Sprintf("%s:%s:%d:%d", filepath.Join(home, "config.toml"), snake(h.event), h.group, h.handler)
+}
+
+// hash is the hook's currentHash: a hash of its event and command.
+func (h hook) hash() string {
+	sum := sha256.Sum256([]byte(h.event + "\n" + h.command))
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func snake(s string) string {
+	var b strings.Builder
+	for i, r := range s {
+		if r >= 'A' && r <= 'Z' {
+			if i > 0 {
+				b.WriteByte('_')
+			}
+			r += 'a' - 'A'
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
 
 // readHooks parses the hooks of $CODEX_HOME/config.toml, in the shape Codex loads: `[[hooks.<Event>]]` matcher groups,
 // each followed by `[[hooks.<Event>.hooks]]` handlers with `type = "command"` and `command = "…"`. It returns the valid
@@ -580,6 +657,8 @@ func readHooks(home string) ([]hook, error) {
 		}
 	}
 	group := ""
+	groups := map[string]int{} // matcher groups seen per event
+	handlers := 0              // handlers seen in the current group
 	var cur *hook
 	curType := ""
 	finish := func() {
@@ -604,10 +683,13 @@ func readHooks(home string) ([]hook, error) {
 			if group != event {
 				fail("[[hooks.%s.hooks]] has no [[hooks.%s]] matcher group before it", event, event)
 			}
-			cur = &hook{event: event}
+			cur = &hook{event: event, group: groups[event] - 1, handler: handlers}
+			handlers++
 		case strings.HasPrefix(line, "[[hooks.") && strings.HasSuffix(line, "]]"):
 			finish()
 			group = strings.TrimSuffix(strings.TrimPrefix(line, "[[hooks."), "]]")
+			groups[group]++
+			handlers = 0
 		case strings.HasPrefix(line, "["):
 			finish()
 			group = ""
@@ -623,36 +705,130 @@ func readHooks(home string) ([]hook, error) {
 	return hooks, firstErr
 }
 
+const stateHeader = `[hooks.state.`
+
+// readTrust returns the trusted hashes config.toml records, by hook key, and the file's lines without those tables.
+func readTrust(home string) (trust map[string]string, rest []string) {
+	trust = map[string]string{}
+	b, err := os.ReadFile(filepath.Join(home, "config.toml"))
+	if err != nil {
+		return trust, nil
+	}
+	key, inState := "", false
+	for _, line := range strings.Split(strings.TrimRight(string(b), "\n"), "\n") {
+		t := strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(t, stateHeader) && strings.HasSuffix(t, "]"):
+			inState = true
+			key, _ = strconv.Unquote(strings.TrimSuffix(strings.TrimPrefix(t, stateHeader), "]"))
+			continue
+		case strings.HasPrefix(t, "["):
+			inState = false
+		case inState && strings.HasPrefix(t, "trusted_hash = "):
+			if v, err := strconv.Unquote(strings.TrimPrefix(t, "trusted_hash = ")); err == nil && key != "" {
+				trust[key] = v
+			}
+			continue
+		}
+		if !inState {
+			rest = append(rest, line)
+		}
+	}
+	return trust, rest
+}
+
+// applyTrustEdits records the hooks.state."<key>".trusted_hash edits of a config/batchWrite in config.toml, as Codex
+// does (in "never-trusted" mode they are dropped); other edits are ignored.
+func applyTrustEdits(home string, params json.RawMessage) error {
+	var p struct {
+		Edits []struct {
+			KeyPath string          `json:"keyPath"`
+			Value   json.RawMessage `json:"value"`
+		} `json:"edits"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil {
+		return err
+	}
+	trust, rest := readTrust(home)
+	changed := false
+	for _, e := range p.Edits {
+		if !strings.HasPrefix(e.KeyPath, "hooks.state.") || !strings.HasSuffix(e.KeyPath, ".trusted_hash") {
+			continue
+		}
+		key, err := strconv.Unquote(strings.TrimSuffix(strings.TrimPrefix(e.KeyPath, "hooks.state."), ".trusted_hash"))
+		if err != nil {
+			return fmt.Errorf("keyPath %q: the hook key must be a quoted string", e.KeyPath)
+		}
+		var v string
+		if err := json.Unmarshal(e.Value, &v); err != nil {
+			return fmt.Errorf("keyPath %q: the value must be a string", e.KeyPath)
+		}
+		if hooksMode() != "never-trusted" {
+			trust[key], changed = v, true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	keys := make([]string, 0, len(trust))
+	for k := range trust {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out := strings.Join(rest, "\n") + "\n"
+	for _, k := range keys {
+		out += fmt.Sprintf("\n%s%s]\ntrusted_hash = %s\n", stateHeader, strconv.Quote(k), strconv.Quote(trust[k]))
+	}
+	return os.WriteFile(filepath.Join(home, "config.toml"), []byte(out), 0o600)
+}
+
 func hooksMode() string {
 	switch m := os.Getenv("ATHENA_FAKE_CODEX_HOOKS"); m {
-	case "untrusted", "foreign":
+	case "untrusted", "never-trusted", "foreign":
 		return m
 	}
 	return "trusted"
 }
 
+// trustStatus is what hooks/list says of a configured hook's trust in the current mode.
+func trustStatus(h hook, home string, trust map[string]string) string {
+	switch hooksMode() {
+	case "trusted", "foreign":
+		return "trusted"
+	case "never-trusted":
+		return "untrusted"
+	}
+	switch v, ok := trust[h.key(home)]; {
+	case !ok:
+		return "untrusted"
+	case v == h.hash():
+		return "trusted"
+	default:
+		return "modified"
+	}
+}
+
 // hookList is what hooks/list says: the hooks of config.toml, and with "foreign" one of the repository's.
 func hookList(home, cwd string) []any {
-	var list []any
-	trust := "trusted"
-	if hooksMode() == "untrusted" {
-		trust = "untrusted"
-	}
+	list := []any{} // [] rather than null when there is none, as Codex sends it
 	configured, _ := readHooks(home)
+	trust, _ := readTrust(home)
 	for i, h := range configured {
 		list = append(list, map[string]any{
-			"key": fmt.Sprintf("user:%s:%d", h.event, i), "eventName": lowerFirst(h.event), "handlerType": "command",
+			"key": h.key(home), "eventName": lowerFirst(h.event), "handlerType": "command", "async": false,
 			"command": h.command, "enabled": true, "isManaged": false, "source": "user",
-			"sourcePath": filepath.Join(home, "config.toml"), "currentHash": fmt.Sprintf("fixture-hash-%d", i),
-			"displayOrder": i, "timeoutSec": 30, "trustStatus": trust, "matcher": nil, "statusMessage": nil, "pluginId": nil,
+			"sourcePath": filepath.Join(home, "config.toml"), "currentHash": h.hash(),
+			"displayOrder": i, "timeoutSec": 30, "trustStatus": trustStatus(h, home, trust), "matcher": nil,
+			"statusMessage": nil, "pluginId": nil, "additionalContextLimit": nil,
 		})
 	}
 	if hooksMode() == "foreign" {
+		src := filepath.Join(cwd, ".codex", "config.toml")
 		list = append(list, map[string]any{
-			"key": "project:preToolUse:0", "eventName": "preToolUse", "handlerType": "command", "command": "./scripts/audit.sh",
-			"enabled": true, "isManaged": false, "source": "project", "sourcePath": filepath.Join(cwd, ".codex", "hooks.json"),
-			"currentHash": "fixture-hash-foreign", "displayOrder": len(list), "timeoutSec": 30, "trustStatus": "trusted",
-			"matcher": nil, "statusMessage": nil, "pluginId": nil,
+			"key": src + ":pre_tool_use:0:0", "eventName": "preToolUse", "handlerType": "command", "async": false,
+			"command": "./scripts/audit.sh", "enabled": true, "isManaged": false, "source": "project", "sourcePath": src,
+			"currentHash": "sha256:foreign", "displayOrder": len(list), "timeoutSec": 30, "trustStatus": "trusted",
+			"matcher": nil, "statusMessage": nil, "pluginId": nil, "additionalContextLimit": nil,
 		})
 	}
 	return list
@@ -665,9 +841,9 @@ func lowerFirst(s string) string {
 	return strings.ToLower(s[:1]) + s[1:]
 }
 
-// runHook runs the commands configured for event with input on stdin, as Codex does at that point of a turn, and
-// reports whether one denied: exit code 2, or an output saying "permissionDecision":"deny" or "decision":"block". An
-// untrusted hook does not run.
+// runHook runs the trusted commands configured for event with input on stdin, as Codex does at that point of a turn,
+// and reports whether one denied: exit code 2, or an output saying "permissionDecision":"deny" or "decision":"block".
+// A hook that is not trusted does not run.
 func (s *server) runHook(event string, input json.RawMessage) (denied bool) {
 	rec := map[string]any{"fake": "hook", "event": event}
 	defer func() {
@@ -675,13 +851,15 @@ func (s *server) runHook(event string, input json.RawMessage) (denied bool) {
 		b, _ := json.Marshal(rec)
 		s.logRPC(b)
 	}()
-	if hooksMode() == "untrusted" {
-		rec["skipped"] = "untrusted"
-		return false
-	}
-	configured, _ := readHooks(os.Getenv("CODEX_HOME"))
+	home := os.Getenv("CODEX_HOME")
+	configured, _ := readHooks(home)
+	trust, _ := readTrust(home)
 	for _, h := range configured {
 		if h.event != event {
+			continue
+		}
+		if st := trustStatus(h, home, trust); st != "trusted" {
+			rec["skipped"] = st
 			continue
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -718,9 +896,13 @@ type protocol struct {
 }
 
 // loadProtocol reads ATHENA_FAKE_CODEX_PROTOCOL, or the protocol.json beside the fixtures of the source tree this
-// binary was built from; nil (every request passes) when it cannot be read.
+// binary was built from. It exits 5 when the file cannot be read (a -trimpath build, say), so the fake never runs
+// unchecked by accident; ATHENA_FAKE_CODEX_PROTOCOL=off turns the checks off (nil: every request passes).
 func loadProtocol() *protocol {
 	path := os.Getenv("ATHENA_FAKE_CODEX_PROTOCOL")
+	if path == "off" {
+		return nil
+	}
 	if path == "" {
 		_, file, _, _ := runtime.Caller(0)
 		path = filepath.Join(filepath.Dir(file), "..", "codex", "protocol.json")
@@ -731,8 +913,8 @@ func loadProtocol() *protocol {
 		err = json.Unmarshal(b, &p)
 	}
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "fakecodex: no protocol.json, requests are not checked: %v\n", err)
-		return nil
+		fmt.Fprintf(os.Stderr, "fakecodex: protocol.json not usable at %s (%v); set ATHENA_FAKE_CODEX_PROTOCOL to its path, or to off\n", path, err)
+		os.Exit(5)
 	}
 	return &p
 }

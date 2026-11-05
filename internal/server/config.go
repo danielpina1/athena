@@ -32,7 +32,8 @@ import (
 //	             "weakerNetworkIsolation": true, "caFile": ""},
 //	 "web": {"enabled": false, "listen": ":8443", "host": "", "ips": [], "tls": "ca",
 //	         "acme": {"email", "provider", "resolvers": [], "directory", "agreeTos": false}},
-//	 "localRepoRoots": ["~/code"]}
+//	 "localRepoRoots": ["~/code"],
+//	 "runtimes": {"codex": {"enabled": true, "binary": "codex", "model": ""}}}
 //
 // It holds the path of the GitHub App's private key, never the key. Without the file, or without its github part,
 // the server runs owner tasks only: no Source, no router. Without an enabled web part there is no dashboard endpoint.
@@ -60,7 +61,31 @@ type FileConfig struct {
 	// existing ones of DefaultLocalRepoRoots; an empty list turns the listing off. A pointer, so that a saved
 	// configuration keeps an explicit empty list.
 	LocalRepoRoots *[]string `json:"localRepoRoots,omitempty"`
+	// Runtimes configures the runtimes besides Claude Code.
+	Runtimes RuntimesConfig `json:"runtimes"`
 }
+
+// RuntimesConfig configures the runtimes besides Claude Code, which is always there.
+type RuntimesConfig struct {
+	Codex CodexConfig `json:"codex"`
+}
+
+// CodexConfig is the Codex runtime. Its CODEX_HOME is Athena's own, <stateDir>/codex (CodexHome).
+type CodexConfig struct {
+	// Enabled turns Codex on or off; unset means on. An enabled Codex that is not ready (not installed, not logged
+	// in, hooks not Athena's) is never chosen, and says why.
+	Enabled *bool `json:"enabled,omitempty"`
+	// Binary is the codex executable (default "codex"); `athena server --codex PATH` overrides it.
+	Binary string `json:"binary,omitempty"`
+	// Model is the default Codex model; empty leaves it to Codex.
+	Model string `json:"model,omitempty"`
+}
+
+// DefaultCodexBinary is the codex executable when the configuration names none.
+const DefaultCodexBinary = "codex"
+
+// On reports whether Codex is enabled: Enabled, or unset.
+func (c CodexConfig) On() bool { return c.Enabled == nil || *c.Enabled }
 
 // DefaultLocalRepoRoots are the folders searched for local git repositories when localRepoRoots is left out; only
 // the ones that exist are used.
@@ -286,6 +311,9 @@ func (c FileConfig) withDefaults() FileConfig {
 	if c.Web != nil {
 		w := c.Web.withDefaults()
 		c.Web = &w
+	}
+	if c.Runtimes.Codex.Binary == "" {
+		c.Runtimes.Codex.Binary = DefaultCodexBinary
 	}
 	if c.LocalRepoRoots != nil {
 		roots := slices.Clone(*c.LocalRepoRoots)

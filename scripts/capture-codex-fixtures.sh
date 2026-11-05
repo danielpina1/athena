@@ -15,10 +15,13 @@
 #
 # The turn runs in a temporary git repository against Athena's own CODEX_HOME ($ATHENA_CODEX_HOME, default
 # ${ATHENA_STATE_DIR:-$HOME/.athena}/codex), in place: no copy of its credential is made, so a token Codex rotates
-# stays where Athena looks for it. It never touches ~/.codex. Hooks that only log their stdin are passed as -c
-# overrides (the schema's shape: [[hooks.<Event>]] matcher groups holding [[hooks.<Event>.hooks]] handlers with
-# type = "command"). Stop the Athena node first: its own config.toml hooks would run too. Hooks from config may need
-# trusting before Codex runs them (hooks/list shows trustStatus); if hook-inputs.jsonl comes out empty, that is why.
+# stays where Athena looks for it. The run's thread rollout, history and logs land in that home too (harmless, but
+# they stay there). It never touches ~/.codex. Hooks that only log their stdin are passed as -c overrides (the
+# schema's shape: [[hooks.<Event>]] matcher groups holding [[hooks.<Event>.hooks]] handlers with type = "command" and
+# async = false). Codex runs a -c ("sessionFlags") hook only once trusted, and a -c hooks.<Event> list adds to the
+# hooks of config.toml rather than replacing them, so the script starts the app-server twice: once to list the hooks,
+# then with a -c hooks.state override that trusts its own logging hooks and disables every other enabled hook (Athena's
+# `athena hook` ones among them). It refuses to run the turn if any other hook is still enabled.
 # ATHENA_CODEX_BIN names another codex binary (a test double, say).
 set -euo pipefail
 
@@ -61,13 +64,24 @@ env = {k: v for k, v in os.environ.items() if k in ("PATH", "HOME", "LANG", "COD
 hook_flags = []
 for ev in ("SessionStart", "PreToolUse", "PermissionRequest", "PostToolUse", "Stop"):
     cmd = "cat >> %s/%s.jsonl" % (hooks_dir, ev)
-    hook_flags += ["-c", "hooks.%s=[{hooks=[{type=\"command\",command=%s}]}]" % (ev, json.dumps(cmd))]
-proc = subprocess.Popen([binary, "app-server", "--listen", "stdio://", "--strict-config"] + hook_flags, stdin=subprocess.PIPE,
-                        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, cwd=repo, env=env)
-watchdog = threading.Timer(300, proc.kill)
-watchdog.start()
+    hook_flags += ["-c", "hooks.%s=[{hooks=[{type=\"command\",command=%s,async=false}]}]" % (ev, json.dumps(cmd))]
+proc = None
 next_id = [0]
 captured = []  # notifications and server requests, as printed
+
+def start(flags):
+    global proc
+    proc = subprocess.Popen([binary, "app-server", "--listen", "stdio://", "--strict-config"] + flags, stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, cwd=repo, env=env)
+    watchdog = threading.Timer(300, proc.kill)
+    watchdog.daemon = True  # a refusal (SystemExit) must not wait for it
+    watchdog.start()
+    return watchdog
+
+def stop(watchdog):
+    proc.stdin.close()
+    proc.wait(timeout=30)
+    watchdog.cancel()
 
 def send(obj):
     proc.stdin.write((json.dumps(obj) + "\n").encode())
@@ -102,9 +116,36 @@ def call(method, params):
                 raise SystemExit("%s: %s" % (method, msg["error"]))
             return msg["result"]
 
+def list_hooks():
+    return call("hooks/list", {"cwds": [repo]})["data"][0]["hooks"]
+
+# First run: what hooks would run, and their keys and hashes.
+watchdog = start(hook_flags)
 call("initialize", {"clientInfo": {"name": "athena-capture", "version": "0"}})
 send({"method": "initialized"})
-limits = call("account/rateLimits/read", None)
+state = []
+for h in list_hooks():
+    if h["source"] == "sessionFlags":
+        state.append("%s={trusted_hash=%s}" % (json.dumps(h["key"]), json.dumps(h["currentHash"])))
+    elif h["enabled"]:
+        state.append("%s={enabled=false}" % json.dumps(h["key"]))
+stop(watchdog)
+captured.clear()
+
+# Second run: the logging hooks trusted, every other hook off.
+flags = hook_flags + (["-c", "hooks.state={%s}" % ",".join(state)] if state else [])
+watchdog = start(flags)
+call("initialize", {"clientInfo": {"name": "athena-capture", "version": "0"}})
+send({"method": "initialized"})
+hooks = list_hooks()
+others = [h["key"] for h in hooks if h["enabled"] and h["source"] != "sessionFlags"]
+if others:
+    raise SystemExit("refusing: hooks besides the capture's are still enabled: %s" % others)
+logging = [h for h in hooks if h["source"] == "sessionFlags" and h["enabled"] and h["trustStatus"] == "trusted"]
+if len(logging) != 5:
+    print("warning: %d of the 5 logging hooks are trusted; hook-inputs.jsonl will miss the others" % len(logging), file=sys.stderr)
+captured.clear()
+limits = call("account/rateLimits/read", {})
 thread = call("thread/start", {"cwd": repo, "approvalPolicy": "on-request", "sandbox": "workspace-write"})["thread"]["id"]
 prompt = "Create a file hi.txt containing hi, then say done."
 client_id = str(uuid.uuid4())
@@ -118,9 +159,7 @@ while True:
             answer(msg)
         if msg["method"] == "turn/completed":
             break
-proc.stdin.close()
-proc.wait(timeout=30)
-watchdog.cancel()
+stop(watchdog)
 
 hook_lines = []
 for name in sorted(os.listdir(hooks_dir)):

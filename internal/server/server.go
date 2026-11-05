@@ -61,6 +61,9 @@ type Config struct {
 	Node node.Config
 	// Stderr receives a copy of the log besides <StateDir>/logs/athena.log (default os.Stderr).
 	Stderr io.Writer
+	// CodexBinary is the codex executable (`athena server --codex`), replacing the configuration's
+	// runtimes.codex.binary; empty keeps it.
+	CodexBinary string
 	// Version is Athena's version, sent to GitHub in the User-Agent (default "dev").
 	Version string
 	// HTTPClient reaches GitHub (default: a client with a 30 s timeout); its transport is wrapped for the metrics.
@@ -197,6 +200,12 @@ func Run(ctx context.Context, cfg Config) (err error) {
 		if ncfg.AthenaBin, err = executable(); err != nil {
 			return err
 		}
+	}
+	if fileCfg.Runtimes.Codex.On() {
+		cx := CodexRuntime(stateDir, fileCfg, ncfg.AthenaBin, cfg.CodexBinary, ncfg.ApprovalTimeout)
+		logger.Info("codex is configured; `athena codex status` checks it", "binary", cx.Binary, "home", cx.Home)
+	} else {
+		logger.Info("codex is disabled (runtimes.codex.enabled is false)")
 	}
 
 	// The hub, made once the Dispatcher exists, hears of the node's changes through hubRef.

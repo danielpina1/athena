@@ -21,6 +21,8 @@ with a `fake` key is a directive for `fakecodex` and is never sent to the client
 - `approval-turn.jsonl`: a command that asks for approval (a `fake: request` line standing for the server request) and
   then completes.
 - `rate-limits.jsonl`: three `account/rateLimits/updated` notifications: normal usage, a limit reached, a 45-minute window.
+- `config.golden.toml`: the `config.toml` `WriteHome` writes for `TestWriteHomeExactKeys` (not a server line). The real
+  Codex 0.160.1 loads it under `--strict-config` and lists and trusts its hooks (`TestRealHooksListTrusted`).
 - `protocol.json`: written by `scripts/capture-codex-fixtures.sh schema` (`testdata/protoextract`), the required params of
   the methods Athena uses; `TestFixturesUseKnownMethodsAndRequiredFields` checks every fixture line against it.
 

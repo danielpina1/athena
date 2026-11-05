@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,6 +21,7 @@ import (
 	"github.com/danielpina1/athena/internal/metrics"
 	"github.com/danielpina1/athena/internal/node"
 	"github.com/danielpina1/athena/internal/policy"
+	"github.com/danielpina1/athena/internal/runtime/codex"
 	"github.com/danielpina1/athena/internal/sources"
 	"github.com/danielpina1/athena/internal/sources/github"
 	"github.com/danielpina1/athena/internal/store"
@@ -28,7 +30,7 @@ import (
 )
 
 // The parts `athena server` wires between the store and the node: the GitHub App and Source, the Policy, the node's
-// credentials, the Evals' ticker and the metrics of Trigger intake, replies and GitHub requests.
+// credentials, the Codex runtime, the Evals' ticker and the metrics of Trigger intake, replies and GitHub requests.
 //
 // Token scope: a worker of a GitHub Ticket gets no token in its environment. Its git and gh shims ask the node socket
 // for its own Assignment's token, which the node mints through Credentials as a token for the Ticket's repository
@@ -736,3 +738,32 @@ func (w *webEndpoint) status() WebStatusResult {
 	}
 	return out
 }
+
+// CodexHome is Athena's own CODEX_HOME, <stateDir>/codex: never the owner's ~/.codex.
+func CodexHome(stateDir string) string { return filepath.Join(stateDir, "codex") }
+
+// CodexRuntime is the Codex runtime of the configuration c (whether or not c enables it: see CodexConfig.On), for a
+// server or the `athena codex` commands on stateDir: its CODEX_HOME is CodexHome, the hooks and the MCP server run
+// athenaBin and reach the node socket, its decision hooks wait as long as the node's for an Approval of
+// approvalTimeout (zero: the node's default), and the hooks are checked for the node's work root. binary, when set
+// (`athena server --codex`), replaces the configured executable.
+func CodexRuntime(stateDir string, c FileConfig, athenaBin, binary string, approvalTimeout time.Duration) *codex.Runtime {
+	if binary == "" {
+		binary = c.Runtimes.Codex.Binary
+	}
+	if binary == "" {
+		binary = DefaultCodexBinary
+	}
+	return &codex.Runtime{
+		Binary:      binary,
+		Home:        CodexHome(stateDir),
+		Model:       c.Runtimes.Codex.Model,
+		AthenaBin:   athenaBin,
+		Socket:      filepath.Join(stateDir, NodeSocket),
+		HookTimeout: node.HookTimeout(approvalTimeout),
+		WorkRoot:    filepath.Join(stateDir, "work"),
+	}
+}
+
+// Executable is this program's path with symlinks resolved: the athena binary hooks and MCP servers run.
+func Executable() (string, error) { return executable() }
