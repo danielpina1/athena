@@ -811,7 +811,7 @@ func (n *Node) variables(s *session) []string {
 // sessionContext is what the SessionStart hook adds to the session: the execution variables and the Mandate.
 func (n *Node) sessionContext(s *session) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "Athena Ticket %s: %s\n\nExecution variables:\n", s.t.ID, s.t.Title)
+	fmt.Fprintf(&b, "Athena Ticket %s: %s\n\nExecution variables:\n", s.t.ID, oneLine(s.t.Title))
 	for _, v := range n.variables(s) {
 		b.WriteString(v + "\n")
 	}
@@ -1105,7 +1105,7 @@ func (r *runner) sendFirst(sess *claude.Session, recovering bool) {
 // (internal/render) recognises it and shows only the Inputs after it.
 func workerPreamble(t core.Ticket, vars []string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "You are the worker of Athena Ticket %s: %s\n\nExecution variables:\n", t.ID, t.Title)
+	fmt.Fprintf(&b, "You are the worker of Athena Ticket %s: %s\n\nExecution variables:\n", t.ID, oneLine(t.Title))
 	for _, v := range vars {
 		b.WriteString(v + "\n")
 	}
@@ -1485,7 +1485,7 @@ func renderInputs(t core.Ticket, ids []string, trigger func(id string) (core.Tri
 		case core.InputResumed:
 			fmt.Fprintf(&b, "[input %s: the Ticket was resumed by the message that follows]\n\n", in.ID)
 		case core.InputNote:
-			fmt.Fprintf(&b, "[input %s: note]\nNote: %s\n\n", in.ID, in.Text)
+			fmt.Fprintf(&b, "[input %s: note]\nNote: %s\n\n", in.ID, quoteText(in.Text))
 		default:
 			var tr core.Trigger
 			found := false
@@ -1501,7 +1501,7 @@ func renderInputs(t core.Ticket, ids []string, trigger func(id string) (core.Tri
 			if in.Human && (in.TriggerID == "" || (found && tr.Source == core.OwnerActor.Source)) {
 				from = "message from the owner (not on GitHub)"
 			}
-			fmt.Fprintf(&b, "[input %s: %s]\n%s\n\n", in.ID, from, in.Text)
+			fmt.Fprintf(&b, "[input %s: %s]\n%s\n\n", in.ID, from, quoteText(in.Text))
 		}
 	}
 	return b.String()

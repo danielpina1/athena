@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -317,6 +318,29 @@ func githubIssueKey(repo, num string) (string, error) {
 	return github.ThreadKey(repo, n), nil
 }
 
+// headerLike matches a line that reads like one Athena writes over an Input: an Input header ("[input …]", or any "["
+// line) or a card line ("from: …").
+var headerLike = regexp.MustCompile(`^(\[|(trigger_id|acknowledged|from|at|thread|url|replies_to|context|routing note):)`)
+
+// quoteText makes text the node did not write (a comment, a Trigger's text, the owner's text, a note) safe to place
+// under a header: each line of it that starts like a header or a card line gets one leading space. Athena's own headers
+// and card lines start at a line's first column, so text can never carry one (prompts/worker.md tells the worker, and
+// internal/render reads it the same way and removes the space for display).
+func quoteText(s string) string {
+	lines := strings.Split(s, "\n")
+	for i, l := range lines {
+		if headerLike.MatchString(l) {
+			lines[i] = " " + l
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// oneLine is s with its line breaks as spaces: a title placed in a header line stays in it.
+func oneLine(s string) string {
+	return strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ").Replace(s)
+}
+
 // cardTextMaxRunes bounds the text of a Trigger card (reference 007 "Messages delivered to Sessions").
 const cardTextMaxRunes = 600
 
@@ -355,7 +379,7 @@ func inputCard(ticketID string, in core.Input, tr core.Trigger) string {
 		b.WriteString("context: it reached you on a thread you follow for context; it is not a request to this ticket\n")
 	}
 	if in.Note != "" {
-		fmt.Fprintf(&b, "routing note: %s\n", in.Note)
+		fmt.Fprintf(&b, "routing note: %s\n", quoteText(in.Note))
 	}
 	text := in.Text
 	if text == "" {
@@ -366,7 +390,9 @@ func inputCard(ticketID string, in core.Input, tr core.Trigger) string {
 		if u != "" {
 			where = "at " + u + " (gh can read it)"
 		}
-		text = string(r[:cardTextMaxRunes]) + fmt.Sprintf("…\n[cut: %d of %d characters shown; read the rest %s]", cardTextMaxRunes, len(r), where)
+		text = quoteText(string(r[:cardTextMaxRunes])) + fmt.Sprintf("…\n[cut: %d of %d characters shown; read the rest %s]", cardTextMaxRunes, len(r), where)
+	} else {
+		text = quoteText(text)
 	}
 	b.WriteString(text + "\n\n")
 	return b.String()
