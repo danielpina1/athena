@@ -6,6 +6,7 @@
 //     real enrollment (a fresh `athena web enroll` link, after revoking the passkeys of earlier tests; the running
 //     test's own are kept, so it may sign in more than once) and sign-in with that passkey. Both screens are checked
 //     with axe on the way.
+//   - addAuthenticator(page): that virtual authenticator alone, for a second device that enrolls through a link.
 //   - athena(...args): the CLI against the shared state dir, e.g. athena("task", "Deploy it") → its stdout.
 //   - expectAccessible(page): axe on the current screen; any serious or critical violation fails.
 //   - session.requestApproval(ticket, tool, input) and session.report(ticket, state, text, question?): act as the
@@ -111,13 +112,8 @@ async function revokeEarlierPasskeys(): Promise<void> {
   }
 }
 
-/**
- * Enrolls a new passkey on a virtual authenticator and signs in with it: page ends on the signed-in shell at "/".
- * Each call enrolls its own passkey; the links are single-use.
- */
-export async function signedInPage(page: Page): Promise<Page> {
-  await revokeEarlierPasskeys();
-  const before = new Set(await passkeyIds());
+/** A CDP virtual authenticator on page's browser (ctap2, internal, resident key, user verified, presence simulated). */
+export async function addAuthenticator(page: Page) {
   const cdp = await page.context().newCDPSession(page);
   await cdp.send("WebAuthn.enable");
   const { authenticatorId } = await cdp.send("WebAuthn.addVirtualAuthenticator", {
@@ -130,6 +126,17 @@ export async function signedInPage(page: Page): Promise<Page> {
       automaticPresenceSimulation: true,
     },
   });
+  return { cdp, authenticatorId };
+}
+
+/**
+ * Enrolls a new passkey on a virtual authenticator and signs in with it: page ends on the signed-in shell at "/".
+ * Each call enrolls its own passkey; the links are single-use.
+ */
+export async function signedInPage(page: Page): Promise<Page> {
+  await revokeEarlierPasskeys();
+  const before = new Set(await passkeyIds());
+  const { cdp, authenticatorId } = await addAuthenticator(page);
 
   await page.goto(await enrollLink());
   const create = page.getByRole("button", { name: "Create passkey" });

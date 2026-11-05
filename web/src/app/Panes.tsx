@@ -1,5 +1,5 @@
 // A view's panes. On the desktop (1024 px and up) a view with a list shows it in the 400 px list pane and its detail
-// in the pane beside it; a view without one (New, Graph, Settings) spans both. On the phone there is one column: the
+// in the pane beside it; a view without one (New, Graph, Nodes) spans both. On the phone there is one column: the
 // detail when one is open (or when there is no list), the list otherwise.
 import { createContext, type ReactNode, useContext, useSyncExternalStore } from "react";
 

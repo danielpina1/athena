@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { useAthena } from "@/lib/store/state";
-import { bindSession, enroll, getSession, reauth, signIn, signOut } from "./session";
+import { bindSession, createEnrollLink, enroll, getSession, reauth, signIn, signOut } from "./session";
 import { ASSERTION, CREATION, expectedAttestation, fakeCredentials, fakeFetch } from "./testkit";
 
 beforeEach(() => {
@@ -16,11 +16,11 @@ test("getSession maps the server's answer", async () => {
   const { calls } = fakeFetch({
     "GET /auth/session": { json: { authenticated: true, passkeyId: "p1", reauthValidUntil: until } },
   });
-  expect(await getSession()).toEqual({ signedIn: true, reauthAt: new Date(until) });
+  expect(await getSession()).toEqual({ signedIn: true, passkeyId: "p1", reauthAt: new Date(until) });
   expect(calls[0]).toMatchObject({ method: "GET", credentials: "same-origin" });
 
   fakeFetch({ "GET /auth/session": { json: { authenticated: true, passkeyId: "p1" } } });
-  expect(await getSession()).toEqual({ signedIn: true, reauthAt: undefined });
+  expect(await getSession()).toEqual({ signedIn: true, passkeyId: "p1", reauthAt: undefined });
   fakeFetch({ "GET /auth/session": { json: { authenticated: false } } });
   expect((await getSession()).signedIn).toBe(false);
 });
@@ -112,4 +112,15 @@ test("sign out clears outbox and store", async () => {
   await expect(signOut()).rejects.toBeTruthy();
   expect(outbox.clear).toHaveBeenCalledOnce();
   expect(useAthena.getState().epoch).toBe("e2");
+});
+
+test("createEnrollLink asks for a link and returns it with its expiry", async () => {
+  const { calls } = fakeFetch({
+    "POST /auth/enroll-link": { json: { url: "https://athena.test/enroll#tok", expiresAt: "2026-11-04T12:10:00Z" } },
+  });
+  expect(await createEnrollLink()).toEqual({ url: "https://athena.test/enroll#tok", expiresAt: new Date("2026-11-04T12:10:00Z") });
+  expect(calls[0]).toMatchObject({ method: "POST", credentials: "same-origin" });
+
+  fakeFetch({ "POST /auth/enroll-link": { status: 403, json: { code: "reauth_required", error: "confirm with your passkey first" } } });
+  await expect(createEnrollLink()).rejects.toMatchObject({ code: "reauth_required", status: 403 });
 });

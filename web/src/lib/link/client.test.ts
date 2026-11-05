@@ -94,6 +94,14 @@ describe("LinkClient", () => {
     off();
   });
 
+  test("the Welcome's server version is kept for Settings › System", () => {
+    const off = connectStore(client);
+    client.start();
+    server.welcome("e1", true);
+    expect(useAthena.getState().serverVersion).toBe("test");
+    off();
+  });
+
   test("a Welcome's epoch counts only once its Snapshot is applied", () => {
     const off = connectStore(client);
     client.start();

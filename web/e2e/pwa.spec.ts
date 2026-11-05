@@ -130,7 +130,7 @@ test("Settings has the Notifications control", async ({ baseURL }, testInfo) => 
     await page.setViewportSize(testInfo.project.use.viewport!);
     await page.emulateMedia({ colorScheme: "light", reducedMotion: "reduce" });
     await signedInPage(page);
-    await page.goto("/settings");
+    await page.goto("/settings/notifications");
     const control = page.getByRole("radiogroup", { name: "Notifications" });
     await expect(control).toBeVisible();
     // Allowed but not subscribed on this device: off, and the owner can turn it on.

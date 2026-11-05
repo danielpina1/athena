@@ -3,7 +3,8 @@
 import { useAthena } from "@/lib/store/state";
 import { creationOptionsFromJSON, credentialToJSON, requestOptionsFromJSON } from "./webauthn";
 
-export type SessionInfo = { signedIn: boolean; reauthAt?: Date };
+/** passkeyId is the passkey this session signed in with (Settings › Devices marks it as this device). */
+export type SessionInfo = { signedIn: boolean; passkeyId?: string; reauthAt?: Date };
 
 /** The server refused (or the browser did): code is the server's error code, or "cancelled" / "unsupported". */
 export class AuthError extends Error {
@@ -58,10 +59,32 @@ async function request(method: "GET" | "POST", path: string, body?: unknown): Pr
   return json;
 }
 
-/** GET /auth/session: signedIn, and reauthAt, the end of the open step-up window, while there is one. */
+/** GET /auth/session: signedIn, the session's passkey, and reauthAt, the end of the open step-up window, while there is one. */
 export async function getSession(): Promise<SessionInfo> {
-  const s = (await request("GET", "/auth/session")) as { authenticated?: boolean; reauthValidUntil?: string };
-  return { signedIn: s.authenticated === true, reauthAt: s.reauthValidUntil ? new Date(s.reauthValidUntil) : undefined };
+  const s = (await request("GET", "/auth/session")) as {
+    authenticated?: boolean;
+    passkeyId?: string;
+    reauthValidUntil?: string;
+  };
+  const info: SessionInfo = {
+    signedIn: s.authenticated === true,
+    reauthAt: s.reauthValidUntil ? new Date(s.reauthValidUntil) : undefined,
+  };
+  if (s.passkeyId) info.passkeyId = s.passkeyId;
+  return info;
+}
+
+export type EnrollLink = { url: string; expiresAt: Date };
+
+/**
+ * POST /auth/enroll-link: a single-use link that enrolls another device, /enroll#<token>. It needs a recent step-up
+ * (AuthError reauth_required otherwise). The token is in the returned url's fragment: keep it in memory only, never
+ * in this page's address, the history or the console.
+ */
+export async function createEnrollLink(): Promise<EnrollLink> {
+  const r = (await request("POST", "/auth/enroll-link")) as { url?: string; expiresAt?: string };
+  if (!r.url || !r.expiresAt) throw new AuthError("internal", 200, "the server sent no link");
+  return { url: r.url, expiresAt: new Date(r.expiresAt) };
 }
 
 /** Whether the browser can offer passkeys in a form field's autofill (conditional mediation). */

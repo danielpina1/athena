@@ -30,6 +30,8 @@ export type AthenaData = {
   synced: boolean;
   /** The epoch of the Welcome whose Snapshot the state came from. */
   epoch: string;
+  /** The server's version, from the last Welcome ("" before one). */
+  serverVersion: string;
   /** The highest Delta seq applied, or the Snapshot's cursor. */
   cursor: bigint;
   tickets: Map<string, TicketSummary>;
@@ -87,6 +89,7 @@ function empty(): AthenaData {
   return {
     synced: false,
     epoch: "",
+    serverVersion: "",
     cursor: 0n,
     tickets: new Map(),
     approvals: new Map(),
@@ -327,6 +330,9 @@ export function connectStore(client: LinkClient, store: typeof useAthena = useAt
       case "welcome":
         welcomeEpoch = f.body.value.epoch;
         resyncAsked = false;
+        if (store.getState().serverVersion !== f.body.value.serverVersion) {
+          store.setState({ serverVersion: f.body.value.serverVersion });
+        }
         // No Snapshot follows only when the epoch matched: the Deltas after the cursor come next.
         if (!f.body.value.snapshotFollows) store.setState({ epoch: welcomeEpoch });
         break;

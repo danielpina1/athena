@@ -1,10 +1,10 @@
-// The signed-in app's routes and its navigation. The views here are placeholders (a heading and one sentence) until
-// the task that builds each replaces it: Nodes and Settings (17). Graph is a lazy chunk (app/routes/graph.tsx).
-// /design and /enroll render outside the session gate (App.tsx).
+// The signed-in app's routes and its navigation. Graph is a lazy chunk (app/routes/graph.tsx), as is Settings ›
+// Prompts. /design and /enroll render outside the session gate (App.tsx).
 //
 // Query contracts the palette already uses: /tickets/:id?tab=session opens a Ticket's live session, and
 // /routing?tab=triggers&trigger=<id> and /routing?tab=threads&thread=<key> open one record (Task 14). On the Ticket
-// views ?pin=T-1,T-2 pins sessions under the panes (1440 px and up).
+// views ?pin=T-1,T-2 pins sessions under the panes (1440 px and up). /settings/<section> opens one Settings section
+// (general, github, notifications, devices, prompts, execution, system); /settings/prompts?part=<name> one prompt part.
 import {
   InboxIcon,
   ListIcon,
@@ -22,7 +22,8 @@ import { NeedsYou } from "@/features/needs-you/NeedsYou";
 import { NewTask } from "@/features/new-task/NewTask";
 import { Routing } from "@/features/routing/Routing";
 import { PinnedSessions } from "@/features/session/PinnedSessions";
-import { NotificationsControl } from "@/features/settings/NotificationsControl";
+import { Nodes } from "@/features/nodes/Nodes";
+import { Settings } from "@/features/settings/Settings";
 import { TicketDetail } from "@/features/tickets/TicketDetail";
 import { TicketList } from "@/features/tickets/TicketList";
 import { selectCounts, selectSynced } from "@/lib/store/selectors";
@@ -116,45 +117,11 @@ function RoutingView() {
 }
 
 function NodesView() {
-  return (
-    <Panes
-      list={<Placeholder title="Nodes" text="The machines that run sessions, with their load." />}
-      detail={<NothingSelected what="node" />}
-    />
-  );
+  return <Panes detail={<Nodes />} />;
 }
 
 const linkClass =
   "inline-flex min-h-11 items-center font-semibold underline decoration-line-soft underline-offset-4 hover:decoration-text lg:min-h-0";
-
-function SettingsView() {
-  return (
-    <Panes
-      detail={
-        <Placeholder title="Settings" text="Policy, notifications, prompts and this device.">
-          <NotificationsControl />
-          <section aria-labelledby="settings-system" className="mt-4 grid gap-1 border-t border-line pt-4">
-            <h2 id="settings-system" className="font-mono text-xs text-muted uppercase">
-              System
-            </h2>
-            <ul className="grid">
-              <li>
-                <Link to="/routing" className={linkClass}>
-                  Routing
-                </Link>
-              </li>
-              <li>
-                <Link to="/nodes" className={linkClass}>
-                  Nodes
-                </Link>
-              </li>
-            </ul>
-          </section>
-        </Placeholder>
-      }
-    />
-  );
-}
 
 function NotFound() {
   return (
@@ -190,7 +157,7 @@ export function AppRoutes() {
       />
       <Route path="routing" element={<RoutingView />} />
       <Route path="nodes" element={<NodesView />} />
-      <Route path="settings/:group?" element={<SettingsView />} />
+      <Route path="settings/:group?" element={<Settings />} />
       <Route path="*" element={<NotFound />} />
     </Routes>
   );
