@@ -85,6 +85,11 @@ type Entry = {
   /** The promise of the submit that made it; a command loaded after a reload has none. */
   resolve?: (r: CommandResult) => void;
   endsSession?: boolean;
+  /**
+   * It reached the server and no answer since says it was not carried out: the server may have run it. False until
+   * sent, and again after a reauth_required or unauthenticated answer (nothing was done).
+   */
+  mayHaveRun?: boolean;
   rollback?: (s: AthenaState) => void;
   commit?: (s: AthenaState) => void;
 };
@@ -223,11 +228,13 @@ export class Outbox {
     switch (r.code) {
       case "reauth_required":
         // Nothing was done; after the step-up the same command goes again.
+        e.mayHaveRun = false;
         if (e.stepUps >= MAX_STEP_UPS) this.finish(e, r);
         else this.stepUp(e);
         return;
       case "unauthenticated":
         // Nothing was done. Kept, and sent on the next open: after the owner signs in again.
+        e.mayHaveRun = false;
         if (this.signedOutOn === this.connection) return;
         this.signedOutOn = this.connection;
         this.guard(() => this.signOut?.());
@@ -249,12 +256,21 @@ export class Outbox {
 
   /**
    * The session ended (signed out by the server, or this device revoked): forgets the commands whose success would end
-   * a session (endsSession), held ones included, so the next sign-in does not replay them; each resolves `signed_out`.
+   * a session (endsSession), so the next sign-in does not replay them. Each resolves with what is known: `not_done`
+   * when the server cannot have carried it out (never sent, held for a step-up, or answered unauthenticated or
+   * reauth_required since it was last sent), `signed_out` when it was sent and no answer came, so it may have run.
    * Every other command stays for after the sign-in.
    */
   dropSessionEnders(): void {
     for (const e of this.sorted()) {
-      if (e.endsSession) this.finish(e, failure(e.cmd.id, "signed_out", "the session ended"));
+      if (!e.endsSession) continue;
+      const maybe = e.mayHaveRun === true && !e.held;
+      this.finish(
+        e,
+        maybe
+          ? failure(e.cmd.id, "signed_out", "the session ended before an answer")
+          : failure(e.cmd.id, "not_done", "the session ended before it was carried out"),
+      );
     }
   }
 
@@ -338,7 +354,10 @@ export class Outbox {
       sent = false;
     }
     // Not open: the next onOpen sends it.
-    if (sent !== false) e.sentOn = this.connection;
+    if (sent !== false) {
+      e.sentOn = this.connection;
+      e.mayHaveRun = true;
+    }
   }
 
   private finish(e: Entry, r: CommandResult): void {

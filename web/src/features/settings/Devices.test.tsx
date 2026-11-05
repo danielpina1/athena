@@ -183,3 +183,29 @@ test("a refused step-up leaves no link and says why", async () => {
   expect(await screen.findByText("Confirm with your passkey to make this change.")).toBeTruthy();
   expect(screen.queryByRole("img", { name: "QR code of the enrollment link" })).toBeNull();
 });
+
+test("a revoke of this device that did not happen says so; one not confirmed says to check", async () => {
+  const user = userEvent.setup();
+  render(
+    <>
+      <Devices />
+      <Toaster />
+    </>,
+    { wrapper },
+  );
+  const mac = await screen.findByRole("listitem", { name: "Mac" });
+  const revoke = async () => {
+    await user.click(within(mac).getByRole("button", { name: "Revoke" }));
+    await new Promise((r) => setTimeout(r, 350));
+    await user.click(within(mac).getByRole("button", { name: "Revoke and sign out this device" }));
+  };
+  // Signed out first, and the server never ran it: the sign-in screen must not read as success.
+  revokePasskey.mockResolvedValueOnce({ ok: false, code: "not_done" } as CommandResult);
+  await revoke();
+  expect(await screen.findByText("You were signed out first. Sign in and revoke it again.")).toBeTruthy();
+  expect(sessionEnded).not.toHaveBeenCalled();
+  // Sent, and the session ended before the answer: it may have happened.
+  revokePasskey.mockResolvedValueOnce({ ok: false, code: "signed_out" } as CommandResult);
+  await revoke();
+  expect(await screen.findByText("You were signed out before Athena answered. Sign in and check the device list.")).toBeTruthy();
+});

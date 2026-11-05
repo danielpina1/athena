@@ -193,3 +193,20 @@ test("keep my text sends once, and a conflict on it offers Reload and Overwrite"
   // Overwrite repeats the same decision on the fresh revision.
   expect(setPrompt).toHaveBeenLastCalledWith("worker", 9, "My own worker text.");
 });
+
+test("keep my text keeps the editor's unsaved text, and the resets say they discard it", async () => {
+  const user = userEvent.setup();
+  renderPrompts();
+  const editor = (await screen.findByDisplayValue("My own worker text.")) as HTMLTextAreaElement;
+  await user.type(editor, " More.");
+  const panel = screen.getByRole("region", { name: "The default changed" });
+  await user.click(within(panel).getByRole("button", { name: "Use the new default" }));
+  expect(within(panel).getByRole("button", { name: "Discard your edits and use the new default" })).toBeTruthy();
+  await user.keyboard("{Escape}");
+  await user.click(screen.getByRole("button", { name: "Reset" }));
+  expect(screen.getByRole("button", { name: "Discard your edits and reset worker" })).toBeTruthy();
+  await user.keyboard("{Escape}");
+
+  await user.click(within(panel).getByRole("button", { name: "Keep my text" }));
+  expect(setPrompt).toHaveBeenCalledWith("worker", 7, "My own worker text. More.");
+});

@@ -438,7 +438,7 @@ describe("Outbox", () => {
     expect(reloaded.pending()).toEqual([]);
   });
 
-  test("a command that ends this session is dropped when the session ends, never replayed", async () => {
+  test("a command that ends this session and was sent is dropped when the session ends, never replayed", async () => {
     const link = new FakeLink();
     const outbox = new Outbox(idb, link.send);
     link.connect(outbox);
@@ -457,6 +457,51 @@ describe("Outbox", () => {
     const reloaded = new Outbox(idb, () => true);
     await reloaded.settled();
     expect(reloaded.pending().map((c) => c.action.case)).toEqual(["reply"]);
+  });
+
+  const revokeMe: Action = { case: "revokePasskey", value: { id: "P-me" } };
+
+  test("a session ender held for a step-up when the session ends did not happen: not_done", async () => {
+    const link = new FakeLink();
+    const outbox = new Outbox(idb, link.send);
+    outbox.setReauthHandler(() => new Promise<boolean>(() => {}));
+    link.connect(outbox);
+    const revoke = track(outbox.submit(revokeMe, { endsSession: true }));
+    await outbox.settled();
+    outbox.onResult(fail(link.ids()[0], "reauth_required"));
+    outbox.dropSessionEnders();
+    await outbox.settled();
+    expect(revoke.result).toMatchObject({ ok: false, code: "not_done" });
+    expect(outbox.pending()).toEqual([]);
+  });
+
+  test("a session ender answered unauthenticated did not happen: not_done", async () => {
+    const link = new FakeLink();
+    const outbox = new Outbox(idb, link.send);
+    // The app's sign-out handler is leave(), which drops the session enders.
+    outbox.setSignOutHandler(() => outbox.dropSessionEnders());
+    link.connect(outbox);
+    const revoke = track(outbox.submit(revokeMe, { endsSession: true }));
+    await outbox.settled();
+    outbox.onResult(fail(link.ids()[0], "unauthenticated"));
+    await outbox.settled();
+    expect(revoke.result).toMatchObject({ ok: false, code: "not_done" });
+    expect(outbox.pending()).toEqual([]);
+  });
+
+  test("a session ender never sent before the session ended did not happen: not_done", async () => {
+    const link = new FakeLink();
+    const outbox = new Outbox(idb, link.send);
+    // Offline: queued, never on the wire; the reconnect then ends in 4002 before Welcome.
+    const revoke = track(outbox.submit(revokeMe, { endsSession: true }));
+    await outbox.settled();
+    expect(link.ids()).toEqual([]);
+    outbox.dropSessionEnders();
+    await outbox.settled();
+    expect(revoke.result).toMatchObject({ ok: false, code: "not_done" });
+    link.connect(outbox);
+    await outbox.settled();
+    expect(link.ids()).toEqual([]);
   });
 
   test("without IndexedDB the outbox still works in memory", async () => {

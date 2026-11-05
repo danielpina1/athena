@@ -153,8 +153,10 @@ const MESSAGES: Record<string, string> = {
   conflict: "Changed on another device. Reload to see the latest.",
   unavailable: "The server is busy. Try again in a moment.",
   internal: "Something went wrong on the server. Try again.",
-  // The outbox's own: the session ended before a command that ends it got its result.
-  signed_out: "You were signed out before it was confirmed.",
+  // The outbox's own, for a command that ends the session (revoking this device) when the session ended first: sent
+  // but unanswered (it may have run), or known not carried out.
+  signed_out: "You were signed out before Athena answered. Sign in and check.",
+  not_done: "You were signed out first, so it was not done. Sign in and try again.",
   // The outbox's own: a command that waited offline past the server's 24 h memory.
   expired: "It waited offline too long and was not sent. Try again.",
 };

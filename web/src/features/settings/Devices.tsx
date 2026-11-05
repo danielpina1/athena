@@ -73,7 +73,19 @@ function DeviceRow({ passkey, current, onRevoked }: { passkey: Passkey; current:
       sessionEnded();
       return;
     }
-    if (r.code === "signed_out") return; // the session ended first; sign-in says so
+    // The session ended first (the sign-in screen is showing): never let that screen read as success.
+    if (r.code === "not_done") {
+      toast({ title: "Not revoked", description: "You were signed out first. Sign in and revoke it again.", tone: "danger" });
+      return;
+    }
+    if (r.code === "signed_out") {
+      toast({
+        title: "Revoke not confirmed",
+        description: "You were signed out before Athena answered. Sign in and check the device list.",
+        tone: "danger",
+      });
+      return;
+    }
     if (r.ok) {
       toast({ title: "Passkey revoked", description: `${passkey.name || "The device"} can no longer sign in.` });
       onRevoked();

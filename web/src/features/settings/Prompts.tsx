@@ -113,7 +113,9 @@ function PartEditor({ part, overridden, revision }: { part: string; overridden: 
           before={detail.previousDefaultText}
           after={detail.defaultText}
           busy={block.busy}
-          onKeep={() => void decide("Kept your text", "Not saved", (base) => setPrompt(part, base, detail.text))}
+          edited={block.bar.dirty}
+          // "My text" is what the editor holds: unsaved edits included, never thrown away.
+          onKeep={() => void decide("Kept your text", "Not saved", (base) => setPrompt(part, base, block.value ?? detail.text))}
           onUseNew={() => void decide("Using the new default", "Not reset", (base) => resetPrompt(part, base))}
         />
       )}
@@ -134,7 +136,7 @@ function PartEditor({ part, overridden, revision }: { part: string; overridden: 
             <Confirm
               size="sm"
               label="Reset"
-              confirmLabel={`Reset ${part} to its default`}
+              confirmLabel={block.bar.dirty ? `Discard your edits and reset ${part}` : `Reset ${part} to its default`}
               disabled={block.busy}
               onConfirm={() => void reset()}
             />
@@ -215,12 +217,15 @@ function DefaultChanged({
   before,
   after,
   busy,
+  edited,
   onKeep,
   onUseNew,
 }: {
   before: string;
   busy: boolean;
   after: string;
+  /** The editor has unsaved edits: using the new default discards them, and says so. */
+  edited: boolean;
   onKeep(): void;
   onUseNew(): void;
 }) {
@@ -256,7 +261,7 @@ function DefaultChanged({
         </Button>
         <Confirm
           label="Use the new default"
-          confirmLabel="Replace my text with the new default"
+          confirmLabel={edited ? "Discard your edits and use the new default" : "Replace my text with the new default"}
           disabled={busy}
           onConfirm={onUseNew}
         />
