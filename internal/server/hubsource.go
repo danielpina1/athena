@@ -209,6 +209,9 @@ func (s hubSource) NodeStatus() node.Status {
 	return s.d.node.Status()
 }
 
+// GitFolder reports whether dir has a .git entry, as the placeFacts pass last found it (see Repos).
+func (s hubSource) GitFolder(dir string) bool { return s.d.facts.lookup(dir).git }
+
 // Repos lists where a task can be placed: the configured GitHub repositories and the repository or folder of each of
 // the newest Tickets, the last used first. A configured repository no Ticket used goes after them, by name; together
 // they are at most maxRepos. Then come the local git repositories the last scan found under the localRepoRoots and

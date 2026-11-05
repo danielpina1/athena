@@ -195,8 +195,8 @@ func TestReposReadCachedFolderFacts(t *testing.T) {
 	if k := kinds(); k != "[dir]" || len(probed) != 0 {
 		t.Fatalf("before the pass: kinds %s, probed %v", k, probed)
 	}
-	if !facts.refresh(false) {
-		t.Error("the pass found a repository but reported no change")
+	if c := facts.refresh(false); fmt.Sprint(c) != fmt.Sprint([]string{gitDir}) {
+		t.Errorf("the pass found a repository but reported the change %v", c)
 	}
 	if k := kinds(); k != "[git]" || fmt.Sprint(probed) != fmt.Sprint([]string{gitDir}) {
 		t.Fatalf("after the pass: kinds %s, probed %v", k, probed)
@@ -207,13 +207,51 @@ func TestReposReadCachedFolderFacts(t *testing.T) {
 	if len(probed) != 0 {
 		t.Errorf("a read probed %v", probed)
 	}
-	if facts.refresh(true) {
-		t.Error("an unchanged pass reported a change")
+	if c := facts.refresh(true); len(c) != 0 {
+		t.Errorf("an unchanged pass reported a change %v", c)
 	}
-	// A folder no read asked about over a whole period is forgotten.
-	facts.refresh(true)
-	if _, ok := facts.known[gitDir]; ok {
-		t.Error("a folder nobody reads is still kept")
+	// The summaries' branch reads the same facts, never the filesystem.
+	probed = nil
+	if !src.GitFolder(gitDir) || len(probed) != 0 {
+		t.Errorf("GitFolder: %v, probed %v", src.GitFolder(gitDir), probed)
+	}
+}
+
+// A folder nobody read over whole periods keeps its fact: a dashboard's Snapshot after a quiet spell lists it as the
+// repository it is. Forgetting it made that Snapshot list it a plain folder, and no Delta ever corrected it, since the
+// hub's last published list still held the fact.
+func TestReposKeepFolderFactsOverQuietPeriods(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "athena.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	gitDir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(gitDir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	putTickets(t, st, placedTicket("T-1", "", gitDir, time.Date(2026, 11, 4, 9, 0, 0, 0, time.UTC)))
+	facts := newPlaceFacts()
+	src := newHubSource(&Dispatcher{st: st, facts: facts})
+	if _, err := src.Repos(); err != nil {
+		t.Fatal(err)
+	}
+	facts.refresh(false)
+	// Two periodic passes with no read between them, as when no dashboard is open for a while.
+	for range 2 {
+		if c := facts.refresh(true); len(c) != 0 {
+			t.Fatalf("a quiet pass reported a change %v", c)
+		}
+	}
+	got, err := src.Repos()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if names, kinds := repoNames(got); fmt.Sprint(kinds) != "[git]" {
+		t.Errorf("after a quiet spell: %v %v", names, kinds)
+	}
+	if !src.GitFolder(gitDir) {
+		t.Error("after a quiet spell the folder has no .git entry")
 	}
 }
 
@@ -227,13 +265,16 @@ func TestPlaceFactsRunProbesANewFolder(t *testing.T) {
 	facts := newPlaceFacts()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	changed := make(chan struct{}, 1)
-	go facts.run(ctx, time.Hour, func() { changed <- struct{}{} })
+	changed := make(chan []string, 1)
+	go facts.run(ctx, time.Hour, func(dirs []string) { changed <- dirs })
 	if facts.lookup(gitDir).git {
 		t.Fatal("a folder not probed yet is a repository")
 	}
 	select {
-	case <-changed:
+	case dirs := <-changed:
+		if fmt.Sprint(dirs) != fmt.Sprint([]string{gitDir}) {
+			t.Errorf("changed folders %v", dirs)
+		}
 	case <-time.After(waitTimeout):
 		t.Fatal("no change reported")
 	}

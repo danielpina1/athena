@@ -10,6 +10,8 @@
 //             CA downloads) and anything not a same-origin GET: never touched.
 //   push      plan 3's notification JSON {title, body, url, tag}; the tag is the Ticket id, so a later push for the
 //             same Ticket replaces the earlier notification.
+//   pushsubscriptionchange   the push service rotated the subscription: subscribes again if the browser did not, and
+//             posts the new one to /push/renew with the old endpoint, so pushes keep coming before the next sign-in.
 //   updates   a new worker waits until the page sends SKIP_WAITING (the owner tapped "Reload").
 
 declare const self: ServiceWorkerGlobalScope;
@@ -98,6 +100,36 @@ self.addEventListener("push", (e) => {
   }
   e.waitUntil(self.registration.showNotification(typeof msg.title === "string" && msg.title ? msg.title : "Athena", options));
 });
+
+self.addEventListener("pushsubscriptionchange", (e) => {
+  const ev = e as PushSubscriptionChangeEvent;
+  ev.waitUntil(renewPush(ev.oldSubscription, ev.newSubscription));
+});
+
+/**
+ * Tells the server the push service moved this device's subscription. The server takes it with the session's cookie
+ * alone (no page, so no passkey step-up) because it names the old endpoint, which the session holds. Without the old
+ * subscription there is nothing to prove that, and the next sign-in sends the current one (resubscribePush). Quiet on
+ * any failure, for the same reason.
+ */
+async function renewPush(old: PushSubscription | null, next: PushSubscription | null): Promise<void> {
+  if (!old) return;
+  try {
+    next ??= await self.registration.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: old.options.applicationServerKey,
+    });
+    if (next.endpoint === old.endpoint) return;
+    await fetch("/push/renew", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ oldEndpoint: old.endpoint, subscription: next.toJSON() }),
+    });
+  } catch {
+    // the next sign-in sends the subscription again
+  }
+}
 
 self.addEventListener("notificationclick", (e) => {
   e.notification.close();

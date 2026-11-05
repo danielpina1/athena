@@ -1661,8 +1661,9 @@ func branchName(t core.Ticket) string { return branchPrefix + strings.ToLower(t.
 // WorktreeBranch is the branch of the Ticket's worktree (athena/<lowercased id>) in the cases a view can tell without
 // running git: the Ticket names a GitHub repository and no directory, or its directory has a .git entry (a repository's
 // top level). A repository with a plain-folder directory (place uses the folder itself) and a subdirectory of a
-// repository (place asks git) give "".
-func WorktreeBranch(t core.Ticket) string {
+// repository (place asks git) give "". hasGit tells whether a directory has a .git entry; the hub answers it from what
+// a pass off its loop found, so a view never touches the filesystem (nil: no directory has one).
+func WorktreeBranch(t core.Ticket, hasGit func(dir string) bool) string {
 	dir := ""
 	if t.Execution != nil {
 		dir = t.Execution.Directory
@@ -1673,7 +1674,7 @@ func WorktreeBranch(t core.Ticket) string {
 		}
 		return ""
 	}
-	if _, err := os.Lstat(filepath.Join(dir, ".git")); err == nil {
+	if hasGit != nil && hasGit(dir) {
 		return branchName(t)
 	}
 	return ""

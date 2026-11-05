@@ -1,8 +1,10 @@
+import { create } from "@bufbuild/protobuf";
 import { act, render, renderHook, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, useNavigate } from "react-router";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { Where } from "@/app/testkit";
+import { DeltaSchema } from "@/gen/athena/v1/state_pb";
 import { useAthena } from "@/lib/store/state";
 import { at, hasClasses, load } from "./fixtures";
 import { useFilterParams } from "./Filters";
@@ -163,4 +165,39 @@ test("the search box follows a change of the URL from outside", async () => {
   expect(box().value).toBe("old");
   await user.click(screen.getByRole("button", { name: "jump" }));
   expect(box().value).toBe("zebra");
+});
+
+test("500 Tickets: a Delta applies and the Tickets list renders it under budget", () => {
+  const tickets = Array.from({ length: 500 }, (_, i) => ({
+    id: `T-${i}`,
+    title: `ticket ${i}`,
+    stage: "working",
+    repo: "acme/api",
+    model: "opus",
+    updatedAt: at(i * 1000),
+  }));
+  load({ tickets });
+  renderList();
+  expect(screen.getAllByRole("link", { name: /ticket \d+/ })).toHaveLength(200);
+  // Each Delta moves one Ticket to the top (the list is newest first) and changes its stage, the worst case for the
+  // list: its order and a row change.
+  const deltas = (from: number) =>
+    tickets.map((t, i) =>
+      create(DeltaSchema, {
+        seq: BigInt(from + i),
+        change: { case: "ticket", value: { ...t, stage: i % 2 ? "idle" : "person", action: "answer", updatedAt: at(1e9 + from + i) } },
+      }),
+    );
+  const apply = (d: ReturnType<typeof deltas>[number]) => act(() => void useAthena.getState().applyDelta(d));
+  // Warm up the JIT and React on 50 Deltas, then time 150 (the 499th Ticket's is the last).
+  const all = deltas(2).slice(300);
+  for (const d of all.slice(0, 50)) apply(d);
+  const timed = all.slice(50);
+  const start = performance.now();
+  for (const d of timed) apply(d);
+  const mean = (performance.now() - start) / timed.length;
+  // The budget is 16 ms to apply and render a Delta (a frame); a shared CI runner gets four times that.
+  const budget = 16 * (process.env.CI ? 4 : 1);
+  expect(mean).toBeLessThan(budget);
+  expect(rows()[0]).toBe("/tickets/T-499");
 });

@@ -14,8 +14,8 @@ test("keeps tabs, newlines and any script", () => {
   expect(stripAnsi("שלום עולם \u001b[4mabc\u001b[0m")).toBe("שלום עולם abc");
 });
 
-// U+202A–U+202E, U+2066–U+2069 and U+200E/U+200F reorder what follows them ("Trojan Source").
-const BIDI = "\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069\u200e\u200f";
+// U+202A–U+202E, U+2066–U+2069 and U+200E/U+200F/U+061C reorder what follows them ("Trojan Source").
+const BIDI = "\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069\u200e\u200f\u061c";
 
 test("titles and stream text lose bidirectional controls, keeping right-to-left text", () => {
   expect(stripAnsi(`a${BIDI}b`)).toBe("ab");
@@ -26,9 +26,11 @@ test("titles and stream text lose bidirectional controls, keeping right-to-left 
 test("markBidi shows each bidirectional control as a visible marker", () => {
   expect(markBidi("if (x\u202e) {}")).toBe("if (x⟪U+202E⟫) {}");
   expect(markBidi(BIDI)).toBe(
-    "⟪U+202A⟫⟪U+202B⟫⟪U+202C⟫⟪U+202D⟫⟪U+202E⟫⟪U+2066⟫⟪U+2067⟫⟪U+2068⟫⟪U+2069⟫⟪U+200E⟫⟪U+200F⟫",
+    "⟪U+202A⟫⟪U+202B⟫⟪U+202C⟫⟪U+202D⟫⟪U+202E⟫⟪U+2066⟫⟪U+2067⟫⟪U+2068⟫⟪U+2069⟫⟪U+200E⟫⟪U+200F⟫⟪U+061C⟫",
   );
   expect(markBidi("plain שלום")).toBe("plain שלום");
   expect(hasBidi("a\u2067b")).toBe(true);
+  expect(hasBidi("a\u061cb")).toBe(true);
+  expect(hasBidi("مرحبا")).toBe(false);
   expect(hasBidi("plain שלום")).toBe(false);
 });
