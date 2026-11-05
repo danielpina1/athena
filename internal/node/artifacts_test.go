@@ -10,7 +10,9 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/danielpina1/athena/internal/core"
 )
@@ -419,12 +421,18 @@ func TestTicketDiffNonASCIINamesAreNotQuoted(t *testing.T) {
 }
 
 // Names that look like secrets are never listed, and never served, in either kind of Ticket.
-var secretNames = []string{".env", ".env.local", ".ENV.production", "server.pem", "tls.KEY", "id_rsa", "id_ed25519.pub", "conf/.env", ".env.d/inner.txt", "a/certs/ca.pem"}
+var secretNames = []string{".env", ".env.local", ".ENV.production", "server.pem", "tls.KEY", "id_rsa", "id_ed25519.pub", "id_dsa", "id_ecdsa_sk",
+	"conf/.env", ".env.d/inner.txt", "a/certs/ca.pem", ".git-credentials", ".aws/credentials", ".ssh/config", "home/.ssh/known_hosts",
+	"infra/prod.tfstate", "infra/prod.tfstate.backup", "vault.KDBX", ".htpasswd", ".docker/config.json", ".kube/config", ".netrc"}
 
 func TestTicketFilesSkipSecretNames(t *testing.T) {
 	n, dir := filesNode(t)
 	writeFile(t, filepath.Join(dir, "notes.md"), "fine")
 	writeFile(t, filepath.Join(dir, "keys.md"), "a document about keys")
+	// Not secrets: an id_ name that is no SSH key, and the same base names outside the directories that hold secrets.
+	for _, name := range []string{"id_mapping.md", "aws/credentials.md", "kube/config", "docker/config.json"} {
+		writeFile(t, filepath.Join(dir, filepath.FromSlash(name)), "fine")
+	}
 	for _, name := range secretNames {
 		writeFile(t, filepath.Join(dir, filepath.FromSlash(name)), "SECRET=1")
 	}
@@ -436,7 +444,7 @@ func TestTicketFilesSkipSecretNames(t *testing.T) {
 	for _, f := range files {
 		got = append(got, f.Path)
 	}
-	if want := []string{"keys.md", "notes.md"}; !slices.Equal(got, want) {
+	if want := []string{"aws/credentials.md", "docker/config.json", "id_mapping.md", "keys.md", "kube/config", "notes.md"}; !slices.Equal(got, want) {
 		t.Fatalf("files = %v, want %v", got, want)
 	}
 	for _, name := range secretNames {
@@ -536,19 +544,180 @@ func TestOpenTicketFileInWorktree(t *testing.T) {
 	}
 }
 
-// Listing a worktree's files runs nothing of the repository's: no clean filter (named by an attribute the worker can
-// write), no fsmonitor and no hook.
-func TestWorktreeFilesRunNoFilterOrHook(t *testing.T) {
+// The node's state directory (and the work root, which holds every Ticket's worktree) is never listed or served
+// through a Ticket, however deep it sits under the Ticket's directory and whatever it is called; a Ticket whose
+// directory is the state directory, or inside it, has no files at all. Matched by identity, not by name.
+func TestStateDirIsNeverReachable(t *testing.T) {
+	top := t.TempDir()
+	state := filepath.Join(top, "home", "athena-state") // not named .athena
+	work := filepath.Join(top, "srv", "work")
+	writeFile(t, filepath.Join(state, "athena.db"), "STATE")
+	writeFile(t, filepath.Join(state, "shims", "gh"), "#!/bin/sh")
+	writeFile(t, filepath.Join(work, "other-t-0009", "SECRET.md"), "another Ticket's")
+	writeFile(t, filepath.Join(top, "notes.md"), "fine")
+	tickets := map[string]core.Ticket{
+		"T-0002": {ID: "T-0002", Title: "Top", Execution: &core.Execution{Directory: top}},
+		"T-0003": {ID: "T-0003", Title: "State", Execution: &core.Execution{Directory: state}},
+		"T-0004": {ID: "T-0004", Title: "Inside", Execution: &core.Execution{Directory: filepath.Join(state, "shims")}},
+	}
+	n := New(Config{WorkRoot: work, StateDir: state}, ticketEngine{tickets: tickets})
+	files, _, err := n.TicketFiles(context.Background(), "T-0002")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, f := range files {
+		got = append(got, f.Path)
+	}
+	if want := []string{"notes.md"}; !slices.Equal(got, want) {
+		t.Fatalf("listed %v, want %v", got, want)
+	}
+	for _, rel := range []string{"home/athena-state/athena.db", "home/athena-state/shims/gh", "srv/work/other-t-0009/SECRET.md"} {
+		if f, err := n.OpenTicketFile(context.Background(), "T-0002", rel); err == nil {
+			f.Close()
+			t.Errorf("served %s", rel)
+		}
+	}
+	for _, id := range []string{"T-0003", "T-0004"} {
+		if _, _, err := n.TicketFiles(context.Background(), id); !errors.Is(err, ErrNoWorkspace) {
+			t.Errorf("files of %s: %v, want ErrNoWorkspace", id, err)
+		}
+		if f, err := n.OpenTicketFile(context.Background(), id, "athena.db"); !errors.Is(err, ErrNoWorkspace) {
+			if f != nil {
+				f.Close()
+			}
+			t.Errorf("open in %s: %v, want ErrNoWorkspace", id, err)
+		}
+	}
+	// A directory inside the state directory is refused where the Ticket is placed, saying why.
+	if _, err := n.place(tickets["T-0004"]); err == nil || !strings.Contains(err.Error(), "state directory") {
+		t.Errorf("placing a Ticket inside the state directory: %v", err)
+	}
+}
+
+// The usual layout, a work root inside the state directory (~/.athena/work), still lists a worktree's files.
+func TestWorktreeInsideTheStateDirIsListed(t *testing.T) {
+	repo := newRepo(t)
+	state := t.TempDir()
+	work := filepath.Join(state, "work")
+	tk := core.Ticket{ID: "T-0001", Title: "Diff me", Execution: &core.Execution{Directory: repo}}
+	n := New(Config{WorkRoot: work, StateDir: state}, ticketEngine{tickets: map[string]core.Ticket{"T-0001": tk}})
+	wt := TicketDir(work, tk)
+	git(t, repo, "worktree", "add", "-q", "-b", "athena/t-0001", wt)
+	writeFile(t, filepath.Join(wt, "REPORT.md"), "# R\n")
+	files, _, err := n.TicketFiles(context.Background(), "T-0001")
+	if err != nil || len(files) != 1 || files[0].Path != "REPORT.md" {
+		t.Fatalf("files=%v err=%v", files, err)
+	}
+	f, err := n.OpenTicketFile(context.Background(), "T-0001", "REPORT.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+}
+
+// A FIFO put where a checked file was (a worker's rename in the window) fails at once: open does not wait for a
+// writer.
+func TestOpenCheckedNeverBlocksOnAFIFO(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "plain"), "p")
+	if err := syscall.Mkfifo(filepath.Join(dir, "pipe"), 0o644); err != nil {
+		t.Skip(err)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	last, err := root.Lstat("plain")
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		f, err := openChecked(root, "pipe", last)
+		if f != nil {
+			f.Close()
+		}
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrNotFound) {
+			t.Fatalf("open of a FIFO: %v, want ErrNotFound", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("open of a FIFO blocked")
+	}
+}
+
+// The worker may rewrite its worktree's .git file to point at a git dir of its own. The listing pins the git dir from
+// the repository's own record of the worktree, so that git dir is never read: its exclude file (hiding REPORT.md) and
+// its programs (fsmonitor, pager, hooks, filters) have no effect.
+func TestWorktreeGitDirIsPinned(t *testing.T) {
+	n, wt := repoFilesNode(t)
+	markers := t.TempDir()
+	fake := filepath.Join(t.TempDir(), "fake")
+	git(t, t.TempDir(), "init", "-q", fake)
+	gd := filepath.Join(fake, ".git")
+	mark := func(name string) string {
+		script := filepath.Join(markers, "..", name+".sh")
+		writeFile(t, script, "#!/bin/sh\ntouch "+filepath.Join(markers, name)+"\nexit 1\n")
+		if err := os.Chmod(script, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return script
+	}
+	cfg := "[core]\n\tfsmonitor = " + mark("fsmonitor") + "\n\tpager = " + mark("pager") + "\n\thooksPath = " + filepath.Join(gd, "hooks") +
+		"\n[filter \"evil\"]\n\tclean = " + mark("clean") + "\n\tprocess = " + mark("process") + "\n"
+	b, _ := os.ReadFile(filepath.Join(gd, "config"))
+	writeFile(t, filepath.Join(gd, "config"), string(b)+cfg)
+	for _, h := range []string{"post-index-change", "reference-transaction", "fsmonitor-watchman"} {
+		writeFile(t, filepath.Join(gd, "hooks", h), "#!/bin/sh\ntouch "+filepath.Join(markers, "hook-"+h)+"\n")
+		if err := os.Chmod(filepath.Join(gd, "hooks", h), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeFile(t, filepath.Join(gd, "info", "exclude"), "REPORT.md\n")
+	writeFile(t, filepath.Join(wt, ".gitattributes"), "* filter=evil\n")
+	writeFile(t, filepath.Join(wt, ".git"), "gitdir: "+gd+"\n")
+	files, _, err := n.TicketFiles(context.Background(), "T-0001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(files, func(f FileEntry) bool { return f.Path == "REPORT.md" && f.Status == "?" }) {
+		t.Errorf("REPORT.md is not listed: the worktree's own .git chose the git dir: %v", files)
+	}
+	f, err := n.OpenTicketFile(context.Background(), "T-0001", "REPORT.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	ents, _ := os.ReadDir(markers)
+	for _, e := range ents {
+		t.Errorf("ran: %s", e.Name())
+	}
+}
+
+// The repository's own core.fsmonitor (which ls-files does run, as the control shows) never runs for a listing.
+func TestWorktreeFilesRunNoFsmonitor(t *testing.T) {
 	n, wt := repoFilesNode(t)
 	repo := filepath.Dir(git(t, wt, "rev-parse", "--path-format=absolute", "--git-common-dir"))
 	marker := filepath.Join(t.TempDir(), "ran")
-	cmd := "touch " + marker
-	git(t, repo, "config", "filter.evil.clean", cmd)
-	git(t, repo, "config", "filter.evil.process", cmd)
-	git(t, repo, "config", "core.fsmonitor", cmd)
-	git(t, repo, "config", "core.hooksPath", filepath.Join(t.TempDir(), "hooks"))
-	writeFile(t, filepath.Join(wt, ".gitattributes"), "* filter=evil\n")
-	writeFile(t, filepath.Join(wt, "README"), "hi\nmore\nuncommitted\n")
+	script := filepath.Join(t.TempDir(), "monitor.sh")
+	writeFile(t, script, "#!/bin/sh\ntouch "+marker+"\nexit 1\n")
+	if err := os.Chmod(script, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	git(t, repo, "config", "core.fsmonitor", script)
+	// The control: plain git runs it.
+	git(t, wt, "ls-files", "--others", "--exclude-standard")
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("the control did not run the fsmonitor (%v): this test would prove nothing", err)
+	}
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
+	}
 	if _, _, err := n.TicketFiles(context.Background(), "T-0001"); err != nil {
 		t.Fatal(err)
 	}
@@ -558,6 +727,6 @@ func TestWorktreeFilesRunNoFilterOrHook(t *testing.T) {
 	}
 	f.Close()
 	if _, err := os.Stat(marker); err == nil {
-		t.Fatal("listing the worktree ran a command of the repository's")
+		t.Fatal("a listing ran the repository's fsmonitor")
 	}
 }

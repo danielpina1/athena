@@ -1621,11 +1621,20 @@ type placement struct {
 }
 
 // place is a Ticket's placement on this node: a GitHub Ticket without a directory of its own works in a worktree of
-// the node's clone of its repository.
+// the node's clone of its repository. A directory that is the state directory, or inside it, is refused.
 func (n *Node) place(t core.Ticket) (placement, error) {
 	p, err := place(n.cfg.WorkRoot, t)
 	if err != nil {
 		return p, err
+	}
+	if t.Execution != nil && t.Execution.Directory != "" {
+		dir := p.dirKey
+		if dir == "" {
+			dir = p.repo
+		}
+		if err := n.checkDirectory(dir); err != nil {
+			return placement{}, err
+		}
 	}
 	if t.Repo != "" && p.repo == "" && p.dirKey == "" {
 		if _, _, err := splitRepo(t.Repo); err != nil {
