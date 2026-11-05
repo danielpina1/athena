@@ -325,9 +325,9 @@ var headerLike = regexp.MustCompile(`^(\[|(trigger_id|acknowledged|from|at|threa
 // quoteText makes text the node did not write (a comment, a Trigger's text, the owner's text, a note) safe to place
 // under a header: each line of it that starts like a header or a card line gets one leading space. Athena's own headers
 // and card lines start at a line's first column, so text can never carry one (prompts/worker.md tells the worker, and
-// internal/render reads it the same way and removes the space for display).
+// internal/render reads it the same way and removes the space for display). Every line separator is a new line first.
 func quoteText(s string) string {
-	lines := strings.Split(s, "\n")
+	lines := strings.Split(newLines(s), "\n")
 	for i, l := range lines {
 		if headerLike.MatchString(l) {
 			lines[i] = " " + l
@@ -338,8 +338,15 @@ func quoteText(s string) string {
 
 // oneLine is s with its line breaks as spaces: a title placed in a header line stays in it.
 func oneLine(s string) string {
-	return strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ").Replace(s)
+	return strings.ReplaceAll(newLines(s), "\n", " ")
 }
+
+// lineBreaks are the separators a reader (the worker's model among them) may take for the end of a line: CRLF, a lone
+// CR, VT, FF, NEL, U+2028 and U+2029, besides LF.
+var lineBreaks = strings.NewReplacer("\r\n", "\n", "\r", "\n", "\v", "\n", "\f", "\n", "\u0085", "\n", "\u2028", "\n", "\u2029", "\n")
+
+// newLines is s with every line separator made a \n, so each line of it can be seen, and quoted, as one.
+func newLines(s string) string { return lineBreaks.Replace(s) }
 
 // cardTextMaxRunes bounds the text of a Trigger card (reference 007 "Messages delivered to Sessions").
 const cardTextMaxRunes = 600
