@@ -7,8 +7,11 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -30,19 +33,23 @@ func (f *fakeArtifacts) TicketDiff(_ context.Context, id string) (node.Diff, err
 		Files: []node.DiffFile{{Path: "b", OldPath: "a", Status: "R", Added: 2, Deleted: 1}, {Path: "bin", Status: "A", Binary: true}}}, nil
 }
 
-func (f *fakeArtifacts) TicketFiles(string) ([]node.FileEntry, bool, error) {
+func (f *fakeArtifacts) TicketFiles(context.Context, string) ([]node.FileEntry, bool, error) {
 	if f.filesErr != nil {
 		return nil, false, f.filesErr
 	}
-	return []node.FileEntry{{Path: "out/report.txt", Size: 5, ModTime: time.Date(2026, 11, 4, 1, 2, 3, 0, time.UTC)}}, true, nil
+	return []node.FileEntry{
+		{Path: "out/report.txt", Size: 5, ModTime: time.Date(2026, 11, 4, 1, 2, 3, 0, time.UTC)},
+		{Path: "REPORT.md", Status: "?", Size: 9, ModTime: time.Date(2026, 11, 4, 1, 2, 3, 0, time.UTC)},
+	}, true, nil
 }
 
-func (f *fakeArtifacts) OpenTicketFile(id, rel string) (*os.File, error) {
+// OpenTicketFile opens the file of rel's base name in dir: the node's own guard is tested in internal/node.
+func (f *fakeArtifacts) OpenTicketFile(_ context.Context, id, rel string) (*os.File, error) {
 	f.opened = append(f.opened, [2]string{id, rel})
 	if f.openErr != nil {
 		return nil, f.openErr
 	}
-	return os.Open(filepath.Join(f.dir, "report.txt"))
+	return os.Open(filepath.Join(f.dir, filepath.Base(rel)))
 }
 
 func artifactsEnv(t *testing.T) (*AuthEnv, *fakeArtifacts, *bytes.Buffer) {
@@ -57,7 +64,7 @@ func artifactsEnv(t *testing.T) (*AuthEnv, *fakeArtifacts, *bytes.Buffer) {
 	return e, fa, &logs
 }
 
-var artifactRoutes = []string{"/api/tickets/T-0001/diff", "/api/tickets/T-0001/files", "/api/tickets/T-0001/files/out/report.txt"}
+var artifactRoutes = []string{"/api/tickets/T-0001/diff", "/api/tickets/T-0001/files", "/api/tickets/T-0001/files/out/report.txt", "/api/tickets/T-0001/files/out/report.txt?view=1"}
 
 func TestArtifactsNeedSession(t *testing.T) {
 	e, fa, _ := artifactsEnv(t)
@@ -87,7 +94,8 @@ func TestArtifactsJSON(t *testing.T) {
 		t.Fatalf("diff body\n got %s\nwant %s", got, want)
 	}
 	rec = e.Do("GET", "/api/tickets/T-0001/files", nil)
-	want = `{"files":[{"path":"out/report.txt","size":5,"modTime":"2026-11-04T01:02:03Z"}],"truncated":true}`
+	want = `{"files":[{"path":"out/report.txt","size":5,"modTime":"2026-11-04T01:02:03Z"},` +
+		`{"path":"REPORT.md","status":"?","size":9,"modTime":"2026-11-04T01:02:03Z"}],"truncated":true}`
 	if got := strings.TrimSpace(rec.Body.String()); rec.Code != 200 || got != want || rec.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("files: %d %s", rec.Code, got)
 	}
@@ -142,5 +150,109 @@ func TestFileDownloadHeaders(t *testing.T) {
 	e.Do("GET", "/api/tickets/T-0001/files/%2e%2e/x", nil)
 	if got := fa.opened[len(fa.opened)-1]; got[1] != "../x" {
 		t.Errorf("encoded dotdot arrived as %q", got[1])
+	}
+}
+
+func writeIn(t *testing.T, dir, name string, b []byte) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, name), b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// ?view=1 serves a file to read in the page: text as text/plain whatever it holds (HTML and SVG included, never to be
+// rendered), the allowed images as themselves, inline, under a sandbox policy added to the app's own.
+func TestFileViewHeaders(t *testing.T) {
+	e, fa, _ := artifactsEnv(t)
+	const html = "<!doctype html><script>alert(1)</script>"
+	const svg = `<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"><script>alert(2)</script></svg>`
+	writeIn(t, fa.dir, "page.html", []byte(html))
+	writeIn(t, fa.dir, "logo.svg", []byte(svg))
+	writeIn(t, fa.dir, "notes.md", []byte("# Notes"))
+	png := []byte("\x89PNG\r\n\x1a\nnot really")
+	for _, name := range []string{"shot.png", "a.JPG", "b.jpeg", "c.gif", "d.webp", "e.pdf", "f.bin"} {
+		writeIn(t, fa.dir, name, png)
+	}
+	cases := []struct{ name, ctype, body string }{
+		{"page.html", "text/plain; charset=utf-8", html},
+		{"logo.svg", "text/plain; charset=utf-8", svg},
+		{"notes.md", "text/plain; charset=utf-8", "# Notes"},
+		{"shot.png", "image/png", string(png)},
+		{"a.JPG", "image/jpeg", string(png)},
+		{"b.jpeg", "image/jpeg", string(png)},
+		{"c.gif", "image/gif", string(png)},
+		{"d.webp", "image/webp", string(png)},
+		{"e.pdf", "text/plain; charset=utf-8", string(png)},
+		{"f.bin", "text/plain; charset=utf-8", string(png)},
+	}
+	for _, c := range cases {
+		rec := e.Do("GET", "/api/tickets/T-0001/files/docs/"+c.name+"?view=1", nil)
+		h := rec.Header()
+		if rec.Code != 200 || rec.Body.String() != c.body {
+			t.Errorf("%s: %d %q", c.name, rec.Code, rec.Body)
+			continue
+		}
+		for k, v := range map[string]string{
+			"Content-Type":           c.ctype,
+			"X-Content-Type-Options": "nosniff",
+			"Content-Disposition":    "inline; filename=" + c.name,
+			"Cache-Control":          "no-store",
+			"X-Athena-Size":          strconv.Itoa(len(c.body)),
+			"X-Athena-Truncated":     "",
+		} {
+			if h.Get(k) != v {
+				t.Errorf("%s: %s = %q, want %q", c.name, k, h.Get(k), v)
+			}
+		}
+		if csp := h.Values("Content-Security-Policy"); !slices.Contains(csp, "sandbox; default-src 'none'") {
+			t.Errorf("%s: Content-Security-Policy = %q", c.name, csp)
+		}
+		if got := fa.opened[len(fa.opened)-1]; got != [2]string{"T-0001", "docs/" + c.name} {
+			t.Errorf("opened %v", got)
+		}
+	}
+}
+
+// The policy is added to the app's own, never put in its place: the page's frame-ancestors still holds.
+func TestFileViewKeepsTheAppPolicy(t *testing.T) {
+	e, fa, _ := artifactsEnv(t)
+	writeIn(t, fa.dir, "notes.md", []byte("# Notes"))
+	req := httptest.NewRequest("GET", "/api/tickets/T-0001/files/notes.md?view=1", nil)
+	for _, c := range e.Request().Cookies() {
+		req.AddCookie(c)
+	}
+	rec := httptest.NewRecorder()
+	securityHeaders(e.Mux, true).ServeHTTP(rec, req)
+	csp := rec.Header().Values("Content-Security-Policy")
+	if rec.Code != 200 || !slices.Equal(csp, []string{contentSecurityPolicy, "sandbox; default-src 'none'"}) {
+		t.Fatalf("%d Content-Security-Policy = %q", rec.Code, csp)
+	}
+}
+
+// Text past 1 MiB is cut, never in the middle of a character, and says so; an image is whole or not served.
+func TestFileViewCapsSize(t *testing.T) {
+	e, fa, _ := artifactsEnv(t)
+	big := append(bytes.Repeat([]byte("a"), maxViewText-1), []byte("é and more")...) // é straddles the cut
+	writeIn(t, fa.dir, "big.log", big)
+	rec := e.Do("GET", "/api/tickets/T-0001/files/big.log?view=1", nil)
+	h := rec.Header()
+	if rec.Code != 200 || rec.Body.Len() != maxViewText-1 || h.Get("X-Athena-Truncated") != "true" || h.Get("X-Athena-Size") != strconv.Itoa(len(big)) {
+		t.Fatalf("%d len=%d truncated=%q size=%q", rec.Code, rec.Body.Len(), h.Get("X-Athena-Truncated"), h.Get("X-Athena-Size"))
+	}
+	exact := bytes.Repeat([]byte("b"), maxViewText)
+	writeIn(t, fa.dir, "exact.txt", exact)
+	rec = e.Do("GET", "/api/tickets/T-0001/files/exact.txt?view=1", nil)
+	if rec.Code != 200 || rec.Body.Len() != maxViewText || rec.Header().Get("X-Athena-Truncated") != "" {
+		t.Fatalf("exactly 1 MiB: %d len=%d truncated=%q", rec.Code, rec.Body.Len(), rec.Header().Get("X-Athena-Truncated"))
+	}
+	writeIn(t, fa.dir, "huge.png", bytes.Repeat([]byte{0}, maxViewImage+1))
+	rec = e.Do("GET", "/api/tickets/T-0001/files/huge.png?view=1", nil)
+	if rec.Code != http.StatusRequestEntityTooLarge || strings.TrimSpace(rec.Body.String()) != `{"code":"too_large","error":"too large to view"}` {
+		t.Fatalf("huge image: %d %s", rec.Code, rec.Body)
+	}
+	// Without view, the whole file downloads.
+	rec = e.Do("GET", "/api/tickets/T-0001/files/big.log", nil)
+	if rec.Code != 200 || rec.Body.Len() != len(big) || rec.Header().Get("Content-Type") != "application/octet-stream" {
+		t.Fatalf("download: %d len=%d %q", rec.Code, rec.Body.Len(), rec.Header().Get("Content-Type"))
 	}
 }

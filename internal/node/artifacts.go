@@ -60,9 +60,12 @@ type DiffFile struct {
 	Binary                bool
 }
 
-// FileEntry is a file in a Ticket's directory; Path is relative, with forward slashes.
+// FileEntry is a file in a Ticket's directory, or one its worktree added or changed; Path is relative, with forward
+// slashes. Status is "" for a Ticket without a repository; in a worktree it is the branch's change (A, M, R, C or T,
+// as in DiffFile) or "?" for a new file not committed yet.
 type FileEntry struct {
 	Path    string
+	Status  string
 	Size    int64
 	ModTime time.Time
 }
@@ -165,39 +168,12 @@ func (n *Node) TicketDiff(ctx context.Context, ticketID string) (Diff, error) {
 	}
 	ctx, cancel := context.WithTimeout(ctx, diffTimeout)
 	defer cancel()
-	env := diffEnv()
-	git := func(limit int, args ...string) ([]byte, bool, error) {
-		return diffGit(ctx, p.repo, env, limit, args...)
-	}
-	text := func(args ...string) (string, error) {
-		out, _, err := git(1<<10, args...)
-		return strings.TrimSpace(string(out)), err
-	}
-	ref := "refs/heads/" + branch
-	if _, err := text("rev-parse", "--verify", "--quiet", ref+"^{commit}"); err != nil {
-		if ctx.Err() != nil {
-			return Diff{}, ctx.Err()
-		}
-		return Diff{}, ErrNoWorkspace
-	}
-	base, err := text("merge-base", "refs/remotes/origin/HEAD", ref)
-	if err != nil {
-		if ctx.Err() != nil {
-			return Diff{}, ctx.Err()
-		}
-		if base, err = text("merge-base", "HEAD", ref); err != nil {
-			return Diff{}, err
-		}
-	}
-	span := base + "..." + ref
-	common := []string{"diff", "--no-ext-diff", "--no-textconv", "--no-color", "--find-renames"}
-	// --raw gives each file's status and --numstat its counts, in one run; -z keeps odd file names exact.
-	stat, statCut, err := git(maxNumstatSize, append(common[:len(common):len(common)], "--raw", "--numstat", "-z", span)...)
+	b, err := branchFiles(ctx, p.repo, branch)
 	if err != nil {
 		return Diff{}, err
 	}
-	d := Diff{Base: base, Branch: branch, Files: parseDiffStat(stat, statCut), Truncated: statCut}
-	patch, cut, err := git(maxPatchBytes, append(common[:len(common):len(common)], span)...)
+	d := Diff{Base: b.base, Branch: branch, Files: b.files, Truncated: b.cut}
+	patch, cut, err := b.git(maxPatchBytes, append(diffCommon[:len(diffCommon):len(diffCommon)], b.span)...)
 	if err != nil {
 		return Diff{}, err
 	}
@@ -213,6 +189,52 @@ func (n *Node) TicketDiff(ctx context.Context, ticketID string) (Diff, error) {
 	}
 	d.Patch = string(bytes.ToValidUTF8(patch, []byte("\uFFFD")))
 	return d, nil
+}
+
+var diffCommon = []string{"diff", "--no-ext-diff", "--no-textconv", "--no-color", "--find-renames"}
+
+// branchDiff is a branch's span against its base and the files it changes, with git to read more of it.
+type branchDiff struct {
+	base, span string
+	files      []DiffFile
+	cut        bool
+	git        func(limit int, args ...string) ([]byte, bool, error)
+}
+
+// branchFiles reads the files branch changes in repo against its base: the merge-base with origin's default branch,
+// else with the repository's own HEAD. A branch that does not exist is ErrNoWorkspace.
+func branchFiles(ctx context.Context, repo, branch string) (branchDiff, error) {
+	env := diffEnv()
+	git := func(limit int, args ...string) ([]byte, bool, error) {
+		return diffGit(ctx, repo, env, limit, args...)
+	}
+	text := func(args ...string) (string, error) {
+		out, _, err := git(1<<10, args...)
+		return strings.TrimSpace(string(out)), err
+	}
+	ref := "refs/heads/" + branch
+	if _, err := text("rev-parse", "--verify", "--quiet", ref+"^{commit}"); err != nil {
+		if ctx.Err() != nil {
+			return branchDiff{}, ctx.Err()
+		}
+		return branchDiff{}, ErrNoWorkspace
+	}
+	base, err := text("merge-base", "refs/remotes/origin/HEAD", ref)
+	if err != nil {
+		if ctx.Err() != nil {
+			return branchDiff{}, ctx.Err()
+		}
+		if base, err = text("merge-base", "HEAD", ref); err != nil {
+			return branchDiff{}, err
+		}
+	}
+	span := base + "..." + ref
+	// --raw gives each file's status and --numstat its counts, in one run; -z keeps odd file names exact.
+	stat, cut, err := git(maxNumstatSize, append(diffCommon[:len(diffCommon):len(diffCommon)], "--raw", "--numstat", "-z", span)...)
+	if err != nil {
+		return branchDiff{}, err
+	}
+	return branchDiff{base: base, span: span, files: parseDiffStat(stat, cut), cut: cut, git: git}, nil
 }
 
 // parseDiffStat reads `git diff --raw --numstat -z`: the raw records (":modes shas status", then one path, or two for
@@ -317,26 +339,103 @@ func multiLinked(info fs.FileInfo) bool {
 	return ok && uint64(st.Nlink) > 1
 }
 
-// ticketRoot is the directory of a Ticket placed without a repository.
-func (n *Node) ticketRoot(ticketID string) (string, error) {
-	p, _, err := n.ticketPlacement(ticketID)
-	if err != nil {
-		return "", err
+// privateName reports a name (one component of a path) that is never listed or served, in either kind of Ticket:
+// git's own directory, and names that look like secrets (.env*, keys and certificates, SSH identities, credential
+// files). A document about keys ("keys.md") is not one.
+func privateName(name string) bool {
+	l := strings.ToLower(name)
+	switch l {
+	case ".git", ".netrc", ".npmrc", ".pypirc", ".pgpass":
+		return true
 	}
-	if p.repo != "" {
-		return "", ErrNoWorkspace
-	}
-	if st, err := os.Stat(p.workDir); err != nil || !st.IsDir() {
-		return "", ErrNoWorkspace
-	}
-	return p.workDir, nil
+	return strings.HasPrefix(l, ".env") || strings.HasPrefix(l, "id_") ||
+		strings.HasSuffix(l, ".pem") || strings.HasSuffix(l, ".key") || strings.HasSuffix(l, ".p12") || strings.HasSuffix(l, ".pfx")
 }
 
-// TicketFiles lists the regular files in the directory of a Ticket placed without a repository: breadth-first, at most
-// 1000 files in at most 2000 directories within 10 s (truncated reports a cap was hit), sorted by path. The .athena
-// directory, symlinks and files with several hard links are left out.
-func (n *Node) TicketFiles(ticketID string) ([]FileEntry, bool, error) {
-	dir, err := n.ticketRoot(ticketID)
+// localPath is rel cleaned, when it names something inside a directory: relative, no NUL, no "..", no private name.
+func localPath(rel string) (string, bool) {
+	if rel == "" || strings.ContainsRune(rel, 0) || strings.HasPrefix(rel, "/") || !filepath.IsLocal(filepath.FromSlash(rel)) {
+		return "", false
+	}
+	rel = path.Clean(rel)
+	for _, part := range strings.Split(rel, "/") {
+		if privateName(part) {
+			return "", false
+		}
+	}
+	return rel, true
+}
+
+// statFile is the regular file at rel in root, when it may be shown: no component of rel is a symlink (one could lead
+// into .athena, or to another file than a listing showed), its first is not .athena (in any letter case), and it has
+// one hard link (a second name could be of something outside the directory).
+func statFile(root *os.Root, rel string) (fs.FileInfo, bool) {
+	parts := strings.Split(rel, "/")
+	var last fs.FileInfo
+	for i := range parts {
+		st, err := root.Lstat(strings.Join(parts[:i+1], "/"))
+		if err != nil || st.Mode()&fs.ModeSymlink != 0 || (i == 0 && isAthena(root, parts[0], st)) {
+			return nil, false
+		}
+		last = st
+	}
+	if !last.Mode().IsRegular() || multiLinked(last) {
+		return nil, false
+	}
+	return last, true
+}
+
+// openFile opens rel in dir through the checks of localPath and statFile, or fails with ErrNotFound. Nothing outside
+// dir opens (os.Root), and the file opened must be the one checked, not something swapped in since.
+func openFile(dir, rel string) (*os.File, error) {
+	rel, ok := localPath(rel)
+	if !ok {
+		return nil, ErrNotFound
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	last, ok := statFile(root, rel)
+	if !ok {
+		return nil, ErrNotFound
+	}
+	f, err := root.Open(rel)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	if st, err := f.Stat(); err != nil || !st.Mode().IsRegular() || !os.SameFile(st, last) || multiLinked(st) {
+		f.Close()
+		return nil, ErrNotFound
+	}
+	return f, nil
+}
+
+// existingDir is dir when it is a directory, else ErrNoWorkspace.
+func existingDir(dir string) (string, error) {
+	if st, err := os.Stat(dir); err != nil || !st.IsDir() {
+		return "", ErrNoWorkspace
+	}
+	return dir, nil
+}
+
+// TicketFiles lists a Ticket's files. Without a repository: the regular files in its directory, breadth-first, at most
+// 1000 files in at most 2000 directories within 10 s (truncated reports a cap was hit), sorted by path. With one: the
+// files its worktree added or changed (worktreeFiles). Either way the .athena directory, private names (privateName),
+// symlinks and files with several hard links are left out.
+func (n *Node) TicketFiles(ctx context.Context, ticketID string) ([]FileEntry, bool, error) {
+	p, t, err := n.ticketPlacement(ticketID)
+	if err != nil {
+		return nil, false, err
+	}
+	if p.repo != "" {
+		return worktreeFiles(ctx, p, branchName(t))
+	}
+	dir, err := existingDir(p.workDir)
 	if err != nil {
 		return nil, false, err
 	}
@@ -370,7 +469,7 @@ func (n *Node) TicketFiles(ticketID string) ([]FileEntry, bool, error) {
 			for _, e := range entries {
 				rel := path.Join(cur, e.Name())
 				info, ierr := e.Info()
-				if ierr != nil || e.Type()&fs.ModeSymlink != 0 || (cur == "." && isAthena(root, e.Name(), info)) {
+				if ierr != nil || e.Type()&fs.ModeSymlink != 0 || privateName(e.Name()) || (cur == "." && isAthena(root, e.Name(), info)) {
 					continue
 				}
 				switch {
@@ -402,47 +501,94 @@ func (n *Node) TicketFiles(ticketID string) ([]FileEntry, bool, error) {
 	return finish(capped)
 }
 
-// OpenTicketFile opens a regular file of a Ticket placed without a repository, by its relative path. Nothing outside
-// the Ticket's directory opens (os.Root), and neither does anything under .athena (in any letter case), through a
-// symlink, or with several hard links: ErrNotFound.
-func (n *Node) OpenTicketFile(ticketID, rel string) (*os.File, error) {
-	dir, err := n.ticketRoot(ticketID)
+// worktreeFiles lists the files a Ticket's worktree added or changed: those its branch changes against its base (as in
+// TicketDiff; a deleted one is not there), and the new files not committed yet that git does not ignore, each as it
+// is in the worktree now. At most 1000, sorted by path; truncated reports that the cap was hit or git's output was cut.
+// git reads only the repository and the worktree's index and directories: no hook, no filter and no fsmonitor runs.
+func worktreeFiles(ctx context.Context, p placement, branch string) ([]FileEntry, bool, error) {
+	dir, err := existingDir(p.workDir)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	if rel == "" || strings.ContainsRune(rel, 0) || strings.HasPrefix(rel, "/") || !filepath.IsLocal(filepath.FromSlash(rel)) {
-		return nil, ErrNotFound
+	ctx, cancel := context.WithTimeout(ctx, diffTimeout)
+	defer cancel()
+	b, err := branchFiles(ctx, p.repo, branch)
+	if err != nil {
+		return nil, false, err
 	}
-	rel = path.Clean(rel)
+	status := map[string]string{}
+	for _, f := range b.files {
+		if f.Status != "D" {
+			status[f.Path] = f.Status
+		}
+	}
+	others, cut, err := diffGit(ctx, dir, diffEnv(), maxNumstatSize, "ls-files", "--others", "--exclude-standard", "-z")
+	if err != nil {
+		return nil, false, err
+	}
+	names := strings.Split(string(others), "\x00")
+	if cut {
+		names = names[:len(names)-1] // the last name may be partial
+	}
+	for _, name := range names {
+		if _, tracked := status[name]; name != "" && !tracked {
+			status[name] = "?"
+		}
+	}
+	paths := make([]string, 0, len(status))
+	for rel := range status {
+		paths = append(paths, rel)
+	}
+	sort.Strings(paths)
 	root, err := os.OpenRoot(dir)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer root.Close()
-	// No component may be a symlink (one could lead into .athena, or to another file than the listing showed).
-	parts := strings.Split(rel, "/")
-	var last fs.FileInfo
-	for i := range parts {
-		st, err := root.Lstat(strings.Join(parts[:i+1], "/"))
-		if err != nil || st.Mode()&fs.ModeSymlink != 0 || (i == 0 && isAthena(root, parts[0], st)) {
-			return nil, ErrNotFound
+	files := []FileEntry{}
+	for _, rel := range paths {
+		clean, ok := localPath(rel)
+		if !ok || clean != rel {
+			continue
 		}
-		last = st
+		info, ok := statFile(root, rel)
+		if !ok {
+			continue // gone since, or not one that may be shown
+		}
+		if len(files) == maxFileEntries {
+			return files, true, nil
+		}
+		files = append(files, FileEntry{Path: rel, Status: status[rel], Size: info.Size(), ModTime: info.ModTime()})
 	}
-	if !last.Mode().IsRegular() || multiLinked(last) {
-		return nil, ErrNotFound
-	}
-	f, err := root.Open(rel)
+	return files, b.cut || cut, nil
+}
+
+// OpenTicketFile opens a regular file of a Ticket by its relative path: one in the directory of a Ticket without a
+// repository, or one its worktree added or changed (worktreeFiles lists it) in a Ticket with one. Nothing outside that
+// directory opens (os.Root), and neither does anything under .athena (in any letter case), a private name, anything
+// through a symlink, or with several hard links: ErrNotFound.
+func (n *Node) OpenTicketFile(ctx context.Context, ticketID, rel string) (*os.File, error) {
+	p, t, err := n.ticketPlacement(ticketID)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil, ErrNotFound
-		}
 		return nil, err
 	}
-	// It must be the file just checked, not something swapped in since.
-	if st, err := f.Stat(); err != nil || !st.Mode().IsRegular() || !os.SameFile(st, last) || multiLinked(st) {
-		f.Close()
+	if p.repo == "" {
+		dir, err := existingDir(p.workDir)
+		if err != nil {
+			return nil, err
+		}
+		return openFile(dir, rel)
+	}
+	clean, ok := localPath(rel)
+	if !ok {
 		return nil, ErrNotFound
 	}
-	return f, nil
+	files, _, err := worktreeFiles(ctx, p, branchName(t))
+	if err != nil {
+		return nil, err
+	}
+	if !slices.ContainsFunc(files, func(f FileEntry) bool { return f.Path == clean }) {
+		return nil, ErrNotFound
+	}
+	return openFile(p.workDir, clean)
 }
