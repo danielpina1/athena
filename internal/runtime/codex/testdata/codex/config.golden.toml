@@ -37,14 +37,14 @@ default_tools_approval_mode = "approve"
 [[hooks.PreToolUse.hooks]]
 type = "command"
 command = "/opt/athena/bin/athena hook --runtime codex PreToolUse"
-timeout = 2100
+timeout = 86400
 async = false
 
 [[hooks.PermissionRequest]]
 [[hooks.PermissionRequest.hooks]]
 type = "command"
 command = "/opt/athena/bin/athena hook --runtime codex PermissionRequest"
-timeout = 2100
+timeout = 86400
 async = false
 
 [[hooks.PostToolUse]]

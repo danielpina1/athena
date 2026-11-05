@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -12,9 +13,18 @@ import (
 	"unicode/utf8"
 )
 
-// DefaultDecisionHookTimeout bounds the hooks that wait for a person (PreToolUse, PermissionRequest) when
-// Home.HookTimeout is zero; the other hooks get quickHookTimeout.
-const DefaultDecisionHookTimeout = 2 * time.Hour
+// DecisionHookTimeout bounds the hooks that wait for a person's Approval (PreToolUse, PermissionRequest). It is a
+// constant, not derived from the server's --approval-timeout, so config.toml is the same whichever athena command
+// renders it, and a CLI run can never shorten a live server's decision hooks. It only has to outlast the Approval: the
+// node decides an unanswered one at the approval timeout and answers the waiting hook then, so a long bound costs
+// nothing; 24 hours covers any approval timeout an owner would set (overnight and then some) while a hook process
+// that is truly stuck still ends within a day.
+const DecisionHookTimeout = 24 * time.Hour
+
+// DecisionHookMargin is how much longer than the approval timeout a decision hook must be allowed to wait, so the
+// node's verdict reaches the hook before Codex gives up on it (the node's own margin for Claude Code's hooks, 5
+// minutes). The server refuses an approval timeout above DecisionHookTimeout - DecisionHookMargin while Codex is on.
+const DecisionHookMargin = 5 * time.Minute
 
 const (
 	quickHookTimeout = 30 * time.Second
@@ -32,8 +42,6 @@ type Home struct {
 	// AthenaBin is the athena binary the hooks and the MCP server run. Socket is the node's socket; the sessions get
 	// it in their environment at start, so config.toml does not hold it.
 	AthenaBin, Socket string
-	// HookTimeout bounds the hooks that wait for a person's Approval; zero is DefaultDecisionHookTimeout.
-	HookTimeout time.Duration
 	// Model is the default model; empty leaves it to Codex.
 	Model string
 }
@@ -57,18 +65,34 @@ var disabledFeatures = []string{
 	"multi_agent", "image_generation", "memories", "realtime_conversation",
 }
 
-// HookSpec is one hook Athena installs: its event (as config.toml names it, "PreToolUse") and its command.
+// HookSpec is one hook Athena installs: its event (as config.toml names it, "PreToolUse"), its command, its timeout,
+// and the file it is written in (<Home.Dir>/config.toml). Athena's hooks have no matcher and are not async.
 type HookSpec struct {
 	Event, Command string
+	Timeout        time.Duration
+	File           string
 }
 
 // HookSpecs returns the hooks WriteHome installs for h.
 func HookSpecs(h Home) []HookSpec {
+	dir := h.Dir
+	if abs, err := filepath.Abs(dir); err == nil && dir != "" {
+		dir = abs
+	}
 	specs := make([]HookSpec, 0, len(hookEvents))
 	for _, ev := range hookEvents {
-		specs = append(specs, HookSpec{Event: ev.name, Command: hookCommand(h.AthenaBin, ev.name)})
+		specs = append(specs, HookSpec{Event: ev.name, Command: hookCommand(h.AthenaBin, ev.name), Timeout: hookTimeout(ev.decision),
+			File: filepath.Join(dir, configName)})
 	}
 	return specs
+}
+
+// hookTimeout is the timeout of a decision hook or of another one.
+func hookTimeout(decision bool) time.Duration {
+	if decision {
+		return DecisionHookTimeout
+	}
+	return quickHookTimeout
 }
 
 func hookCommand(athenaBin, event string) string {
@@ -84,10 +108,6 @@ func renderConfig(h Home) ([]byte, error) {
 		if !utf8.ValidString(v) {
 			return nil, fmt.Errorf("codex: %q is not valid UTF-8, which config.toml cannot hold", v)
 		}
-	}
-	decision := h.HookTimeout
-	if decision <= 0 {
-		decision = DefaultDecisionHookTimeout
 	}
 	var b strings.Builder
 	b.WriteString("# Athena's Codex configuration. The Athena node writes this file; do not edit it, a change is overwritten.\n")
@@ -111,11 +131,7 @@ func renderConfig(h Home) ([]byte, error) {
 	fmt.Fprintf(&b, "\n[mcp_servers.athena]\ncommand = %s\nargs = [\"mcp\"]\ndefault_tools_approval_mode = \"approve\"\n",
 		tomlString(h.AthenaBin))
 	for _, ev := range hookEvents {
-		d := quickHookTimeout
-		if ev.decision {
-			d = decision
-		}
-		secs := int64((d + time.Second - 1) / time.Second)
+		secs := int64(hookTimeout(ev.decision) / time.Second)
 		// async = false: a hook that decides must finish before Codex goes on.
 		fmt.Fprintf(&b, "\n[[hooks.%s]]\n[[hooks.%s.hooks]]\ntype = \"command\"\ncommand = %s\ntimeout = %d\nasync = false\n",
 			ev.name, ev.name, tomlString(hookCommand(h.AthenaBin, ev.name)), secs)
@@ -134,7 +150,7 @@ func renderConfig(h Home) ([]byte, error) {
 //   - [mcp_servers.athena]: command h.AthenaBin, args ["mcp"], default_tools_approval_mode "approve";
 //   - for PreToolUse, PermissionRequest, PostToolUse, Stop and SessionStart, a [[hooks.<Event>]] matcher group with
 //     one [[hooks.<Event>.hooks]] handler: type "command", command `<athenaBin> hook --runtime codex <Event>`, timeout
-//     h.HookTimeout in seconds for PreToolUse and PermissionRequest (30 for the others), async false.
+//     DecisionHookTimeout in seconds for PreToolUse and PermissionRequest (30 for the others), async false.
 //
 // When the file already holds exactly that, followed only by the [hooks.state."<key>"] trusted_hash entries Codex
 // wrote when TrustHooks trusted Athena's hooks, it is left as it is, so a rewrite does not drop their trust. Anything
@@ -148,14 +164,36 @@ func WriteHome(h Home) error {
 		return err
 	}
 	path := filepath.Join(h.Dir, configName)
-	if cur, err := os.ReadFile(path); err == nil && strings.HasPrefix(string(cur), string(content)) &&
-		onlyTrustState(string(cur[len(content):]), path) {
+	if cur, err := os.ReadFile(path); err == nil && current(cur, content, path) {
 		if err := os.Chmod(path, 0o600); err != nil {
 			return fmt.Errorf("codex: %w", err)
 		}
 		return nil
 	}
 	return writePrivate(path, content)
+}
+
+// current reports whether the config file at path, holding cur, is content followed only by Codex's trust records.
+func current(cur, content []byte, path string) bool {
+	return strings.HasPrefix(string(cur), string(content)) && onlyTrustState(string(cur[len(content):]), path)
+}
+
+// HomeCurrent compares h.Dir/config.toml with what WriteHome would write for h, without writing anything: exists is
+// false when there is no file; current is true when it holds exactly that, followed only by Codex's trust records.
+func HomeCurrent(h Home) (exists, current_ bool, err error) {
+	content, err := renderConfig(h)
+	if err != nil {
+		return false, false, err
+	}
+	path := filepath.Join(h.Dir, configName)
+	cur, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, false, nil
+	}
+	if err != nil {
+		return false, false, fmt.Errorf("codex: %w", err)
+	}
+	return true, current(cur, content, path), nil
 }
 
 // onlyTrustState reports whether tail is nothing but [hooks.state."<key>"] tables of keys of the config file at path,
@@ -308,16 +346,23 @@ func (e ErrHooksUncontrolled) Error() string {
 
 // hookInfo is one hook of hooks/list.
 type hookInfo struct {
-	Key         string `json:"key"`
-	EventName   string `json:"eventName"`
-	HandlerType string `json:"handlerType"`
-	Command     string `json:"command"`
-	Enabled     bool   `json:"enabled"`
-	Source      string `json:"source"`
-	SourcePath  string `json:"sourcePath"`
-	CurrentHash string `json:"currentHash"`
-	TrustStatus string `json:"trustStatus"`
+	Key         string  `json:"key"`
+	EventName   string  `json:"eventName"`
+	HandlerType string  `json:"handlerType"`
+	Command     string  `json:"command"`
+	Enabled     bool    `json:"enabled"`
+	Source      string  `json:"source"`
+	SourcePath  string  `json:"sourcePath"`
+	CurrentHash string  `json:"currentHash"`
+	TrustStatus string  `json:"trustStatus"`
+	TimeoutSec  int64   `json:"timeoutSec"`
+	Async       bool    `json:"async"`
+	Matcher     *string `json:"matcher"`
+	IsManaged   bool    `json:"isManaged"`
 }
+
+// managed reports whether h comes from a managed layer, which Athena cannot turn off.
+func (h hookInfo) managed() bool { return h.IsManaged || h.TrustStatus == "managed" }
 
 type hooksEntry struct {
 	Cwd    string      `json:"cwd"`
@@ -344,10 +389,13 @@ func listHooks(ctx context.Context, c *Conn, cwd string) (hooksEntry, error) {
 	return res.Data[0], nil
 }
 
-// ours reports whether h is the hook spec w that Athena wrote into its CODEX_HOME's config.toml (the "user" layer):
-// a command hook of the same event and command.
+// ours reports whether h is exactly the hook spec w that Athena wrote into its CODEX_HOME's config.toml (the "user"
+// layer, from w.File): a command hook of the same event, command and timeout, synchronous, with no matcher, and not
+// managed. A hook that differs in any of these is someone else's, however alike.
 func ours(h hookInfo, w HookSpec) bool {
-	return h.Source == "user" && h.HandlerType == "command" && h.EventName == lowerFirst(w.Event) && h.Command == w.Command
+	return h.Source == "user" && !h.managed() && filepath.Clean(h.SourcePath) == filepath.Clean(w.File) &&
+		h.HandlerType == "command" && h.EventName == lowerFirst(w.Event) && h.Command == w.Command &&
+		h.TimeoutSec == int64(w.Timeout/time.Second) && !h.Async && h.Matcher == nil
 }
 
 func lowerFirst(s string) string {
@@ -364,7 +412,8 @@ func lowerFirst(s string) string {
 //     "untrusted" or "modified", one config/batchWrite edit hooks.state."<key>".trusted_hash = <currentHash> (in one
 //     call);
 //  3. hooks/list again;
-//  4. ErrHooksUncontrolled unless every want is there, enabled and trusted (or managed), and no other hook is enabled.
+//  4. ErrHooksUncontrolled unless every want is there, enabled and trusted, no other hook is enabled, and no other
+//     hook is managed (enabled or not: Athena cannot turn a managed hook off).
 //
 // It trusts no hook Athena did not write: a foreign hook is never trusted, and an enabled one fails the check (trusted
 // or not), whatever layer (a repository's .codex, a plugin, a managed config) it comes from.
@@ -418,19 +467,20 @@ func checkHooks(entry hooksEntry, want []HookSpec) error {
 			return ErrHooksUncontrolled{Why: why}
 		case !found.Enabled:
 			return ErrHooksUncontrolled{Why: "Athena's " + w.Event + " hook is disabled"}
-		case found.TrustStatus != "trusted" && found.TrustStatus != "managed":
+		case found.TrustStatus != "trusted":
 			return ErrHooksUncontrolled{Why: "Athena's " + w.Event + " hook is " + strconv.Quote(found.TrustStatus) + ", not trusted"}
 		}
 	}
 	for _, h := range entry.Hooks {
-		if !h.Enabled {
-			continue
-		}
 		mine := false
 		for _, w := range want {
 			mine = mine || ours(h, w)
 		}
-		if !mine {
+		switch {
+		case mine:
+		case h.managed():
+			return ErrHooksUncontrolled{Why: fmt.Sprintf("a managed %s hook Athena did not write is configured (%s, from %s)", h.EventName, h.Source, h.SourcePath)}
+		case h.Enabled:
 			return ErrHooksUncontrolled{Why: fmt.Sprintf("a %s hook Athena did not write is enabled (%s, from %s)", h.EventName, h.Source, h.SourcePath)}
 		}
 	}

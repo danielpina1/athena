@@ -34,8 +34,9 @@
 // hooks.state."<key>".trusted_hash edits), account/read (acct_fixture) and account/rateLimits/read; any other request
 // gets a -32601 error.
 //
-// Hooks are listed as Codex lists them: key "<config path>:<snake_event>:<group>:<handler>", source "user", and a
-// currentHash of the event and command. Trust is recorded as Codex records it, at the end of config.toml:
+// Hooks are listed as Codex lists them: key "<config path>:<snake_event>:<group>:<handler>", source "user", their
+// timeout (600 when the handler names none), async flag and group matcher, and a currentHash of all of these. Trust
+// is recorded as Codex records it, at the end of config.toml:
 //
 //	[hooks.state."<key>"]
 //	trusted_hash = "<currentHash>"
@@ -613,6 +614,9 @@ func rewriteUser(line []byte, echo userEcho) []byte {
 type hook struct {
 	event, command string
 	group, handler int
+	timeout        int     // seconds (Codex's default, 600, when the handler names none)
+	async          bool    // async = true
+	matcher        *string // the matcher group's matcher, if any
 }
 
 // key is the hook's key as Codex makes it: "<config path>:<snake_event>:<group>:<handler>".
@@ -620,9 +624,14 @@ func (h hook) key(home string) string {
 	return fmt.Sprintf("%s:%s:%d:%d", filepath.Join(home, "config.toml"), snake(h.event), h.group, h.handler)
 }
 
-// hash is the hook's currentHash: a hash of its event and command.
+// hash is the hook's currentHash: a hash of its event, command, timeout, async flag and matcher (what Codex hashes
+// is its own; any change to the handler changes it).
 func (h hook) hash() string {
-	sum := sha256.Sum256([]byte(h.event + "\n" + h.command))
+	m := "<none>"
+	if h.matcher != nil {
+		m = *h.matcher
+	}
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%s\n%s\n%d\n%t\n%s", h.event, h.command, h.timeout, h.async, m)))
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
@@ -657,6 +666,7 @@ func readHooks(home string) ([]hook, error) {
 		}
 	}
 	group := ""
+	var matcher *string        // the current group's matcher
 	groups := map[string]int{} // matcher groups seen per event
 	handlers := 0              // handlers seen in the current group
 	var cur *hook
@@ -683,13 +693,13 @@ func readHooks(home string) ([]hook, error) {
 			if group != event {
 				fail("[[hooks.%s.hooks]] has no [[hooks.%s]] matcher group before it", event, event)
 			}
-			cur = &hook{event: event, group: groups[event] - 1, handler: handlers}
+			cur = &hook{event: event, group: groups[event] - 1, handler: handlers, timeout: 600, matcher: matcher}
 			handlers++
 		case strings.HasPrefix(line, "[[hooks.") && strings.HasSuffix(line, "]]"):
 			finish()
 			group = strings.TrimSuffix(strings.TrimPrefix(line, "[[hooks."), "]]")
 			groups[group]++
-			handlers = 0
+			handlers, matcher = 0, nil
 		case strings.HasPrefix(line, "["):
 			finish()
 			group = ""
@@ -699,6 +709,16 @@ func readHooks(home string) ([]hook, error) {
 			}
 		case cur != nil && strings.HasPrefix(line, "type = "):
 			curType, _ = strconv.Unquote(strings.TrimPrefix(line, "type = "))
+		case cur != nil && strings.HasPrefix(line, "timeout = "):
+			if n, err := strconv.Atoi(strings.TrimPrefix(line, "timeout = ")); err == nil {
+				cur.timeout = n
+			}
+		case cur != nil && strings.HasPrefix(line, "async = "):
+			cur.async = strings.TrimPrefix(line, "async = ") == "true"
+		case cur == nil && group != "" && strings.HasPrefix(line, "matcher = "):
+			if m, err := strconv.Unquote(strings.TrimPrefix(line, "matcher = ")); err == nil {
+				matcher = &m
+			}
 		}
 	}
 	finish()
@@ -815,10 +835,10 @@ func hookList(home, cwd string) []any {
 	trust, _ := readTrust(home)
 	for i, h := range configured {
 		list = append(list, map[string]any{
-			"key": h.key(home), "eventName": lowerFirst(h.event), "handlerType": "command", "async": false,
+			"key": h.key(home), "eventName": lowerFirst(h.event), "handlerType": "command", "async": h.async,
 			"command": h.command, "enabled": true, "isManaged": false, "source": "user",
 			"sourcePath": filepath.Join(home, "config.toml"), "currentHash": h.hash(),
-			"displayOrder": i, "timeoutSec": 30, "trustStatus": trustStatus(h, home, trust), "matcher": nil,
+			"displayOrder": i, "timeoutSec": h.timeout, "trustStatus": trustStatus(h, home, trust), "matcher": h.matcher,
 			"statusMessage": nil, "pluginId": nil, "additionalContextLimit": nil,
 		})
 	}

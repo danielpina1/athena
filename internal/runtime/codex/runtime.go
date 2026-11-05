@@ -36,15 +36,18 @@ type Runtime struct {
 	Model string
 	// AthenaBin is the athena binary the hooks and the MCP server run; Socket the node's socket.
 	AthenaBin, Socket string
-	// HookTimeout bounds the hooks that wait for a person's Approval (zero: DefaultDecisionHookTimeout).
-	HookTimeout time.Duration
 	// WorkRoot is the directory the hooks are checked for (the node's work root); empty is Home.
 	WorkRoot string
+	// KeepHome is for the `athena codex` commands: an existing config.toml is never rewritten (it is the server's, with
+	// its binary and the trust Codex recorded), only compared with what this Runtime would write (Status.HomeStale);
+	// it is written only when there is none. The server leaves it false and rewrites the file when it differs.
+	KeepHome bool
 
-	mu     sync.Mutex
-	cached *Status
-	at     time.Time
-	now    func() time.Time // tests
+	mu      sync.Mutex
+	cached  *Status
+	at      time.Time
+	now     func() time.Time // tests
+	timeout time.Duration    // tests; zero is checkTimeout
 }
 
 // Status is what Check found, with what `athena codex status` shows besides.
@@ -55,7 +58,15 @@ type Status struct {
 	Account string
 	// Hooks is "trusted" when Athena's hooks are the only ones Codex runs, else why not; empty when Codex was not asked.
 	Hooks string
+	// AccountAsked: Codex answered account/read, so an empty Account means it is not logged in.
+	AccountAsked bool
+	// HomeStale (KeepHome only): the existing config.toml is not what this Runtime would write (another athena binary
+	// wrote it); it was left as it is, and its hooks were not checked.
+	HomeStale bool
 }
+
+// StaleHome is the Why of a KeepHome check that found another athena's config.toml.
+const StaleHome = "config.toml was written by another athena (a different binary or version): restart the server to rewrite it"
 
 // Name is "codex".
 func (*Runtime) Name() string { return "codex" }
@@ -71,7 +82,23 @@ func (r *Runtime) binary() string {
 }
 
 func (r *Runtime) home() Home {
-	return Home{Dir: r.Home, AthenaBin: r.AthenaBin, Socket: r.Socket, HookTimeout: r.HookTimeout, Model: r.Model}
+	return Home{Dir: r.Home, AthenaBin: r.AthenaBin, Socket: r.Socket, Model: r.Model}
+}
+
+// writeHome writes h (WriteHome), or with KeepHome writes it only when absent and otherwise reports whether the
+// existing file differs (stale), leaving it as it is.
+func (r *Runtime) writeHome(h Home) (stale bool, err error) {
+	if !r.KeepHome {
+		return false, WriteHome(h)
+	}
+	exists, cur, err := HomeCurrent(h)
+	if err != nil {
+		return false, err
+	}
+	if !exists {
+		return false, WriteHome(h)
+	}
+	return !cur, EnsureHomeDir(h.Dir)
 }
 
 func (r *Runtime) clock() time.Time {
@@ -95,23 +122,27 @@ func (r *Runtime) Invalidate() {
 // app-server (no thread), and asks it for the account (account/read) and, through TrustHooks, for Athena's hooks in
 // the work root. It is Ready when the version is supported, an account is logged in and the hooks are Athena's alone;
 // a version newer than VerifiedVersion is Ready but not Tested. The result is reused for 10 minutes, or until
-// Invalidate; one cut short by ctx is not kept. Calls are serialised.
+// Invalidate; one cut short (by ctx, or by the check's own 30-second bound) is not kept. Calls are serialised.
 func (r *Runtime) Status(ctx context.Context) Status {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.cached != nil && r.clock().Sub(r.at) < checkTTL {
 		return *r.cached
 	}
-	s := r.check(ctx)
-	if ctx.Err() == nil {
+	timeout := r.timeout
+	if timeout <= 0 {
+		timeout = checkTimeout
+	}
+	cctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	s := r.check(cctx)
+	if cctx.Err() == nil {
 		r.cached, r.at = &s, r.clock()
 	}
 	return s
 }
 
 func (r *Runtime) check(ctx context.Context) Status {
-	ctx, cancel := context.WithTimeout(ctx, checkTimeout)
-	defer cancel()
 	var s Status
 	if r.Home == "" {
 		s.Why = "codex: Athena's CODEX_HOME is not configured"
@@ -129,6 +160,7 @@ func (r *Runtime) check(ctx context.Context) Status {
 	env := Env(os.Environ(), home.Dir)
 	cmd := exec.CommandContext(ctx, r.binary(), "--version")
 	cmd.Env = env
+	cmd.WaitDelay = time.Second // a killed --version must not wait on a child holding its output
 	out, err := cmd.Output()
 	if err != nil {
 		if errors.Is(err, exec.ErrNotFound) || errors.Is(err, fs.ErrNotExist) {
@@ -151,10 +183,13 @@ func (r *Runtime) check(ctx context.Context) Status {
 		s.Why = fmt.Sprintf("Codex %s is older than the supported %s", v, MinVersion)
 		return s
 	}
-	if err := WriteHome(home); err != nil {
+	stale, err := r.writeHome(home)
+	if err != nil {
 		s.Why = err.Error()
 		return s
 	}
+	// Another athena's file (stale): its hooks are not this binary's, so they cannot be judged from here.
+	s.HomeStale = stale
 	cwd := r.WorkRoot
 	if cwd == "" {
 		cwd = home.Dir
@@ -163,12 +198,14 @@ func (r *Runtime) check(ctx context.Context) Status {
 		s.Why = "codex: " + err.Error()
 		return s
 	}
-	loggedIn, why := r.ask(ctx, home, cwd, env, &s)
+	loggedIn, why := r.ask(ctx, home, cwd, env, !stale, &s)
 	switch {
 	case why != "":
 		s.Why = why
 	case !loggedIn:
 		s.Why = NotLoggedIn
+	case stale:
+		s.Hooks, s.Why = "not checked: "+StaleHome, StaleHome
 	case s.Hooks != "trusted":
 		s.Why = s.Hooks
 	default:
@@ -180,9 +217,9 @@ func (r *Runtime) check(ctx context.Context) Status {
 	return s
 }
 
-// ask runs a short-lived app-server in cwd and fills s.Account and s.Hooks from it; why is set when the server could
-// not be asked at all.
-func (r *Runtime) ask(ctx context.Context, home Home, cwd string, env []string, s *Status) (loggedIn bool, why string) {
+// ask runs a short-lived app-server in cwd and fills s.Account and, with hooks, s.Hooks from it; why is set when the
+// server could not be asked at all.
+func (r *Runtime) ask(ctx context.Context, home Home, cwd string, env []string, hooks bool, s *Status) (loggedIn bool, why string) {
 	p, err := rt.StartProc(ctx, rt.ProcOptions{
 		Binary: r.binary(), Args: []string{"app-server", "--listen", "stdio://", "--strict-config"},
 		Dir: cwd, Env: env, CloseGrace: 5 * time.Second,
@@ -229,8 +266,12 @@ func (r *Runtime) ask(ctx context.Context, home Home, cwd string, env []string, 
 	if err := conn.Call(ctx, "account/read", nil, &acct); err != nil {
 		return failed("account/read", err)
 	}
+	s.AccountAsked = true
 	if acct.Account != nil {
 		loggedIn, s.Account = true, acct.Account.Type
+	}
+	if !hooks {
+		return loggedIn, ""
 	}
 	if err := TrustHooks(ctx, conn, cwd, HookSpecs(home)); err != nil {
 		var hu ErrHooksUncontrolled
@@ -247,7 +288,8 @@ func (r *Runtime) ask(ctx context.Context, home Home, cwd string, env []string, 
 // Login runs `codex login` against Athena's CODEX_HOME, attached to stdin, stdout and stderr: Codex itself asks for
 // the account and writes the credential (auth.json) there. withAPIKey adds --with-api-key, for which Codex reads the
 // key from stdin; Athena never sees or prints it. config.toml is written first, so the login runs with Athena's
-// settings, and the cached Check is dropped after. The error is the command's (an *exec.ExitError when it failed).
+// settings (with KeepHome only when there is none; a differing one is left as it is and noted on stderr), and the
+// cached Check is dropped after. The error is the command's (an *exec.ExitError when it failed).
 func (r *Runtime) Login(ctx context.Context, withAPIKey bool, stdin io.Reader, stdout, stderr io.Writer) error {
 	if r.Home == "" {
 		return errors.New("codex: Athena's CODEX_HOME is not configured")
@@ -256,8 +298,12 @@ func (r *Runtime) Login(ctx context.Context, withAPIKey bool, stdin io.Reader, s
 	if abs, err := filepath.Abs(home.Dir); err == nil {
 		home.Dir = abs
 	}
-	if err := WriteHome(home); err != nil {
+	stale, err := r.writeHome(home)
+	if err != nil {
 		return err
+	}
+	if stale {
+		fmt.Fprintf(stderr, "note: %s: %s\n", filepath.Join(home.Dir, configName), StaleHome)
 	}
 	args := []string{"login"}
 	if withAPIKey {
@@ -266,7 +312,7 @@ func (r *Runtime) Login(ctx context.Context, withAPIKey bool, stdin io.Reader, s
 	cmd := exec.CommandContext(ctx, r.binary(), args...)
 	cmd.Env = Env(os.Environ(), home.Dir)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = stdin, stdout, stderr
-	err := cmd.Run()
+	err = cmd.Run()
 	r.Invalidate()
 	if herr := EnsureHomeDir(home.Dir); err == nil {
 		err = herr

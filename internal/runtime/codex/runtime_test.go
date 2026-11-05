@@ -3,6 +3,7 @@ package codex
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -60,7 +61,7 @@ func methods(t *testing.T, rpcLog string) []string {
 func TestCheckReady(t *testing.T) {
 	r, rpcLog := newRuntime(t)
 	s := r.Status(context.Background())
-	want := Status{Info: rt.Info{Installed: true, Ready: true, Tested: true, Version: VerifiedVersion}, Account: "chatgpt", Hooks: "trusted"}
+	want := Status{Info: rt.Info{Installed: true, Ready: true, Tested: true, Version: VerifiedVersion}, Account: "chatgpt", Hooks: "trusted", AccountAsked: true}
 	if s != want {
 		t.Fatalf("status = %+v, want %+v", s, want)
 	}
@@ -78,7 +79,7 @@ func TestCheckReady(t *testing.T) {
 func TestCheckNotLoggedIn(t *testing.T) {
 	r, _ := newRuntime(t, "ATHENA_FAKE_CODEX_LOGGED_OUT=1")
 	s := r.Status(context.Background())
-	if s.Ready || !s.Installed || s.Why != NotLoggedIn || s.Account != "" {
+	if s.Ready || !s.Installed || s.Why != NotLoggedIn || s.Account != "" || !s.AccountAsked {
 		t.Fatalf("status = %+v", s)
 	}
 	if NotLoggedIn != "Codex is not logged in for Athena: run athena codex login" {
@@ -204,6 +205,81 @@ func TestCheckIsCachedUntilInvalidated(t *testing.T) {
 	r.Check(context.Background())
 	if n := starts(); n != 4 {
 		t.Fatalf("%d app-servers, want 4: the cancelled check was cached", n)
+	}
+}
+
+// A check its own 30-second bound cut short is not kept: the next Check asks again.
+func TestCheckTimeoutIsNotCached(t *testing.T) {
+	r, _ := newRuntime(t)
+	slow := filepath.Join(t.TempDir(), "codex")
+	if err := os.WriteFile(slow, []byte("#!/bin/sh\nexec sleep 5\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fake := r.Binary
+	r.Binary, r.timeout = slow, 200*time.Millisecond
+	start := time.Now()
+	if s := r.Status(context.Background()); s.Ready || !strings.HasPrefix(s.Why, "codex --version") || s.AccountAsked {
+		t.Fatalf("slow codex: %+v", s)
+	}
+	if d := time.Since(start); d > 3*time.Second {
+		t.Fatalf("the check took %s, past its bound", d)
+	}
+	r.Binary, r.timeout = fake, 0
+	if s := r.Status(context.Background()); !s.Ready {
+		t.Fatalf("the timed-out check was cached: %+v", s)
+	}
+}
+
+// With KeepHome (the athena codex commands) an existing config.toml another athena wrote is left byte for byte, and
+// reported; a missing one is written; one that is current is checked as usual.
+func TestCheckKeepHomeNeverRewrites(t *testing.T) {
+	r, rpcLog := newRuntime(t)
+	r.KeepHome = true
+	// No file: written, and checked.
+	if s := r.Status(context.Background()); !s.Ready || s.HomeStale {
+		t.Fatalf("no file: %+v", s)
+	}
+	path := filepath.Join(r.Home, "config.toml")
+	mine := readFile(t, path)
+	// The server's file, written for another binary, with trust Codex recorded.
+	server := Home{Dir: r.Home, AthenaBin: "/opt/server/athena", Socket: r.Socket}
+	if err := WriteHome(server); err != nil {
+		t.Fatal(err)
+	}
+	trusted := readFile(t, path) + "\n[hooks.state." + tomlString(path+":pre_tool_use:0:0") + "]\ntrusted_hash = \"sha256:00\"\n"
+	if err := os.WriteFile(path, []byte(trusted), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r.Invalidate()
+	before := len(methods(t, rpcLog))
+	s := r.Status(context.Background())
+	if s.Ready || !s.HomeStale || s.Why != StaleHome || s.Account != "chatgpt" || !s.AccountAsked || s.Hooks != "not checked: "+StaleHome {
+		t.Fatalf("stale: %+v", s)
+	}
+	if got := readFile(t, path); got != trusted {
+		t.Fatalf("config.toml was rewritten:\n%s", got)
+	}
+	for _, m := range methods(t, rpcLog)[before:] {
+		if m == "hooks/list" || m == "config/batchWrite" {
+			t.Fatalf("a stale home's hooks were asked about or trusted: %s", m)
+		}
+	}
+	// Login leaves it too, and says so.
+	var stderr strings.Builder
+	if err := r.Login(context.Background(), false, strings.NewReader(""), io.Discard, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, path); got != trusted || !strings.Contains(stderr.String(), StaleHome) {
+		t.Fatalf("login: stderr %q, file rewritten: %v", stderr.String(), got != trusted)
+	}
+	// The server (KeepHome false) does rewrite it.
+	r.KeepHome = false
+	r.Invalidate()
+	if s := r.Status(context.Background()); !s.Ready || s.HomeStale {
+		t.Fatalf("server: %+v", s)
+	}
+	if got := readFile(t, path); !strings.HasPrefix(got, mine) {
+		t.Fatalf("the server did not rewrite it:\n%s", got)
 	}
 }
 

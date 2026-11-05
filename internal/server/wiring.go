@@ -744,10 +744,10 @@ func CodexHome(stateDir string) string { return filepath.Join(stateDir, "codex")
 
 // CodexRuntime is the Codex runtime of the configuration c (whether or not c enables it: see CodexConfig.On), for a
 // server or the `athena codex` commands on stateDir: its CODEX_HOME is CodexHome, the hooks and the MCP server run
-// athenaBin and reach the node socket, its decision hooks wait as long as the node's for an Approval of
-// approvalTimeout (zero: the node's default), and the hooks are checked for the node's work root. binary, when set
-// (`athena server --codex`), replaces the configured executable.
-func CodexRuntime(stateDir string, c FileConfig, athenaBin, binary string, approvalTimeout time.Duration) *codex.Runtime {
+// athenaBin and reach the node socket, and the hooks are checked for the node's work root. binary, when set
+// (`athena server --codex`), replaces the configured executable. Its decision hooks wait codex.DecisionHookTimeout,
+// whatever the approval timeout (checkCodexApprovalTimeout).
+func CodexRuntime(stateDir string, c FileConfig, athenaBin, binary string) *codex.Runtime {
 	if binary == "" {
 		binary = c.Runtimes.Codex.Binary
 	}
@@ -755,14 +755,23 @@ func CodexRuntime(stateDir string, c FileConfig, athenaBin, binary string, appro
 		binary = DefaultCodexBinary
 	}
 	return &codex.Runtime{
-		Binary:      binary,
-		Home:        CodexHome(stateDir),
-		Model:       c.Runtimes.Codex.Model,
-		AthenaBin:   athenaBin,
-		Socket:      filepath.Join(stateDir, NodeSocket),
-		HookTimeout: node.HookTimeout(approvalTimeout),
-		WorkRoot:    filepath.Join(stateDir, "work"),
+		Binary:    binary,
+		Home:      CodexHome(stateDir),
+		Model:     c.Runtimes.Codex.Model,
+		AthenaBin: athenaBin,
+		Socket:    filepath.Join(stateDir, NodeSocket),
+		WorkRoot:  filepath.Join(stateDir, "work"),
 	}
+}
+
+// checkCodexApprovalTimeout refuses an approval timeout Codex's decision hooks would not outlast by
+// codex.DecisionHookMargin: Codex would give up on the hook before the node decides the Approval.
+func checkCodexApprovalTimeout(approvalTimeout time.Duration) error {
+	if max := codex.DecisionHookTimeout - codex.DecisionHookMargin; approvalTimeout > max {
+		return fmt.Errorf("server: an approval timeout of %s is longer than Codex's hooks wait (at most %s); "+
+			"shorten --approval-timeout, or set runtimes.codex.enabled to false", approvalTimeout, max)
+	}
+	return nil
 }
 
 // Executable is this program's path with symlinks resolved: the athena binary hooks and MCP servers run.

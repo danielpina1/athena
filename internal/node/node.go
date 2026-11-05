@@ -55,16 +55,6 @@ const (
 	runtimeClaude = "claude"
 )
 
-// HookTimeout is how long a decision hook (PreToolUse, PermissionRequest) may block for an Approval that times out
-// after approvalTimeout (zero: the default 30 minutes): a margin longer, so the node, not the runtime, decides what an
-// unanswered Approval means.
-func HookTimeout(approvalTimeout time.Duration) time.Duration {
-	if approvalTimeout <= 0 {
-		approvalTimeout = defaultApprovalTimeout
-	}
-	return approvalTimeout + hookTimeoutMargin
-}
-
 // Config configures a Node.
 type Config struct {
 	// WorkRoot holds the Ticket directories (default <StateDir>/work).
@@ -1840,7 +1830,7 @@ func (n *Node) prepare(s *session) error {
 	sb, sbEnv := n.sandboxFor(p.workDir)
 	return rtm.Prepare(rt.Prepare{
 		WorkDir: p.workDir, AthenaBin: n.cfg.AthenaBin, Socket: n.cfg.SocketPath, TicketID: s.t.ID, AssignmentID: s.a.ID,
-		HookTimeout: HookTimeout(n.cfg.ApprovalTimeout), Sandbox: sb, SandboxEnv: sbEnv, Role: roleWorker,
+		HookTimeout: n.cfg.ApprovalTimeout + hookTimeoutMargin, Sandbox: sb, SandboxEnv: sbEnv, Role: roleWorker,
 	})
 }
 

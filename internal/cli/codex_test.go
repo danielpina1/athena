@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/danielpina1/athena/internal/runtime/codex"
 )
 
 var (
@@ -109,7 +111,7 @@ func TestCodexStatus(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d: %s%s", code, out, errOut)
 	}
-	for _, want := range []string{"installed: yes\n", "version:   0.160.1 (tested)\n", "logged in: yes (chatgpt)\n", "hooks:     trusted\n", "ready:     yes\n",
+	for _, want := range []string{"installed: yes\n", "version:   0.160.1 (tested)\n", "config:    current\n", "logged in: yes (chatgpt)\n", "hooks:     trusted\n", "ready:     yes\n",
 		"CODEX_HOME=" + filepath.Join(dir, "codex")} {
 		if !strings.Contains(out, want) {
 			t.Errorf("status lacks %q:\n%s", want, out)
@@ -133,5 +135,49 @@ func TestCodexStatus(t *testing.T) {
 		if code, _, errOut := athena(context.Background(), append(args, "--state-dir", dir)...); code != 2 || errOut == "" {
 			t.Errorf("%v: exit %d, stderr %q; want 2 with usage", args, code, errOut)
 		}
+	}
+}
+
+// The athena codex commands never rewrite the server's config.toml: one written for another athena binary (with the
+// trust Codex recorded) stays byte for byte, and the mismatch is reported; without one, they write it.
+func TestCodexCommandsLeaveTheServersConfig(t *testing.T) {
+	dir, _ := codexState(t, "")
+	home := filepath.Join(dir, "codex")
+	path := filepath.Join(home, "config.toml")
+	// No file: status writes it.
+	if code, out, errOut := athena(context.Background(), "codex", "status", "--state-dir", dir); code != 0 {
+		t.Fatalf("exit %d: %s%s", code, out, errOut)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("status wrote no config.toml: %v", err)
+	}
+	// The server's own, for its binary, with trust recorded.
+	if err := codex.WriteHome(codex.Home{Dir: home, AthenaBin: "/opt/server/bin/athena"}); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := string(b) + "\n[hooks.state.\"" + path + ":pre_tool_use:0:0\"]\ntrusted_hash = \"sha256:00\"\n"
+	if err := os.WriteFile(path, []byte(server), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	unchanged := func(what string) {
+		t.Helper()
+		if b, err := os.ReadFile(path); err != nil || string(b) != server {
+			t.Fatalf("%s rewrote config.toml (%v):\n%s", what, err, b)
+		}
+	}
+	code, out, _ := athena(context.Background(), "codex", "status", "--state-dir", dir)
+	unchanged("status")
+	if code != 1 || !strings.Contains(out, "config:    differs from what this athena writes; left as it is (restart the server to rewrite it)\n") ||
+		!strings.Contains(out, "ready:     no: "+codex.StaleHome) || !strings.Contains(out, "logged in: yes (chatgpt)") {
+		t.Fatalf("status: exit %d\n%s", code, out)
+	}
+	code, _, errOut := athena(context.Background(), "codex", "login", "--state-dir", dir)
+	unchanged("login")
+	if code != 0 || !strings.Contains(errOut, codex.StaleHome) {
+		t.Fatalf("login: exit %d, stderr %q", code, errOut)
 	}
 }

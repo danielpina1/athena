@@ -14,7 +14,7 @@ import (
 const testAthenaBin = "/opt/athena/bin/athena"
 
 func testHome(dir string) Home {
-	return Home{Dir: dir, AthenaBin: testAthenaBin, Socket: "/opt/athena/node.sock", HookTimeout: 35 * time.Minute, Model: "gpt-5-codex"}
+	return Home{Dir: dir, AthenaBin: testAthenaBin, Socket: "/opt/athena/node.sock", Model: "gpt-5-codex"}
 }
 
 func readFile(t *testing.T, path string) string {
@@ -109,27 +109,59 @@ func TestHookCommandsUseRuntimeFlag(t *testing.T) {
 	if want := []string{"PreToolUse", "PermissionRequest", "PostToolUse", "Stop", "SessionStart"}; !slices.Equal(events, want) {
 		t.Fatalf("events = %v, want %v", events, want)
 	}
-	// The decision hooks wait as long as an Approval may; the others 30 seconds.
+	// The decision hooks wait DecisionHookTimeout (a day), the others 30 seconds, whatever the approval timeout.
 	dir := t.TempDir()
-	if err := WriteHome(Home{Dir: dir, AthenaBin: testAthenaBin, HookTimeout: 90 * time.Second}); err != nil {
+	if err := WriteHome(Home{Dir: dir, AthenaBin: testAthenaBin}); err != nil {
 		t.Fatal(err)
 	}
 	cfg := readFile(t, filepath.Join(dir, "config.toml"))
-	for _, ev := range events {
-		want := "30"
+	for i, ev := range events {
+		want, d := "30", 30*time.Second
 		if ev == "PreToolUse" || ev == "PermissionRequest" {
-			want = "90"
+			want, d = "86400", 24*time.Hour
 		}
 		block := cfg[strings.Index(cfg, "[[hooks."+ev+".hooks]]"):]
 		if !strings.Contains(block[:strings.Index(block, "async")], "timeout = "+want+"\n") {
 			t.Errorf("%s: timeout is not %s:\n%s", ev, want, block)
 		}
+		if specs[i].Timeout != d {
+			t.Errorf("%s: spec timeout %s, want %s", ev, specs[i].Timeout, d)
+		}
 	}
-	if err := WriteHome(Home{Dir: dir, AthenaBin: testAthenaBin}); err != nil {
+	if DecisionHookTimeout-DecisionHookMargin < 30*time.Minute {
+		t.Fatal("the decision hooks would not outlast the default approval timeout")
+	}
+}
+
+// HomeCurrent tells an absent, current and stale config.toml apart, and writes nothing.
+func TestHomeCurrent(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "codex")
+	h := testHome(dir)
+	if exists, _, err := HomeCurrent(h); exists || err != nil {
+		t.Fatalf("no file: exists=%v err=%v", exists, err)
+	}
+	if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("HomeCurrent wrote something")
+	}
+	if err := WriteHome(h); err != nil {
 		t.Fatal(err)
 	}
-	if cfg := readFile(t, filepath.Join(dir, "config.toml")); !strings.Contains(cfg, "timeout = 7200\n") {
-		t.Errorf("a zero HookTimeout is not DefaultDecisionHookTimeout:\n%s", cfg)
+	path := filepath.Join(dir, "config.toml")
+	trust := "\n[hooks.state." + tomlString(path+":stop:0:0") + "]\ntrusted_hash = \"sha256:00\"\n"
+	if err := os.WriteFile(path, []byte(readFile(t, path)+trust), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if exists, cur, err := HomeCurrent(h); !exists || !cur || err != nil {
+		t.Fatalf("with trust: exists=%v current=%v err=%v", exists, cur, err)
+	}
+	other := h
+	other.AthenaBin = "/elsewhere/athena"
+	before := readFile(t, path)
+	if exists, cur, err := HomeCurrent(other); !exists || cur || err != nil {
+		t.Fatalf("another binary: exists=%v current=%v err=%v", exists, cur, err)
+	}
+	if readFile(t, path) != before {
+		t.Fatal("HomeCurrent changed the file")
 	}
 }
 
@@ -350,6 +382,32 @@ func TestTrustHooksWritesOnlyAthenaHashes(t *testing.T) {
 		}
 	}
 
+	// Athena's own command in another handler of the same file, with a different timeout, async or a matcher, is not
+	// Athena's hook: it is never trusted, and fails the check.
+	cmd := HookSpecs(h)[0].Command
+	for name, extra := range map[string]string{
+		"timeout": "timeout = 5\n",
+		"async":   "timeout = 86400\nasync = true\n",
+		"matcher": "timeout = 86400\n",
+	} {
+		group := "[[hooks.PreToolUse]]\n"
+		if name == "matcher" {
+			group += "matcher = \"Bash\"\n"
+		}
+		q, h := trustFake(t, "untrusted", "\n"+group+"[[hooks.PreToolUse.hooks]]\ntype = \"command\"\ncommand = "+tomlString(cmd)+"\n"+extra)
+		var hu ErrHooksUncontrolled
+		if err := TrustHooks(ctx, q.conn, "/home/user/work", HookSpecs(h)); !errors.As(err, &hu) || !strings.Contains(hu.Why, "a preToolUse hook Athena did not write is enabled") {
+			t.Errorf("%s: err = %v", name, err)
+		}
+		for _, w := range q.batchWrites() {
+			for _, e := range w {
+				if strings.Contains(e["keyPath"].(string), ":pre_tool_use:1:0") {
+					t.Errorf("%s: the look-alike hook was trusted: %v", name, e)
+				}
+			}
+		}
+	}
+
 	// A hook whose recorded trust is not its hash ("modified") is trusted again.
 	r, h := trustFake(t, "untrusted", "")
 	path := filepath.Join(r.home, "config.toml")
@@ -396,42 +454,60 @@ func TestHookCheckRefusesForeignOrUntrusted(t *testing.T) {
 
 // checkHooks's other refusals, on hooks/list entries as Codex could send them.
 func TestCheckHooksVerdicts(t *testing.T) {
-	want := HookSpecs(Home{AthenaBin: testAthenaBin})
+	want := HookSpecs(Home{Dir: "/state/codex", AthenaBin: testAthenaBin})
 	mine := func() []hookInfo {
 		var hs []hookInfo
 		for _, w := range want {
 			hs = append(hs, hookInfo{Key: w.Event, EventName: lowerFirst(w.Event), HandlerType: "command", Command: w.Command,
-				Enabled: true, Source: "user", TrustStatus: "trusted"})
+				Enabled: true, Source: "user", SourcePath: "/state/codex/config.toml", TimeoutSec: int64(w.Timeout / time.Second),
+				TrustStatus: "trusted"})
 		}
 		return hs
 	}
 	if err := checkHooks(hooksEntry{Hooks: mine()}, want); err != nil {
 		t.Fatalf("Athena's hooks alone: %v", err)
 	}
-	managed := mine()
-	managed[0].TrustStatus = "managed"
-	if err := checkHooks(hooksEntry{Hooks: managed}, want); err != nil {
-		t.Fatalf("a managed hook: %v", err)
-	}
-	disabled := mine()
-	disabled[1].Enabled = false
-	plugin := append(mine(), hookInfo{EventName: "stop", HandlerType: "command", Command: "x", Enabled: true, Source: "plugin", SourcePath: "/p"})
-	sameCmdElsewhere := append(mine(), hookInfo{EventName: "stop", HandlerType: "command", Command: want[3].Command, Enabled: true, Source: "project", SourcePath: "/r/.codex/config.toml"})
 	off := append(mine(), hookInfo{EventName: "stop", HandlerType: "command", Command: "x", Enabled: false, Source: "project"})
 	if err := checkHooks(hooksEntry{Hooks: off}, want); err != nil {
 		t.Fatalf("a disabled foreign hook: %v", err)
 	}
+	with := func(i int, change func(*hookInfo)) []hookInfo {
+		hs := mine()
+		change(&hs[i])
+		return hs
+	}
+	bash := "Bash"
+	// Athena's PreToolUse hook as it should be, but in another file, or changed: then it is someone else's.
+	lookAlike := func(change func(*hookInfo)) []hookInfo {
+		h := mine()[0]
+		h.Key = "other"
+		change(&h)
+		return append(mine(), h)
+	}
 	for name, c := range map[string]struct {
-		entry hooksEntry
-		why   string
+		hooks  []hookInfo
+		errors []hookError
+		why    string
 	}{
-		"disabled":         {hooksEntry{Hooks: disabled}, "Athena's PermissionRequest hook is disabled"},
-		"plugin":           {hooksEntry{Hooks: plugin}, "a stop hook Athena did not write is enabled (plugin, from /p)"},
-		"same command":     {hooksEntry{Hooks: sameCmdElsewhere}, "a stop hook Athena did not write is enabled (project, from /r/.codex/config.toml)"},
-		"missing, errored": {hooksEntry{Errors: []hookError{{"bad toml", "/x"}}}, "Athena's PreToolUse hook is not loaded (bad toml)"},
+		"disabled":         {hooks: with(1, func(h *hookInfo) { h.Enabled = false }), why: "Athena's PermissionRequest hook is disabled"},
+		"own managed":      {hooks: with(0, func(h *hookInfo) { h.TrustStatus = "managed" }), why: "Athena's PreToolUse hook is not loaded"},
+		"own untrusted":    {hooks: with(2, func(h *hookInfo) { h.TrustStatus = "modified" }), why: `Athena's PostToolUse hook is "modified", not trusted`},
+		"own other file":   {hooks: with(0, func(h *hookInfo) { h.SourcePath = "/state/codex/hooks.json" }), why: "Athena's PreToolUse hook is not loaded"},
+		"own short":        {hooks: with(0, func(h *hookInfo) { h.TimeoutSec = 5 }), why: "Athena's PreToolUse hook is not loaded"},
+		"own async":        {hooks: with(0, func(h *hookInfo) { h.Async = true }), why: "Athena's PreToolUse hook is not loaded"},
+		"own matcher":      {hooks: with(0, func(h *hookInfo) { h.Matcher = &bash }), why: "Athena's PreToolUse hook is not loaded"},
+		"other file":       {hooks: lookAlike(func(h *hookInfo) { h.SourcePath = "/state/codex/hooks.json" }), why: "a preToolUse hook Athena did not write is enabled (user, from /state/codex/hooks.json)"},
+		"short timeout":    {hooks: lookAlike(func(h *hookInfo) { h.TimeoutSec = 5 }), why: "a preToolUse hook Athena did not write is enabled (user, from /state/codex/config.toml)"},
+		"async":            {hooks: lookAlike(func(h *hookInfo) { h.Async = true }), why: "a preToolUse hook Athena did not write is enabled (user, from /state/codex/config.toml)"},
+		"matcher":          {hooks: lookAlike(func(h *hookInfo) { h.Matcher = &bash }), why: "a preToolUse hook Athena did not write is enabled (user, from /state/codex/config.toml)"},
+		"plugin":           {hooks: append(mine(), hookInfo{EventName: "stop", HandlerType: "command", Command: "x", Enabled: true, Source: "plugin", SourcePath: "/p"}), why: "a stop hook Athena did not write is enabled (plugin, from /p)"},
+		"same command":     {hooks: append(mine(), hookInfo{EventName: "stop", HandlerType: "command", Command: want[3].Command, Enabled: true, Source: "project", SourcePath: "/r/.codex/config.toml", TimeoutSec: 30}), why: "a stop hook Athena did not write is enabled (project, from /r/.codex/config.toml)"},
+		"managed, off":     {hooks: append(mine(), hookInfo{EventName: "stop", HandlerType: "command", Command: "x", Enabled: false, Source: "mdm", SourcePath: "/m", TrustStatus: "managed"}), why: "a managed stop hook Athena did not write is configured (mdm, from /m)"},
+		"isManaged, off":   {hooks: append(mine(), hookInfo{EventName: "stop", HandlerType: "command", Command: "x", Enabled: false, Source: "system", SourcePath: "/s", IsManaged: true, TrustStatus: "trusted"}), why: "a managed stop hook Athena did not write is configured (system, from /s)"},
+		"missing, errored": {errors: []hookError{{"bad toml", "/x"}}, why: "Athena's PreToolUse hook is not loaded (bad toml)"},
 	} {
 		var hu ErrHooksUncontrolled
-		if err := checkHooks(c.entry, want); !errors.As(err, &hu) || hu.Why != c.why {
+		if err := checkHooks(hooksEntry{Hooks: c.hooks, Errors: c.errors}, want); !errors.As(err, &hu) || hu.Why != c.why {
 			t.Errorf("%s: err = %v, want %q", name, err, c.why)
 		}
 	}

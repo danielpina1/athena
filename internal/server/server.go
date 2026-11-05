@@ -202,7 +202,10 @@ func Run(ctx context.Context, cfg Config) (err error) {
 		}
 	}
 	if fileCfg.Runtimes.Codex.On() {
-		cx := CodexRuntime(stateDir, fileCfg, ncfg.AthenaBin, cfg.CodexBinary, ncfg.ApprovalTimeout)
+		if err := checkCodexApprovalTimeout(ncfg.ApprovalTimeout); err != nil {
+			return err
+		}
+		cx := CodexRuntime(stateDir, fileCfg, ncfg.AthenaBin, cfg.CodexBinary)
 		logger.Info("codex is configured; `athena codex status` checks it", "binary", cx.Binary, "home", cx.Home)
 	} else {
 		logger.Info("codex is disabled (runtimes.codex.enabled is false)")

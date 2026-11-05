@@ -43,7 +43,10 @@ func (c *command) codexRuntime() (*codex.Runtime, bool, error) {
 	if err != nil {
 		return nil, false, err
 	}
-	return server.CodexRuntime(c.stateDir, cfg, bin, "", 0), cfg.Runtimes.Codex.On(), nil
+	r := server.CodexRuntime(c.stateDir, cfg, bin, "")
+	// The server's config.toml (its binary, and the hook trust Codex recorded) is never replaced from here.
+	r.KeepHome = true
+	return r, cfg.Runtimes.Codex.On(), nil
 }
 
 // codexLogin runs `codex login` with CODEX_HOME=<stateDir>/codex, attached to the terminal: Codex asks for the account
@@ -69,8 +72,9 @@ func (c *command) codexLogin(ctx context.Context, args []string) int {
 	return 0
 }
 
-// codexStatus prints what Check found: installed, version, tested, logged in (the account's kind only), hooks. It
-// exits 1 when Codex is not ready (or disabled).
+// codexStatus prints what Check found: installed, version, tested, whether config.toml is what this athena writes,
+// logged in (the account's kind only), hooks. It never rewrites an existing config.toml (KeepHome). It exits 1 when
+// Codex is not ready (or disabled).
 func (c *command) codexStatus(ctx context.Context, args []string) int {
 	if _, code, ok := c.parse(args, 0, 0); !ok {
 		return code
@@ -95,7 +99,7 @@ func (c *command) codexStatus(ctx context.Context, args []string) int {
 	switch {
 	case s.Account != "":
 		loggedIn = "yes (" + s.Account + ")"
-	case s.Hooks != "": // Codex was asked, and has no account
+	case s.AccountAsked:
 		loggedIn = "no"
 	}
 	if hooks == "" {
@@ -105,8 +109,15 @@ func (c *command) codexStatus(ctx context.Context, args []string) int {
 	if !s.Ready {
 		ready = "no: " + s.Why
 	}
-	fmt.Fprintf(c.stdout, "installed: %s\nversion:   %s\nlogged in: %s\nhooks:     %s\nready:     %s\n",
-		yesNo(s.Installed), version, loggedIn, hooks, ready)
+	config := "-"
+	if s.AccountAsked {
+		config = "current"
+	}
+	if s.HomeStale {
+		config = "differs from what this athena writes; left as it is (restart the server to rewrite it)"
+	}
+	fmt.Fprintf(c.stdout, "installed: %s\nversion:   %s\nconfig:    %s\nlogged in: %s\nhooks:     %s\nready:     %s\n",
+		yesNo(s.Installed), version, config, loggedIn, hooks, ready)
 	if !s.Ready {
 		return 1
 	}

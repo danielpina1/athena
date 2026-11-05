@@ -21,11 +21,16 @@ athena codex status
 
 This is a separate login from the one your own `codex` uses. Athena's Codex lives in its own `CODEX_HOME`,
 `<stateDir>/codex` (`~/.athena/codex` by default, mode 0700): its configuration, its credential (`auth.json`, mode 0600,
-written by `codex login` itself) and its sessions. Athena never reads or writes `~/.codex`, so your own Codex settings,
-hooks and plugins never reach a worker, and a worker's never reach yours.
+written by `codex login` itself) and its sessions. Athena never reads or writes `~/.codex`, so nothing in your own
+Codex home (settings, hooks, plugins) reaches a worker, and a worker's never reach yours. A repository can carry Codex
+settings of its own (`.codex/`): Athena refuses to run Codex while any hook it did not write would run (§4); the
+check of a repository's other settings is still to come.
 
 `athena codex status` prints what the check found: whether Codex is installed, its version and whether it is tested,
-whether it is logged in (the kind of account only, never its id or email), Athena's hooks, and whether it is ready.
+whether `config.toml` is what this `athena` would write, whether it is logged in (the kind of account only, never its
+id or email), Athena's hooks, and whether it is ready. `athena codex status` and `athena codex login` write
+`config.toml` only when there is none: an existing one is the server's (its binary, and the trust Codex recorded), so
+they leave it as it is and say when it differs; restarting the server rewrites it.
 
 ## 3. `config.json` `runtimes`
 
@@ -41,12 +46,16 @@ whether it is logged in (the kind of account only, never its id or email), Athen
 
 ## 4. Hooks and trust
 
-Athena writes `<stateDir>/codex/config.toml` itself, every time it checks Codex; do not edit it. It holds Athena's
+The server writes `<stateDir>/codex/config.toml` itself, whenever it checks Codex and the file differs; do not edit
+it. It holds Athena's
 settings: approvals asked of Athena (`approval_policy = "on-request"`, `approvals_reviewer = "user"`), the
 `workspace-write` sandbox, no update check, no analytics, the features that act outside the worktree or spend quota
 unasked turned off (apps, plugins, browser and computer use, multi-agent, image generation, memories, realtime), Athena's
 MCP server, and Athena's hooks: `athena hook --runtime codex <Event>` for `PreToolUse`, `PermissionRequest`,
-`PostToolUse`, `Stop` and `SessionStart`.
+`PostToolUse`, `Stop` and `SessionStart`. The two that wait for an Approval (`PreToolUse`, `PermissionRequest`) wait
+up to 24 hours, whatever `--approval-timeout` is, so the file does not depend on how `athena` was started; the node
+answers them when the Approval times out, and the server refuses an approval timeout longer than 23 h 55 min while
+Codex is on.
 
 **Deviation from the design (§6.1):** the hooks are in `config.toml`, not in a separate `hooks.json`. Codex 0.160 loads
 `[[hooks.<Event>]]` tables from `config.toml`; one file is written in one step, and the trust check below sees the hooks
@@ -55,9 +64,11 @@ global configuration or the repository.
 
 Codex runs a hook from a configuration file only once it is trusted. Athena trusts only the hooks it wrote: it asks
 Codex for the hooks it would run (`hooks/list`), records the trust of its own (`hooks.state."<key>".trusted_hash`,
-written by Codex at the end of `config.toml`), and lists them again. Codex is ready only when Athena's five hooks are
-there, enabled and trusted, and **no other hook is enabled**, trusted or not, from whatever layer (a repository's
-`.codex/`, a plugin, a managed configuration). Otherwise Athena refuses to start Codex and says why: there is no silent
+written by Codex at the end of `config.toml`), and lists them again. A hook is Athena's only when it is exactly what
+Athena wrote: in its `config.toml`, the same event and command, the same timeout, synchronous, with no matcher. Codex
+is ready only when Athena's five hooks are there, enabled and trusted, **no other hook is enabled**, trusted or not,
+from whatever layer (a repository's `.codex/`, a plugin), and no managed hook (which Athena cannot turn off) is
+configured at all. Otherwise Athena refuses to start Codex and says why: there is no silent
 fallback to a session its hooks do not control.
 
 ## 5. Sandbox
@@ -66,6 +77,13 @@ fallback to a session its hooks do not control.
 git directory read-only even inside a writable root, so a Ticket's worktree can commit only when the worktree's git
 directory (`<common>/worktrees/<name>`) and the common directory's `objects`, `refs` and `logs` are writable roots;
 the common directory as a root is not enough. Those roots leave the common directory's `config` and `hooks` read-only.
+Caveats:
+
+- This was verified with `codex sandbox -c sandbox_workspace_write.writable_roots=…` only, not with the
+  `sandboxPolicy.writableRoots` a session's `turn/start` carries (checking that takes a real turn).
+- `<gitDir>/config.worktree` stays writable under those roots, so Athena's PreToolUse rules must protect it.
+- git prints `error: Unable to create '…/packed-refs.lock': Operation not permitted` during the commit; it is harmless,
+  and the commit succeeds.
 
 ## 6. Attribution
 
@@ -95,4 +113,5 @@ the common directory as a root is not enough. Those roots leave the common direc
 | `Codex is not logged in for Athena: run athena codex login` | Run it. |
 | `a … hook Athena did not write is enabled (…)` | Remove or disable that hook (the path says where it is). |
 | `Athena's … hook is "untrusted", not trusted` | Codex did not take Athena's trust; check `<stateDir>/codex/config.toml` is writable by you. |
+| `config.toml was written by another athena …: restart the server to rewrite it` | The file is the running (or last) server's, for another binary; restart `athena server` with the binary you want. |
 | `codex app-server initialize: … unknown configuration field …` | This Codex does not know a key Athena writes: use a tested version. |
