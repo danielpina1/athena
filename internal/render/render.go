@@ -13,7 +13,7 @@ import (
 	"github.com/danielpina1/athena/internal/runtime/claude"
 )
 
-// LogLine is one rendered transcript event: when it happened, its kind (init, say, tool, result or other) and a short
+// LogLine is one rendered transcript event: when it happened, its kind (init, say, tool, input, result or other) and a short
 // text. It never carries a raw transcript line.
 type LogLine struct {
 	At   time.Time `json:"at"`
@@ -39,7 +39,7 @@ type Renderer struct {
 // New returns a Renderer that dates lines before the first timestamp with fallback.
 func New(fallback time.Time) *Renderer { return &Renderer{last: fallback} }
 
-// Render returns the LogLines of one transcript line: one per event, at least one.
+// Render returns the LogLines of one transcript line: one per event (an echoed message: one per Input in it).
 func (r *Renderer) Render(line []byte) []LogLine {
 	var head struct {
 		Type      string `json:"type"`
@@ -63,6 +63,13 @@ func (r *Renderer) Render(line []byte) []LogLine {
 	}
 	out := make([]LogLine, 0, len(evs))
 	for _, ev := range evs {
+		if e, ok := ev.(claude.UserEcho); ok {
+			// A message the session took in: one line per Input in it, who sent it and its first words.
+			for _, it := range inputItems(e.Text) {
+				out = append(out, LogLine{At: r.last, Kind: "input", Text: it.Tool + ": " + Clip(it.Text, sayMaxRunes)})
+			}
+			continue
+		}
 		subtype := head.Subtype
 		if subtype == "" {
 			subtype = blockTypes(head.Message.Content)

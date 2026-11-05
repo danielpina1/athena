@@ -19,6 +19,8 @@ func TestItemsDropTranscriptNoise(t *testing.T) {
 		`{"type":"system","subtype":"vcs_state_changed"}`,
 		`{"type":"system"}`,
 		`{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1794085200}}`,
+		`{"type":"tool_progress","tool_use_id":"toolu_1-heartbeat-0","tool_name":"Bash","elapsed_time_seconds":30,"heartbeat":true}`,
+		`{"type":"command_lifecycle","command_uuid":"c1","state":"queued"}`,
 	} {
 		if got := Items([]byte(line), 10); len(got) != 0 {
 			t.Errorf("%s rendered %d items (%q), want none", line, len(got), got[0].GetText())
@@ -28,8 +30,8 @@ func TestItemsDropTranscriptNoise(t *testing.T) {
 	if len(init) != 1 || init[0].Kind != "init" || init[0].Text != "session s-1 model claude-haiku-4-5-20251001" {
 		t.Fatalf("init = %+v", init)
 	}
-	other := Items([]byte(`{"type":"tool_progress","tool_name":"Bash"}`), 3)
-	if len(other) != 1 || other[0].Kind != "other" || other[0].Text != "tool_progress" || other[0].Offset != 3 {
+	other := Items([]byte(`{"type":"brand_new_kind","x":1}`), 3)
+	if len(other) != 1 || other[0].Kind != "other" || other[0].Text != "brand_new_kind" || other[0].Offset != 3 {
 		t.Fatalf("unknown type = %+v", other)
 	}
 }
