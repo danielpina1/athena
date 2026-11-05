@@ -162,7 +162,7 @@ test("the session view reads as a log of the agent's work", async ({ page, sessi
     await box.press("Enter");
     // The fixture's report call files nothing: the real Report goes in before the turn ends, so no nudge replays it.
     await expect(log).toContainText("To try it locally");
-    expect(await session.report(ticket, "ready", "Added a per-IP rate limiter in front of the bookings API.")).toBe("Report filed (ready).");
+    expect(await session.report(ticket, "ready", "Added a per-IP rate limiter in front of the bookings API.")).toMatch(/^Report filed \(ready\)\./);
     release();
     await expect(log.locator("[data-kind=result]")).toContainText("Done");
 
@@ -170,7 +170,19 @@ test("the session view reads as a log of the agent's work", async ({ page, sessi
     for (const noise of ["task_progress", "thinking_tokens", "rate_limit", "system/", "Thinking", "ToolSearch", "/home/dev"]) {
       expect(text, `the log shows ${noise}`).not.toContain(noise);
     }
-    await expect(log.locator("[data-kind=user]")).toContainText("Go ahead, keep the limit per IP");
+    // What the worker was sent, by who sent it, and none of the protocol.
+    await expect(log.locator("[data-kind=task]")).toContainText(title);
+    await expect(log.locator("[data-kind=user]")).toHaveText("YouGo ahead, keep the limit per IP");
+    const gh = log.locator("[data-kind=github]");
+    await expect(gh.getByRole("link", { name: "dana-reviewer on GitHub" })).toHaveAttribute(
+      "href",
+      "https://github.com/acme/bookings/issues/41#issuecomment-991",
+    );
+    await expect(gh).toContainText("Please make the burst configurable too");
+    await expect(log.locator("[data-kind=athena]")).toHaveText("Athena asked for a status report");
+    for (const protocol of ["[input", "trigger_id", "ATHENA_", "Execution variables", "message from the owner"]) {
+      expect(await log.innerText(), `the log shows ${protocol}`).not.toContain(protocol);
+    }
     const rows = log.getByTestId("tool-call");
     await expect(rows).toHaveCount(13);
     const row = (label: string, n = 0) => rows.filter({ has: page.locator("summary", { hasText: label }) }).nth(n);
@@ -184,7 +196,7 @@ test("the session view reads as a log of the agent's work", async ({ page, sessi
     await expect(failedTests).toHaveAttribute("data-status", "error");
     await expect(failedTests).toContainText("Exit code 1: --- FAIL: TestRateLimit (0.00s)");
     await expect(row("Run the API tests", 1)).toHaveAttribute("data-status", "ok");
-    await expect(row("Check the GitHub login")).toContainText("Blocked: command gh auth is blocked");
+    await expect(row("Check the GitHub login")).toContainText("Command gh auth is blocked: it would show");
     await expect(row("Updated the plan", 1)).toContainText("3 of 4 done");
     await expect(row("Reported ready")).toContainText("PR #42 · Added a per-IP rate limiter");
     // The agent's Markdown: a numbered list, inline code and a code block.

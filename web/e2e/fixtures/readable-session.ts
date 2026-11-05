@@ -85,8 +85,12 @@ const todos = (done: number) =>
     (content, i) => ({ content, status: i < done ? "completed" : i === done ? "in_progress" : "pending", activeForm: content }),
   );
 
-// The owner's message, as the CLI echoes it with --replay-user-messages.
-calls.push({ type: "user", isReplay: true, message: { role: "user", content: "Go ahead, keep the limit per IP" } });
+// The owner's reply is echoed by fakeclaude itself (the worker runs with --replay-user-messages); what comes in while
+// the turn runs is echoed here, as the CLI writes it: a GitHub comment card and, later, Athena's report nudge.
+/** A message the session took in, echoed back. */
+function echo(text: string) {
+  calls.push({ type: "user", isReplay: true, message: { role: "user", content: text } });
+}
 calls.push({ type: "assistant", timestamp: at(0), message: { content: [{ type: "thinking", thinking: "", signature: "e2e" }] } });
 noise(0);
 say(1, "I'll start with the bookings handler and the middleware that's already there, then add the limiter in front of it.");
@@ -97,6 +101,19 @@ tool(4, "Grep", { pattern: "func .*http.Handler\\) http.Handler", path: `${WT}/i
 noise(5);
 tool(6, "Bash", { command: "go version && go list -m golang.org/x/time", description: "Check the Go toolchain and x/time" }, 1.3,
   "go version go1.25.3 linux/amd64\ngolang.org/x/time v0.12.0");
+echo(
+  [
+    "[input 01HZE2E0C: message from a person]",
+    "trigger_id: github:issuecomment:991",
+    "acknowledged: no; ack it before substantial work if it is a request you take up",
+    "from: dana-reviewer",
+    "at: 2026-11-04T10:00:07Z",
+    "thread: acme/bookings#41 (github:acme/bookings#41)",
+    "url: https://github.com/acme/bookings/issues/41#issuecomment-991",
+    "Please make the burst configurable too: staging needs a **higher** one.",
+    "",
+  ].join("\n"),
+);
 tool(8, "Write", { file_path: `${WT}/internal/api/ratelimit.go`, content: LIMITER }, 0.1,
   `File created successfully at: ${WT}/internal/api/ratelimit.go`);
 tool(9, "Edit", {
@@ -125,6 +142,7 @@ tool(24, "Bash", { command: "gh auth status", description: "Check the GitHub log
   "PreToolUse:Bash hook error: command gh auth is blocked: it would show or replace a credential; Athena authenticates git and gh for this ticket's repository, so run them plainly", true);
 tool(25, "Bash", { command: "git push -u origin athena/t-0007 && gh pr create --fill", description: "Push the branch and open the pull request" }, 6.1,
   "branch 'athena/t-0007' set up to track 'origin/athena/t-0007'.\nhttps://github.com/acme/bookings/pull/42");
+echo("Your turn ended without a report. Call the report tool now with your status.");
 tool(32, "ToolSearch", { query: "select:mcp__athena__report", max_results: 1 }, 0.1, "Loaded mcp__athena__report");
 tool(33, "mcp__athena__report", {
   status: "ready",
