@@ -9,6 +9,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/danielpina1/athena/internal/pb/athenav1"
 	"github.com/danielpina1/athena/internal/redact"
 	"github.com/danielpina1/athena/internal/runtime/claude"
 )
@@ -42,9 +43,12 @@ func New(fallback time.Time) *Renderer { return &Renderer{last: fallback} }
 // Render returns the LogLines of one transcript line: one per event (an echoed message: one per Input in it).
 func (r *Renderer) Render(line []byte) []LogLine {
 	var head struct {
-		Type      string `json:"type"`
-		Subtype   string `json:"subtype"`
-		Timestamp string `json:"timestamp"`
+		Type      string          `json:"type"`
+		Subtype   string          `json:"subtype"`
+		Timestamp string          `json:"timestamp"`
+		At        string          `json:"at"`
+		Codex     json.RawMessage `json:"codex"`
+		Athena    json.RawMessage `json:"athena"`
 		Message   struct {
 			Content json.RawMessage `json:"content"`
 		} `json:"message"`
@@ -56,6 +60,9 @@ func (r *Renderer) Render(line []byte) []LogLine {
 		if at, err := time.Parse(time.RFC3339Nano, head.Timestamp); err == nil {
 			r.last = at
 		}
+	}
+	if len(head.Codex) > 0 || len(head.Athena) > 0 {
+		return r.renderOther(line, head.At, len(head.Codex) > 0, head.Codex)
 	}
 	evs, err := claude.ParseEvents(line)
 	if err != nil {
@@ -76,6 +83,58 @@ func (r *Renderer) Render(line []byte) []LogLine {
 		}
 		kind, text := describe(ev, head.Type, subtype)
 		// Values were masked before they were cut; a last pass catches anything a cut put back together.
+		out = append(out, LogLine{At: r.last, Kind: kind, Text: redact.String(text)})
+	}
+	return out
+}
+
+// renderOther renders a Codex envelope or an Athena line from the items the dashboard shows, in the shorter words of the
+// log: a tool call is its tool and what it did, a tool result only whether it worked.
+func (r *Renderer) renderOther(line []byte, at string, isCodex bool, codexLine json.RawMessage) []LogLine {
+	if t, err := time.Parse(time.RFC3339Nano, at); err == nil {
+		r.last = t
+	}
+	var items []*athenav1.StreamItem
+	if isCodex {
+		items = codexItems(codexLine)
+	} else {
+		var m struct {
+			Athena string `json:"athena"`
+			At     string `json:"at"`
+		}
+		items = athenaItems(line)
+		if json.Unmarshal(line, &m) == nil && m.Athena == "session" && len(items) == 1 {
+			// a marker: "<runtime> session: <model> · <reason>"
+			items[0].Kind, items[0].Text = "other", items[0].Tool+" session: "+items[0].Text
+		}
+	}
+	out := make([]LogLine, 0, len(items))
+	for _, it := range items {
+		var kind, text string
+		switch it.Kind {
+		case "init":
+			kind, text = "init", it.Text
+		case "say":
+			kind, text = "say", Clip(it.Text, sayMaxRunes)
+		case "thinking":
+			kind, text = "other", "thinking: "+Clip(it.Text, sayMaxRunes)
+		case "tool_call":
+			kind, text = "tool", strings.TrimSpace(it.Tool+" "+Clip(it.Text, summaryMaxRunes))
+		case "tool_result":
+			kind, text = "other", "tool result: ok"
+			if it.IsError {
+				text = "tool result: error"
+			}
+		case "user":
+			kind, text = "input", it.Tool+": "+Clip(it.Text, sayMaxRunes)
+		case "result":
+			kind, text = "result", Clip(it.Text, sayMaxRunes)
+			if it.IsError {
+				text += " (error)"
+			}
+		default:
+			kind, text = "other", Clip(it.Text, sayMaxRunes)
+		}
 		out = append(out, LogLine{At: r.last, Kind: kind, Text: redact.String(text)})
 	}
 	return out

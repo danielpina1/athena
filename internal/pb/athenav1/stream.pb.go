@@ -131,13 +131,18 @@ type StreamItem struct {
 	state  protoimpl.MessageState `protogen:"open.v1"`
 	Offset int64                  `protobuf:"varint,1,opt,name=offset,proto3" json:"offset,omitempty"`
 	At     *timestamppb.Timestamp `protobuf:"bytes,2,opt,name=at,proto3" json:"at,omitempty"`
-	// kind is init, say, thinking, tool_call, tool_result, result, user (a message from the owner) or other.
+	// kind is init, say, thinking, tool_call, tool_result, result, user (a message from the owner), runtime or other.
+	// A runtime item marks where a session of another runtime starts: tool is the runtime (claude or codex), text
+	// "<model> · <reason>", and detail {"model","reason","role"} (reason is start, resume, failover or review; role is
+	// implement or review). Codex sessions' tools are named exec_command, apply_patch, web_search, update_plan and
+	// mcp__<server>__<tool>.
 	Kind      string `protobuf:"bytes,3,opt,name=kind,proto3" json:"kind,omitempty"`
 	Text      string `protobuf:"bytes,4,opt,name=text,proto3" json:"text,omitempty"`
 	Tool      string `protobuf:"bytes,5,opt,name=tool,proto3" json:"tool,omitempty"`
 	ToolUseId string `protobuf:"bytes,6,opt,name=tool_use_id,json=toolUseId,proto3" json:"tool_use_id,omitempty"`
 	IsError   bool   `protobuf:"varint,7,opt,name=is_error,json=isError,proto3" json:"is_error,omitempty"`
-	// detail is a tool_call's input as compact JSON, empty for other kinds. Its string values are redacted, its
+	// detail is a tool_call's input as compact JSON (an exec_command tool_result's is {"exitCode":n}, a runtime item's
+	// is described above), empty for other kinds. Its string values are redacted, its
 	// secret-looking keys hold "***", and each long string is clipped to about 2000 runes and an ellipsis; past
 	// 8 KiB in all the long values go and the keys stay. "_lines" maps the dotted path of each value it shortened
 	// (content, edits.0.old_string) to that value's full line count.
