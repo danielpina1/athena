@@ -69,6 +69,23 @@ func TestReadBuildsTaskStates(t *testing.T) {
 	}
 }
 
+func TestReadShowsWorkOutsideTasks(t *testing.T) {
+	root := fixture(t)
+	write(t, root, ".superpowers/sdd/2026-11-04-athena-p2-router/progress.md", `# SDD ledger — plan: docs/superpowers/plans/2026-11-04-athena-p2-router.md
+
+Task 1: complete (commits a..b)
+| 1 | table row |
+- Ruling R1: something
+  indented detail
+Session view: implementer dispatched
+`)
+	b := ReadBuilds(root)[0]
+	want := []string{"Task 1: complete (commits a..b)", "Session view: implementer dispatched"}
+	if strings.Join(b.Recent, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("recent = %q, want %q", b.Recent, want)
+	}
+}
+
 func TestReadRoadmapStatuses(t *testing.T) {
 	root := fixture(t)
 	plans := ReadRoadmap(root, ReadBuilds(root))

@@ -196,6 +196,11 @@ func readBuild(root, ledger string) (Build, bool) {
 		default:
 			m := ledgerTask.FindStringSubmatch(line)
 			if m == nil {
+				// Work outside the plan's tasks (an owner request, a follow-up) is still news: a plain event line
+				// shows in Latest. Bullets, tables, headings and indented lines are detail, not events.
+				if line != "" && !strings.ContainsAny(line[:1], "-|# \t") {
+					b.Recent = append(b.Recent, line)
+				}
 				continue
 			}
 			n, _ := strconv.Atoi(m[1])
