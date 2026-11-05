@@ -817,6 +817,38 @@ func TestStreamResumesFromOffsetAndRedacts(t *testing.T) {
 	}
 }
 
+// Bookkeeping lines (system lines other than init, rate limit events) render to no items: the stream sends none for
+// them, and a client that resumes after its last item (from_offset = its offset + 1) gets the next real item, with
+// no gap over the silent lines.
+func TestStreamSkipsSilentLinesAndResumes(t *testing.T) {
+	_, fs, c := streamConn(t, 256, "T-0001")
+	noise := func(n int, line string) node.Line { return node.Line{Offset: int64(n) * 100, Data: []byte(line)} }
+	fs.push("T-0001", say(1, "one"))
+	fs.push("T-0001", noise(2, `{"type":"system","subtype":"task_progress","description":"Reading"}`))
+	fs.push("T-0001", say(3, "three"))
+	fs.push("T-0001", noise(4, `{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"}}`))
+	streamOpen(c, "T-0001", -1)
+	texts, offs := c.items(2)
+	if texts[0] != "one" || texts[1] != "three" || offs[1] != 300 {
+		t.Fatalf("texts %q at %v", texts, offs)
+	}
+	c.quiet(200 * time.Millisecond)
+
+	// Reconnected: resume after the last item. The silent line after it is read again and still sends nothing.
+	streamOpen(c, "T-0001", offs[1]+1)
+	eventually(t, func() bool { o, _, _ := fs.state(); return o == 2 })
+	fs.push("T-0001", say(5, "five"))
+	texts, offs = c.items(1)
+	if texts[0] != "five" || offs[0] != 500 {
+		t.Fatalf("after resume: %q at %v", texts, offs)
+	}
+	for _, f := range c.backlog {
+		if f.GetStreamGap() != nil {
+			t.Fatalf("a gap over silent lines: %v", f.GetStreamGap())
+		}
+	}
+}
+
 func TestStreamOpenErrorsAndClose(t *testing.T) {
 	_, fs, c := streamConn(t, 100, "T-0001")
 	streamOpen(c, "T-9999", -1)

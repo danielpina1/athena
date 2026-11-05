@@ -12,7 +12,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file athena/v1/stream.proto.
  */
 export const file_athena_v1_stream: GenFile = /*@__PURE__*/
-  fileDesc("ChZhdGhlbmEvdjEvc3RyZWFtLnByb3RvEglhdGhlbmEudjEiNAoKU3RyZWFtT3BlbhIRCgl0aWNrZXRfaWQYASABKAkSEwoLZnJvbV9vZmZzZXQYAiABKAMiRgoLU3RyZWFtSXRlbXMSEQoJdGlja2V0X2lkGAEgASgJEiQKBWl0ZW1zGAIgAygLMhUuYXRoZW5hLnYxLlN0cmVhbUl0ZW0ilQEKClN0cmVhbUl0ZW0SDgoGb2Zmc2V0GAEgASgDEiYKAmF0GAIgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIMCgRraW5kGAMgASgJEgwKBHRleHQYBCABKAkSDAoEdG9vbBgFIAEoCRITCgt0b29sX3VzZV9pZBgGIAEoCRIQCghpc19lcnJvchgHIAEoCCI4CglTdHJlYW1HYXASEQoJdGlja2V0X2lkGAEgASgJEgwKBGZyb20YAiABKAMSCgoCdG8YAyABKAMiIAoLU3RyZWFtQ2xvc2USEQoJdGlja2V0X2lkGAEgASgJQj1aO2dpdGh1Yi5jb20vZGFuaWVscGluYTEvYXRoZW5hL2ludGVybmFsL3BiL2F0aGVuYXYxO2F0aGVuYXYxYgZwcm90bzM", [file_google_protobuf_timestamp]);
+  fileDesc("ChZhdGhlbmEvdjEvc3RyZWFtLnByb3RvEglhdGhlbmEudjEiNAoKU3RyZWFtT3BlbhIRCgl0aWNrZXRfaWQYASABKAkSEwoLZnJvbV9vZmZzZXQYAiABKAMiRgoLU3RyZWFtSXRlbXMSEQoJdGlja2V0X2lkGAEgASgJEiQKBWl0ZW1zGAIgAygLMhUuYXRoZW5hLnYxLlN0cmVhbUl0ZW0ipQEKClN0cmVhbUl0ZW0SDgoGb2Zmc2V0GAEgASgDEiYKAmF0GAIgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIMCgRraW5kGAMgASgJEgwKBHRleHQYBCABKAkSDAoEdG9vbBgFIAEoCRITCgt0b29sX3VzZV9pZBgGIAEoCRIQCghpc19lcnJvchgHIAEoCBIOCgZkZXRhaWwYCCABKAkiOAoJU3RyZWFtR2FwEhEKCXRpY2tldF9pZBgBIAEoCRIMCgRmcm9tGAIgASgDEgoKAnRvGAMgASgDIiAKC1N0cmVhbUNsb3NlEhEKCXRpY2tldF9pZBgBIAEoCUI9WjtnaXRodWIuY29tL2RhbmllbHBpbmExL2F0aGVuYS9pbnRlcm5hbC9wYi9hdGhlbmF2MTthdGhlbmF2MWIGcHJvdG8z", [file_google_protobuf_timestamp]);
 
 /**
  * @generated from message athena.v1.StreamOpen
@@ -75,7 +75,7 @@ export type StreamItem = Message<"athena.v1.StreamItem"> & {
   at?: Timestamp | undefined;
 
   /**
-   * kind is init, say, thinking, tool_call, tool_result, result or other.
+   * kind is init, say, thinking, tool_call, tool_result, result, user (a message from the owner) or other.
    *
    * @generated from field: string kind = 3;
    */
@@ -100,6 +100,16 @@ export type StreamItem = Message<"athena.v1.StreamItem"> & {
    * @generated from field: bool is_error = 7;
    */
   isError: boolean;
+
+  /**
+   * detail is a tool_call's input as compact JSON, empty for other kinds. Its string values are redacted, its
+   * secret-looking keys hold "***", and each long string is clipped to about 2000 runes and an ellipsis; past
+   * 8 KiB in all the long values go and the keys stay. "_lines" maps the dotted path of each value it shortened
+   * (content, edits.0.old_string) to that value's full line count.
+   *
+   * @generated from field: string detail = 8;
+   */
+  detail: string;
 };
 
 /**
