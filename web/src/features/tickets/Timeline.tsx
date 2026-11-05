@@ -36,7 +36,7 @@ function RowText({ row, onViewReport }: { row: Row; onViewReport?: (assignmentId
     return (
       <details className="group/approvals min-w-0">
         <summary className="flex min-h-11 cursor-pointer list-none items-center gap-1 lg:min-h-0 [&::-webkit-details-marker]:hidden">
-          <span className="text-sm font-semibold">{view.title}</span>
+          <span className="text-sm font-semibold wrap-anywhere">{view.title}</span>
           <ChevronRightIcon aria-hidden className="size-3.5 text-muted transition-transform group-open/approvals:rotate-90" />
         </summary>
         <ul aria-label="What you approved" className="mt-1 grid gap-0.5">
@@ -52,8 +52,10 @@ function RowText({ row, onViewReport }: { row: Row; onViewReport?: (assignmentId
   return (
     <div className="grid min-w-0 gap-0.5">
       <div className="flex min-w-0 flex-wrap items-baseline gap-x-2">
-        <span className="text-sm font-semibold">{view.title}</span>
-        {view.badge && <Mono>{view.badge}</Mono>}
+        <span dir="auto" className="min-w-0 text-sm font-semibold wrap-anywhere">
+          {stripAnsi(view.title)}
+        </span>
+        {view.badge && <Mono className="wrap-anywhere">{stripAnsi(view.badge)}</Mono>}
       </div>
       {view.subtitle && <Truncate text={stripAnsi(view.subtitle)} lines={2} className="text-sm text-muted" />}
       {view.report && onViewReport && (
@@ -73,15 +75,18 @@ export function Timeline({
   entries,
   trimmed,
   onViewReport,
+  question = "",
 }: {
   entries: readonly TimelineEntry[];
   trimmed: boolean;
   /** Shows the Report of an Assignment (the report card's), from a report row's "View report". */
   onViewReport?: (assignmentId: string) => void;
+  /** The question the Ticket waits on the owner to answer, if any: the newest report row asks it. */
+  question?: string;
 }) {
   // The shared clock: "Today" turns into "Yesterday" at midnight without a new entry.
   const now = useNow();
-  const days = useMemo(() => buildTimeline(entries, now), [entries, now]);
+  const days = useMemo(() => buildTimeline(entries, now, question), [entries, now, question]);
   // The entries there at the first render are the history; any other one arrived while the page was open.
   const [initial] = useState(() => new Set(entries.map(entryKey)));
   const fresh = (row: Row) => (row.type === "group" ? row.entries : [row.entry]).some((e) => !initial.has(entryKey(e)));

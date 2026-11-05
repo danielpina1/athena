@@ -190,7 +190,12 @@ function TicketTabs({
       <TabsContent value="timeline" className="min-w-0">
         {detail ? (
           <Suspense fallback={<ListSkeleton />}>
-            <Timeline entries={detail.timeline} trimmed={detail.timelineTrimmed} onViewReport={revealReport} />
+            <Timeline
+              entries={detail.timeline}
+              trimmed={detail.timelineTrimmed}
+              onViewReport={revealReport}
+              question={ticket.stage === "person" && ticket.action === "answer" ? ticket.attentionQuestion : ""}
+            />
           </Suspense>
         ) : (
           <ListSkeleton />

@@ -85,6 +85,7 @@ function Row({ item, now, fresh }: { item: ActivityItem; now: number; fresh: boo
 export function LiveFeed({ limit, className }: { /** Shows this many until "Show all". */ limit?: number; className?: string }) {
   const items = useActivity((s) => s.items);
   const working = useAthena((s) => selectCounts(s).working);
+  const needsYou = useAthena((s) => selectCounts(s).needsYou);
   const synced = useAthena(selectSynced);
   const now = useNow();
   const [all, setAll] = useState(false);
@@ -97,10 +98,17 @@ export function LiveFeed({ limit, className }: { /** Shows this many until "Show
     <section data-live-feed aria-labelledby={heading} className={cn("grid min-w-0 content-start gap-1", className)}>
       <div className="flex items-center justify-between gap-2">
         <h2 id={heading} className="flex items-center gap-2 font-mono text-xs tracking-wider text-muted uppercase">
-          {working > 0 && <span aria-hidden className="size-1.5 animate-pulse rounded-full bg-ok" />}
+          {(working > 0 || needsYou > 0) && (
+            <span data-live-pulse aria-hidden className={cn("size-1.5 animate-pulse rounded-full", needsYou > 0 ? "bg-accent" : "bg-success")} />
+          )}
           Live
         </h2>
-        {synced && <span data-working className="font-mono text-xs text-muted tabular-nums">{`${working} working`}</span>}
+        {synced && (
+          // Both counts are the lengths of their lists (selectCounts): a Ticket waiting on the owner is not working.
+          <span data-working className="font-mono text-[11px] whitespace-nowrap text-muted tabular-nums">
+            {needsYou > 0 ? `${working} working · ${needsYou} need you` : `${working} working`}
+          </span>
+        )}
       </div>
       <Announcer items={items} />
       {items.length === 0 ? (

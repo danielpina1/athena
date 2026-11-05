@@ -86,7 +86,7 @@ export function describeEntry(e: Entry): EntryView {
       return { title, subtitle: text, tone: "neutral" };
     }
     case "decision":
-      return { title: sub === "attached" ? "Added to an existing Ticket" : "Router started this Ticket", subtitle: "", tone: "neutral" };
+      return { title: "Router started this Ticket", subtitle: "", tone: "neutral" };
     case "assignment": {
       const kind = sub || (text === "running" ? "started" : text === "pending" ? "queued" : "ended");
       switch (kind) {
@@ -175,7 +175,7 @@ function rowsOf(sorted: TimelineEntry[]): Row[] {
     }
     if (j - i > 1) {
       const run = sorted.slice(i, j);
-      rows.push({ type: "group", key: entryKey(e), at: entryMs(run[run.length - 1]), entries: run, items: run.map((r) => r.subject || r.text), view: groupView(run) });
+      rows.push({ type: "group", key: entryKey(e), at: entryMs(run[run.length - 1]), entries: run, items: run.map((r) => joined(r.subject, r.text)), view: groupView(run) });
     } else {
       rows.push({ type: "entry", key: entryKey(e), at: entryMs(e), entry: e, view: describeEntry(e) });
       j = i + 1;
@@ -203,10 +203,15 @@ export function dayLabel(at: number, now: number): string {
 /** The local time of day, HH:MM. */
 export const clockTime = (at: number) => clock.format(new Date(at));
 
-/** The rail's days, newest first, each with its rows newest first. */
-export function buildTimeline(entries: readonly TimelineEntry[], now: number): Day[] {
+/**
+ * The rail's days, newest first, each with its rows newest first. An open question (the Ticket waits on the owner's
+ * answer) is the newest report's: that row says so and has the orange dot.
+ */
+export function buildTimeline(entries: readonly TimelineEntry[], now: number, question = ""): Day[] {
   const sorted = [...entries].sort((a, b) => entryMs(a) - entryMs(b));
   const rows = rowsOf(sorted).reverse();
+  const asking = question.trim() ? rows.find((r) => r.type === "entry" && r.entry.kind === "report") : undefined;
+  if (asking) asking.view = { ...asking.view, title: "Asked you a question", subtitle: question, tone: "attention" };
   const days: Day[] = [];
   for (const row of rows) {
     const key = String(startOfDay(row.at));

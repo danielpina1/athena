@@ -2,13 +2,13 @@
 // load, the live feed and today's counts. Every count is the length of the list it stands for (selectCounts).
 import { useState } from "react";
 import { NavLink } from "react-router";
-import { ConnectionDot, type LinkSource } from "@/app/ConnectionBanner";
+import type { LinkSource } from "@/app/ConnectionBanner";
 import { NAV, type NavItem, useNavCount } from "@/app/routes";
 import { modKeyLabel } from "@/app/shortcuts";
 import { selectCounts, selectSynced } from "@/lib/store/selectors";
 import { useAthena } from "@/lib/store/state";
 import { LiveFeed } from "@/features/activity/LiveFeed";
-import { AthenaMark } from "@/ui/athena/AthenaMark";
+import { AthenaMark } from "@/app/AthenaMark";
 import { Kbd } from "@/ui/athena/Kbd";
 import { Waiting } from "@/ui/athena/Waiting";
 import { cn } from "@/ui/cn";
@@ -144,9 +144,8 @@ export function Sidebar({ link, onOpenPalette }: { link: LinkSource; onOpenPalet
     <aside className="flex h-dvh w-[240px] shrink-0 flex-col overflow-y-auto border-r border-line">
       <div className="flex h-14 items-center justify-between gap-2 border-b border-line px-4">
         <span className="flex items-center gap-2 font-semibold">
-          <AthenaMark />
+          <AthenaMark link={link} />
           Athena
-          <ConnectionDot link={link} />
         </span>
         <button
           type="button"

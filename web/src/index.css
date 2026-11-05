@@ -37,6 +37,23 @@
   .athena-mark[data-state="needs-you"]::before {
     background: var(--accent);
   }
+  /* The link before Athena's state: hollow while connecting, red while offline or signed out, and still. */
+  .athena-mark[data-link="connecting"] {
+    border-color: var(--muted);
+    color: var(--muted);
+  }
+  .athena-mark[data-link="connecting"]::before {
+    background: transparent;
+  }
+  .athena-mark[data-link="offline"],
+  .athena-mark[data-link="signedOut"] {
+    border-color: var(--danger);
+    color: var(--danger);
+  }
+  .athena-mark[data-link="offline"]::before,
+  .athena-mark[data-link="signedOut"]::before {
+    background: var(--danger);
+  }
 
   /* A soft ring that grows from the element and fades, in its currentColor. */
   .athena-ring {

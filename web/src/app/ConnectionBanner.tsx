@@ -1,9 +1,8 @@
-// The link's health, said quietly: a dot in the shell, and a banner only when the link is not open. A reconnect that
+// The link's health, said quietly: Athena's mark in the shell (AthenaMark), and a banner only when the link is not open. A reconnect that
 // takes under a second says nothing at all; a longer one says "Connecting…", and an offline link says the control
 // server is unreachable and when the last update arrived. Signed out is the sign-in screen's (the session gate's).
 import { useSyncExternalStore } from "react";
 import type { LinkClient, LinkStatus } from "@/lib/link/client";
-import { cn } from "@/ui/cn";
 
 /** What the shell needs of the link: its status, and its frames for the time of the last update. */
 export type LinkSource = Pick<LinkClient, "status" | "onStatus" | "onFrame">;
@@ -18,31 +17,14 @@ export function useLinkStatus(link: LinkSource): LinkStatus {
   );
 }
 
-const LABEL: Record<LinkStatus, string> = {
+/** The link's state in words, for screen readers (Athena's mark shows it). */
+export const LINK_LABEL: Record<LinkStatus, string> = {
   open: "Connected",
   connecting: "Connecting",
   offline: "Offline",
   signedOut: "Signed out",
 };
 
-/** A square status dot with its words for screen readers: ink when open, hollow while connecting, red offline. */
-export function ConnectionDot({ link, className }: { link: LinkSource; className?: string }) {
-  const status = useLinkStatus(link);
-  return (
-    <span className={cn("inline-flex items-center", className)} data-status={status}>
-      <span
-        aria-hidden
-        className={cn(
-          "size-2 border",
-          status === "open" && "border-ok bg-ok",
-          status === "connecting" && "border-muted bg-transparent",
-          (status === "offline" || status === "signedOut") && "border-danger bg-danger",
-        )}
-      />
-      <span className="sr-only">{LABEL[status]}</span>
-    </span>
-  );
-}
 
 const clock = new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit" });
 

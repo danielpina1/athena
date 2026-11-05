@@ -1,7 +1,8 @@
 import { create } from "@bufbuild/protobuf";
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { expect, test, vi } from "vitest";
+import { act } from "@testing-library/react";
+import { afterEach, expect, test, vi } from "vitest";
 import { ReportViewSchema } from "@/gen/athena/v1/state_pb";
 import { at } from "./fixtures";
 import ReportCard from "./ReportCard";
@@ -76,4 +77,42 @@ test("the state pill is green for review and amber while waiting", () => {
   const waiting = document.querySelector("[data-state]")!;
   expect(waiting.className).toContain("text-warning");
   expect(waiting.className).toContain("border-warning");
+});
+
+afterEach(() => vi.unstubAllGlobals());
+
+test("the clamp follows the width: a resize measures again", () => {
+  let observed: (() => void) | undefined;
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      constructor(cb: () => void) {
+        observed = cb;
+      }
+      observe() {}
+      disconnect() {}
+    },
+  );
+  render(<ReportCard reports={[report({ assignmentId: "a1", state: "progress", summary: long })]} repo="" />);
+  const body = screen.getByTestId("report-body");
+  const size = (scroll: number) => {
+    Object.defineProperty(body, "clientHeight", { configurable: true, value: 100 });
+    Object.defineProperty(body, "scrollHeight", { configurable: true, value: scroll });
+  };
+  size(10_000);
+  act(() => observed?.());
+  expect(body.getAttribute("data-clamped")).toBe("true");
+  // Wide enough now for all of it: no clamp, no button.
+  size(50);
+  act(() => observed?.());
+  expect(body.getAttribute("data-clamped")).toBe("false");
+  expect(screen.queryByRole("button", { name: "Show the full report" })).toBeNull();
+});
+
+test("focus inside a clamped report opens it, and the button names what it controls", () => {
+  render(<ReportCard reports={[report({ assignmentId: "a1", state: "progress", summary: long + "\n\n[the PR](https://example.com/pr)" })]} repo="" />);
+  const body = screen.getByTestId("report-body");
+  expect(screen.getByRole("button", { name: "Show the full report" }).getAttribute("aria-controls")).toBe(body.id);
+  act(() => screen.getByRole("link", { name: "the PR" }).focus());
+  expect(body.getAttribute("data-clamped")).toBe("false");
 });

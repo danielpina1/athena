@@ -26,6 +26,8 @@ export type ActivityItem = {
 };
 
 export const MAX_ACTIVITY = 30;
+/** How many event keys the feed remembers (the newest), so one is not added twice. */
+export const SEEN_MAX = 500;
 
 type Event = Pick<ActivityItem, "key" | "event" | "tone">;
 
@@ -46,6 +48,8 @@ const ENDED: Record<string, [string, Tone]> = {
   closed: ["Closed", "neutral"],
   failed: ["Failed", "danger"],
 };
+
+const stamp = (t: TicketSummary["updatedAt"]) => String(t?.seconds ?? 0);
 
 const prNumber = (url: string) => /\/pull\/(\d+)/.exec(url)?.[1];
 
@@ -69,14 +73,17 @@ export function ticketEvents(prev: TicketSummary | undefined, next: TicketSummar
     (kind === "answer" && next.attentionQuestion !== prev?.attentionQuestion);
   if (kind && turned) {
     const [event, tone] = NEEDS_YOU[kind];
-    const what = kind === "approval" ? next.pendingApprovalId : kind === "answer" ? next.attentionQuestion : String(Number(next.updatedAt?.seconds ?? 0));
+    // An approval is one event per approval; anything else is one per time it began (the same question asked again
+    // later is news again).
+    const what = kind === "approval" ? next.pendingApprovalId : `${kind === "answer" ? next.attentionQuestion : ""}@${stamp(next.updatedAt)}`;
     out.push({ key: `${id}:${kind}:${what}`, event, tone });
   } else if (next.canRetry && !prev?.canRetry && next.stage !== "ended") {
-    out.push({ key: `${id}:stalled:${String(next.updatedAt?.seconds ?? 0)}`, event: "Stalled", tone: "warn" });
+    out.push({ key: `${id}:stalled:${stamp(next.updatedAt)}`, event: "Stalled", tone: "warn" });
   }
   if (next.stage === "ended" && prev && prev.stage !== "ended") {
     const [event, tone] = ENDED[next.outcome] ?? ["Ended", "neutral"];
-    out.push({ key: `${id}:ended`, event, tone });
+    // A Ticket a person revived ends again: its end is keyed by when.
+    out.push({ key: `${id}:ended:${stamp(next.endedAt ?? next.updatedAt)}`, event, tone });
   }
   return out;
 }
@@ -107,6 +114,8 @@ export function addEvents(items: readonly ActivityItem[], events: readonly NewIt
   for (const e of events) {
     if (seen.has(e.key)) continue;
     seen.add(e.key);
+    // A Set keeps insertion order: the oldest key goes first.
+    if (seen.size > SEEN_MAX) seen.delete(seen.values().next().value as string);
     const top = out[0];
     if (top && top.ticketId === e.ticketId && top.event === e.event) {
       out[0] = { ...top, at: e.at, title: e.title, count: top.count + 1 };

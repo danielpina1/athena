@@ -4,11 +4,11 @@
 import { SearchIcon } from "lucide-react";
 import type { ReactNode } from "react";
 import { NavLink } from "react-router";
-import { ConnectionBanner, ConnectionDot, type LinkSource } from "@/app/ConnectionBanner";
+import { ConnectionBanner, type LinkSource } from "@/app/ConnectionBanner";
 import { UpdateBanner } from "@/app/UpdateBanner";
 import { NAV, type NavItem, useNavCount } from "@/app/routes";
 import { NeedsCount } from "@/app/Sidebar";
-import { AthenaMark } from "@/ui/athena/AthenaMark";
+import { AthenaMark } from "@/app/AthenaMark";
 import { cn } from "@/ui/cn";
 
 function BottomLink({ item }: { item: NavItem }) {
@@ -55,9 +55,8 @@ export function PhoneShell({
       <header className="sticky top-0 z-10 border-b border-line bg-bg pt-[env(safe-area-inset-top)]">
         <div className="flex h-12 items-center justify-between pr-[max(4px,env(safe-area-inset-right))] pl-[max(16px,env(safe-area-inset-left))]">
           <span className="flex items-center gap-2 font-mono text-xs tracking-wider text-muted uppercase">
-            <AthenaMark />
+            <AthenaMark link={link} />
             Athena
-            <ConnectionDot link={link} />
           </span>
           <button
             type="button"

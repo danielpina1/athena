@@ -113,3 +113,40 @@ test("an empty timeline says so", () => {
   render(<Timeline entries={[]} trimmed={false} />);
   expect(screen.getByText("Nothing has happened on this Ticket yet.")).toBeTruthy();
 });
+
+test("a denied run keeps each note, and hostile subjects are stripped and wrap", async () => {
+  const user = userEvent.setup();
+  render(
+    <Timeline
+      entries={[
+        entry("approval", "denied", "too risky", 3, { subject: "Bash: rm -rf /", refId: "A-1" }),
+        entry("approval", "denied", "", 2, { subject: "Bash: \u001b[31mdd\u001b[0m", refId: "A-2" }),
+        entry("assignment", "started", "", 1, { subject: "\u001b[1m" + "m".repeat(160) }),
+      ]}
+      trimmed={false}
+    />,
+  );
+  const group = rows()[1];
+  await user.click(within(group).getByText("You denied 2 commands"));
+  expect(within(group).getAllByRole("listitem").map((li) => li.textContent)).toEqual(["Bash: rm -rf / — too risky", "Bash: dd"]);
+  const title = within(rows()[0]).getByText(/^Started work/);
+  expect(title.textContent).not.toContain("\u001b");
+  expect(title.className).toContain("wrap-anywhere");
+});
+
+test("an open question pulses on the newest report", () => {
+  render(
+    <Timeline
+      entries={[entry("report", "progress", "first", 5, { refId: "a1" }), entry("report", "waiting", "Two caches fit", 1, { refId: "a2" })]}
+      trimmed={false}
+      question="Redis or in-process?"
+    />,
+  );
+  const [newest, older] = rows();
+  expect(newest.textContent).toContain("Asked you a question");
+  expect(newest.textContent).toContain("Redis or in-process?");
+  const dot = newest.querySelector("[data-dot]")!;
+  expect(dot.getAttribute("data-tone")).toBe("attention");
+  expect(dot.classList.contains("athena-ring")).toBe(true);
+  expect(older.querySelector("[data-dot]")!.getAttribute("data-tone")).not.toBe("attention");
+});

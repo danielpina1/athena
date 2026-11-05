@@ -2,7 +2,7 @@
 // as Markdown (the session view's safe renderer), clamped to about 12 lines with "Show the full report" expanding it in
 // place. A question is a highlighted line with a Reply that opens the composer. Earlier Reports fold under their count.
 // A lazy chunk (with the Markdown renderer); TicketDetail shows a placeholder while it loads.
-import { useLayoutEffect, useRef, useState } from "react";
+import { useId, useLayoutEffect, useRef, useState } from "react";
 import type { ReportView } from "@/gen/athena/v1/state_pb";
 import { stripAnsi } from "@/lib/text/ansi";
 import { Markdown } from "@/lib/text/markdown";
@@ -78,15 +78,26 @@ function Meta({ report, repo }: { report: ReportView; repo: string }) {
 /** The summary as Markdown, clamped to about 12 lines until the owner asks for all of it. */
 function Summary({ text }: { text: string }) {
   const ref = useRef<HTMLDivElement>(null);
+  const id = useId();
   const long = text.split("\n").length > LONG_LINES || text.length > LONG_CHARS;
   const [overflows, setOverflows] = useState<boolean | undefined>(undefined);
   const [open, setOpen] = useState(false);
 
+  // The full height is measured, clamped or not, now and whenever the width changes (a phone turned, a pane resized).
+  // Without layout (no height to measure) the length decides.
   useLayoutEffect(() => {
     const el = ref.current;
-    // Without layout (no height to measure) the length decides. The full height is measured clamped or not.
-    if (!el || el.clientHeight === 0) return;
-    setOverflows(el.scrollHeight > CLAMP_EM * parseFloat(getComputedStyle(el).fontSize) + 1);
+    if (!el) return;
+    const measure = () => {
+      if (el.clientHeight === 0) return;
+      const em = parseFloat(getComputedStyle(el).fontSize) || 16;
+      setOverflows(el.scrollHeight > CLAMP_EM * em + 1);
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
   }, [text]);
 
   const clampable = overflows ?? long;
@@ -95,8 +106,11 @@ function Summary({ text }: { text: string }) {
     <div className="grid min-w-0 gap-2">
       <div
         ref={ref}
+        id={id}
         data-testid="report-body"
         data-clamped={clamped}
+        // A link the clamp hides is still reachable by Tab: reaching it opens the report, so focus is never out of sight.
+        onFocus={() => clamped && setOpen(true)}
         className={cn("min-w-0 text-body", clamped && "max-h-[19em] overflow-hidden", !clamped && "max-h-none")}
       >
         <Markdown text={stripAnsi(text)} />
@@ -105,6 +119,7 @@ function Summary({ text }: { text: string }) {
         <button
           type="button"
           aria-expanded={open}
+          aria-controls={id}
           onClick={() => setOpen((o) => !o)}
           className={cn(link, "inline-flex min-h-11 items-center justify-self-start text-sm lg:min-h-0")}
         >

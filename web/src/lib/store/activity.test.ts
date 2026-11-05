@@ -2,7 +2,7 @@ import { create, type MessageInitShape } from "@bufbuild/protobuf";
 import { timestampFromMs } from "@bufbuild/protobuf/wkt";
 import { afterEach, expect, test } from "vitest";
 import { DeltaSchema, SnapshotSchema, TicketSummarySchema } from "@/gen/athena/v1/state_pb";
-import { connectActivity, MAX_ACTIVITY, useActivity } from "./activity";
+import { addEvents, connectActivity, MAX_ACTIVITY, SEEN_MAX, useActivity } from "./activity";
 import { useAthena } from "./state";
 
 type T = MessageInitShape<typeof TicketSummarySchema>;
@@ -76,6 +76,8 @@ test("an event already in the feed is not added again", () => {
   const undo = useAthena.getState().markApprovalAnswered("A-1", true);
   undo.undo();
   expect(events()).toEqual(["T-1 Needs your approval"]);
+  // Not even as a repeat on the row.
+  expect(useActivity.getState().items[0].count).toBe(1);
   // A new approval is a new event, counted on the row it repeats.
   delta({ id: "T-1", stage: "person", action: "approval", pendingApprovalId: "A-2" });
   expect(events()).toEqual(["T-1 Needs your approval"]);
@@ -104,4 +106,34 @@ test("the feed keeps the newest 30, and a sign-out empties it", () => {
   expect(items[0].ticketId).toBe(`T-${MAX_ACTIVITY + 4}`);
   useAthena.getState().reset();
   expect(useActivity.getState().items).toEqual([]);
+});
+
+test("a Ticket that ends again, or asks the same question again, is news again", () => {
+  off = connectActivity();
+  snapshot([ticket({ id: "T-1" })]);
+  delta({ id: "T-1", stage: "ended", outcome: "completed", endedAt: timestampFromMs(2000) });
+  delta({ id: "T-1", stage: "working", updatedAt: timestampFromMs(3000) });
+  delta({ id: "T-1", stage: "ended", outcome: "completed", endedAt: timestampFromMs(4000) });
+  delta({ id: "T-1", stage: "person", action: "answer", attentionQuestion: "Which one?", updatedAt: timestampFromMs(5000) });
+  delta({ id: "T-1", stage: "working", updatedAt: timestampFromMs(6000) });
+  delta({ id: "T-1", stage: "person", action: "answer", attentionQuestion: "Which one?", updatedAt: timestampFromMs(7000) });
+  expect(events()).toEqual(["T-1 Asked you a question", "T-1 Finished"]);
+  expect(useActivity.getState().items.map((i) => i.count)).toEqual([2, 2]);
+});
+
+test("the keys the feed remembers are bounded", () => {
+  const seen = new Set<string>();
+  const events = Array.from({ length: SEEN_MAX + 50 }, (_, i) => ({
+    key: `T-${i}:started`,
+    ticketId: `T-${i}`,
+    title: "t",
+    event: "Started work",
+    tone: "ok" as const,
+    at: i,
+  }));
+  addEvents([], events, seen);
+  expect(seen.size).toBeLessThanOrEqual(SEEN_MAX);
+  // The newest are the ones remembered.
+  expect(seen.has(`T-${SEEN_MAX + 49}:started`)).toBe(true);
+  expect(seen.has("T-0:started")).toBe(false);
 });

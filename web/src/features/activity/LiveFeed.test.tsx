@@ -1,7 +1,9 @@
+import { create } from "@bufbuild/protobuf";
 import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { SnapshotSchema } from "@/gen/athena/v1/state_pb";
 import { type ActivityItem, useActivity } from "@/lib/store/activity";
 import { useAthena } from "@/lib/store/state";
 import { LiveFeed } from "./LiveFeed";
@@ -78,4 +80,29 @@ test("the page form shows the latest 5, then all", async () => {
   expect(screen.getAllByRole("listitem")).toHaveLength(5);
   await user.click(screen.getByRole("button", { name: "Show all (8)" }));
   expect(screen.getAllByRole("listitem")).toHaveLength(8);
+});
+
+test("the header says how many work and how many need you, and pulses for either", () => {
+  useAthena.getState().applySnapshot(
+    create(SnapshotSchema, {
+      cursor: 1n,
+      tickets: [
+        { id: "T-1", stage: "person", action: "answer" },
+        { id: "T-2", stage: "person", action: "review" },
+      ],
+    }),
+    "e1",
+  );
+  const view = feed();
+  const header = () => view.container.querySelector("[data-working]")!.textContent;
+  expect(header()).toBe("0 working · 2 need you");
+  expect(view.container.querySelector("[data-live-pulse]")).toBeTruthy();
+  act(() =>
+    useAthena.getState().applySnapshot(create(SnapshotSchema, { cursor: 1n, tickets: [{ id: "T-3", stage: "working" }] }), "e1"),
+  );
+  expect(header()).toBe("1 working");
+  expect(view.container.querySelector("[data-live-pulse]")).toBeTruthy();
+  act(() => useAthena.getState().applySnapshot(create(SnapshotSchema, { cursor: 1n, tickets: [] }), "e1"));
+  expect(header()).toBe("0 working");
+  expect(view.container.querySelector("[data-live-pulse]")).toBeNull();
 });
