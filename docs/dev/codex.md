@@ -29,6 +29,59 @@ name the account. Each line is `{"at":"<time>","codex":<what Codex printed>}`, o
 `{"at":"<time>","athena":{"declined":<method>,"id":<request id>,"reason":<why>}}` for an approval Athena declined on its
 own.
 
+### Which Tickets run on Codex
+
+A task names its runtime: `claude` (the default), `codex` or `auto` (the control socket's `submit` takes `runtime`).
+Until the runtime chooser lands, `auto` runs on Claude Code. A Ticket pinned to `codex` runs only there: before each
+process starts, the node asks whether Codex is ready (the check of §2, cached for 10 minutes) and, when it is not, the
+Assignment reports failed with why ("codex cannot run this ticket: Codex is not logged in for Athena: run athena codex
+login"). A session that refuses to start because a hook or a setting is not Athena's (§4) fails the same way, with the
+refusal's why, and the next launch checks Codex (and trusts Athena's hooks) again. A Codex session's environment has
+`ATHENA_RUNTIME=codex`, and its first message lists it with the other execution variables. Every process a Ticket starts,
+on either runtime, first writes a marker line to the transcript (`{"athena":"session","runtime":…,"model":…,
+"assignment":…,"role":"implement","reason":"start|resume"}`), so the session view shows where a runtime begins. A Codex
+Ticket with no model of its own runs Codex's default (§3), which the thread names.
+
+### Hooks, approvals and the rules
+
+Codex's hooks reach the same rules as Claude Code's (`athena hook --runtime codex <Event>`). Codex's tools are mapped
+onto Claude Code's vocabulary first:
+
+| Codex tool | judged as |
+| --- | --- |
+| `Bash`, `shell`, `local_shell`, `exec_command`, `unified_exec` | `Bash` with the command (an argv array joined with POSIX quoting), run in its `workdir` |
+| `apply_patch` | one `Write` per path the patch adds, updates, deletes or moves to; the strictest verdict wins |
+| `write_stdin` | allowed (its process was already allowed to start) |
+| `mcp__…`, `web_search` | as they are |
+| any other | allowed unless one of its strings names a credential or Athena's state directory |
+
+A command the hook cannot read, and a patch whose paths it cannot read, ask the owner. Codex's own approval requests are
+judged the same way: a command as a `PermissionRequest` on `Bash`, a file change on a `Write` of each path, while network
+access (rule `network_access`, "Network: <host>", "any host" for `*`) and more permissions (rule `codex_permissions`)
+always ask the owner. Escalations become Approvals exactly as Claude Code's do (the timeout, the expiry, the end with the
+session). When Codex asks about one action through more than one door in the same turn (its `PreToolUse` and
+`PermissionRequest` hooks, and an approval request, in any order), the owner answers one Approval and every ask gets its
+answer: an ask about the same command (or path, or host) in the same turn, while the Approval waits or within 10
+minutes of its answer, shares it. Whether Codex 0.160.1 does ask twice, and in which order, is not verified yet (it takes
+a real turn); sharing is correct in either order.
+
+What the hook prints follows the output schemas Codex 0.160.1 embeds (`pre-tool-use.command.output`,
+`permission-request.command.output`; pinned in `internal/node/testdata/hooks/codex`). They are Claude Code's shapes with
+two exceptions Codex enforces: a `PreToolUse` that allows prints nothing (Codex refuses `permissionDecision: "allow"`),
+and a deny always carries a non-empty reason.
+
+Codex's sandbox cannot keep Athena's files and the repository's git config and hooks read-only inside its writable roots
+(§5), so for Codex sessions the rules deny, with rule `protected_path`, any write (a patch, a file change, a shell
+redirection or file command) to `.athena/settings.json`, `.athena/mcp.json`, `.athena/.gitignore`, the git common
+directory's `config`, `config.worktree` and `hooks/`, and a worktree's own `config.worktree`: the same list Claude Code's
+sandbox denies.
+
+### Keep one athena binary
+
+`config.toml` names the athena binary its hooks and MCP server run, and the server rewrites the file when it starts. Run
+`athena codex status|login` with the same binary the server runs (deploy by replacing `bin/athena` and restarting the
+server): a different binary finds the server's file stale and leaves it as it is (§2).
+
 ## 2. Install and log in
 
 Install the Codex CLI (`codex --version` must print `codex-cli 0.160.0` or newer), then log it in for Athena:
@@ -116,14 +169,24 @@ Caveats:
 - git prints `error: Unable to create '…/packed-refs.lock': Operation not permitted` during the commit; it is harmless,
   and the commit succeeds.
 
-A session passes the node's writable roots, as the node computed them, in every `turn/start`'s `sandboxPolicy`
+The node computes exactly those roots for a worktree (its git directory, and the common directory's `objects`, `refs`
+and `logs`) and protects `<gitDir>/config.worktree`, the git config and hooks and Athena's own files with its rules
+(§1, "Hooks, approvals and the rules"). A session passes the node's writable roots, as the node computed them, in every `turn/start`'s `sandboxPolicy`
 (`workspaceWrite` with `writableRoots`, network off; `readOnly` for a reviewer). The session's working directory is
 always writable. The CA variables a sandboxed command needs are in the session process's environment, which its
 commands inherit.
 
 ## 6. Attribution
 
-*To be written.*
+Commits and pull requests carry no AI attribution, whichever runtime made them. The rules deny (rule `attribution`, for
+both runtimes, right after the blocked commands) a `git commit` or a `gh pr create|edit` (also as `athena gh`, or inside
+`sh -c`) whose message, `--trailer`, title or body matches a co-author trailer naming Codex or Claude, a "Generated
+with Codex" or "Generated with [Claude Code]" footer, or a `noreply@openai.com` or `noreply@anthropic.com` address. The
+rule reads `-m`/`--message`, `--trailer`, `--title`/`-t` and `--body`/`-b`, and the files `-F`/`--file`/`--body-file`
+name when they are in the Ticket's directory (up to 64 KiB); a message read from stdin (`-F -`, a here-document) is
+looked for in the whole command. Its reason tells the worker: "remove the AI attribution trailer or footer: commits and
+pull requests carry none". It is a guard against a model's habit, not against a worker set on evading it (a message
+built by command substitution, or a file outside the Ticket's directory, is not read).
 
 ## 7. Quota and failover
 

@@ -65,9 +65,17 @@ func TestSessionRunsOnConfiguredRuntime(t *testing.T) {
 	if o.TicketID != tk.ID || o.AssignmentID != a.ID || o.Role != "worker" || o.Transcript == nil || o.Model != "sonnet" || o.ReadOnly {
 		t.Errorf("start = %+v", o)
 	}
-	// A worktree's commits land in the repository's git directory.
-	if want := filepath.Join(repo, ".git"); len(o.WritableRoots) != 1 || !sameFile(o.WritableRoots[0], want) {
-		t.Errorf("writable roots = %v, want [%s] (work dir %s)", o.WritableRoots, want, wd)
+	// A worktree's commits land in its git directory and the repository's objects, refs and logs; its config and hooks
+	// are none of them.
+	common := filepath.Join(repo, ".git")
+	want := []string{filepath.Join(common, "worktrees", filepath.Base(wd)), filepath.Join(common, "objects"), filepath.Join(common, "refs"), filepath.Join(common, "logs")}
+	if len(o.WritableRoots) != len(want) {
+		t.Fatalf("writable roots = %v, want %v (work dir %s)", o.WritableRoots, want, wd)
+	}
+	for i := range want {
+		if !sameFile(o.WritableRoots[i], want[i]) {
+			t.Errorf("writable root %d = %s, want %s", i, o.WritableRoots[i], want[i])
+		}
 	}
 }
 
@@ -90,7 +98,7 @@ func TestUnavailableRuntimeFailsWithWhy(t *testing.T) {
 }
 
 func TestDefaultRuntimesAreClaudeCode(t *testing.T) {
-	rs := defaultRuntimes(Config{ClaudeBinary: "/opt/claude"})
+	rs := DefaultRuntimes(Config{ClaudeBinary: "/opt/claude"})
 	if r, ok := rs["claude"].(claude.Runtime); len(rs) != 1 || !ok || r.Binary != "/opt/claude" || r.Name() != "claude" {
 		t.Fatalf("default runtimes = %#v", rs)
 	}

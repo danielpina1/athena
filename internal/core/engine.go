@@ -65,6 +65,8 @@ func userErrorf(format string, args ...any) error {
 type TaskOptions struct {
 	Dir   string
 	Model string
+	// Runtime is the runtime the Ticket runs on: RuntimeClaude (the default when empty), RuntimeCodex or RuntimeAuto.
+	Runtime string
 	// Repo is the repository (owner/name) the task works in, through its Source; it excludes Dir.
 	Repo string
 	// RequestID makes the submit idempotent: a task submitted again with an id already stored creates nothing and
@@ -155,6 +157,13 @@ func (e *Engine) SubmitOwnerTask(text string, opts TaskOptions) (Ticket, error) 
 	if title == "" {
 		return Ticket{}, userErrorf("a task needs text")
 	}
+	switch opts.Runtime {
+	case "":
+		opts.Runtime = RuntimeClaude
+	case RuntimeClaude, RuntimeCodex, RuntimeAuto:
+	default:
+		return Ticket{}, userErrorf("runtime %q is not %s, %s or %s", opts.Runtime, RuntimeClaude, RuntimeCodex, RuntimeAuto)
+	}
 	if opts.Repo != "" {
 		if !validRepo(opts.Repo) {
 			return Ticket{}, userErrorf("repository %q is not owner/name", opts.Repo)
@@ -194,7 +203,7 @@ func (e *Engine) SubmitOwnerTask(text string, opts TaskOptions) (Ticket, error) 
 			ID: id, Title: title, DecisionID: decision.ID, Mandate: mandate,
 			CreatedAt: o.at, UpdatedAt: o.at,
 			Origin:    Origin{TriggerID: trigger.ID, TriggerIDs: []string{trigger.ID}},
-			Execution: &Execution{Directory: opts.Dir, Runtime: "claude", Model: opts.Model},
+			Execution: &Execution{Directory: opts.Dir, Runtime: opts.Runtime, Model: opts.Model},
 			Repo:      opts.Repo,
 			RequestID: opts.RequestID,
 		}

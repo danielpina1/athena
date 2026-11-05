@@ -512,10 +512,10 @@ func TestApprovalRequestUsesApprove(t *testing.T) {
 			mu.Lock()
 			defer mu.Unlock()
 			want := []rt.ApprovalRequest{
-				{Kind: "command", Command: "/bin/zsh -lc 'rm -rf build'", Cwd: "/home/user/work", Reason: "Command is outside the sandbox's write roots"},
-				{Kind: "file", Paths: []string{"/home/user/work/a.go"}, Reason: "edit a.go"},
-				{Kind: "permissions", Cwd: "/home/user/work", Reason: "needs the cache (turns network access on)", Host: "*", Paths: []string{"/home/user/.cache/x"}},
-				{Kind: "network", Command: "curl https://example.com", Cwd: "/home/user/work", Host: "example.com"},
+				{Kind: "command", Command: "/bin/zsh -lc 'rm -rf build'", Cwd: "/home/user/work", Reason: "Command is outside the sandbox's write roots", TurnID: "turn_fixture_0001"},
+				{Kind: "file", Paths: []string{"/home/user/work/a.go"}, Reason: "edit a.go", TurnID: "turn_fixture_0002"},
+				{Kind: "permissions", Cwd: "/home/user/work", Reason: "needs the cache (turns network access on)", Host: "*", Paths: []string{"/home/user/.cache/x"}, TurnID: "turn_fixture_0002"},
+				{Kind: "network", Command: "curl https://example.com", Cwd: "/home/user/work", Host: "example.com", TurnID: "turn_fixture_0002"},
 			}
 			if !reflect.DeepEqual(asked, want) {
 				t.Fatalf("Approve got %+v\nwant %+v", asked, want)
@@ -1003,6 +1003,8 @@ func TestDescribePermissions(t *testing.T) {
 		"not an object":       {raw: `["root"]`, why: "cannot read in full"},
 		"absent":              {raw: ``, why: "cannot read in full"},
 		"empty path":          {raw: `{"fileSystem":{"entries":[{"access":"write","path":{"type":"path","path":""}}]}}`, why: "empty path"},
+		"empty legacy write":  {raw: `{"fileSystem":{"write":["/x",""]}}`, why: "empty path"},
+		"empty legacy read":   {raw: `{"fileSystem":{"read":[""]}}`, why: "empty path"},
 		"two values in a row": {raw: `{} {}`, why: "cannot read in full"},
 	} {
 		g, why := describePermissions(json.RawMessage(c.raw))

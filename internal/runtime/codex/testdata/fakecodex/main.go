@@ -66,6 +66,9 @@
 //	    goes on at once (the answer is still logged when it comes)
 //	{"fake":"exit","code":3}
 //	    exits at once with that code
+//	{"fake":"mcp","tool":"report","arguments":{...}}
+//	    calls that tool of Athena's MCP server as Codex would: the command config.toml's [mcp_servers.athena] names,
+//	    with the args and env of this process's -c overrides, over stdio; the result is logged to the RPC log
 //	{"fake":"hook","event":"PreToolUse","input":{...}}
 //	    runs the trusted commands config.toml names for that event (it parses only `[[hooks.<Event>]]` matcher groups
 //	    holding `[[hooks.<Event>.hooks]]` handlers with `type = "command"` and `command = "..."`; with --strict-config
@@ -203,6 +206,8 @@ type server struct {
 	pending map[string]chan json.RawMessage
 	proto   *protocol
 	optOut  map[string]bool // notifications the client opted out of
+
+	mcpCalls sync.WaitGroup // MCP calls in flight ({"fake":"mcp"})
 }
 
 // turn is a running turn: its replay stops when cancelled is closed.
@@ -245,6 +250,7 @@ func (s *server) serve(in io.Reader) {
 			break
 		}
 	}
+	s.mcpCalls.Wait() // an MCP call in flight finishes (and is logged) before the process ends
 	s.mu.Lock()
 	if s.active != nil && !s.active.done {
 		s.cancelLocked(s.active)
@@ -445,7 +451,9 @@ func (s *server) startTurn(id json.RawMessage, echo userEcho, holdReply string) 
 	s.active = t
 	first := s.turns == 1
 	s.mu.Unlock()
-	reply := func() { s.reply(id, map[string]any{"turn": map[string]any{"id": t.id, "items": []any{}, "status": "inProgress"}}) }
+	reply := func() {
+		s.reply(id, map[string]any{"turn": map[string]any{"id": t.id, "items": []any{}, "status": "inProgress"}})
+	}
 	if holdReply != "" {
 		go func() {
 			waitFile(holdReply)
@@ -559,6 +567,8 @@ func (s *server) replay(t *turn, path string, echo userEcho, steer, exitMid bool
 			Input  json.RawMessage `json:"input"`
 			Wait   *bool           `json:"wait"`
 			Code   int             `json:"code"`
+			Tool   string          `json:"tool"`
+			Args   json.RawMessage `json:"arguments"`
 		}
 		if json.Unmarshal(l, &line) != nil {
 			continue
@@ -576,6 +586,9 @@ func (s *server) replay(t *turn, path string, echo userEcho, steer, exitMid bool
 			if s.runHook(line.Event, line.Input) {
 				dropping = true
 			}
+			continue
+		case "mcp":
+			s.callMCP(line.Tool, line.Args)
 			continue
 		}
 		if line.Method == "thread/started" || (steer && (line.Method == "turn/started" || line.Method == "turn/completed")) {
@@ -1013,6 +1026,157 @@ func (s *server) runHook(event string, input json.RawMessage) (denied bool) {
 		}
 	}
 	return false
+}
+
+// callMCP calls tool of the athena MCP server as Codex would: it starts the command config.toml's [mcp_servers.athena]
+// names, with the args and env of this process's -c mcp_servers.athena.args= and mcp_servers.athena.env= overrides,
+// speaks MCP to it over stdio, and logs {"fake":"mcp","tool","isError","text"} (or "error") to the RPC log.
+func (s *server) callMCP(tool string, args json.RawMessage) {
+	s.mcpCalls.Add(1)
+	defer s.mcpCalls.Done()
+	rec := map[string]any{"fake": "mcp", "tool": tool}
+	defer func() {
+		b, _ := json.Marshal(rec)
+		s.logRPC(b)
+	}()
+	srv, _ := readLayer(configPath(os.Getenv("CODEX_HOME"))).servers["athena"].(map[string]any)
+	command, _ := srv["command"].(string)
+	if command == "" {
+		rec["error"] = "no [mcp_servers.athena] command in config.toml"
+		return
+	}
+	var argv, env []string
+	for i, a := range os.Args {
+		if i == 0 || os.Args[i-1] != "-c" {
+			continue
+		}
+		if v, ok := strings.CutPrefix(a, "mcp_servers.athena.args="); ok {
+			argv = tomlStrings(strings.Trim(v, "[]"))
+		}
+		if v, ok := strings.CutPrefix(a, "mcp_servers.athena.env="); ok {
+			env = append(env, tomlTable(strings.Trim(v, "{}"))...)
+		}
+	}
+	if len(args) == 0 {
+		args = json.RawMessage("{}")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, command, argv...)
+	cmd.Env = append(os.Environ(), env...)
+	res, err := mcpToolCall(cmd, tool, args)
+	if err != nil {
+		rec["error"] = err.Error()
+		return
+	}
+	var r struct {
+		IsError bool `json:"isError"`
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	_ = json.Unmarshal(res, &r)
+	var text strings.Builder
+	for _, c := range r.Content {
+		if c.Type == "text" {
+			text.WriteString(c.Text)
+		}
+	}
+	rec["isError"], rec["text"] = r.IsError, text.String()
+}
+
+// mcpToolCall runs cmd as an MCP server over stdio (newline-delimited JSON-RPC), as a client: initialize, the
+// initialized notification, then one tools/call; it returns the call's result. The server's own requests and
+// notifications are skipped.
+func mcpToolCall(cmd *exec.Cmd, tool string, args json.RawMessage) (json.RawMessage, error) {
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, err
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	defer func() {
+		stdin.Close()
+		_ = cmd.Wait()
+	}()
+	r := bufio.NewReader(stdout)
+	call := func(id int, method string, params any) (json.RawMessage, error) {
+		b, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": id, "method": method, "params": params})
+		if _, err := stdin.Write(append(b, '\n')); err != nil {
+			return nil, err
+		}
+		for {
+			line, err := r.ReadBytes('\n')
+			if err != nil {
+				return nil, fmt.Errorf("%s: %w", method, err)
+			}
+			var m struct {
+				ID     *int            `json:"id"`
+				Method string          `json:"method"`
+				Result json.RawMessage `json:"result"`
+				Error  *struct {
+					Message string `json:"message"`
+				} `json:"error"`
+			}
+			if json.Unmarshal(line, &m) != nil || m.Method != "" || m.ID == nil || *m.ID != id {
+				continue
+			}
+			if m.Error != nil {
+				return nil, fmt.Errorf("%s: %s", method, m.Error.Message)
+			}
+			return m.Result, nil
+		}
+	}
+	if _, err := call(1, "initialize", map[string]any{"protocolVersion": "2025-06-18", "capabilities": map[string]any{},
+		"clientInfo": map[string]string{"name": "fakecodex", "version": version}}); err != nil {
+		return nil, err
+	}
+	b, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "method": "notifications/initialized"})
+	if _, err := stdin.Write(append(b, '\n')); err != nil {
+		return nil, err
+	}
+	return call(2, "tools/call", map[string]any{"name": tool, "arguments": args})
+}
+
+// tomlStrings reads the basic strings of a TOML inline array's inside ("a","b").
+func tomlStrings(v string) []string {
+	var out []string
+	for v = strings.TrimSpace(v); v != ""; v = strings.TrimLeft(strings.TrimSpace(v), ",") {
+		q, err := strconv.QuotedPrefix(strings.TrimSpace(v))
+		if err != nil {
+			return out
+		}
+		u, _ := strconv.Unquote(q)
+		out = append(out, u)
+		v = strings.TrimSpace(v)[len(q):]
+	}
+	return out
+}
+
+// tomlTable reads a TOML inline table's inside of basic strings (K="v",L="w") as K=v pairs.
+func tomlTable(v string) []string {
+	var out []string
+	for v = strings.TrimSpace(v); v != ""; v = strings.TrimLeft(strings.TrimSpace(v), ",") {
+		k, rest, ok := strings.Cut(v, "=")
+		if !ok {
+			return out
+		}
+		rest = strings.TrimSpace(rest)
+		q, err := strconv.QuotedPrefix(rest)
+		if err != nil {
+			return out
+		}
+		u, _ := strconv.Unquote(q)
+		out = append(out, strings.TrimSpace(k)+"="+u)
+		v = rest[len(q):]
+	}
+	return out
 }
 
 // protocol is protocol.json: what the real server checks of a request.

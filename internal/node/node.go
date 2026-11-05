@@ -19,6 +19,7 @@ import (
 	"github.com/danielpina1/athena/internal/core"
 	"github.com/danielpina1/athena/internal/metrics"
 	"github.com/danielpina1/athena/internal/redact"
+	"github.com/danielpina1/athena/internal/render"
 	"github.com/danielpina1/athena/internal/runtime/rt"
 	"github.com/danielpina1/athena/prompts"
 )
@@ -51,8 +52,10 @@ const (
 	// branchPrefix names the branch of a Ticket's worktree: athena/<lowercased ticket id>.
 	branchPrefix = "athena/"
 	slugMaxLen   = 40
-	// runtimeClaude is the runtime label of the metrics this node records.
-	runtimeClaude = "claude"
+	// runtimeClaude is the runtime of a Ticket that names none.
+	runtimeClaude = core.RuntimeClaude
+	// roleImplement is the role a worker session's transcript marker names.
+	roleImplement = "implement"
 )
 
 // Config configures a Node.
@@ -74,7 +77,7 @@ type Config struct {
 	// ClaudeBinary is the claude executable (default "claude") of the default Runtimes.
 	ClaudeBinary string
 	// Runtimes are the runtimes sessions run on, by name (rt.Runtime.Name); a Ticket runs on the one its Execution
-	// names, Claude Code when it names none. Default: Claude Code alone (defaultRuntimes).
+	// names, Claude Code when it names none or auto (until the runtime chooser). Default: Claude Code alone (DefaultRuntimes).
 	Runtimes map[string]rt.Runtime
 	// ApprovalTimeout is how long an escalated tool call waits for a person before it is denied (default 30m).
 	ApprovalTimeout time.Duration
@@ -183,8 +186,6 @@ type Node struct {
 	// Metric handles; nil without Config.Metrics.
 	reg        *metrics.Registry
 	slotsGauge *metrics.Gauge
-	spawnHist  *metrics.Histogram
-	initHist   *metrics.Histogram
 }
 
 type engineRef struct{ e EngineCallbacks }
@@ -208,7 +209,7 @@ func New(cfg Config, eng EngineCallbacks) *Node {
 		cfg.WorkRoot = abs
 	}
 	if cfg.Runtimes == nil {
-		cfg.Runtimes = defaultRuntimes(cfg)
+		cfg.Runtimes = DefaultRuntimes(cfg)
 	}
 	if cfg.AthenaBin == "" {
 		if exe, err := os.Executable(); err == nil {
@@ -229,10 +230,11 @@ func New(cfg Config, eng EngineCallbacks) *Node {
 		restartDelay: func(n int) time.Duration { return time.Duration(n) * time.Second },
 		reg:          cfg.Metrics,
 		slotsGauge:   cfg.Metrics.Gauge("slots_in_use"),
-		spawnHist:    cfg.Metrics.Histogram("session_spawn_seconds", "runtime", runtimeClaude),
-		initHist:     cfg.Metrics.Histogram("session_init_seconds", "runtime", runtimeClaude),
 	}
 	n.tokens.log = log
+	// Claude Code's session timings exist from the start; another runtime's from its first session.
+	n.histogram("session_spawn_seconds", runtimeClaude)
+	n.histogram("session_init_seconds", runtimeClaude)
 	if eng != nil {
 		n.SetEngine(eng)
 	}
@@ -244,6 +246,12 @@ func New(cfg Config, eng EngineCallbacks) *Node {
 	reapOrphans(cfg.StateDir, log)
 	go n.loop()
 	return n
+}
+
+// histogram is the node's timing of name for a runtime (session_spawn_seconds, session_init_seconds); nil without
+// Config.Metrics.
+func (n *Node) histogram(name, runtime string) *metrics.Histogram {
+	return n.reg.Histogram(name, "runtime", runtime)
 }
 
 // SetEngine sets the Engine the node reports to.
@@ -624,6 +632,8 @@ type session struct {
 	notBefore   time.Time
 	// proc is the session's running process, nil between processes and after the last.
 	proc rt.Session
+	// shared holds the escalations an ask about the same action in the same turn shares (escalateShared), by key.
+	shared map[string]*sharedVerdict
 }
 
 func (s *session) setProcess(p rt.Session) {
@@ -834,6 +844,7 @@ func (n *Node) variables(s *session) []string {
 		"ATHENA_DIR=" + s.place.workDir,
 		"ATHENA_BLOCKED_COMMANDS=" + strings.Join(n.cfg.Blocked, ","),
 		"ATHENA_SOCKET=" + n.cfg.SocketPath,
+		"ATHENA_RUNTIME=" + runtimeName(s.t),
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -869,8 +880,10 @@ type runner struct {
 	unread      []unreadInput
 	sessionID   string
 	initSeen    bool
-	// model is the model the sessions run with: the Ticket's, or the node's default.
-	model string
+	// model is the model the sessions run with: the Ticket's, or the node's default (Claude Code), or the one the
+	// runtime's session named (Codex's own default). runtime is the runtime's name.
+	model   string
+	runtime string
 	// send writes a message to the current process.
 	send func(text string) error
 	// inputReports is the session's Report count when it was last sent an Input (or its first message); nudged is set
@@ -884,6 +897,8 @@ type runner struct {
 	paused bool
 	// restarted is set when the first process resumes a session a server restart cut short.
 	restarted bool
+	// redeliver is set when sending waiting Inputs failed while the process ran: the next turn end tries again.
+	redeliver bool
 
 	// usage is what the session did since the last RecordUsage; tools maps the ids of tool calls in flight to their
 	// tool; firstSent and firstOutput time the Ticket's time to first output.
@@ -954,14 +969,34 @@ func (r *runner) run() {
 	if recovering {
 		r.seedUnread()
 	}
-	model := n.cfg.Model
-	if s.t.Execution != nil && s.t.Execution.Model != "" {
-		model = s.t.Execution.Model
-	}
-	r.model = model
 	rtm, err := n.runtimeFor(s.t)
 	if err != nil {
 		r.fail(err.Error())
+		return
+	}
+	// The Ticket's model, else the node's default for Claude Code; Codex runs its own default (config.toml), which its
+	// session names at start (Init).
+	model := ""
+	if s.t.Execution != nil && s.t.Execution.Model != "" {
+		model = s.t.Execution.Model
+	} else if rtm.Name() == runtimeClaude {
+		model = n.cfg.Model
+	}
+	r.model = model
+	// A runtime that cannot run sessions under Athena's control now refuses the Ticket with why (T8's chooser replaces
+	// this for auto). A stop ends the check.
+	cctx, cancel := context.WithCancel(n.ctx)
+	go func() {
+		select {
+		case <-s.stopCh:
+			cancel()
+		case <-cctx.Done():
+		}
+	}()
+	why := readiness(cctx, rtm)
+	cancel()
+	if why != "" {
+		r.fail(why)
 		return
 	}
 	adir := filepath.Join(s.place.workDir, ".athena")
@@ -972,7 +1007,7 @@ func (r *runner) run() {
 	if trPath == "" {
 		trPath = filepath.Join(adir, "transcript.jsonl")
 	}
-	sandbox, _ := n.sandboxFor(s.place.workDir)
+	sandbox, sandboxEnv := n.sandboxFor(s.place.workDir)
 	roots := writableRoots(s.place.workDir)
 	for crashes := 0; ; {
 		spawnStart := time.Now()
@@ -982,6 +1017,14 @@ func (r *runner) run() {
 			r.fail("start " + rtm.Name() + ": " + err.Error())
 			return
 		}
+		// Each process's lines follow a marker naming its runtime, so a transcript that moves between runtimes shows where.
+		reason := "start"
+		if resumeID != "" {
+			reason = "resume"
+		}
+		// Its model is the one the session runs with, once known: Codex's own default is named by its first process.
+		tr.Append(render.MarkerLine(render.Marker{At: time.Now(), Runtime: rtm.Name(), Model: r.model, Assignment: s.a.ID,
+			Role: roleImplement, Reason: reason}))
 		// The transcript keeps what the worker was sent, so the session view shows it (internal/render); the echo is no
 		// event the runner acts on (onEvent and account ignore rt.UserEcho).
 		sess, err := rtm.Start(n.ctx, rt.StartOptions{
@@ -993,6 +1036,8 @@ func (r *runner) run() {
 			Transcript:    tr,
 			Role:          roleWorker,
 			Sandbox:       sandbox,
+			SandboxEnv:    sandboxEnv,
+			Approve:       func(ctx context.Context, req rt.ApprovalRequest) rt.Verdict { return n.approveRequest(ctx, s, req) },
 			TicketID:      s.t.ID,
 			AssignmentID:  s.a.ID,
 			WritableRoots: roots,
@@ -1000,12 +1045,16 @@ func (r *runner) run() {
 		})
 		if err != nil {
 			_ = tr.Close()
-			r.fail("start " + rtm.Name() + ": " + err.Error())
+			if inv, ok := rtm.(invalidator); ok && uncontrolled(err) {
+				inv.Invalidate() // the next launch checks again, and trusts Athena's hooks anew
+			}
+			r.fail("start " + rtm.Name() + ": " + redact.String(err.Error()))
 			return
 		}
 		r.spawned = time.Now()
-		n.spawnHist.Observe(r.spawned.Sub(spawnStart))
-		n.recordProcess(s.t.ID, sess.Pid())
+		n.histogram("session_spawn_seconds", rtm.Name()).Observe(r.spawned.Sub(spawnStart))
+		n.recordProcess(s.t.ID, sess.Pid(), rtm.Name())
+		r.runtime = rtm.Name()
 		r.log.Info("session started", "resume", resumeID != "", "recovering", recovering)
 		crashed, cause := r.drive(sess, recovering)
 		_ = tr.Close()
@@ -1195,6 +1244,9 @@ func (r *runner) deliver(sess rt.Session) {
 		if err := r.eng.DeliveryFailed(t.ID, r.s.a.ID, err.Error()); err != nil {
 			r.log.Error("record delivery failure", "error", err)
 		}
+		// The Inputs still wait. A turn that cannot take input (Codex's review or compact turn refuses a steer) takes them
+		// once it ends: the delivery is tried again then.
+		r.redeliver = true
 		return
 	}
 	r.markSent(ids)
@@ -1315,11 +1367,14 @@ func (r *runner) onEvent(ev rt.Event) {
 	case rt.Init:
 		r.initSeen = true
 		if !r.spawned.IsZero() {
-			r.n.initHist.Observe(time.Since(r.spawned))
+			r.n.histogram("session_init_seconds", r.runtime).Observe(time.Since(r.spawned))
 		}
 		if e.SessionID != "" {
 			r.sessionID = e.SessionID
 			r.s.setSessionID(e.SessionID)
+		}
+		if r.model == "" {
+			r.model = e.Model // the runtime's own default, named by the session
 		}
 		if err := r.eng.AssignmentStarted(r.s.t.ID, r.s.a.ID, e.SessionID, r.model); err != nil {
 			r.log.Error("record start", "error", err)
@@ -1341,6 +1396,10 @@ func (r *runner) onEvent(ev rt.Event) {
 		r.s.stepTaken()
 	case rt.TurnEnd:
 		r.s.turnOver()
+		if r.redeliver {
+			r.redeliver = false
+			r.s.requestDeliver()
+		}
 		// A failed turn (an API error, an expired login, a rate limit, too many turns) leaves the CLI waiting for the
 		// next message: report it, or the Ticket stays working with nothing running. Its Inputs may not have reached
 		// the model, so they stay unread and a retry sends them again. A turn Athena itself ends (a stop) never gets
@@ -1923,12 +1982,13 @@ func gitIn(dir string, env []string, args ...string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-// recordProcess notes a session process in the run directory, for the next node to stop if this one dies first.
-func (n *Node) recordProcess(ticketID string, pid int) {
+// recordProcess notes a session process of runtime in the run directory, for the next node to stop if this one dies
+// first.
+func (n *Node) recordProcess(ticketID string, pid int, runtime string) {
 	if n.cfg.StateDir == "" {
 		return
 	}
-	if err := recordProcess(n.cfg.StateDir, ticketID, pid, runtimeClaude); err != nil {
+	if err := recordProcess(n.cfg.StateDir, ticketID, pid, runtime); err != nil {
 		n.log.Warn("record session process", "ticket", ticketID, "error", err)
 	}
 }

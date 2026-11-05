@@ -10,12 +10,14 @@ import (
 
 	"github.com/danielpina1/athena/internal/redact"
 	"github.com/danielpina1/athena/internal/render"
+	"github.com/danielpina1/athena/internal/runtime/rt"
 )
 
 const (
-	// maxEnvelopeLine is the longest transcript line the node keeps whole (internal/node maxLineBytes, 256 KiB); a longer
-	// one reaches the dashboard as "line too large to show". The envelope adds under 128 bytes to the line.
-	maxEnvelopeLine = 256<<10 - 128
+	// maxEnvelopeLine is the longest line capLine lets through: the node keeps whole a transcript line of at most
+	// rt.MaxTranscriptLine (a longer one reaches the dashboard as "line too large to show"), and the envelope adds under
+	// 128 bytes to the line.
+	maxEnvelopeLine = rt.MaxTranscriptLine - 128
 	// outputKeep is how much (as JSON) of a command's aggregatedOutput the transcript keeps: the dashboard shows a few
 	// KiB of it.
 	outputKeep = 64 << 10

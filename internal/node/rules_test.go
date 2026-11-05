@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/danielpina1/athena/internal/core"
 )
 
 type ruleEnv struct {
@@ -588,5 +590,260 @@ func TestBlockedCredentialCommands(t *testing.T) {
 	}
 	if d := Evaluate(c, "Bash", in(map[string]any{"command": "gh auth status"})); !strings.Contains(d.Reason, "gh auth") || d.Rule != ruleBlocked {
 		t.Errorf("deny = %+v, want the blocked-command rule naming gh auth", d)
+	}
+}
+
+// codexEval normalises a Codex tool call and evaluates every call it maps to, as the node does.
+func codexEval(c RuleContext, tool string, input json.RawMessage) Decision {
+	d, _ := EvaluateCalls(c, core.RuntimeCodex, NormalizeTool(core.RuntimeCodex, tool, input))
+	return d
+}
+
+func TestCodexShellMapsToBash(t *testing.T) {
+	// An argv array is joined with POSIX shell quoting, so an argument with spaces stays one word.
+	argv := []any{"bash", "-lc", "echo 'a b' > out.txt"}
+	want := `bash -lc 'echo '"'"'a b'"'"' > out.txt'`
+	for _, tool := range []string{"Bash", "shell", "local_shell", "exec_command", "unified_exec"} {
+		for _, key := range []string{"command", "cmd"} {
+			calls := NormalizeTool(core.RuntimeCodex, tool, in(map[string]any{key: argv}))
+			if len(calls) != 1 || calls[0].Tool != "Bash" {
+				t.Fatalf("%s{%s}: calls = %+v, want one Bash call", tool, key, calls)
+			}
+			var got struct{ Command string }
+			if err := json.Unmarshal(calls[0].Input, &got); err != nil || got.Command != want {
+				t.Fatalf("%s{%s}: command = %q (%v), want %q", tool, key, got.Command, err, want)
+			}
+		}
+	}
+	// A plain string command is kept as it is.
+	calls := NormalizeTool(core.RuntimeCodex, "shell", in(map[string]any{"command": "ls -la"}))
+	if len(calls) != 1 || calls[0].Tool != "Bash" || !strings.Contains(string(calls[0].Input), `"ls -la"`) {
+		t.Fatalf("string command: %+v", calls)
+	}
+	// A working directory other than the ticket's is where the command runs: its relative writes are judged from there.
+	e := newRuleEnv(t)
+	if d := codexEval(e.ctx, "exec_command", in(map[string]any{"cmd": []any{"touch", "f"}, "workdir": e.outDir})); d.Verdict != VerdictEscalate || d.Rule != ruleWrite {
+		t.Fatalf("relative write from an outside workdir: %+v, want escalate", d)
+	}
+	if d := codexEval(e.ctx, "exec_command", in(map[string]any{"cmd": []any{"touch", "f"}, "workdir": e.ctx.TicketDir})); d.Verdict != VerdictAllow {
+		t.Fatalf("relative write in the ticket dir: %+v, want allow", d)
+	}
+	// The mapped command goes through every Bash rule: a credential read in an argument is denied.
+	if d := codexEval(e.ctx, "exec_command", in(map[string]any{"cmd": []any{"cat", "/x/.ssh/id_rsa"}})); d.Verdict != VerdictDeny || d.Rule != ruleCredential {
+		t.Fatalf("credential read: %+v, want deny", d)
+	}
+	if d := codexEval(e.ctx, "shell", in(map[string]any{"command": []any{"rm", "-rf", "x y"}})); d.Verdict != VerdictDeny || d.Rule != ruleBlocked {
+		t.Fatalf("blocked command: %+v, want deny", d)
+	}
+	// write_stdin is allowed; MCP tools and web_search are evaluated unchanged; another tool's strings are searched for
+	// credential paths.
+	if d := codexEval(e.ctx, "write_stdin", in(map[string]any{"chars": "cat ~/.ssh/id_rsa\n"})); d.Verdict != VerdictAllow {
+		t.Fatalf("write_stdin: %+v, want allow", d)
+	}
+	if d := codexEval(e.ctx, "mcp__athena__report", in(map[string]any{"status": "ready", "summary": "done"})); d.Verdict != VerdictAllow {
+		t.Fatalf("mcp tool: %+v, want allow", d)
+	}
+	if d := codexEval(e.ctx, "view_image", in(map[string]any{"path": "~/.ssh/id_rsa"})); d.Verdict != VerdictDeny || d.Rule != ruleCredential {
+		t.Fatalf("other tool naming a credential: %+v, want deny", d)
+	}
+	if d := codexEval(e.ctx, "view_image", in(map[string]any{"path": "shot.png"})); d.Verdict != VerdictAllow {
+		t.Fatalf("other tool: %+v, want allow", d)
+	}
+	// Claude's input is one call, unchanged.
+	raw := in(map[string]any{"command": "ls"})
+	if calls := NormalizeTool(core.RuntimeClaude, "Bash", raw); len(calls) != 1 || calls[0].Tool != "Bash" || string(calls[0].Input) != string(raw) {
+		t.Fatalf("claude: %+v", calls)
+	}
+	if calls := NormalizeTool(core.RuntimeClaude, "exec_command", raw); len(calls) != 1 || calls[0].Tool != "exec_command" {
+		t.Fatalf("claude keeps its own tool names: %+v", calls)
+	}
+}
+
+func TestApplyPatchEvaluatesEveryPath(t *testing.T) {
+	e := newRuleEnv(t)
+	patch := func(move string) string {
+		return "*** Begin Patch\n*** Add File: a.txt\n+x\n*** Update File: sub/b.txt\n" + move + "@@\n-x\n+y\n*** Delete File: d.txt\n*** End Patch\n"
+	}
+	calls := NormalizeTool(core.RuntimeCodex, "apply_patch", in(map[string]any{"command": patch("*** Move to: ../out/c.txt\n")}))
+	var paths []string
+	for _, c := range calls {
+		var w struct {
+			FilePath string `json:"file_path"`
+		}
+		if c.Tool != "Write" || json.Unmarshal(c.Input, &w) != nil {
+			t.Fatalf("call %+v, want a Write", c)
+		}
+		paths = append(paths, w.FilePath)
+	}
+	if strings.Join(paths, ",") != "a.txt,sub/b.txt,../out/c.txt,d.txt" {
+		t.Fatalf("paths = %v", paths)
+	}
+	// One path outside the ticket directory escalates the whole call, and names that path.
+	d, call := EvaluateCalls(e.ctx, core.RuntimeCodex, calls)
+	if d.Verdict != VerdictEscalate || d.Rule != ruleWrite || !strings.Contains(string(call.Input), "../out/c.txt") {
+		t.Fatalf("decision %+v on %s, want escalate on the moved path", d, call.Input)
+	}
+	if d := codexEval(e.ctx, "apply_patch", in(map[string]any{"command": patch("")})); d.Verdict != VerdictAllow {
+		t.Fatalf("patch inside the ticket dir: %+v, want allow", d)
+	}
+	// The patch may be the whole input (a freeform tool), or under another key.
+	whole, _ := json.Marshal(patch("*** Move to: ../out/c.txt\n"))
+	if d := codexEval(e.ctx, "apply_patch", whole); d.Verdict != VerdictEscalate {
+		t.Fatalf("patch as the input: %+v, want escalate", d)
+	}
+	if d := codexEval(e.ctx, "apply_patch", in(map[string]any{"input": patch("*** Move to: ../out/c.txt\n")})); d.Verdict != VerdictEscalate {
+		t.Fatalf("patch under input: %+v, want escalate", d)
+	}
+	// A credential path anywhere in the patch is denied, whatever else it does; deny beats escalate.
+	if d := codexEval(e.ctx, "apply_patch", in(map[string]any{"command": "*** Begin Patch\n*** Update File: ../out/x\n*** Add File: " +
+		e.ctx.Home + "/.ssh/config\n+x\n*** End Patch\n"})); d.Verdict != VerdictDeny {
+		t.Fatalf("patch to a credential file: %+v, want deny", d)
+	}
+	// A patch whose paths cannot be read asks the owner.
+	if d := codexEval(e.ctx, "apply_patch", in(map[string]any{"command": "not a patch"})); d.Verdict != VerdictEscalate {
+		t.Fatalf("unreadable patch: %+v, want escalate", d)
+	}
+}
+
+func TestApplyPatchToGitConfigDenied(t *testing.T) {
+	e := newRuleEnv(t)
+	c := e.ctx
+	// A repository whose git directory is in the ticket directory.
+	for _, d := range []string{".git/hooks", ".athena/gh"} {
+		if err := os.MkdirAll(filepath.Join(c.TicketDir, d), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c.Protected = ProtectedPaths(c.TicketDir)
+	up := func(p string) json.RawMessage {
+		return in(map[string]any{"command": "*** Begin Patch\n*** Update File: " + p + "\n@@\n-a\n+b\n*** End Patch\n"})
+	}
+	for _, p := range []string{".git/config", ".git/config.worktree", ".git/hooks/pre-commit", "sub/../.git/hooks/post-checkout", ".athena/settings.json", ".athena/mcp.json"} {
+		if d := codexEval(c, "apply_patch", up(p)); d.Verdict != VerdictDeny {
+			t.Errorf("patch to %s: %+v, want deny", p, d)
+		}
+	}
+	if d := codexEval(c, "apply_patch", up(".git/config")); d.Rule != ruleProtectedPath {
+		t.Errorf("patch to .git/config: rule %q, want %q", d.Rule, ruleProtectedPath)
+	}
+	// The same paths through the shell.
+	if d := codexEval(c, "exec_command", in(map[string]any{"cmd": []any{"bash", "-lc", "echo x > .git/hooks/pre-commit"}})); d.Verdict != VerdictDeny || d.Rule != ruleProtectedPath {
+		t.Errorf("shell write to a git hook: %+v, want deny", d)
+	}
+	if d := codexEval(c, "apply_patch", up("src/main.go")); d.Verdict != VerdictAllow {
+		t.Errorf("patch to a source file: %+v, want allow", d)
+	}
+
+	// A worktree: its config and hooks are in the main repository's git directory, outside the ticket directory, where a
+	// write would otherwise only need an approval.
+	main := filepath.Join(e.root, "main")
+	gitDir := filepath.Join(main, ".git", "worktrees", "T1")
+	for _, d := range []string{gitDir, filepath.Join(main, ".git", "hooks")} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	wt := filepath.Join(e.root, "work", "W1")
+	if err := os.MkdirAll(wt, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wt, ".git"), []byte("gitdir: "+gitDir+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gitDir, "commondir"), []byte("../..\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w := c
+	w.TicketDir, w.Protected = wt, ProtectedPaths(wt)
+	for _, p := range []string{filepath.Join(main, ".git", "config"), filepath.Join(main, ".git", "hooks", "pre-push"), filepath.Join(gitDir, "config.worktree")} {
+		if d := codexEval(w, "apply_patch", up(p)); d.Verdict != VerdictDeny || d.Rule != ruleProtectedPath {
+			t.Errorf("worktree patch to %s: %+v, want deny", p, d)
+		}
+	}
+	// The sandbox denies exactly these writes (one list).
+	n := &Node{cfg: Config{Sandbox: &SandboxConfig{}}}
+	sb, _ := n.sandboxFor(wt)
+	if strings.Join(sb.DenyWrite, ",") != strings.Join(ProtectedPaths(wt), ",") {
+		t.Errorf("sandbox DenyWrite = %v, want ProtectedPaths %v", sb.DenyWrite, ProtectedPaths(wt))
+	}
+	// Claude's rules are unchanged: its sandbox protects these.
+	cl := c
+	cl.Protected = nil
+	if d := Evaluate(cl, "Write", in(map[string]any{"file_path": ".git/config", "content": "x"})); d.Verdict != VerdictAllow {
+		t.Errorf("claude Write to .git/config: %+v, want allow (its sandbox guards it)", d)
+	}
+}
+
+func TestAttributionTrailerDenied(t *testing.T) {
+	e := newRuleEnv(t)
+	c := e.ctx
+	c.Blocked = nil
+	write := func(name, body string) {
+		if err := os.WriteFile(filepath.Join(c.TicketDir, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("msg.txt", "Fix the parser\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n")
+	write("body.md", "Adds the thing.\n\nCo-authored-by: Codex <noreply@openai.com>\n")
+	for _, cmd := range []string{
+		`git commit -m "Fix the parser" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"`,
+		`git commit -am 'Fix
+
+Co-authored-by: codex <codex@example.com>'`,
+		`git commit --message="fix" --message "Generated with Codex"`,
+		`git commit -mfix -m 'noreply@anthropic.com'`,
+		`git -C . commit -F msg.txt`,
+		`git commit --file=msg.txt`,
+		"cd sub && git commit -F - <<'EOF'\nFix\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nEOF",
+		`git add -A && git commit -m "fix" -m "Co-Authored-By: Claude"`,
+		`sh -c "git commit -m 'Generated with [Claude Code]'"`,
+		`gh pr create --title "Fix" --body "Done.
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)"`,
+		`gh pr create -t Fix -b 'noreply@openai.com'`,
+		`gh pr edit 7 --body-file body.md`,
+		`gh pr create --title="Co-Authored-By: Codex" --body x`,
+	} {
+		d := Evaluate(c, "Bash", in(map[string]any{"command": cmd}))
+		if d.Verdict != VerdictDeny || d.Rule != ruleAttribution || d.Reason != "remove the AI attribution trailer or footer: commits and pull requests carry none" {
+			t.Errorf("%q: %+v, want the attribution deny", cmd, d)
+		}
+	}
+	// Codex's argv form, joined, is judged the same.
+	if d := codexEval(c, "exec_command", in(map[string]any{"cmd": []any{"git", "commit", "-m", "fix\n\nCo-Authored-By: Codex <noreply@openai.com>"}})); d.Verdict != VerdictDeny || d.Rule != ruleAttribution {
+		t.Errorf("codex argv commit: %+v, want the attribution deny", d)
+	}
+	// The blocked commands come first.
+	c.Blocked = []string{"git commit"}
+	if d := Evaluate(c, "Bash", in(map[string]any{"command": `git commit -m "Co-Authored-By: Claude"`})); d.Rule != ruleBlocked {
+		t.Errorf("blocked commit: %+v, want the blocked-command deny", d)
+	}
+}
+
+func TestAttributionAllowsPlainMessage(t *testing.T) {
+	e := newRuleEnv(t)
+	c := e.ctx
+	c.Blocked = nil
+	if err := os.WriteFile(filepath.Join(c.TicketDir, "msg.txt"), []byte("Fix the Claude config parser\n\nCo-authored-by: Jane <jane@example.com>\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(e.outDir, "msg.txt")
+	if err := os.WriteFile(outside, []byte("Co-Authored-By: Claude\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, cmd := range []string{
+		`git commit -m "Read the Claude Code settings" -m "Co-authored-by: Jane <jane@example.com>"`,
+		`git commit -m "Codex runtime: generated code is checked"`,
+		`git commit -F msg.txt`,
+		`git commit -F ` + outside, // outside the ticket directory: not read
+		`git log --grep "Co-Authored-By: Claude"`,
+		`echo "Co-Authored-By: Claude" > notes.md`,
+		`gh pr create --title "Codex runtime" --body "Adds the Codex runtime for Claude Code users"`,
+		`gh pr view 7`,
+		`gh issue create --body "Co-Authored-By: Claude"`,
+	} {
+		if d := Evaluate(c, "Bash", in(map[string]any{"command": cmd})); d.Verdict == VerdictDeny {
+			t.Errorf("%q: %+v, want it not denied", cmd, d)
+		}
 	}
 }

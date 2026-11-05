@@ -108,7 +108,7 @@ func startServer(t *testing.T) string {
 	var serverErr bytes.Buffer
 	go func() {
 		var out bytes.Buffer
-		done <- Run(ctx, "server", []string{"--state-dir", dir, "--claude", fakeClaude(t), "--slots", "2",
+		done <- Run(ctx, "server", []string{"--state-dir", dir, "--claude", fakeClaude(t), "--codex", noCodex, "--slots", "2",
 			"--model", "haiku", "--blocked", "rm,git push", "--approval-timeout", "5s"}, &out, &lockedWriter{w: &serverErr})
 	}()
 	t.Cleanup(func() {
@@ -410,8 +410,11 @@ func TestServerHelperProcess(t *testing.T) {
 	if dir == "" {
 		t.Skip("helper process")
 	}
-	os.Exit(Run(context.Background(), "server", []string{"--state-dir", dir, "--claude", os.Getenv("ATHENA_TEST_CLAUDE")}, io.Discard, os.Stderr))
+	os.Exit(Run(context.Background(), "server", []string{"--state-dir", dir, "--claude", os.Getenv("ATHENA_TEST_CLAUDE"), "--codex", noCodex}, io.Discard, os.Stderr))
 }
+
+// noCodex is the codex the CLI's test servers run: none, so no test reaches the owner's codex.
+const noCodex = "/nonexistent/athena-test-codex"
 
 // A closed terminal sends SIGHUP; the server stops gracefully on it, as on SIGINT and SIGTERM, instead of dying with
 // its sessions still running.

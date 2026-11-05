@@ -194,6 +194,14 @@ type MandateBasis struct {
 	Observation bool `json:"observation,omitempty"`
 }
 
+// The runtimes a Ticket may run on (Execution.Runtime, TaskOptions.Runtime). RuntimeAuto lets the Executor choose for
+// each Assignment.
+const (
+	RuntimeClaude = "claude"
+	RuntimeCodex  = "codex"
+	RuntimeAuto   = "auto"
+)
+
 // Execution is what a Ticket's Executor chose.
 type Execution struct {
 	Name       string `json:"name"`

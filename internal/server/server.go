@@ -205,7 +205,16 @@ func Run(ctx context.Context, cfg Config) (err error) {
 		if err := checkCodexApprovalTimeout(ncfg.ApprovalTimeout); err != nil {
 			return err
 		}
+		// The node runs Codex Tickets on it. Its config.toml is what `athena codex status|login` render too: the hooks are
+		// checked for the node's own work root and the session names the server's version, neither of which is in it.
 		cx := CodexRuntime(stateDir, fileCfg, ncfg.AthenaBin, cfg.CodexBinary)
+		cx.WorkRoot, cx.Version = ncfg.WorkRoot, version
+		runtimes := node.DefaultRuntimes(ncfg)
+		for name, r := range ncfg.Runtimes {
+			runtimes[name] = r
+		}
+		runtimes[cx.Name()] = cx
+		ncfg.Runtimes = runtimes
 		logger.Info("codex is configured; `athena codex status` checks it", "binary", cx.Binary, "home", cx.Home)
 	} else {
 		logger.Info("codex is disabled (runtimes.codex.enabled is false)")

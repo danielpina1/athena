@@ -9,7 +9,8 @@ checks that no fixture holds an `@`, an `sk-`, a home path or any other id.
 
 Each line is what the server prints on stdout: a notification (`{"method","params"}`), with no `jsonrpc` field. A line
 with a `fake` key is a directive for `fakecodex` and is never sent to the client (see its doc comment):
-`{"fake":"request",...}` sends a server request, `{"fake":"hook",...}` runs the configured hook.
+`{"fake":"request",...}` sends a server request, `{"fake":"hook",...}` runs the configured hook, `{"fake":"mcp",...}` calls
+a tool of the configured Athena MCP server.
 
 - `simple-turn.jsonl`: one message, one agent answer (with a text delta), token usage, `turn/completed`.
 - `tool-turn.jsonl`: reasoning, two `commandExecution` items (one exits 0, one fails), a `fileChange`, an `mcpToolCall`,
@@ -32,5 +33,7 @@ with a `fake` key is a directive for `fakecodex` and is never sent to the client
 - The `item/started` and `item/completed` item shapes follow the schema; whether a real `webSearch` or `mcpToolCall`
   completes without a start, and what `aggregatedOutput` holds for a failed command, comes from the first real capture.
 - `thread/started` follows `thread/start` (`fakecodex` sends it); a real `thread/resume` may not send it.
-- A hook's output that denies a tool (exit 2, or `permissionDecision: "deny"`) is the shape Claude Code uses; Codex's
-  exact rules are Task 4's to confirm (`hook-inputs.jsonl`, once captured, shows the inputs).
+- A hook's output that denies a tool (exit 2, or `permissionDecision: "deny"`) is the shape Claude Code uses. The output
+  schemas the 0.160.1 binary embeds confirm it (internal/node/testdata/hooks/codex), with two more rules Codex enforces:
+  a `PreToolUse` allow is "unsupported" (Athena prints nothing instead) and a deny needs a non-empty reason. What a real
+  hook's input holds for each tool (`hook-inputs.jsonl`, once captured, shows it) is assumed from the input schemas.

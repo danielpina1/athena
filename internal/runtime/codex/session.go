@@ -512,6 +512,7 @@ func (s *session) answer(m Message) (any, *RPCError) {
 	case "item/commandExecution/requestApproval":
 		var p struct {
 			ItemID  string  `json:"itemId"`
+			TurnID  string  `json:"turnId"`
 			Kind    string  `json:"kind"`
 			Command *string `json:"command"`
 			Cwd     *string `json:"cwd"`
@@ -525,7 +526,7 @@ func (s *session) answer(m Message) (any, *RPCError) {
 			s.declined(m, "input to a running terminal ("+p.Kind+"), which the request does not show")
 			return map[string]any{"decision": "decline"}, nil
 		}
-		req := rt.ApprovalRequest{Kind: "command", Command: deref(p.Command), Cwd: deref(p.Cwd), Reason: deref(p.Reason)}
+		req := rt.ApprovalRequest{Kind: "command", Command: deref(p.Command), Cwd: deref(p.Cwd), Reason: deref(p.Reason), TurnID: p.TurnID}
 		if req.Command == "" {
 			req.Command = s.item(p.ItemID).command
 		}
@@ -536,11 +537,12 @@ func (s *session) answer(m Message) (any, *RPCError) {
 	case "item/fileChange/requestApproval":
 		var p struct {
 			ItemID    string  `json:"itemId"`
+			TurnID    string  `json:"turnId"`
 			Reason    *string `json:"reason"`
 			GrantRoot *string `json:"grantRoot"`
 		}
 		_ = json.Unmarshal(m.Params, &p)
-		req := rt.ApprovalRequest{Kind: "file", Paths: slices.Clone(s.item(p.ItemID).paths), Reason: deref(p.Reason)}
+		req := rt.ApprovalRequest{Kind: "file", Paths: slices.Clone(s.item(p.ItemID).paths), Reason: deref(p.Reason), TurnID: p.TurnID}
 		if len(req.Paths) == 0 {
 			s.declined(m, "a file change whose paths are not known")
 			return map[string]any{"decision": "decline"}, nil
@@ -554,6 +556,7 @@ func (s *session) answer(m Message) (any, *RPCError) {
 	case "item/permissions/requestApproval":
 		var p struct {
 			Cwd         string          `json:"cwd"`
+			TurnID      string          `json:"turnId"`
 			Reason      *string         `json:"reason"`
 			Permissions json.RawMessage `json:"permissions"`
 		}
@@ -563,7 +566,7 @@ func (s *session) answer(m Message) (any, *RPCError) {
 			s.declined(m, "a permissions request holding "+why)
 			return map[string]any{"permissions": map[string]any{}}, nil // nothing granted
 		}
-		req := rt.ApprovalRequest{Kind: "permissions", Cwd: p.Cwd, Paths: grant.writes, Reason: deref(p.Reason)}
+		req := rt.ApprovalRequest{Kind: "permissions", Cwd: p.Cwd, Paths: grant.writes, Reason: deref(p.Reason), TurnID: p.TurnID}
 		var also []string
 		if len(grant.reads) > 0 {
 			also = append(also, "makes readable: "+strings.Join(grant.reads, ", "))
@@ -678,6 +681,9 @@ func describePermissions(raw json.RawMessage) (g permissionGrant, why string) {
 	}
 	if fs := p.FileSystem; fs != nil {
 		g.writes, g.reads = slices.Clone(fs.Write), slices.Clone(fs.Read)
+		if slices.Contains(g.writes, "") || slices.Contains(g.reads, "") {
+			return g, "an empty path"
+		}
 		for _, e := range fs.Entries {
 			var path string
 			switch e.Path.Type {

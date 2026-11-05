@@ -13,6 +13,10 @@ import (
 // ErrExited is returned by a Session's Send and InterruptTurn once its process has exited.
 var ErrExited = errors.New("runtime: process has exited")
 
+// MaxTranscriptLine is the longest transcript line the node keeps whole (a longer one is kept as its offset alone): a
+// runtime that writes the transcript itself (Codex's envelopes) cuts what it writes to fit.
+const MaxTranscriptLine = 256 << 10
+
 // Runtime is one coding-agent CLI a node can run sessions on.
 type Runtime interface {
 	// Name is the runtime's label in Tickets, Assignments and metrics: "claude", "codex".
@@ -86,8 +90,8 @@ type StartOptions struct {
 	Approve func(context.Context, ApprovalRequest) Verdict
 	// TicketID and AssignmentID are the session's, for a runtime that passes them to its MCP server at start.
 	TicketID, AssignmentID string
-	// WritableRoots are directories besides Dir the session must write to (the repository's git directory of a
-	// worktree), for a runtime whose sandbox takes them at start.
+	// WritableRoots are directories besides Dir the session must write to (a worktree's git directory and its
+	// repository's objects, refs and logs), for a runtime whose sandbox takes them at start.
 	WritableRoots []string
 	// CloseGrace is how long Close waits after closing the session's input before it kills the process (zero: the
 	// runtime's default).
@@ -134,6 +138,9 @@ type ApprovalRequest struct {
 	Kind                       string
 	Command, Cwd, Host, Reason string
 	Paths                      []string
+	// TurnID is the turn the approval is asked in, when the runtime says ("" otherwise): the node answers a hook and an
+	// approval about the same action in the same turn with one Approval.
+	TurnID string
 }
 
 // Verdict answers an ApprovalRequest.

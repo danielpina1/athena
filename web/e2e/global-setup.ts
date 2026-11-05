@@ -1,6 +1,7 @@
 // Builds the dashboard and the binaries (into bin/e2e, never bin/athena), then runs one `athena server` for every spec: a temp state dir (under /tmp,
 // so the Unix socket paths stay short) whose config.json turns the dashboard on at http://localhost:<free port> with
-// TLS off and no GitHub source, and fakeclaude as the runtime (`athena server --claude`). fakeclaude replays
+// TLS off and no GitHub source, fakeclaude as the runtime (`athena server --claude`) and fakecodex as Codex
+// (`--codex`, so no spec reaches this machine's codex). fakeclaude replays
 // <state>/fixture-<ticket>.jsonl, or fixture-default.jsonl (a turn that never ends, so every Ticket's session stays
 // live) when a spec wrote none; after each later message it replays <state>/later-<ticket>.jsonl if a spec wrote one
 // (R37: each spec gives its own Tickets their fixtures, see harness.ts), its result line waiting while
@@ -44,6 +45,7 @@ export default async function globalSetup() {
   closeSync(openSync(join(ROOT, "internal/web/ui/dist/.gitkeep"), "a"));
   go("athena", "./cmd/athena");
   go("fakeclaude", "./internal/runtime/claude/testdata/fakeclaude");
+  go("fakecodex", "./internal/runtime/codex/testdata/fakecodex");
   go("sessionctl", "./internal/testutil/sessionctl");
 
   const state = mkdtempSync("/tmp/athena-e2e-");
@@ -64,7 +66,9 @@ export default async function globalSetup() {
   writeFileSync(join(state, "fixture-default.jsonl"), captured.split("\n")[0] + "\n");
 
   const log = openSync(join(state, "server.log"), "a");
-  const server = spawn(join(BIN, "athena"), ["server", "--state-dir", state, "--claude", join(BIN, "fakeclaude")], {
+  // Codex is fakecodex: no spec reaches this machine's codex or its quota.
+  const args = ["server", "--state-dir", state, "--claude", join(BIN, "fakeclaude"), "--codex", join(BIN, "fakecodex")];
+  const server = spawn(join(BIN, "athena"), args, {
     env: {
       ...process.env,
       ATHENA_FAKE_FIXTURE: join(state, "fixture-{ticket}.jsonl"),

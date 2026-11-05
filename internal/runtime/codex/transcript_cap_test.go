@@ -12,8 +12,8 @@ import (
 	"github.com/danielpina1/athena/internal/runtime/rt"
 )
 
-// nodeLineCap mirrors internal/node maxLineBytes: a longer transcript line reaches the dashboard as nil.
-const nodeLineCap = 256 << 10
+// nodeLineCap is the node's line cap (internal/node maxLineBytes): a longer transcript line reaches the dashboard as nil.
+const nodeLineCap = rt.MaxTranscriptLine
 
 func jstr(s string) string { b, _ := json.Marshal(s); return string(b) }
 

@@ -116,7 +116,7 @@ func (d *Dispatcher) handleRequest(req Request) (any, error) {
 	case OpPing:
 		return nil, nil
 	case OpSubmit:
-		t, err := d.submit(req.Text, req.Dir, req.Model, req.Repo, "")
+		t, err := d.submit(req.Text, req.Dir, req.Model, req.Repo, req.Runtime, "")
 		if err != nil {
 			return nil, err
 		}
@@ -330,7 +330,7 @@ func (d *Dispatcher) act(o web.Origin, c *athenav1.Command) *athenav1.CommandRes
 	switch a := c.GetAction().(type) {
 	case *athenav1.Command_SubmitTask:
 		s := a.SubmitTask
-		t, err := d.submit(s.GetText(), s.GetDir(), s.GetModel(), s.GetRepo(), requestID(o, c))
+		t, err := d.submit(s.GetText(), s.GetDir(), s.GetModel(), s.GetRepo(), "", requestID(o, c))
 		if err != nil {
 			return d.failure(err)
 		}
@@ -484,7 +484,7 @@ func (d *Dispatcher) failure(err error) *athenav1.CommandResult {
 
 // submit records an owner task. A relative directory would resolve against the server's working directory, not the
 // client's; a repository must be one GitHub serves. A requestID seen before returns the Ticket it created.
-func (d *Dispatcher) submit(text, dir, model, repo, requestID string) (core.Ticket, error) {
+func (d *Dispatcher) submit(text, dir, model, repo, runtime, requestID string) (core.Ticket, error) {
 	if dir != "" {
 		if !filepath.IsAbs(dir) {
 			return core.Ticket{}, userErrorf("directory %s must be an absolute path", dir)
@@ -501,7 +501,7 @@ func (d *Dispatcher) submit(text, dir, model, repo, requestID string) (core.Tick
 		}
 		repo = name
 	}
-	t, err := d.eng.SubmitOwnerTask(text, core.TaskOptions{Dir: dir, Model: model, Repo: repo, RequestID: requestID})
+	t, err := d.eng.SubmitOwnerTask(text, core.TaskOptions{Dir: dir, Model: model, Repo: repo, Runtime: runtime, RequestID: requestID})
 	if errors.Is(err, core.ErrDuplicate) {
 		return t, nil
 	}

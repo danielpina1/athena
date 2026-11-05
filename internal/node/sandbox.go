@@ -52,30 +52,21 @@ func (n *Node) sandboxFor(workDir string) (*rt.Sandbox, []string) {
 	if c == nil {
 		return nil, nil
 	}
-	adir := filepath.Join(workDir, ".athena")
 	sb := &rt.Sandbox{
 		Required:   c.Required,
 		AllowWrite: append([]string{workDir}, c.AllowWrite...),
-		// Athena's own files: a worker that rewrote its settings would run its next process without hooks or sandbox.
-		// .athena/gh stays writable: `athena gh` keeps gh's configuration there.
-		DenyWrite:              []string{filepath.Join(adir, "settings.json"), filepath.Join(adir, "mcp.json"), filepath.Join(adir, ".gitignore")},
+		// Athena's own files, and a repository's git config and hooks (ProtectedPaths).
+		DenyWrite:              ProtectedPaths(workDir),
 		DenyRead:               slices.Clone(c.DenyRead),
 		AllowedDomains:         append(slices.Clone(GitHubDomains), c.AllowedDomains...),
 		UnixSockets:            []string{n.cfg.SocketPath},
 		AllowAllUnixSockets:    runtime.GOOS == "linux", // Linux cannot allow a socket by path; without this the node socket is unreachable
 		WeakerNetworkIsolation: c.WeakerNetworkIsolation,
 	}
-	// A worktree's commits write to the repository's git directory, outside the working directory. Its config and
-	// hooks stay read-only: git runs what they name, outside the sandbox, the next time the owner or the node uses the
-	// repository.
-	if gitDir, common := gitDirs(workDir); common != "" {
+	// A worktree's commits write to the repository's git directory, outside the working directory; its config and hooks
+	// stay read-only (DenyWrite).
+	if _, common := gitDirs(workDir); common != "" {
 		sb.AllowWrite = append(sb.AllowWrite, common)
-		// The common directory's config.worktree is read by the main worktree too, when the repository has
-		// extensions.worktreeConfig: it can name a promisor remote or a program git runs outside the sandbox.
-		sb.DenyWrite = append(sb.DenyWrite, filepath.Join(common, "config"), filepath.Join(common, "config.worktree"), filepath.Join(common, "hooks"))
-		if gitDir != common {
-			sb.DenyWrite = append(sb.DenyWrite, filepath.Join(gitDir, "config.worktree"))
-		}
 	}
 	var env []string
 	if c.CAFile != "" {
@@ -84,6 +75,42 @@ func (n *Node) sandboxFor(workDir string) (*rt.Sandbox, []string) {
 		}
 	}
 	return sb, env
+}
+
+// ProtectedPaths are the paths of a session working in workDir that nothing the session runs may write, each with
+// everything below it:
+//   - Athena's own files in .athena (settings.json, mcp.json, .gitignore): a worker that rewrote them would run its next
+//     process without hooks or sandbox. .athena/gh stays writable: `athena gh` keeps gh's configuration there.
+//   - for a repository or worktree, the git config and hooks, which git runs outside any sandbox the next time the owner
+//     or the node uses the repository: the common directory's config, config.worktree (read by the main worktree too
+//     when the repository has extensions.worktreeConfig: it can name a promisor remote or a program) and hooks, and a
+//     worktree's own config.worktree.
+//
+// Claude Code's sandbox denies these writes (sandboxFor's DenyWrite); Codex's cannot within its writable roots, so for
+// Codex sessions the hook rules deny them (RuleContext.Protected).
+func ProtectedPaths(workDir string) []string {
+	adir := filepath.Join(workDir, ".athena")
+	out := []string{filepath.Join(adir, "settings.json"), filepath.Join(adir, "mcp.json"), filepath.Join(adir, ".gitignore")}
+	if gitDir, common := gitDirs(workDir); common != "" {
+		out = append(out, filepath.Join(common, "config"), filepath.Join(common, "config.worktree"), filepath.Join(common, "hooks"))
+		if gitDir != common {
+			out = append(out, filepath.Join(gitDir, "config.worktree"))
+		}
+	}
+	return out
+}
+
+// writableRoots are the directories besides its working directory a session's sandbox must let it write, for a runtime
+// whose sandbox takes them at start (Codex's), so that a worktree can commit: the worktree's git directory and the
+// repository's objects, refs and logs. Codex keeps a .git directory inside a writable root read-only, and a root of the
+// whole common directory does not let a commit through (docs/dev/codex.md §5); the config and hooks stay outside every
+// root. Nil outside a git repository.
+func writableRoots(workDir string) []string {
+	gitDir, common := gitDirs(workDir)
+	if common == "" {
+		return nil
+	}
+	return []string{gitDir, filepath.Join(common, "objects"), filepath.Join(common, "refs"), filepath.Join(common, "logs")}
 }
 
 // gitDirs returns the git directory of the repository or worktree whose top level is dir and its common directory

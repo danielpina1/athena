@@ -17,6 +17,9 @@ import (
 	"time"
 
 	"github.com/danielpina1/athena/internal/core"
+	"github.com/danielpina1/athena/internal/render"
+	"github.com/danielpina1/athena/internal/runtime/claude"
+	"github.com/danielpina1/athena/internal/runtime/codex"
 	"github.com/danielpina1/athena/internal/runtime/rt"
 	"github.com/danielpina1/athena/internal/store"
 	"github.com/danielpina1/athena/prompts"
@@ -1812,4 +1815,424 @@ func TestRestartResumeUsesRestartNote(t *testing.T) {
 		l := got.LatestAssignment()
 		return len(l.Interruptions) == 1 && l.Interruptions[0].ResumedAt != nil
 	})
+}
+
+// --- Codex sessions (fakecodex, and the real athena binary for the hooks and the MCP server) ---
+
+var (
+	codexOnce                 sync.Once
+	fakeCodexPath, athenaPath string
+	codexErr                  error
+)
+
+// codexBins builds fakecodex and athena once per test binary run, beside fakeclaude (removed by TestMain).
+func codexBins(t *testing.T) (fakecodex, athena string) {
+	t.Helper()
+	fakeClaude(t) // makes fakeDir
+	codexOnce.Do(func() {
+		fakeCodexPath, athenaPath = filepath.Join(fakeDir, "codex"), filepath.Join(fakeDir, "athena")
+		for out, pkg := range map[string]string{
+			fakeCodexPath: "github.com/danielpina1/athena/internal/runtime/codex/testdata/fakecodex",
+			athenaPath:    "github.com/danielpina1/athena/cmd/athena",
+		} {
+			if b, err := exec.Command("go", "build", "-o", out, pkg).CombinedOutput(); err != nil {
+				codexErr = fmt.Errorf("build %s: %v\n%s", pkg, err, b)
+				return
+			}
+		}
+	})
+	if codexErr != nil {
+		t.Fatal(codexErr)
+	}
+	return fakeCodexPath, athenaPath
+}
+
+// codexHarness is a harness whose node also has Codex (fakecodex), with the real athena binary running the hooks and
+// the MCP server. rpcLog receives what the session sent fakecodex and the hooks it ran.
+type codexHarness struct {
+	*harness
+	rpcLog, argsLog string
+}
+
+func newCodexHarness(t *testing.T, fixture string, mod func(*Config)) *codexHarness {
+	t.Helper()
+	fake, athena := codexBins(t)
+	dir := t.TempDir()
+	ch := &codexHarness{rpcLog: filepath.Join(dir, "rpc.log"), argsLog: filepath.Join(dir, "args-{ticket}.json")}
+	t.Setenv("ATHENA_FAKE_CODEX_RPC_LOG", ch.rpcLog)
+	t.Setenv("ATHENA_FAKE_CODEX_ARGS_LOG", ch.argsLog)
+	if fixture != "" {
+		p := filepath.Join(dir, "fixture.jsonl")
+		if err := os.WriteFile(p, []byte(fixture), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("ATHENA_FAKE_CODEX_FIXTURE", p)
+	}
+	ch.harness = newHarness(t, func(c *Config) {
+		c.AthenaBin = athena
+		c.Runtimes = map[string]rt.Runtime{
+			core.RuntimeClaude: claude.Runtime{Binary: c.ClaudeBinary},
+			core.RuntimeCodex: &codex.Runtime{Binary: fake, Home: filepath.Join(c.StateDir, "codex"), AthenaBin: athena,
+				Socket: c.SocketPath, WorkRoot: c.WorkRoot, Version: "test"},
+		}
+		if mod != nil {
+			mod(c)
+		}
+	})
+	return ch
+}
+
+func (h *codexHarness) submitCodex(text string) core.Ticket {
+	h.t.Helper()
+	tk, err := h.eng.SubmitOwnerTask(text, core.TaskOptions{Runtime: core.RuntimeCodex})
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	return tk
+}
+
+// rpc returns the lines of the RPC log.
+func (h *codexHarness) rpc() []string {
+	b, err := os.ReadFile(h.rpcLog)
+	if err != nil && !os.IsNotExist(err) {
+		h.t.Fatal(err)
+	}
+	return strings.Split(strings.TrimSpace(string(b)), "\n")
+}
+
+func (h *codexHarness) rpcHas(sub string) bool {
+	return slices.ContainsFunc(h.rpc(), func(l string) bool { return strings.Contains(l, sub) })
+}
+
+func (h *codexHarness) transcript(ticketID string) string {
+	b, _ := os.ReadFile(TranscriptPath(h.cfg.StateDir, ticketID))
+	return string(b)
+}
+
+// codexTurn is a fixture turn (thread and turn ids are fakecodex's placeholders) with body between its start and end.
+func codexTurn(body ...string) string {
+	lines := append([]string{`{"method":"turn/started","params":{"threadId":"thr_fixture_0001","turn":{"id":"turn_fixture_0001","items":[],"status":"inProgress","startedAt":1893456001}}}`}, body...)
+	lines = append(lines, `{"method":"turn/completed","params":{"threadId":"thr_fixture_0001","turn":{"id":"turn_fixture_0001","items":[],"status":"completed","startedAt":1893456001,"completedAt":1893456005,"durationMs":4200}}}`)
+	return strings.Join(lines, "\n") + "\n"
+}
+
+func codexCommandItem(method, id, command string) string {
+	status, extra := "inProgress", `"aggregatedOutput":null,"exitCode":null,"durationMs":null`
+	if method == "item/completed" {
+		status, extra = "completed", `"aggregatedOutput":"","exitCode":0,"durationMs":20`
+	}
+	at := `"startedAtMs":1893456007250`
+	if method == "item/completed" {
+		at = `"completedAtMs":1893456007750`
+	}
+	cmd, _ := json.Marshal(command)
+	return `{"method":"` + method + `","params":{"threadId":"thr_fixture_0001","turnId":"turn_fixture_0001","item":{"id":"` + id +
+		`","type":"commandExecution","command":` + string(cmd) + `,"commandActions":[],"cwd":"/home/user/work","source":"agent","status":"` +
+		status + `",` + extra + `},` + at + `}}`
+}
+
+// codexHook is a fakecodex directive running Athena's hook for event on a Bash tool call of command.
+func codexHook(event, command string) string {
+	input := map[string]any{
+		"session_id": "thr_fixture_0001", "turn_id": "turn_fixture_0001", "transcript_path": nil, "cwd": "/home/user/work",
+		"model": "gpt-5-codex", "permission_mode": "default", "hook_event_name": event, "tool_name": "Bash",
+		"tool_input": map[string]any{"command": command},
+	}
+	if event == EventPreToolUse {
+		input["tool_use_id"] = "call_fixture_0001"
+	}
+	b, _ := json.Marshal(map[string]any{"fake": "hook", "event": event, "input": input})
+	return string(b)
+}
+
+func codexApprovalRequest(command string, wait bool) string {
+	b, _ := json.Marshal(map[string]any{"fake": "request", "wait": wait, "method": "item/commandExecution/requestApproval",
+		"params": map[string]any{"threadId": "thr_fixture_0001", "turnId": "turn_fixture_0001", "itemId": "item_0003",
+			"startedAtMs": 1893456007500, "command": command}})
+	return string(b)
+}
+
+func TestCodexTicketRunsAndReports(t *testing.T) {
+	h := newCodexHarness(t, codexTurn(
+		`{"fake":"mcp","tool":"report","arguments":{"status":"ready","summary":"all done"}}`,
+		`{"method":"item/started","params":{"threadId":"thr_fixture_0001","turnId":"turn_fixture_0001","item":{"id":"item_0007","type":"mcpToolCall","server":"athena","tool":"report","status":"inProgress","arguments":{"status":"ready","summary":"all done"},"result":null,"error":null,"durationMs":31},"startedAtMs":1893456003750}}`,
+		`{"method":"item/completed","params":{"threadId":"thr_fixture_0001","turnId":"turn_fixture_0001","item":{"id":"item_0007","type":"mcpToolCall","server":"athena","tool":"report","status":"completed","arguments":{"status":"ready","summary":"all done"},"result":{"content":[{"type":"text","text":"ok"}],"structuredContent":null},"error":null,"durationMs":31},"completedAtMs":1893456004000}}`,
+	), nil)
+	tk := h.submitCodex("Do the codex thing")
+	h.eventually("the codex worker's ready report ends the ticket", func() bool {
+		cur, _ := h.ticket(tk.ID)
+		return cur.Ended != nil
+	})
+	cur, _ := h.ticket(tk.ID)
+	a := cur.LatestAssignment()
+	if cur.Ended.Outcome != core.OutcomeCompleted || a.Report == nil || a.Report.Summary != "all done" {
+		t.Fatalf("ended %+v, report %+v", cur.Ended, a.Report)
+	}
+	if a.SessionID != "thr_fixture_"+tk.ID {
+		t.Fatalf("session id = %q, want the Codex thread", a.SessionID)
+	}
+	// The report went through `athena mcp`, which the session's -c overrides pointed at this Ticket and Assignment.
+	h.eventually("the MCP call's result is logged", func() bool { return h.rpcHas(`"fake":"mcp"`) })
+	if !h.rpcHas(`Report filed (ready)`) || h.rpcHas(`"isError":true`) {
+		t.Fatalf("the MCP call did not file the report:\n%s", strings.Join(h.rpc(), "\n"))
+	}
+	b, err := os.ReadFile(strings.ReplaceAll(h.argsLog, "{ticket}", tk.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var inv struct {
+		Args []string          `json:"args"`
+		Env  map[string]string `json:"env"`
+	}
+	if err := json.Unmarshal(b, &inv); err != nil {
+		t.Fatal(err)
+	}
+	if inv.Env["ATHENA_RUNTIME"] != "codex" || inv.Env["ATHENA_ASSIGNMENT"] != a.ID || inv.Env["ATHENA_TICKET"] != tk.ID {
+		t.Fatalf("session env = %v", inv.Env)
+	}
+	if !slices.Contains(inv.Args, `mcp_servers.athena.args=["mcp","--ticket","`+tk.ID+`"]`) {
+		t.Fatalf("session args = %v", inv.Args)
+	}
+	// The first message says which runtime the worker is on.
+	if !h.rpcHas(`ATHENA_RUNTIME=codex`) {
+		t.Fatal("the first message does not carry ATHENA_RUNTIME")
+	}
+}
+
+func TestCodexHookDenyBlocksItem(t *testing.T) {
+	h := newCodexHarness(t, codexTurn(
+		codexHook(EventPreToolUse, "cat ~/.ssh/id_rsa"),
+		codexCommandItem("item/started", "item_0003", "cat ~/.ssh/id_rsa"),
+		codexCommandItem("item/completed", "item_0003", "cat ~/.ssh/id_rsa"),
+	), nil)
+	tk := h.submitCodex("Read a key")
+	h.eventually("the hook ran", func() bool { return h.rpcHas(`"fake":"hook"`) })
+	var rec struct {
+		Denied bool   `json:"denied"`
+		Exit   int    `json:"exit"`
+		Stdout string `json:"stdout"`
+	}
+	for _, l := range h.rpc() {
+		if strings.Contains(l, `"fake":"hook"`) {
+			if err := json.Unmarshal([]byte(l), &rec); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if !rec.Denied || rec.Exit != 0 || !strings.Contains(rec.Stdout, `"permissionDecisionReason":"reading credential files is not allowed"`) {
+		t.Fatalf("hook = %+v, want Codex's deny with its reason", rec)
+	}
+	h.eventually("the turn ended", func() bool {
+		cur, _ := h.ticket(tk.ID)
+		return cur.LatestAssignment().IdleAt != nil || strings.Contains(h.transcript(tk.ID), `"turn/completed"`)
+	})
+	if strings.Contains(h.transcript(tk.ID), "item_0003") {
+		t.Fatal("the denied command's item reached the transcript")
+	}
+	h.eventually("the denial counted", func() bool {
+		cur, _ := h.ticket(tk.ID)
+		return cur.Stats.HookDenials == 1
+	})
+}
+
+// approveOnly waits for exactly one pending Approval of the Ticket and approves it.
+func (h *codexHarness) approveOnly(ticketID string) core.Approval {
+	h.t.Helper()
+	var pending []core.Approval
+	h.eventually("an approval is pending", func() bool {
+		pending, _ = h.eng.PendingApprovals()
+		return len(pending) > 0
+	})
+	if len(pending) != 1 || pending[0].TicketID != ticketID {
+		h.t.Fatalf("pending approvals = %+v, want one of %s", pending, ticketID)
+	}
+	if err := h.eng.AnswerApproval(pending[0].ID, true, "go"); err != nil {
+		h.t.Fatal(err)
+	}
+	return pending[0]
+}
+
+func TestCodexApprovalRequestBecomesApproval(t *testing.T) {
+	h := newCodexHarness(t, codexTurn(
+		codexCommandItem("item/started", "item_0003", "kubectl apply -f app.yaml"),
+		codexApprovalRequest("kubectl apply -f app.yaml", true),
+		codexCommandItem("item/completed", "item_0003", "kubectl apply -f app.yaml"),
+	), nil)
+	tk := h.submitCodex("Deploy")
+	ap := h.approveOnly(tk.ID)
+	if ap.Tool != "Bash" || ap.Rule != "bash-escalate:kubectl" || !strings.Contains(ap.Summary, "kubectl apply -f app.yaml") {
+		t.Fatalf("approval = %+v", ap)
+	}
+	h.eventually("Codex is told accept", func() bool { return h.rpcHas(`"decision":"accept"`) })
+
+	// A denied one answers decline; network and permission requests always ask the owner.
+	n := h.n
+	s := n.liveSession(tk.ID)
+	if s == nil {
+		t.Fatal("no live session")
+	}
+	ctx := context.Background()
+	got := make(chan rt.Verdict, 1)
+	go func() {
+		got <- n.approveRequest(ctx, s, rt.ApprovalRequest{Kind: "network", Host: "registry.npmjs.org", TurnID: "t9"})
+	}()
+	var pending []core.Approval
+	h.eventually("network approval", func() bool { pending, _ = h.eng.PendingApprovals(); return len(pending) == 1 })
+	if p := pending[0]; p.Rule != "network_access" || p.Summary != "Network: registry.npmjs.org" {
+		t.Fatalf("network approval = %+v", p)
+	}
+	if err := h.eng.AnswerApproval(pending[0].ID, false, "no"); err != nil {
+		t.Fatal(err)
+	}
+	if v := <-got; v.Allow {
+		t.Fatalf("denied network approval = %+v", v)
+	}
+	go func() {
+		got <- n.approveRequest(ctx, s, rt.ApprovalRequest{Kind: "permissions", Host: "*", Paths: []string{"/opt/cache"}, Reason: "needs the cache"})
+	}()
+	h.eventually("permissions approval", func() bool { pending, _ = h.eng.PendingApprovals(); return len(pending) == 1 })
+	if p := pending[0]; p.Rule != "codex_permissions" || !strings.Contains(p.Summary, "/opt/cache") || !strings.Contains(p.Summary, "any host") {
+		t.Fatalf("permissions approval = %+v", p)
+	}
+	if err := h.eng.AnswerApproval(pending[0].ID, true, ""); err != nil {
+		t.Fatal(err)
+	}
+	if v := <-got; !v.Allow {
+		t.Fatalf("approved permissions = %+v", v)
+	}
+	// A command the rules allow, or deny, needs nobody; a file change is judged on every path.
+	if v := n.approveRequest(ctx, s, rt.ApprovalRequest{Kind: "command", Command: "ls -la"}); !v.Allow {
+		t.Fatalf("ls = %+v, want allow", v)
+	}
+	if v := n.approveRequest(ctx, s, rt.ApprovalRequest{Kind: "command", Command: "cat ~/.ssh/id_rsa"}); v.Allow || v.Reason == "" {
+		t.Fatalf("credential read = %+v, want deny with a reason", v)
+	}
+	if v := n.approveRequest(ctx, s, rt.ApprovalRequest{Kind: "file", Paths: []string{"a.txt", ".athena/mcp.json"}}); v.Allow {
+		t.Fatalf("file change to Athena's MCP config = %+v, want deny", v)
+	}
+	if v := n.approveRequest(ctx, s, rt.ApprovalRequest{Kind: "file", Paths: []string{"a.txt", "b/c.txt"}}); !v.Allow {
+		t.Fatalf("file change in the ticket dir = %+v, want allow", v)
+	}
+}
+
+// TestCodexOneCommandOneApproval: when Codex both runs Athena's PermissionRequest hook and asks Athena for approval of
+// the same command in the same turn, in either order, the owner answers one Approval, and both get its verdict.
+func TestCodexOneCommandOneApproval(t *testing.T) {
+	const cmd = "kubectl apply -f app.yaml"
+	for name, body := range map[string][]string{
+		"hook first":    {codexHook(EventPermissionRequest, cmd), codexApprovalRequest(cmd, true)},
+		"request first": {codexApprovalRequest(cmd, false), codexHook(EventPermissionRequest, cmd)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newCodexHarness(t, codexTurn(append([]string{codexCommandItem("item/started", "item_0003", cmd)}, body...)...), nil)
+			tk := h.submitCodex("Deploy")
+			h.approveOnly(tk.ID)
+			h.eventually("Codex is told accept", func() bool { return h.rpcHas(`"decision":"accept"`) })
+			h.eventually("the hook allowed", func() bool { return h.rpcHas(`\"behavior\":\"allow\"`) })
+			cur, _ := h.ticket(tk.ID)
+			if cur.Stats.Escalations != 1 {
+				t.Fatalf("escalations = %d, want one Approval for the one command", cur.Stats.Escalations)
+			}
+			if pending, _ := h.eng.PendingApprovals(); len(pending) != 0 {
+				t.Fatalf("pending approvals left: %+v", pending)
+			}
+		})
+	}
+}
+
+func TestCodexResumeUsesThreadID(t *testing.T) {
+	t.Setenv("ATHENA_FAKE_CODEX_EXIT_MID_TURN", "1")
+	h := newCodexHarness(t, codexTurn(`{"method":"item/started","params":{"threadId":"thr_fixture_0001","turnId":"turn_fixture_0001","item":{"id":"item_0002","type":"agentMessage","text":"","phase":"final_answer"},"startedAtMs":1893456000750}}`), nil)
+	tk := h.submitCodex("Crash and resume")
+	h.eventually("the crashed session resumed its thread", func() bool {
+		return h.rpcHas(`"method":"thread/resume"`) && h.rpcHas(`"threadId":"thr_fixture_`+tk.ID+`"`)
+	})
+	for _, l := range h.rpc() {
+		if strings.Contains(l, `"thread/resume"`) && !strings.Contains(l, `"threadId":"thr_fixture_`+tk.ID+`"`) {
+			t.Fatalf("resume of another thread: %s", l)
+		}
+	}
+}
+
+func TestMarkerWrittenPerProcess(t *testing.T) {
+	t.Setenv("ATHENA_FAKE_CODEX_EXIT_MID_TURN", "1")
+	h := newCodexHarness(t, codexTurn(), nil)
+	tk := h.submitCodex("Crash repeatedly")
+	h.eventually("the assignment failed after its restarts", func() bool {
+		cur, _ := h.ticket(tk.ID)
+		a := cur.LatestAssignment()
+		return a.Report != nil && a.Report.State == core.ReportFailed
+	})
+	cur, _ := h.ticket(tk.ID)
+	a := cur.LatestAssignment()
+	var markers []render.Marker
+	for _, l := range strings.Split(h.transcript(tk.ID), "\n") {
+		var m struct {
+			Athena     string `json:"athena"`
+			Runtime    string `json:"runtime"`
+			Model      string `json:"model"`
+			Assignment string `json:"assignment"`
+			Role       string `json:"role"`
+			Reason     string `json:"reason"`
+		}
+		if json.Unmarshal([]byte(l), &m) == nil && m.Athena == "session" {
+			markers = append(markers, render.Marker{Runtime: m.Runtime, Model: m.Model, Assignment: m.Assignment, Role: m.Role, Reason: m.Reason})
+		}
+	}
+	if len(markers) != 1+maxRestarts {
+		t.Fatalf("markers = %+v, want one per process (%d)", markers, 1+maxRestarts)
+	}
+	for i, m := range markers {
+		// The Ticket names no model: Codex runs its own default, which the first process's thread named.
+		want, model := "resume", a.Model
+		if i == 0 {
+			want, model = "start", ""
+		}
+		if m.Reason != want || m.Runtime != "codex" || m.Assignment != a.ID || m.Role != "implement" || m.Model != model {
+			t.Fatalf("marker %d = %+v, want %s on model %q", i, m, want, model)
+		}
+	}
+	if a.Model == "" {
+		t.Fatal("the Assignment records no model: Codex's default should be named by its thread")
+	}
+	// A Claude Code session's transcript opens with its own marker.
+	ct := h.submit("Claude task", "")
+	h.running(ct.ID)
+	first, _, _ := strings.Cut(h.transcript(ct.ID), "\n")
+	if !strings.Contains(first, `"athena":"session"`) || !strings.Contains(first, `"runtime":"claude"`) || !strings.Contains(first, `"reason":"start"`) {
+		t.Fatalf("claude transcript opens with %s", first)
+	}
+}
+
+func TestCodexNotReadyRefusesWithWhy(t *testing.T) {
+	t.Setenv("ATHENA_FAKE_CODEX_LOGGED_OUT", "1")
+	h := newCodexHarness(t, codexTurn(), nil)
+	tk := h.submitCodex("Pinned to a logged-out Codex")
+	h.eventually("the pinned ticket failed", func() bool {
+		cur, _ := h.ticket(tk.ID)
+		a := cur.LatestAssignment()
+		return a.Report != nil && a.Report.State == core.ReportFailed
+	})
+	cur, _ := h.ticket(tk.ID)
+	if s := cur.LatestAssignment().Report.Summary; !strings.Contains(s, codex.NotLoggedIn) {
+		t.Fatalf("summary = %q, want the Why %q", s, codex.NotLoggedIn)
+	}
+	if h.rpcHas(`"method":"thread/start"`) {
+		t.Fatal("a session started on a Codex that is not ready")
+	}
+}
+
+func TestAutoRunsClaudeUntilTheChooser(t *testing.T) {
+	h := newHarness(t, nil)
+	tk, err := h.eng.SubmitOwnerTask("Auto task", core.TaskOptions{Runtime: core.RuntimeAuto})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.running(tk.ID)
+	if inv := h.invocations(); len(inv) != 1 || inv[0].Env["ATHENA_RUNTIME"] != "claude" {
+		t.Fatalf("invocations = %+v, want one Claude Code session", inv)
+	}
+	if _, err := h.eng.SubmitOwnerTask("Bad", core.TaskOptions{Runtime: "gemini"}); err == nil {
+		t.Fatal("an unknown runtime was accepted")
+	}
 }

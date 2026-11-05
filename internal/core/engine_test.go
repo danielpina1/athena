@@ -96,6 +96,23 @@ func TestSubmitOwnerTaskStartsAssignment(t *testing.T) {
 	eq(t, "second id", h.submit("again").ID, "T-0002")
 }
 
+// A task names the runtime its Ticket runs on: Claude Code unless it says otherwise; anything else is refused.
+func TestSubmitOwnerTaskRuntime(t *testing.T) {
+	h := newHarness(t)
+	for _, c := range []struct{ in, want string }{{"", RuntimeClaude}, {RuntimeClaude, RuntimeClaude}, {RuntimeCodex, RuntimeCodex}, {RuntimeAuto, RuntimeAuto}} {
+		got, err := h.eng.SubmitOwnerTask("Task", TaskOptions{Runtime: c.in})
+		if err != nil {
+			t.Fatal(err)
+		}
+		eq(t, "runtime of "+c.in, h.ticket(got.ID).Execution.Runtime, c.want)
+	}
+	_, err := h.eng.SubmitOwnerTask("Task", TaskOptions{Runtime: "gemini"})
+	var ue *UserError
+	if !errors.As(err, &ue) || !strings.Contains(err.Error(), `"gemini"`) {
+		t.Fatalf("unknown runtime: %v, want a UserError naming it", err)
+	}
+}
+
 func TestSubmitOwnerTaskTitle(t *testing.T) {
 	h := newHarness(t)
 	long := strings.Repeat("é", 100) + "\nsecond line"

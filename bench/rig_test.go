@@ -211,10 +211,12 @@ func (r *rig) runningTicket(dir string) (core.Ticket, core.Assignment) {
 	return cur, *cur.LatestAssignment()
 }
 
-// hook sends one hook request over the node socket, as `athena hook` does, and returns its latency.
-func (r *rig) hook(tk core.Ticket, a core.Assignment, tool string, input map[string]any) time.Duration {
-	raw, _ := json.Marshal(map[string]any{"hook_event_name": node.EventPreToolUse, "tool_name": tool, "tool_input": input})
-	req := node.HookRequest{Op: node.OpHook, Event: node.EventPreToolUse, Ticket: tk.ID, Assignment: a.ID, Input: raw}
+// hook sends one hook request of runtime ("" is Claude Code) over the node socket, as `athena hook` does, and returns
+// its latency.
+func (r *rig) hook(tk core.Ticket, a core.Assignment, runtime, tool string, input any) time.Duration {
+	raw, _ := json.Marshal(map[string]any{"hook_event_name": node.EventPreToolUse, "tool_name": tool, "tool_input": input,
+		"turn_id": "turn_bench"})
+	req := node.HookRequest{Op: node.OpHook, Event: node.EventPreToolUse, Ticket: tk.ID, Assignment: a.ID, Runtime: runtime, Input: raw}
 	start := time.Now()
 	conn, err := net.DialTimeout("unix", filepath.Join(r.dir, "node.sock"), time.Second)
 	if err != nil {
@@ -243,22 +245,28 @@ func measureHook(tb testing.TB, n int) []time.Duration {
 	if err != nil {
 		tb.Fatal(err)
 	}
+	// Claude Code's tool calls, and Codex's (argv shell calls, a patch, a commit the attribution rule reads), whose
+	// decisions also normalise the call and check the protected paths.
+	patch := "*** Begin Patch\n*** Update File: " + filepath.Join(wd, "a.txt") + "\n@@\n-x\n+y\n*** Add File: b.txt\n+z\n*** End Patch\n"
 	calls := []struct {
-		tool  string
-		input map[string]any
+		runtime, tool string
+		input         any
 	}{
-		{"Write", map[string]any{"file_path": filepath.Join(wd, "a.txt"), "content": "x"}},
-		{"Read", map[string]any{"file_path": filepath.Join(wd, "a.txt")}},
-		{"Bash", map[string]any{"command": "ls -la"}},
+		{"", "Write", map[string]any{"file_path": filepath.Join(wd, "a.txt"), "content": "x"}},
+		{"", "Read", map[string]any{"file_path": filepath.Join(wd, "a.txt")}},
+		{"", "Bash", map[string]any{"command": "ls -la"}},
+		{core.RuntimeCodex, "exec_command", map[string]any{"cmd": []string{"bash", "-lc", "ls -la && git status"}, "workdir": wd}},
+		{core.RuntimeCodex, "apply_patch", map[string]any{"command": patch}},
+		{core.RuntimeCodex, "shell", map[string]any{"command": []string{"git", "commit", "-m", "Fix the parser\n\nCloses #3"}}},
 	}
 	for i := 0; i < 50; i++ { // warm up
 		c := calls[i%len(calls)]
-		r.hook(tk, a, c.tool, c.input)
+		r.hook(tk, a, c.runtime, c.tool, c.input)
 	}
 	out := make([]time.Duration, 0, n)
 	for i := 0; i < n; i++ {
 		c := calls[i%len(calls)]
-		out = append(out, r.hook(tk, a, c.tool, c.input))
+		out = append(out, r.hook(tk, a, c.runtime, c.tool, c.input))
 	}
 	return out
 }
@@ -417,7 +425,8 @@ func idleRSS(tb testing.TB, idle time.Duration) uint64 {
 	bin := build(tb, "athena", "github.com/danielpina1/athena/cmd/athena")
 	fake := fakeClaude(tb)
 	dir := shortDir(tb)
-	cmd := exec.Command(bin, "server", "--state-dir", dir, "--claude", fake)
+	// Codex is a binary that does not exist: no measurement reaches this machine's codex.
+	cmd := exec.Command(bin, "server", "--state-dir", dir, "--claude", fake, "--codex", "/nonexistent/athena-bench-codex")
 	if err := cmd.Start(); err != nil {
 		tb.Fatal(err)
 	}
@@ -698,9 +707,19 @@ func (d *dashboard) startTicket() string {
 		StreamOpen: &athenav1.StreamOpen{TicketId: sub.ID}}}); err != nil {
 		tb.Fatal(err)
 	}
+	// The session's own output, not only the runtime marker the node writes before its process starts: from then on a
+	// Reply is a message of its own, not part of the session's first one.
 	d.await(func(f *athenav1.Frame) bool {
 		d.note(f)
-		return f.GetStreamItems().GetTicketId() == sub.ID && len(f.GetStreamItems().GetItems()) > 0
+		if f.GetStreamItems().GetTicketId() != sub.ID {
+			return false
+		}
+		for _, it := range f.GetStreamItems().GetItems() {
+			if it.GetKind() != "runtime" {
+				return true
+			}
+		}
+		return false
 	})
 	d.settle()
 	return sub.ID

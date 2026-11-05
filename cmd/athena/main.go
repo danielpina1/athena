@@ -34,11 +34,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "athena %s\n", version)
 		return 0
 	case "hook":
-		if len(args) < 2 {
-			fmt.Fprintln(stderr, "usage: athena hook <event>")
-			return 2
-		}
-		return node.RunHook(args[1], stdin, stdout, stderr, os.Getenv("ATHENA_SOCKET"))
+		return node.HookMain(args[1:], stdin, stdout, stderr, os.Getenv("ATHENA_SOCKET"))
 	case "mcp":
 		return runMCP(args[1:], stderr)
 	case "git-credential":

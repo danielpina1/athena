@@ -68,6 +68,8 @@ type Request struct {
 	Thread string `json:"thread,omitempty"`
 	// Repo is the repository (owner/name) a submitted task works in.
 	Repo string `json:"repo,omitempty"`
+	// Runtime is the runtime a submitted task runs on: claude (the default), codex or auto.
+	Runtime string `json:"runtime,omitempty"`
 	// Policy is the settings document policy.set saves.
 	Policy json.RawMessage `json:"policy,omitempty"`
 }

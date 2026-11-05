@@ -75,7 +75,7 @@ func TestHookRequiresEvent(t *testing.T) {
 	if code := run([]string{"hook"}, &out, &errb); code != 2 {
 		t.Fatalf("exit code = %d, want 2", code)
 	}
-	if !strings.Contains(errb.String(), "usage: athena hook <event>") {
+	if !strings.Contains(errb.String(), "usage: athena hook [--runtime claude|codex] <event>") {
 		t.Fatalf("stderr = %q, want usage", errb.String())
 	}
 }

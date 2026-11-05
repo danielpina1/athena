@@ -11,12 +11,14 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
 
 	"github.com/danielpina1/athena/internal/core"
 	"github.com/danielpina1/athena/internal/redact"
+	"github.com/danielpina1/athena/internal/runtime/rt"
 	"github.com/danielpina1/athena/internal/sources/github"
 )
 
@@ -194,7 +196,7 @@ func (n *Node) handleHook(ctx context.Context, req HookRequest) HookResponse {
 		n.observeHook(req.Event, VerdictAllow, start)
 		return resp
 	case EventPreToolUse, EventPermissionRequest:
-		resp := n.decide(ctx, s, req.Event, req.Input, start)
+		resp := n.decide(ctx, s, req.Event, hookRuntime(req, s), req.Input, start)
 		if resp.Verdict == VerdictDeny {
 			// A rule's, the owner's or an expiry's deny: the tool call fails, maybe beside a report in the same step.
 			s.noteDenial()
@@ -228,51 +230,164 @@ func (n *Node) recordUsage(s *session, u core.UsageDelta) {
 	}
 }
 
-func (n *Node) ruleContext(s *session) RuleContext {
-	home, _ := os.UserHomeDir()
-	return RuleContext{TicketDir: s.place.workDir, Blocked: n.cfg.Blocked, Home: home, StateDir: n.cfg.StateDir,
-		AthenaBin: n.cfg.AthenaBin, VenvActive: false}
+// hookRuntime is the runtime whose tool vocabulary a hook's input uses: the one the hook names (`athena hook --runtime`),
+// or the session's own when that is Codex, whose rules are the stricter.
+func hookRuntime(req HookRequest, s *session) string {
+	if req.Runtime == core.RuntimeCodex || runtimeName(s.t) == core.RuntimeCodex {
+		return core.RuntimeCodex
+	}
+	return core.RuntimeClaude
 }
 
-// decide applies the hook rules to one tool call; an escalation becomes an Approval the call waits for.
-func (n *Node) decide(ctx context.Context, s *session, event string, raw json.RawMessage, start time.Time) HookResponse {
+// ruleContext is what the rules know of a session; a Codex session's protected paths are denied by the rules, since
+// its sandbox cannot keep them read-only.
+func (n *Node) ruleContext(s *session, runtime string) RuleContext {
+	home, _ := os.UserHomeDir()
+	c := RuleContext{TicketDir: s.place.workDir, Blocked: n.cfg.Blocked, Home: home, StateDir: n.cfg.StateDir,
+		AthenaBin: n.cfg.AthenaBin, VenvActive: false}
+	if runtime == core.RuntimeCodex {
+		c.Protected = ProtectedPaths(s.place.workDir)
+	}
+	return c
+}
+
+// decide applies the hook rules to one tool call of runtime (NormalizeTool); an escalation becomes an Approval the call
+// waits for.
+func (n *Node) decide(ctx context.Context, s *session, event, runtime string, raw json.RawMessage, start time.Time) HookResponse {
 	var in struct {
 		ToolName  string          `json:"tool_name"`
 		ToolInput json.RawMessage `json:"tool_input"`
+		// TurnID is Codex's: the turn the hook runs in.
+		TurnID string `json:"turn_id"`
 	}
 	if err := json.Unmarshal(raw, &in); err != nil || in.ToolName == "" {
 		n.observeHook(event, VerdictDeny, start)
 		return denied("hook input names no tool")
 	}
-	d := Evaluate(n.ruleContext(s), in.ToolName, in.ToolInput)
+	calls := NormalizeTool(runtime, in.ToolName, in.ToolInput)
+	return n.judge(ctx, s, event, runtime, in.ToolName, in.ToolInput, calls, in.TurnID, start)
+}
+
+// judge applies the rules to the calls of one tool call (tool and input, as asked about): the strictest verdict
+// stands, and an escalation becomes an Approval, the same for every ask about the same action in the same turn
+// (escalateShared).
+func (n *Node) judge(ctx context.Context, s *session, event, runtime, tool string, input json.RawMessage, calls []ToolCall,
+	turn string, start time.Time) HookResponse {
+	d, at := EvaluateCalls(n.ruleContext(s, runtime), runtime, calls)
 	// Never log the tool input: it may name credential paths or carry secrets.
-	s.log.Info("hook decision", "event", event, "tool", in.ToolName, "verdict", d.Verdict, "rule", d.Rule)
+	s.log.Info("hook decision", "event", event, "runtime", runtime, "tool", tool, "verdict", d.Verdict, "rule", d.Rule)
 	switch d.Verdict {
 	case VerdictAllow:
 		n.observeHook(event, VerdictAllow, start)
 		return allowed("")
 	case VerdictEscalate:
-		return n.escalate(ctx, s, event, in.ToolName, in.ToolInput, d, start)
+		ask := approvalAsk{tool: tool, input: input, d: d, summary: summarize(at.Tool, at.Input, d.Reason)}
+		return n.escalateShared(ctx, s, event, shareKey(turn, at.Tool, callSubject(at)), ask, start)
 	default:
 		n.observeHook(event, VerdictDeny, start)
 		return denied(d.Reason)
 	}
 }
 
+// approvalAsk is what an escalation shows a person: the tool call as asked about, the rule's decision, and a line
+// saying what it would do.
+type approvalAsk struct {
+	tool    string
+	input   json.RawMessage
+	d       Decision
+	summary string
+}
+
+// shareWindow is how long a person's answer to an escalation also answers another ask about the same action in the
+// same turn.
+const shareWindow = 10 * time.Minute
+
+// sharedVerdict is an escalation's answer, once done is closed.
+type sharedVerdict struct {
+	done chan struct{}
+	resp HookResponse
+	at   time.Time
+}
+
+// shareKey names an action asked about in a turn, for escalateShared: the turn, the tool and the action's subject;
+// "" (nothing shared) without a turn.
+func shareKey(turn, tool, subject string) string {
+	if turn == "" {
+		return ""
+	}
+	return turn + "\x00" + tool + "\x00" + subject
+}
+
+// callSubject is what a call does, for shareKey: a command (its words), a write's path, or the input.
+func callSubject(c ToolCall) string {
+	var in struct {
+		Command  string `json:"command"`
+		FilePath string `json:"file_path"`
+	}
+	_ = json.Unmarshal(c.Input, &in)
+	switch c.Tool {
+	case "Bash":
+		return strings.Join(strings.Fields(in.Command), " ")
+	case "Write":
+		return in.FilePath
+	}
+	return string(c.Input)
+}
+
+// escalateShared is escalate, once per action in a turn: Codex may ask about one action through more than one door
+// (its PreToolUse and PermissionRequest hooks, and an approval request), in either order. The first ask creates the
+// Approval; an ask with the same key while it waits, or within shareWindow of its answer, gets the same answer. An
+// empty key shares nothing (Claude Code's hooks name no turn).
+func (n *Node) escalateShared(ctx context.Context, s *session, event, key string, ask approvalAsk, start time.Time) HookResponse {
+	if key == "" {
+		return n.escalate(ctx, s, event, ask, start)
+	}
+	s.mu.Lock()
+	if s.shared == nil {
+		s.shared = map[string]*sharedVerdict{}
+	}
+	for k, v := range s.shared {
+		if !v.at.IsZero() && time.Since(v.at) > shareWindow {
+			delete(s.shared, k)
+		}
+	}
+	if sv := s.shared[key]; sv != nil {
+		s.mu.Unlock()
+		n.observeHook(event, VerdictEscalate, start)
+		s.log.Info("approval shared with an earlier ask", "rule", ask.d.Rule)
+		select {
+		case <-sv.done:
+			return sv.resp
+		case <-ctx.Done():
+			return denied("the athena node is shutting down; do not retry the same action, find another way or report blocked")
+		case <-s.stopCh:
+			return denied("the session ended before the owner answered; do not retry the same action, find another way or report blocked")
+		}
+	}
+	sv := &sharedVerdict{done: make(chan struct{})}
+	s.shared[key] = sv
+	s.mu.Unlock()
+	resp := n.escalate(ctx, s, event, ask, start)
+	s.mu.Lock()
+	sv.resp, sv.at = resp, time.Now()
+	s.mu.Unlock()
+	close(sv.done)
+	return resp
+}
+
 // escalate asks a person through an Approval and waits up to ApprovalTimeout, or until the session stops, for the
 // answer; no answer is a deny and the Approval expires.
-func (n *Node) escalate(ctx context.Context, s *session, event, tool string, input json.RawMessage, d Decision, start time.Time) HookResponse {
+func (n *Node) escalate(ctx context.Context, s *session, event string, ask approvalAsk, start time.Time) HookResponse {
 	eng := n.engine()
 	ap, err := eng.RequestApproval(core.Approval{
-		TicketID: s.t.ID, AssignmentID: s.a.ID, Tool: tool, Rule: d.Rule, Input: input,
-		Summary: summarize(tool, input, d.Reason),
+		TicketID: s.t.ID, AssignmentID: s.a.ID, Tool: ask.tool, Rule: ask.d.Rule, Input: ask.input, Summary: ask.summary,
 	})
 	n.observeHook(event, VerdictEscalate, start)
 	if err != nil {
 		s.log.Error("request approval", "error", err)
 		return denied("approval could not be requested: " + err.Error())
 	}
-	s.log.Info("approval requested", "approval", ap.ID, "rule", d.Rule)
+	s.log.Info("approval requested", "approval", ap.ID, "rule", ask.d.Rule)
 	// The wait ends with the session too: nobody can act on an answer once it stopped (a retry, a stop, a shutdown).
 	wctx, cancel := context.WithTimeout(ctx, n.cfg.ApprovalTimeout)
 	go func() {
@@ -317,6 +432,91 @@ func (n *Node) escalate(ctx context.Context, s *session, event, tool string, inp
 		}
 		return denied(reason + "; do not retry the same action, find another way or report blocked")
 	}
+}
+
+// approveRequest decides an approval Codex asks its client for (rt.StartOptions.Approve), as the hooks decide:
+//
+//   - command: the rules' verdict on Bash{command} (run in its Cwd), as for a PermissionRequest hook;
+//   - file: the strictest verdict over a Write of each path;
+//   - network: always a person's (rule network_access), "Network: <host>";
+//   - permissions: always a person's (rule codex_permissions), with everything accepting grants.
+//
+// An escalation becomes an Approval exactly as a hook's does (the timeout, the expiry, the end with the session), and
+// one about an action a hook of the same turn already escalated shares that Approval (escalateShared). A deny counts as
+// a hook denial.
+func (n *Node) approveRequest(ctx context.Context, s *session, req rt.ApprovalRequest) rt.Verdict {
+	start := time.Now()
+	const runtime = core.RuntimeCodex
+	var resp HookResponse
+	switch req.Kind {
+	case "command":
+		in := map[string]string{"command": req.Command}
+		if req.Cwd != "" {
+			in["workdir"] = req.Cwd
+		}
+		call := ToolCall{Tool: "Bash", Input: mustJSON(in)}
+		resp = n.judge(ctx, s, EventPermissionRequest, runtime, call.Tool, call.Input, []ToolCall{call}, req.TurnID, start)
+	case "file":
+		calls := make([]ToolCall, 0, len(req.Paths))
+		for _, p := range req.Paths {
+			calls = append(calls, ToolCall{Tool: "Write", Input: mustJSON(map[string]string{"file_path": p})})
+		}
+		if len(calls) == 0 {
+			calls = append(calls, ToolCall{Tool: "Write", Input: mustJSON(map[string]string{"file_path": ""})})
+		}
+		input := mustJSON(map[string]any{"paths": req.Paths, "reason": req.Reason})
+		resp = n.judge(ctx, s, EventPermissionRequest, runtime, "apply_patch", input, calls, req.TurnID, start)
+	case "network":
+		host := hostName(req.Host)
+		ask := approvalAsk{tool: "network", input: mustJSON(map[string]string{"host": req.Host, "command": req.Command, "reason": req.Reason}),
+			d: escalate(ruleNetworkAccess, "network access needs approval"), summary: clip(redact.String("Network: " + host))}
+		resp = n.escalateShared(ctx, s, EventPermissionRequest, shareKey(req.TurnID, "network", req.Host), ask, start)
+	case "permissions":
+		var parts []string
+		if len(req.Paths) > 0 {
+			parts = append(parts, "write "+strings.Join(req.Paths, ", "))
+		}
+		if req.Host != "" {
+			parts = append(parts, "network: "+hostName(req.Host))
+		}
+		if req.Reason != "" {
+			parts = append(parts, req.Reason)
+		}
+		ask := approvalAsk{tool: "permissions", input: mustJSON(map[string]any{"paths": req.Paths, "host": req.Host, "reason": req.Reason}),
+			d: escalate(ruleCodexPermissions, "more permissions need approval"), summary: clip(redact.String("Permissions: " + strings.Join(parts, "; ")))}
+		resp = n.escalateShared(ctx, s, EventPermissionRequest, "", ask, start)
+	default:
+		n.observeHook(EventPermissionRequest, VerdictDeny, start)
+		resp = denied("unknown approval kind " + req.Kind)
+	}
+	if resp.Verdict == VerdictDeny {
+		s.noteDenial()
+		n.recordUsage(s, core.UsageDelta{HookDenials: 1})
+	}
+	return rt.Verdict{Allow: resp.Verdict == VerdictAllow, Reason: resp.Reason}
+}
+
+// The rules of the approvals Codex asks for beyond tool calls.
+const (
+	ruleNetworkAccess    = "network_access"
+	ruleCodexPermissions = "codex_permissions"
+)
+
+// hostName is how an approval names a host: "*" is any host.
+func hostName(h string) string {
+	if h == "*" {
+		return "any host"
+	}
+	return h
+}
+
+// clip cuts s to summaryMaxRunes.
+func clip(s string) string {
+	if utf8.RuneCountInString(s) > summaryMaxRunes {
+		r := []rune(s)
+		s = string(r[:summaryMaxRunes-1]) + "…"
+	}
+	return s
 }
 
 // summarize says in a line what an escalated tool call would do, with secrets in it masked.
