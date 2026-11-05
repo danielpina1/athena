@@ -132,8 +132,10 @@ test("the detail follows its Ticket live", async ({ page, session }) => {
     const question = page.getByRole("group", { name: /Choose the cache layer/ });
     await expect(question.getByText("Redis or in-process?")).toBeVisible();
     await expect(page.getByRole("region", { name: "Report" }).getByText("Two caches fit")).toBeVisible();
-    const row = page.getByTestId("timeline-row").filter({ hasText: "Waiting on you" });
-    await expect(row).toContainText("Two caches fit");
+    // The open question is the newest report's row, with the orange dot.
+    const row = page.getByTestId("timeline-row").filter({ hasText: "Asked you a question" });
+    await expect(row).toContainText("Redis or in-process?");
+    await expect(row.locator("[data-dot]")).toHaveAttribute("data-tone", "attention");
     await expect(row).toHaveClass(/motion-wash/);
     await expectAccessible(page);
 
@@ -181,7 +183,7 @@ test("long and ANSI content stays inside the column", async ({ page, session }, 
     await page.goto(`/tickets/${repo.id}?tab=timeline`);
     await expect(page.getByTestId("ticket-detail").getByRole("heading", { level: 1 })).toBeVisible();
     await expect(page.getByRole("region", { name: "Report" }).getByText(/red failure/)).toBeVisible();
-    await expect(page.getByTestId("timeline-row").filter({ hasText: "Waiting on you" })).toContainText("red failure");
+    await expect(page.getByTestId("timeline-row").filter({ hasText: "Asked you a question" })).toContainText("Go on?");
     expect(await page.locator("body").innerText()).not.toContain("\u001b");
     await expectNoSideScroll(page);
 

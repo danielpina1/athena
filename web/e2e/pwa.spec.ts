@@ -60,6 +60,8 @@ test("offline reload shows the shell with the unreachable banner", async ({ page
   // No Snapshot yet: nothing claims "nothing" or "0".
   await expect(page.getByText("Waiting for the server.").first()).toBeVisible();
   await expect(page.getByText("Nothing needs you.")).toHaveCount(0);
+  // Athena's mark carries the link: red offline, hollow between retries.
+  await expect(page.locator("[data-mark]")).toHaveAttribute("data-link", /offline|connecting/);
   await expectAccessible(page);
   await page.evaluate(() => document.fonts.ready);
   await expect(page).toHaveScreenshot("offline-light.png");
@@ -68,6 +70,7 @@ test("offline reload shows the shell with the unreachable banner", async ({ page
   await context.setOffline(false);
   await expectShell(page);
   await expect(page.getByText("Control server unreachable — retrying")).toHaveCount(0);
+  await expect(page.locator("[data-mark]")).toHaveAttribute("data-link", "open");
   await expect(page.getByText("Nothing needs you.")).toBeVisible();
   await expect(page.getByText("Waiting for the server.")).toHaveCount(0);
 });

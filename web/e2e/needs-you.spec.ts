@@ -148,6 +148,10 @@ test("the live feed shows what happens as it happens, and the mark says what Ath
     await expect(row("Needs your approval")).toHaveCount(1);
     await expect(feed.getByRole("listitem").first()).toContainText("Needs your approval");
     await expect(mark).toHaveAttribute("data-state", "needs-you");
+    await expect(mark).toHaveAttribute("data-link", "open");
+    // A Ticket waiting on the owner is not working: the header says both.
+    await expect(feed.locator("[data-working]")).toContainText("need you");
+    await expect(feed.locator("[data-live-pulse]")).toBeAttached();
     await expectAccessible(page);
 
     // The mark's ring breathes; under reduced motion everything is still.

@@ -96,17 +96,17 @@ export async function expectAccessible(page: Page): Promise<void> {
 }
 
 /**
- * What a screenshot must not pin in the live feed: its rows (the events since the page opened, with their Tickets'
- * ids) and its working count. Every screenshot that shows the feed masks these.
+ * What a screenshot must not pin: the live feed, whose rows (the events since the page opened, with their Tickets'
+ * ids) and counts depend on what ran before. Every screenshot that shows the feed masks the whole section.
  */
 export function liveFeed(page: Page) {
-  return [page.locator("[data-live-feed] ul"), page.locator("[data-live-feed] [data-working]")];
+  return [page.locator("[data-live-feed]")];
 }
 
 /** The shell is up: the main navigation shows and the link is open. */
 export async function expectShell(page: Page): Promise<void> {
   await expect(page.getByRole("navigation", { name: "Main" })).toBeVisible();
-  await expect(page.locator('[data-status="open"]').first()).toBeAttached();
+  await expect(page.locator('[data-mark][data-link="open"]')).toBeAttached();
 }
 
 /** The passkeys the running test enrolled: kept, so a test can sign in more than once (two screens, say). */
