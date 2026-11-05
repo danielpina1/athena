@@ -46,7 +46,10 @@ export type AthenaData = {
   repos: RepoView[];
   notifications?: NotificationPrefsView;
   prompts?: PromptsView;
-  /** The watched Tickets' details (seq 0 Deltas), by Ticket id. A Snapshot keeps them: they are not part of it. */
+  /**
+   * The watched Tickets' details (seq 0 Deltas), by Ticket id. A Snapshot keeps them: they are not part of it. The
+   * last screen to let a Ticket go forgets its detail (forgetDetail), so they do not pile up over a long session.
+   */
   details: Map<string, TicketDetail>;
   /**
    * Tickets the owner asked to stop that have not ended yet: shown as "Stopping…". This client's own optimistic
@@ -75,6 +78,8 @@ export type AthenaState = AthenaData & {
    */
   applyDelta(d: Delta): "ok" | "gap";
   reset(): void;
+  /** Forgets a Ticket's detail: no screen watches it any more. */
+  forgetDetail(ticketId: string): void;
   /**
    * Optimistically marks an approval answered and clears it from its Tickets' pending_approval_id. The undo restores
    * only what a Delta has not replaced since: the Deltas are the truth. An approval already answered, or being
@@ -262,6 +267,13 @@ export const useAthena = create<AthenaState>()((set, get) => ({
   },
   reset() {
     set(empty());
+  },
+  forgetDetail(ticketId) {
+    const s = get();
+    if (!s.details.has(ticketId)) return;
+    const details = new Map(s.details);
+    details.delete(ticketId);
+    set({ details });
   },
   markApprovalAnswered(id, approve) {
     const s = get();

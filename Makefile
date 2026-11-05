@@ -1,4 +1,4 @@
-.PHONY: check proto build web web-check e2e bench bench-baseline
+.PHONY: check proto build web web-check e2e bench bench-baseline plans
 
 # The web app's packages; protoc-gen-es lives in them, so generating the TypeScript needs them first.
 web/node_modules: web/package-lock.json

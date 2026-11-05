@@ -9,6 +9,7 @@ import { useMediaQuery } from "@/app/Panes";
 import { filterSearch, PIN_PARAM, searchOf } from "@/features/tickets/Filters";
 import { useWatch } from "@/lib/commands/useWatch";
 import { stripAnsi } from "@/lib/stream/ansi";
+import { selectSynced } from "@/lib/store/selectors";
 import { useAthena } from "@/lib/store/state";
 import { Mono } from "@/ui/athena/Mono";
 import { cn } from "@/ui/cn";
@@ -91,7 +92,7 @@ function PinnedSession({ id, onUnpin }: { id: string; onUnpin(): void }) {
   useWatch(id);
   const [params] = useSearchParams();
   const title = useAthena((s) => (s.tickets.get(id) ?? s.details.get(id)?.summary)?.title);
-  const loaded = useAthena((s) => s.epoch !== "");
+  const loaded = useAthena(selectSynced);
   const heading = (
     <div className="grid min-w-0">
       <Mono>{id}</Mono>

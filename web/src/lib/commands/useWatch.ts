@@ -1,11 +1,12 @@
 // useWatch(ticketId): the Ticket's detail Deltas for as long as a screen shows it. One count per Ticket, so a detail
 // pane and a pinned session of the same Ticket share one watch: the first user sends watch, the last sends unwatch.
 // The last user's unwatch waits one tick, so a StrictMode double mount (unmount, then mount at once) or a quick move
-// between two screens of the same Ticket sends nothing at all.
+// between two screens of the same Ticket sends nothing at all. The unwatch forgets the Ticket's detail in the store.
 //
 // A watch can be lost behind the screen's back: the outbox re-sends it after a reconnect and the server may refuse
 // (the Ticket is gone, or too many are watched), or the first watch is refused. `lost` says so, and resume tries again.
 import { useEffect, useSyncExternalStore } from "react";
+import { useAthena } from "@/lib/store/state";
 import { onWatchLost, unwatch, watch } from "./actions";
 
 /** Screens showing each Ticket now. */
@@ -70,6 +71,8 @@ function release(id: string) {
       releasing.delete(id);
       if (watching.delete(id)) void unwatch(id);
       setLost(id, false);
+      // No screen shows it now: its detail goes too (ruling R28), and comes back with the next watch.
+      useAthena.getState().forgetDetail(id);
     }, 0),
   );
 }

@@ -167,6 +167,8 @@ test("sign in, task, answer, approve, review, stop, graph, sign out", async ({ p
     await inBothThemes(page, testInfo, "9-signed-out");
   } finally {
     for (const t of started) await athena("stop", t).catch(() => {});
+    // A failed body would hide them otherwise: they go with the report either way.
+    if (errors.length) await testInfo.attach("console errors", { body: errors.join("\n"), contentType: "text/plain" });
   }
   expect(errors, "console errors").toEqual([]);
 });

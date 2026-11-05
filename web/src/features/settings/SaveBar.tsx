@@ -256,6 +256,8 @@ export function useSaveBlock<T>(opts: SaveBlockOptions<T>): SaveBlock<T> {
       refused.current = r.ok || r.code !== "conflict" ? null : action;
       if (r.ok && held !== undefined) setDraft({ value: held, base });
       else if (r.ok) setDraft(null);
+      // An earlier save's revision is not this decision's: an edit after it builds on the decision's own.
+      if (r.ok) setSavedRevision(r.result?.case === "policyRevision" ? r.result.value : undefined);
       // A refusal other than a conflict is the caller's to say (a toast): the bar's Try again is for a draft.
       setStatus(r.ok ? (held !== undefined ? "saved" : "idle") : r.code !== "conflict" ? "idle" : "conflict");
       return r;

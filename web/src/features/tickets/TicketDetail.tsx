@@ -15,6 +15,7 @@ import { PinToggle } from "@/features/session/PinnedSessions";
 import { SessionView } from "@/features/session/SessionView";
 import { errorMessage, retry } from "@/lib/commands/actions";
 import { useWatch } from "@/lib/commands/useWatch";
+import { selectSynced } from "@/lib/store/selectors";
 import { useAthena } from "@/lib/store/state";
 import { stripAnsi } from "@/lib/text/ansi";
 import { Confirm } from "@/ui/athena/Confirm";
@@ -202,7 +203,7 @@ export function TicketDetail({ id }: { id: string }) {
   const onComposerFocused = useCallback(() => setFocusComposer(false), []);
   const summary = useAthena((s) => s.tickets.get(id) ?? s.details.get(id)?.summary);
   const detail = useAthena((s) => s.details.get(id));
-  const loaded = useAthena((s) => s.epoch !== "");
+  const loaded = useAthena(selectSynced);
   const approval = useApprovalOf(summary);
   const back = `/tickets${filterSearch(params)}`;
 

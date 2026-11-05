@@ -212,7 +212,7 @@ Checklist, on the iPhone with the VPN on:
 - [ ] 2. On the Mac run `athena web enroll`, scan the QR code with the phone's camera and create the passkey with
   Face ID.
 - [ ] 3. In Safari, **Share** > **Add to Home Screen**, then open Athena from the home screen icon and sign in.
-- [ ] 4. **Settings** > **Notifications**, choose **On** (enable them), and allow notifications when iOS asks.
+- [ ] 4. **Settings** > **Notifications**, choose **On**, and allow notifications when iOS asks.
 - [ ] 5. Start a task from the phone, watch it live, reply to it, then approve an Approval from the lock-screen push.
 - [ ] 6. On the Mac open the same dashboard: an action on one screen shows on the other in under a second.
 - [ ] 7. Turn on Airplane mode in the middle of an approve, then turn it off: the approval happens exactly once.
