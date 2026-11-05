@@ -29,10 +29,9 @@ const (
 
 // slot is a string of a decoded line and the way to replace it.
 type slot struct {
-	key  string
-	s    string
-	orig int // the string's size as the server sent it
-	set  func(string)
+	key string
+	s   string
+	set func(string)
 }
 
 // capLine keeps a Codex line short enough for the transcript. A line over outputKeep is decoded; each string of at least
@@ -113,7 +112,7 @@ func capLine(raw []byte) []byte {
 	}
 	for i, sl := range cuttable {
 		if b := min(t, capOf(sl)); enc[i] > b {
-			sl.set(cutFit(sl.s, b, sl.orig))
+			sl.set(cutFit(sl.s, b))
 		}
 	}
 	if out = encode(v); out == nil || len(out) > maxEnvelopeLine {
@@ -146,7 +145,7 @@ func collect(v any, key string, out *[]slot) {
 	case map[string]any:
 		for k, e := range x {
 			if s, ok := e.(string); ok {
-				*out = append(*out, slot{k, s, len(s), func(n string) { x[k] = n }})
+				*out = append(*out, slot{k, s, func(n string) { x[k] = n }})
 			} else {
 				collect(e, k, out)
 			}
@@ -154,7 +153,7 @@ func collect(v any, key string, out *[]slot) {
 	case []any:
 		for i, e := range x {
 			if s, ok := e.(string); ok {
-				*out = append(*out, slot{key, s, len(s), func(n string) { x[i] = n }})
+				*out = append(*out, slot{key, s, func(n string) { x[i] = n }})
 			} else {
 				collect(e, key, out)
 			}
@@ -187,8 +186,8 @@ func runeJSONLen(s string, i *int) int {
 }
 
 // cutFit keeps the longest part of s that fits in budget bytes as JSON with a cut mark, cut at a rune boundary. s is
-// already redacted, so no cut can leave part of a secret. The mark says how many bytes of the original (orig bytes) are gone.
-func cutFit(s string, budget, orig int) string {
+// already redacted, so no cut can leave part of a secret. The mark says how many bytes of the stripped, redacted text are gone.
+func cutFit(s string, budget int) string {
 	room, n, i := budget-2-markReserve, 0, 0
 	for i < len(s) {
 		j := i
@@ -198,5 +197,5 @@ func cutFit(s string, budget, orig int) string {
 		}
 		n, i = n+c, j
 	}
-	return s[:i] + fmt.Sprintf("\n[cut: %d bytes]", orig-i)
+	return s[:i] + fmt.Sprintf("\n[cut: %d bytes]", len(s)-i)
 }

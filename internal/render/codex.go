@@ -31,9 +31,16 @@ func stripANSI(s string) string {
 	if !strings.Contains(s, "\x1b") {
 		return s
 	}
-	s = ansiOSC.ReplaceAllString(s, "")
-	s = ansiCSI.ReplaceAllString(s, "")
-	return ansiOther.ReplaceAllString(s, "")
+	// Repeat until nothing changes: removing one escape can join the halves of another (PASS\x1b\x1b[0m[0mWORD).
+	for {
+		t := ansiOther.ReplaceAllString(ansiCSI.ReplaceAllString(ansiOSC.ReplaceAllString(s, ""), ""), "")
+		if t == s {
+			break
+		}
+		s = t
+	}
+	// A stray ESC left over can't start a sequence any more, but it can still split a name the redactor looks for.
+	return strings.ReplaceAll(s, "\x1b", "")
 }
 
 // approvalRequests are the server requests that ask for an approval: the dashboard shows the Approval itself. The

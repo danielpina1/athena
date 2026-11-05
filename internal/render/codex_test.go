@@ -435,3 +435,18 @@ func TestLogsStripControlCharacters(t *testing.T) {
 		}
 	}
 }
+
+// Removing one escape can join the halves of another; a stray ESC must not survive to split a name the redactor
+// looks for.
+func TestStripANSINestedEscapes(t *testing.T) {
+	for in, want := range map[string]string{
+		"PASS\x1b\x1b[0m[0mWORD":        "PASSWORD",
+		"PASS\x1b\x1b\x1b[0m[0m[0mWORD": "PASSWORD",
+		"a\x1bb":                        "ab",
+		"\x1b[1mbold\x1b[0m":            "bold",
+	} {
+		if got := StripANSI(in); got != want {
+			t.Errorf("StripANSI(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
