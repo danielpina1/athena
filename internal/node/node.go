@@ -1966,9 +1966,14 @@ func cleanupWorktree(p placement, t core.Ticket, log *slog.Logger) {
 // gitOut runs git in dir and returns its trimmed stdout.
 func gitOut(dir string, args ...string) (string, error) { return gitIn(dir, nil, args...) }
 
-// gitIn runs git in dir with env (the node's, if nil) and returns its trimmed stdout.
+// gitPins are the command-scope settings of every node git gitIn runs: no hook (a worktree add runs post-checkout) and
+// no fsmonitor of the repository's, whose config a worker may have reached; repos.go's noHooks, as arguments.
+var gitPins = []string{"-c", "core.fsmonitor=false", "-c", "core.hooksPath=" + os.DevNull}
+
+// gitIn runs git in dir with env (the node's, if nil) and the pins above, and returns its trimmed stdout.
 func gitIn(dir string, env []string, args ...string) (string, error) {
-	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	full := append(slices.Clone(gitPins), "-C", dir)
+	cmd := exec.Command("git", append(full, args...)...)
 	if env == nil {
 		env = os.Environ()
 	}

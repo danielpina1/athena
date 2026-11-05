@@ -755,7 +755,9 @@ func TestApplyPatchToGitConfigDenied(t *testing.T) {
 	}
 	w := c
 	w.TicketDir, w.Protected = wt, ProtectedPaths(wt)
-	for _, p := range []string{filepath.Join(main, ".git", "config"), filepath.Join(main, ".git", "hooks", "pre-push"), filepath.Join(gitDir, "config.worktree")} {
+	for _, p := range []string{filepath.Join(main, ".git", "config"), filepath.Join(main, ".git", "hooks", "pre-push"), filepath.Join(gitDir, "config.worktree"),
+		// The files that say where the git directory is.
+		filepath.Join(gitDir, "commondir"), filepath.Join(gitDir, "gitdir"), filepath.Join(wt, ".git")} {
 		if d := codexEval(w, "apply_patch", up(p)); d.Verdict != VerdictDeny || d.Rule != ruleProtectedPath {
 			t.Errorf("worktree patch to %s: %+v, want deny", p, d)
 		}

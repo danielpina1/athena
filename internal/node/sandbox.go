@@ -85,6 +85,9 @@ func (n *Node) sandboxFor(workDir string) (*rt.Sandbox, []string) {
 //     or the node uses the repository: the common directory's config, config.worktree (read by the main worktree too
 //     when the repository has extensions.worktreeConfig: it can name a promisor remote or a program) and hooks, and a
 //     worktree's own config.worktree.
+//   - the files that say where the git directory is: the git directory's commondir and, for a worktree, its gitdir and
+//     the working directory's .git file. A worker that rewrote one would point the owner's or the node's next git at a
+//     directory of its own, whose config and hooks it wrote.
 //
 // Claude Code's sandbox denies these writes (sandboxFor's DenyWrite); Codex's cannot within its writable roots, so for
 // Codex sessions the hook rules deny them (RuleContext.Protected).
@@ -92,9 +95,10 @@ func ProtectedPaths(workDir string) []string {
 	adir := filepath.Join(workDir, ".athena")
 	out := []string{filepath.Join(adir, "settings.json"), filepath.Join(adir, "mcp.json"), filepath.Join(adir, ".gitignore")}
 	if gitDir, common := gitDirs(workDir); common != "" {
-		out = append(out, filepath.Join(common, "config"), filepath.Join(common, "config.worktree"), filepath.Join(common, "hooks"))
+		out = append(out, filepath.Join(common, "config"), filepath.Join(common, "config.worktree"), filepath.Join(common, "hooks"),
+			filepath.Join(gitDir, "commondir"))
 		if gitDir != common {
-			out = append(out, filepath.Join(gitDir, "config.worktree"))
+			out = append(out, filepath.Join(gitDir, "config.worktree"), filepath.Join(gitDir, "gitdir"), filepath.Join(workDir, ".git"))
 		}
 	}
 	return out

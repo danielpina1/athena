@@ -190,3 +190,33 @@ func TestEndedTicketDropsItsKeptPrompt(t *testing.T) {
 	}
 	n.dropPrompt("T-0001") // already gone: no error
 }
+
+// The node's own git (gitIn: worktree add, status, rev-list, worktree remove) runs no hook and no fsmonitor of the
+// repository's, whose config or hooks a worker may have reached.
+func TestNodeGitRunsNoHookOrFsmonitor(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell hooks")
+	}
+	repo := newRepo(t)
+	marker := filepath.Join(t.TempDir(), "ran")
+	script := "#!/bin/sh\necho \"$0\" >> " + marker + "\n"
+	hook := filepath.Join(repo, ".git", "hooks", "post-checkout")
+	if err := os.WriteFile(hook, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	monitor := filepath.Join(t.TempDir(), "fsmonitor.sh")
+	if err := os.WriteFile(monitor, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	git(t, repo, "config", "core.fsmonitor", monitor)
+	wt := filepath.Join(t.TempDir(), "wt")
+	if _, err := gitIn(repo, nil, "worktree", "add", "-q", "-b", "t1", wt); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gitIn(wt, nil, "status", "--porcelain"); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := os.ReadFile(marker); err == nil {
+		t.Fatalf("node git ran the repository's hook or fsmonitor:\n%s", b)
+	}
+}
