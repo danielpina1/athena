@@ -296,27 +296,51 @@ func TestTranslateTokensAreTheTurnsDeltaWithoutCachedInput(t *testing.T) {
 		}
 		tr.Translate(Message{Method: "thread/tokenUsage/updated", Params: raw(`{"threadId":"t","turnId":"u","tokenUsage":{"last":` + b(lastIn, lastOut, lastCached) + `,"total":` + b(totIn, totOut, totCached) + `}}`)})
 	}
+	start := func() {
+		tr.Translate(Message{Method: "turn/started", Params: raw(`{"threadId":"t","turn":{"id":"u","items":[],"status":"inProgress"}}`)})
+	}
 	end := func() rt.TurnEnd {
 		return tr.Translate(Message{Method: "turn/completed", Params: raw(`{"threadId":"t","turn":{"id":"u","items":[],"status":"completed"}}`)})[0].(rt.TurnEnd)
 	}
 	// The first turn of a thread: two model calls.
+	start()
 	usage(1000, 10, 400, 1000, 10, 400)
 	usage(1500, 20, 900, 2500, 30, 1300)
 	if e := end(); e.InputTokens != 1200 || e.OutputTokens != 30 || e.CacheReadTokens != 1300 {
 		t.Fatalf("turn 1: %+v", e)
 	}
 	// The next: one call, whose own usage (last) is not the turn's change in the totals either.
+	start()
 	usage(1500, 20, 600, 4000, 50, 1900)
 	usage(1700, 25, 800, 5700, 75, 2700)
 	if e := end(); e.InputTokens != 1800 || e.OutputTokens != 45 || e.CacheReadTokens != 1400 {
 		t.Fatalf("turn 2: %+v (want 3200 input - 1400 cached, 45 output)", e)
 	}
 	// A turn with no usage update has no tokens; cached above input does not make input negative.
+	start()
 	if e := end(); e.InputTokens != 0 || e.OutputTokens != 0 || e.CacheReadTokens != 0 {
 		t.Fatalf("turn without usage: %+v", e)
 	}
+	start()
 	usage(10, 1, 50, 5710, 76, 2750)
 	if e := end(); e.InputTokens != 0 {
 		t.Fatalf("input = %d, want 0 (cached 50 of 10)", e.InputTokens)
+	}
+
+	// R47 N2: an update outside a turn (a resumed thread reporting its totals, say) belongs to no turn: the next turn
+	// counts only its own change, even on a fresh Translator whose first update came between turns.
+	tr = NewTranslator()
+	usage(900, 9, 0, 90000, 900, 40000)
+	start()
+	usage(1000, 10, 400, 91000, 910, 40400)
+	if e := end(); e.InputTokens != 600 || e.OutputTokens != 10 || e.CacheReadTokens != 400 {
+		t.Fatalf("turn after an update outside a turn: %+v (want 600/10/400)", e)
+	}
+	// Totals that go down (Codex reset them) count as nothing, never negative, in every column.
+	usage(1, 1, 1, 100, 1, 1)
+	start()
+	usage(1, 1, 1, 50, 0, 0)
+	if e := end(); e.InputTokens != 0 || e.OutputTokens != 0 || e.CacheReadTokens != 0 {
+		t.Fatalf("totals that went down: %+v", e)
 	}
 }

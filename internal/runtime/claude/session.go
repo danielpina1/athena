@@ -16,13 +16,6 @@ import (
 	"github.com/danielpina1/athena/internal/runtime/rt"
 )
 
-const (
-	// abandonAfter is how long, once Close has returned, the event pump waits
-	// for a consumer before it concludes nobody is reading and drops the rest.
-	abandonAfter = 250 * time.Millisecond
-	eventBuffer  = 64
-)
-
 // ErrExited is returned by Send and Interrupt once the process has exited. It is rt.ErrExited.
 var ErrExited = rt.ErrExited
 
@@ -103,8 +96,8 @@ type Session struct {
 
 	// events carries the session's events for Events; rtEvents the same translated for the node (Runtime.Start). A
 	// session fills one of them: push queues a line's events for it, finish marks the reader done, pump delivers.
-	events   chan Event
-	rtEvents chan rt.Event
+	events   <-chan Event
+	rtEvents <-chan rt.Event
 	push     func([]Event)
 	finish   func()
 	pump     func()
@@ -163,20 +156,21 @@ func start(ctx context.Context, o Options, forRT bool) (*Session, error) {
 		s.transcript, s.ownTranscript = tr, true
 	}
 	if forRT {
-		q := newQueue[rt.Event]()
-		s.rtEvents = q.out
+		q := rt.NewQueue[rt.Event]()
+		s.rtEvents = q.Out()
 		s.push = func(evs []Event) {
 			out := make([]rt.Event, len(evs))
 			for i, ev := range evs {
 				out[i] = toRT(ev)
 			}
-			q.push(out)
+			q.Push(out...)
 		}
-		s.finish, s.pump = q.finish, func() { q.pump(s.closedCh) }
+		s.finish, s.pump = q.Finish, func() { q.Pump(s.closedCh) }
 	} else {
-		q := newQueue[Event]()
-		s.events = q.out
-		s.push, s.finish, s.pump = q.push, q.finish, func() { q.pump(s.closedCh) }
+		q := rt.NewQueue[Event]()
+		s.events = q.Out()
+		s.push = func(evs []Event) { q.Push(evs...) }
+		s.finish, s.pump = q.Finish, func() { q.Pump(s.closedCh) }
 	}
 
 	p, err := rt.StartProc(ctx, rt.ProcOptions{
@@ -241,85 +235,6 @@ func (s *Session) handleLine(line []byte) {
 		evs = []Event{Unknown{Type: "invalid", Raw: json.RawMessage("null")}}
 	}
 	s.push(evs)
-}
-
-// queue holds a session's events until its pump delivers them, so the stdout reader never waits on the consumer.
-type queue[E any] struct {
-	mu         sync.Mutex
-	items      []E
-	readerDone bool
-	notify     chan struct{} // cap 1: queue changed
-	out        chan E
-}
-
-func newQueue[E any]() *queue[E] {
-	return &queue[E]{notify: make(chan struct{}, 1), out: make(chan E, eventBuffer)}
-}
-
-func (q *queue[E]) push(evs []E) {
-	q.mu.Lock()
-	q.items = append(q.items, evs...)
-	q.mu.Unlock()
-	q.wake()
-}
-
-// finish marks the reader done: the pump closes out once the queue is empty.
-func (q *queue[E]) finish() {
-	q.mu.Lock()
-	q.readerDone = true
-	q.mu.Unlock()
-	q.wake()
-}
-
-func (q *queue[E]) wake() {
-	select {
-	case q.notify <- struct{}{}:
-	default:
-	}
-}
-
-// pump delivers queued events to out and closes it once the reader is done
-// and the queue is empty. closed is closed once the session's Close returned.
-func (q *queue[E]) pump(closed <-chan struct{}) {
-	defer close(q.out)
-	abandoned := false
-	var zero E
-	for {
-		q.mu.Lock()
-		var ev E
-		have := len(q.items) > 0
-		if have {
-			ev = q.items[0]
-			q.items[0] = zero
-			q.items = q.items[1:]
-		}
-		finished := q.readerDone && !have
-		q.mu.Unlock()
-		if finished {
-			return
-		}
-		if !have {
-			<-q.notify
-			continue
-		}
-		if abandoned {
-			continue
-		}
-		select {
-		case q.out <- ev:
-			continue
-		case <-closed:
-		}
-		// Close has returned: keep delivering to a consumer that is still
-		// draining, but give up on one that has gone away.
-		t := time.NewTimer(abandonAfter)
-		select {
-		case q.out <- ev:
-			t.Stop()
-		case <-t.C:
-			abandoned = true
-		}
-	}
 }
 
 // Events returns the session's events in order. The channel is buffered, but

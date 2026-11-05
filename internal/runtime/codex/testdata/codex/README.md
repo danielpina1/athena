@@ -24,7 +24,8 @@ with a `fake` key is a directive for `fakecodex` and is never sent to the client
 - `config.golden.toml`: the `config.toml` `WriteHome` writes for `TestWriteHomeExactKeys` (not a server line). The real
   Codex 0.160.1 loads it under `--strict-config` and lists and trusts its hooks (`TestRealHooksListTrusted`).
 - `protocol.json`: written by `scripts/capture-codex-fixtures.sh schema` (`testdata/protoextract`), the required params of
-  the methods Athena uses; `TestFixturesUseKnownMethodsAndRequiredFields` checks every fixture line against it.
+  the methods Athena uses, every field of the requests Athena sends (`fakecodex` refuses any other), and how the session
+  answers each server request; `TestFixturesUseKnownMethodsAndRequiredFields` checks every fixture line against it.
 
 ## What is assumed, not verified
 

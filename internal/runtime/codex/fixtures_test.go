@@ -58,7 +58,9 @@ type protocolFile struct {
 	Methods      map[string][]string `json:"methods"`
 	// ParamsRequired lists the methods whose params must be present, as an object.
 	ParamsRequired []string `json:"paramsRequired"`
-	// ServerRequestAnswers says how the client answers each server request: "decline" or "error".
+	// RequestFields are the fields each client request Athena sends may carry.
+	RequestFields map[string][]string `json:"requestFields"`
+	// ServerRequestAnswers says how the session answers each server request: "approve", "decline" or "error".
 	ServerRequestAnswers map[string]string `json:"serverRequestAnswers"`
 }
 
@@ -90,8 +92,8 @@ func TestFixturesUseKnownMethodsAndRequiredFields(t *testing.T) {
 	for _, m := range []string{"item/commandExecution/requestApproval", "item/fileChange/requestApproval", "item/permissions/requestApproval",
 		"item/tool/requestUserInput", "mcpServer/elicitation/request", "item/tool/call", "account/chatgptAuthTokens/refresh",
 		"attestation/generate", "applyPatchApproval", "execCommandApproval"} {
-		if a := proto.ServerRequestAnswers[m]; a != "decline" && a != "error" {
-			t.Errorf("server request %s: answer %q, want decline or error", m, a)
+		if a := proto.ServerRequestAnswers[m]; a != "approve" && a != "decline" && a != "error" {
+			t.Errorf("server request %s: answer %q, want approve, decline or error", m, a)
 		}
 		if _, ok := proto.Methods[m]; !ok {
 			t.Errorf("server request %s is not in protocol.json", m)

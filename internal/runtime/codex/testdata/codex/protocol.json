@@ -18,6 +18,7 @@
     "config/batchWrite": [
       "edits"
     ],
+    "config/read": [],
     "error": [
       "error",
       "threadId",
@@ -141,6 +142,7 @@
     "applyPatchApproval",
     "attestation/generate",
     "config/batchWrite",
+    "config/read",
     "error",
     "execCommandApproval",
     "hooks/list",
@@ -166,15 +168,99 @@
     "turn/started",
     "turn/steer"
   ],
+  "requestFields": {
+    "account/rateLimits/read": [],
+    "account/read": [
+      "refreshToken"
+    ],
+    "config/batchWrite": [
+      "edits",
+      "expectedVersion",
+      "filePath",
+      "reloadUserConfig"
+    ],
+    "config/read": [
+      "cwd",
+      "includeLayers"
+    ],
+    "hooks/list": [
+      "cwds"
+    ],
+    "initialize": [
+      "capabilities",
+      "clientInfo"
+    ],
+    "thread/resume": [
+      "approvalPolicy",
+      "approvalsReviewer",
+      "baseInstructions",
+      "config",
+      "cwd",
+      "developerInstructions",
+      "excludeTurns",
+      "model",
+      "modelProvider",
+      "personality",
+      "sandbox",
+      "serviceTier",
+      "threadId"
+    ],
+    "thread/start": [
+      "approvalPolicy",
+      "approvalsReviewer",
+      "baseInstructions",
+      "config",
+      "cwd",
+      "developerInstructions",
+      "ephemeral",
+      "model",
+      "modelProvider",
+      "personality",
+      "sandbox",
+      "serviceName",
+      "serviceTier",
+      "sessionStartSource",
+      "threadSource"
+    ],
+    "turn/interrupt": [
+      "threadId",
+      "turnId"
+    ],
+    "turn/start": [
+      "approvalPolicy",
+      "approvalsReviewer",
+      "clientUserMessageId",
+      "cwd",
+      "disabledPluginIds",
+      "effort",
+      "input",
+      "model",
+      "outputSchema",
+      "personality",
+      "sandboxPolicy",
+      "serviceTier",
+      "serviceTierForTurn",
+      "summary",
+      "threadId",
+      "toolOutput",
+      "turnTrigger"
+    ],
+    "turn/steer": [
+      "clientUserMessageId",
+      "expectedTurnId",
+      "input",
+      "threadId"
+    ]
+  },
   "serverRequestAnswers": {
     "account/chatgptAuthTokens/refresh": "error",
-    "applyPatchApproval": "error",
+    "applyPatchApproval": "decline",
     "attestation/generate": "error",
-    "execCommandApproval": "error",
-    "item/commandExecution/requestApproval": "decline",
-    "item/fileChange/requestApproval": "decline",
-    "item/permissions/requestApproval": "error",
-    "item/tool/call": "error",
+    "execCommandApproval": "decline",
+    "item/commandExecution/requestApproval": "approve",
+    "item/fileChange/requestApproval": "approve",
+    "item/permissions/requestApproval": "approve",
+    "item/tool/call": "decline",
     "item/tool/requestUserInput": "error",
     "mcpServer/elicitation/request": "decline"
   }

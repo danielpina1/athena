@@ -26,6 +26,8 @@ type Translator struct {
 	windows []rt.Window
 	// open is the items whose ToolUse was sent and whose ToolResult was not.
 	open map[string]bool
+	// inTurn: a turn/started was seen and its turn/completed was not.
+	inTurn bool
 }
 
 // NewTranslator returns a Translator for a new session (the zero value works too).
@@ -89,6 +91,8 @@ func (t *Translator) Translate(m Message) []rt.Event {
 		}
 		t.threadID = p.Thread.ID
 		return []rt.Event{rt.Init{SessionID: p.Thread.ID, Model: p.Thread.Model}}
+	case "turn/started":
+		t.inTurn = true
 	case "item/started", "item/completed":
 		var p struct {
 			Item item `json:"item"`
@@ -107,11 +111,16 @@ func (t *Translator) Translate(m Message) []rt.Event {
 		if json.Unmarshal(m.Params, &p) != nil {
 			break
 		}
-		if t.prev == nil {
-			base := p.TokenUsage.Total.minus(p.TokenUsage.Last)
+		total := p.TokenUsage.Total
+		switch {
+		case !t.inTurn:
+			// Outside a turn (a resume, a refresh): nothing of it belongs to the next turn.
+			t.prev = &total
+		case t.prev == nil:
+			base := total.minus(p.TokenUsage.Last)
 			t.prev = &base
 		}
-		t.total = &p.TokenUsage.Total
+		t.total = &total
 		return nil
 	case "account/rateLimits/updated":
 		var p struct {
@@ -228,9 +237,11 @@ func (t *Translator) turnEnd(params json.RawMessage) []rt.Event {
 		end.SessionID = t.threadID
 	}
 	if t.total != nil && t.prev != nil {
-		// Input without its cached part, as Claude's counts it, so a consumer treats both runtimes alike.
+		// Input without its cached part, as Claude's counts it, so a consumer treats both runtimes alike. A total that
+		// went down (Codex reset it) counts as nothing, never as a negative.
 		d := t.total.minus(*t.prev)
-		end.InputTokens, end.OutputTokens, end.CacheReadTokens = max(d.InputTokens-d.CachedInputTokens, 0), d.OutputTokens, d.CachedInputTokens
+		cached := max(d.CachedInputTokens, 0)
+		end.InputTokens, end.OutputTokens, end.CacheReadTokens = max(d.InputTokens-cached, 0), max(d.OutputTokens, 0), cached
 		t.prev = t.total
 	}
 	code := ""
@@ -253,7 +264,7 @@ func (t *Translator) turnEnd(params json.RawMessage) []rt.Event {
 			end.Subtype = p.Turn.Status
 		}
 	}
-	t.total, t.errors, t.lastText = nil, nil, ""
+	t.total, t.errors, t.lastText, t.inTurn = nil, nil, "", false
 	t.open = map[string]bool{}
 	return []rt.Event{end}
 }

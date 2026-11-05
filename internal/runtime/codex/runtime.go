@@ -38,6 +38,8 @@ type Runtime struct {
 	AthenaBin, Socket string
 	// WorkRoot is the directory the hooks are checked for (the node's work root); empty is Home.
 	WorkRoot string
+	// Version is Athena's own version, which a session gives Codex as its client's (default "dev").
+	Version string
 	// KeepHome is for the `athena codex` commands: an existing config.toml is never rewritten (it is the server's, with
 	// its binary and the trust Codex recorded), only compared with what this Runtime would write (Status.HomeStale);
 	// it is written only when there is none. The server leaves it false and rewrites the file when it differs.
@@ -68,11 +70,31 @@ type Status struct {
 // StaleHome is the Why of a KeepHome check that found another athena's config.toml.
 const StaleHome = "config.toml was written by another athena (a different binary or version): restart the server to rewrite it"
 
+var _ rt.Runtime = (*Runtime)(nil)
+
 // Name is "codex".
 func (*Runtime) Name() string { return "codex" }
 
 // Prepare does nothing: Codex reads Athena's CODEX_HOME, and a session's own values are -c overrides at Start.
 func (*Runtime) Prepare(rt.Prepare) error { return nil }
+
+// Start runs one session: its own `codex app-server --listen stdio:// --strict-config` in o.Dir, with Athena's
+// CODEX_HOME and, as -c overrides, only Athena's MCP server's arguments and environment for the session (never hooks.*
+// or features.*). On it, after initialize:
+//
+//  1. the control check for o.Dir: Athena's hooks, trusted, and no other (hooks/list; Start never writes trust, Check
+//     does), and Athena's settings (config/read): it fails with ErrHooksUncontrolled or ErrConfigUncontrolled, whose Why
+//     says why, rather than run a session Athena's hooks and settings do not control;
+//  2. thread/start (o.SystemPrompt as developer instructions, approvals asked of Athena, the workspace-write sandbox or
+//     read-only), or thread/resume of o.ResumeID, which keeps its instructions; the thread is the Init;
+//  3. one account/rateLimits/read, as a QuotaUpdate.
+//
+// Every notification and server request the server prints is appended to o.Transcript as {"at":…,"codex":<line>};
+// its responses never are. The approvals Codex asks for go to o.Approve; every other server request is answered at
+// once, so no turn waits on one.
+func (r *Runtime) Start(ctx context.Context, o rt.StartOptions) (rt.Session, error) {
+	return startSession(ctx, r, o)
+}
 
 func (r *Runtime) binary() string {
 	if r.Binary == "" {

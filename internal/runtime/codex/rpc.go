@@ -16,10 +16,12 @@ import (
 // follows it ("codex: connection closed: <read error>").
 var ErrConnClosed = errors.New("codex: connection closed")
 
-// RPCError is a JSON-RPC error the server answered a request with.
+// RPCError is a JSON-RPC error the server answered a request with. Data is the error's data, when it had any (Codex
+// puts a turn error's codexErrorInfo there).
 type RPCError struct {
 	Code    int
 	Message string
+	Data    json.RawMessage
 }
 
 func (e *RPCError) Error() string { return fmt.Sprintf("codex rpc error %d: %s", e.Code, e.Message) }
@@ -72,8 +74,9 @@ type wire struct {
 	Params json.RawMessage `json:"params,omitempty"`
 	Result json.RawMessage `json:"result,omitempty"`
 	Error  *struct {
-		Code    int    `json:"code"`
-		Message string `json:"message"`
+		Code    int             `json:"code"`
+		Message string          `json:"message"`
+		Data    json.RawMessage `json:"data,omitempty"`
 	} `json:"error,omitempty"`
 }
 
@@ -284,7 +287,7 @@ func (c *Conn) answer(w wire) {
 		return
 	}
 	if w.Error != nil {
-		ch <- reply{err: &RPCError{Code: w.Error.Code, Message: w.Error.Message}}
+		ch <- reply{err: &RPCError{Code: w.Error.Code, Message: w.Error.Message, Data: w.Error.Data}}
 		return
 	}
 	ch <- reply{result: w.Result}

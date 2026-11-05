@@ -9,6 +9,19 @@ Athena drives `codex app-server --listen stdio:// --strict-config`, one process 
 `remote-control` or `--remote`. It runs Codex 0.160.0 or newer; 0.160.1 is the version it was verified against. A newer
 version runs too, once its hooks check passes, and `athena codex status` calls it untested.
 
+Each session's process runs in the Ticket's worktree with `CODEX_HOME` set to Athena's home (§2) and only two `-c`
+overrides, for Athena's MCP server: its arguments (`mcp --ticket <id>`, plus `--role review` for a reviewer) and its
+environment (the node's socket and the Assignment). No override ever sets `hooks.*` or `features.*`. On that process,
+before any thread starts, Athena checks the session is under its control (§4); then it starts the thread
+(`thread/start`, with the worker's instructions, approvals asked of Athena and the `workspace-write` sandbox, or
+`read-only` for a reviewer) or resumes it (`thread/resume`, which keeps the thread's instructions), and reads the account's
+usage limits once (free). A message sent while a turn runs is steered into it (`turn/steer`). Codex's approvals
+(commands, network access, file changes, more permissions) go to Athena's Approvals; every other request Codex makes of
+Athena (a question for the user, an MCP elicitation, a client-side tool call, a token refresh, an attestation, anything
+newer) is answered at once, declined or refused, so a turn never waits on one. The session's transcript keeps what
+Codex printed on its own (notifications and requests), never Codex's answers to Athena, which echo the instructions and
+name the account.
+
 ## 2. Install and log in
 
 Install the Codex CLI (`codex --version` must print `codex-cli 0.160.0` or newer), then log it in for Athena:
@@ -23,8 +36,8 @@ This is a separate login from the one your own `codex` uses. Athena's Codex live
 `<stateDir>/codex` (`~/.athena/codex` by default, mode 0700): its configuration, its credential (`auth.json`, mode 0600,
 written by `codex login` itself) and its sessions. Athena never reads or writes `~/.codex`, so nothing in your own
 Codex home (settings, hooks, plugins) reaches a worker, and a worker's never reach yours. A repository can carry Codex
-settings of its own (`.codex/`): Athena refuses to run Codex while any hook it did not write would run (§4); the
-check of a repository's other settings is still to come.
+settings of its own (`.codex/`): Athena refuses to run a session while any hook it did not write would run, or while a
+repository's settings would load at all (§4).
 
 `athena codex status` prints what the check found: whether Codex is installed, its version and whether it is tested,
 whether `config.toml` is what this `athena` would write, whether it is logged in (the kind of account only, never its
@@ -71,6 +84,13 @@ from whatever layer (a repository's `.codex/`, a plugin), and no managed hook (w
 configured at all. Otherwise Athena refuses to start Codex and says why: there is no silent
 fallback to a session its hooks do not control.
 
+Every session checks again, on its own app-server and for its own worktree, since a repository's `.codex/` applies only
+there: the hooks as above (`hooks/list`; a session never records trust, the readiness check does), and the settings
+Codex would run with (`config/read`). It refuses when any feature Athena turns off is on, when an MCP server other than
+Athena's is configured or Athena's runs another command, or when a repository's `.codex/` layer is loaded at all. Codex
+0.160.1 loads one only for a project the user configuration trusts, which Athena's never does; a loaded one could
+change the model provider, the sandbox or add a notify command, none of which the effective features and servers show.
+
 ## 5. Sandbox
 
 *To be written.* Found while building the runtime, with Codex 0.160.1's `codex sandbox`: Codex keeps a workspace's own
@@ -84,6 +104,11 @@ Caveats:
 - `<gitDir>/config.worktree` stays writable under those roots, so Athena's PreToolUse rules must protect it.
 - git prints `error: Unable to create '…/packed-refs.lock': Operation not permitted` during the commit; it is harmless,
   and the commit succeeds.
+
+A session passes the node's writable roots, as the node computed them, in every `turn/start`'s `sandboxPolicy`
+(`workspaceWrite` with `writableRoots`, network off; `readOnly` for a reviewer). The session's working directory is
+always writable. The CA variables a sandboxed command needs are in the session process's environment, which its
+commands inherit.
 
 ## 6. Attribution
 
@@ -114,4 +139,7 @@ Caveats:
 | `a … hook Athena did not write is enabled (…)` | Remove or disable that hook (the path says where it is). |
 | `Athena's … hook is "untrusted", not trusted` | Codex did not take Athena's trust; check `<stateDir>/codex/config.toml` is writable by you. |
 | `config.toml was written by another athena …: restart the server to rewrite it` | The file is the running (or last) server's, for another binary; restart `athena server` with the binary you want. |
+| `codex settings are not under Athena's control: the Codex feature … is on` | Something besides Athena's `config.toml` turns it on (a managed configuration, say); remove that. |
+| `codex settings are not under Athena's control: an MCP server Athena did not configure is set up (…)` | Remove that server from the configuration that adds it. |
+| `codex settings are not under Athena's control: a repository's Codex settings are loaded (…)` | Athena's home trusts a project; restart the server to rewrite `config.toml`. |
 | `codex app-server initialize: … unknown configuration field …` | This Codex does not know a key Athena writes: use a tested version. |

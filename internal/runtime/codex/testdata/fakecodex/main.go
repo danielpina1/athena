@@ -21,6 +21,14 @@
 //	                                 "never-trusted" (untrusted whatever is written); or "foreign" (trusted, plus an
 //	                                 enabled hook of a repository's .codex). A hook that is not trusted does not run.
 //	ATHENA_FAKE_CODEX_LOGGED_OUT     when set, account/read says there is no account and the rate limits are refused
+//	ATHENA_FAKE_CODEX_STEER_ERROR    how turn/steer fails: "mismatch" (always, as when expectedTurnId is not the
+//	                                 active turn: "expected active turn id `…` but found `…`"), or "notSteerable" (the
+//	                                 active turn cannot take input: turn/steer, and turn/start during it, fail with
+//	                                 "cannot steer a review turn" and codexErrorInfo activeTurnNotSteerable in the
+//	                                 error's data, as Codex answers during a review or compact turn)
+//	ATHENA_FAKE_CODEX_TRUST_PROJECT  when set, a .codex/config.toml in the cwd of config/read (or a parent) is a loaded
+//	                                 layer; otherwise it is listed disabled, as Codex does for a project Athena's
+//	                                 config.toml does not trust
 //	ATHENA_FAKE_CODEX_VERSION        the version --version prints (default 0.160.1)
 //	ATHENA_FAKE_CODEX_PROTOCOL       path of protocol.json (default: testdata/codex/protocol.json of the source tree it
 //	                                 was built from); every request it knows is checked against it, as the real server
@@ -28,10 +36,12 @@
 //	                                 fields present, or the answer is -32600. When the file cannot be read, app-server
 //	                                 exits 5 rather than run unchecked, unless the variable is "off".
 //
-// It answers initialize, thread/start (thread id thr_fixture_<ATHENA_TICKET>, announced by a thread/started
-// notification), thread/resume, turn/start (during a turn it steers into it, as the real server does), turn/steer,
-// turn/interrupt (the turn ends "interrupted"), hooks/list, config/batchWrite (it records only the
-// hooks.state."<key>".trusted_hash edits), account/read (acct_fixture) and account/rateLimits/read; any other request
+// It answers initialize (honouring capabilities.optOutNotificationMethods: those notifications are never sent),
+// thread/start (thread id thr_fixture_<ATHENA_TICKET>, announced by a thread/started notification), thread/resume,
+// turn/start (during a turn it steers into it, as the real server does), turn/steer, turn/interrupt (the turn ends
+// "interrupted"), hooks/list, config/batchWrite (it records only the hooks.state."<key>".trusted_hash edits),
+// config/read (the [features] and [mcp_servers.<name>] of $CODEX_HOME/config.toml and of a project's .codex/config.toml,
+// see ATHENA_FAKE_CODEX_TRUST_PROJECT), account/read (acct_fixture) and account/rateLimits/read; any other request
 // gets a -32601 error.
 //
 // Hooks are listed as Codex lists them: key "<config path>:<snake_event>:<group>:<handler>" (the path with the home's
@@ -184,6 +194,7 @@ type server struct {
 	nextReq int
 	pending map[string]chan json.RawMessage
 	proto   *protocol
+	optOut  map[string]bool // notifications the client opted out of
 }
 
 // turn is a running turn: its replay stops when cancelled is closed.
@@ -287,6 +298,18 @@ func (s *server) request(w wire) {
 		if runtime.GOOS == "darwin" {
 			osName = "macos"
 		}
+		var init struct {
+			Capabilities struct {
+				OptOut []string `json:"optOutNotificationMethods"`
+			} `json:"capabilities"`
+		}
+		_ = json.Unmarshal(w.Params, &init)
+		s.mu.Lock()
+		s.optOut = map[string]bool{}
+		for _, m := range init.Capabilities.OptOut {
+			s.optOut[m] = true
+		}
+		s.mu.Unlock()
 		s.reply(w.ID, map[string]any{"userAgent": "athena-fakecodex/" + version, "codexHome": home, "platformFamily": "unix", "platformOs": osName})
 	case "thread/start", "thread/resume":
 		model := p.Model
@@ -316,6 +339,10 @@ func (s *server) request(w wire) {
 		s.mu.Lock()
 		if t := s.active; t != nil && !t.done { // the real server steers a turn/start into the running turn
 			s.mu.Unlock()
+			if os.Getenv("ATHENA_FAKE_CODEX_STEER_ERROR") == "notSteerable" {
+				s.replyNotSteerable(w.ID)
+				return
+			}
 			s.reply(w.ID, map[string]any{"turn": map[string]any{"id": t.id, "items": []any{}, "status": "inProgress"}})
 			go s.replay(t, fixture("ATHENA_FAKE_CODEX_LATER_FIXTURE"), userEcho{text: joinText(p.Input), clientID: p.ClientMsgID}, true, false)
 			return
@@ -339,12 +366,17 @@ func (s *server) request(w wire) {
 			s.replyError(w.ID, -32600, "no active turn to steer")
 			return
 		}
-		if p.ExpectedTurnID != t.id {
+		mode := os.Getenv("ATHENA_FAKE_CODEX_STEER_ERROR")
+		if p.ExpectedTurnID != t.id || mode == "mismatch" {
 			s.mu.Unlock()
-			s.replyError(w.ID, -32600, "expectedTurnId does not match the active turn")
+			s.replyError(w.ID, -32600, fmt.Sprintf("expected active turn id `%s` but found `%s`", p.ExpectedTurnID, t.id))
 			return
 		}
 		s.mu.Unlock()
+		if mode == "notSteerable" {
+			s.replyNotSteerable(w.ID)
+			return
+		}
 		s.reply(w.ID, map[string]any{"turnId": t.id})
 		go s.replay(t, fixture("ATHENA_FAKE_CODEX_LATER_FIXTURE"), userEcho{text: joinText(p.Input), clientID: p.ClientMsgID}, true, false)
 	case "turn/interrupt":
@@ -368,6 +400,13 @@ func (s *server) request(w wire) {
 			return
 		}
 		s.reply(w.ID, map[string]any{"status": "ok", "version": "fixture", "filePath": configPath(home)})
+	case "config/read":
+		var cp struct {
+			Cwd           string `json:"cwd"`
+			IncludeLayers bool   `json:"includeLayers"`
+		}
+		_ = json.Unmarshal(w.Params, &cp)
+		s.reply(w.ID, configRead(home, cp.Cwd, cp.IncludeLayers))
 	case "account/read":
 		if os.Getenv("ATHENA_FAKE_CODEX_LOGGED_OUT") != "" {
 			s.reply(w.ID, map[string]any{"account": nil, "requiresOpenaiAuth": true})
@@ -422,6 +461,12 @@ func (s *server) reply(id json.RawMessage, result any) {
 
 func (s *server) replyError(id json.RawMessage, code int, msg string) {
 	s.send(map[string]any{"id": id, "error": map[string]any{"code": code, "message": msg}})
+}
+
+// replyNotSteerable is Codex's refusal of input to a turn that cannot take it (a review or compact turn).
+func (s *server) replyNotSteerable(id json.RawMessage) {
+	s.send(map[string]any{"id": id, "error": map[string]any{"code": -32600, "message": "cannot steer a review turn",
+		"data": map[string]any{"codexErrorInfo": map[string]any{"activeTurnNotSteerable": map[string]any{"turnKind": "review"}}}}})
 }
 
 func (s *server) send(v any) {
@@ -534,6 +579,12 @@ func (s *server) emit(t *turn, line []byte, end bool) bool {
 	}
 	if end {
 		t.done = true
+	}
+	var m struct {
+		Method string `json:"method"`
+	}
+	if json.Unmarshal(line, &m) == nil && s.optOut[m.Method] {
+		return true
 	}
 	s.writeLineLocked(line)
 	return true
@@ -922,6 +973,9 @@ func (s *server) runHook(event string, input json.RawMessage) (denied bool) {
 type protocol struct {
 	Methods        map[string][]string `json:"methods"`
 	ParamsRequired []string            `json:"paramsRequired"`
+	// RequestFields are the fields a client request's params may carry; any other is refused (stricter than Codex,
+	// which ignores them, so that a misspelt field fails a test rather than being dropped unnoticed).
+	RequestFields map[string][]string `json:"requestFields"`
 }
 
 // loadProtocol reads ATHENA_FAKE_CODEX_PROTOCOL, or the protocol.json beside the fixtures of the source tree this
@@ -970,5 +1024,101 @@ func (p *protocol) check(method string, params json.RawMessage) string {
 			return fmt.Sprintf("%s: missing field `%s`", method, f)
 		}
 	}
+	if fields, ok := p.RequestFields[method]; ok {
+		for f := range obj {
+			if !slices.Contains(fields, f) {
+				return fmt.Sprintf("%s: unknown field `%s`", method, f)
+			}
+		}
+	}
 	return ""
+}
+
+// configRead is config/read's answer: the effective [features] and mcp_servers of $CODEX_HOME/config.toml and, when
+// ATHENA_FAKE_CODEX_TRUST_PROJECT is set, of the .codex/config.toml of cwd or its nearest parent that has one; with
+// layers, the layers (a project layer not trusted is listed with its disabledReason, as Codex lists it).
+func configRead(home, cwd string, layers bool) map[string]any {
+	features, servers := map[string]any{}, map[string]any{}
+	userFile := configPath(home)
+	user := readLayer(filepath.Join(home, "config.toml"))
+	merge := func(l layer) {
+		for k, v := range l.features {
+			features[k] = v
+		}
+		for k, v := range l.servers {
+			servers[k] = v
+		}
+	}
+	merge(user)
+	var list []any
+	if dir := projectDir(cwd); dir != "" {
+		pl := readLayer(filepath.Join(dir, ".codex", "config.toml"))
+		entry := map[string]any{"name": map[string]any{"type": "project", "dotCodexFolder": filepath.Join(dir, ".codex")},
+			"version": "sha256:fixture", "config": pl.raw(), "disabledReason": nil}
+		if os.Getenv("ATHENA_FAKE_CODEX_TRUST_PROJECT") != "" {
+			merge(pl)
+		} else {
+			entry["disabledReason"] = "To load project-local config, hooks, and exec policies, add " + dir + " as a trusted project in " + userFile + "."
+		}
+		list = append(list, entry)
+	}
+	list = append(list, map[string]any{"name": map[string]any{"type": "user", "file": userFile, "profile": nil},
+		"version": "sha256:fixture", "config": user.raw(), "disabledReason": nil})
+	res := map[string]any{"config": map[string]any{"features": features, "mcp_servers": servers}, "origins": map[string]any{}}
+	if layers {
+		res["layers"] = list
+	}
+	return res
+}
+
+// projectDir is cwd or its nearest parent holding a .codex/config.toml; "" when none does.
+func projectDir(cwd string) string {
+	for dir := cwd; dir != "" && dir != "/" && dir != "."; dir = filepath.Dir(dir) {
+		if fileExists(filepath.Join(dir, ".codex", "config.toml")) {
+			return dir
+		}
+	}
+	return ""
+}
+
+// layer is what config/read reports of one config.toml: its [features] booleans and its [mcp_servers.<name>] tables
+// (their command only).
+type layer struct {
+	features map[string]bool
+	servers  map[string]any
+}
+
+func (l layer) raw() map[string]any {
+	f := map[string]any{}
+	for k, v := range l.features {
+		f[k] = v
+	}
+	return map[string]any{"features": f, "mcp_servers": l.servers}
+}
+
+func readLayer(path string) layer {
+	l := layer{features: map[string]bool{}, servers: map[string]any{}}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return l
+	}
+	section := ""
+	for _, line := range strings.Split(string(b), "\n") {
+		t := strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(t, "["):
+			section = strings.Trim(t, "[]")
+			if name, ok := strings.CutPrefix(section, "mcp_servers."); ok && !strings.Contains(name, ".") {
+				l.servers[name] = map[string]any{"enabled": true}
+			}
+		case section == "features" && strings.Contains(t, "="):
+			k, v, _ := strings.Cut(t, "=")
+			l.features[strings.TrimSpace(k)] = strings.TrimSpace(v) == "true"
+		case strings.HasPrefix(section, "mcp_servers.") && strings.HasPrefix(t, "command = "):
+			if srv, ok := l.servers[strings.TrimPrefix(section, "mcp_servers.")].(map[string]any); ok {
+				srv["command"], _ = strconv.Unquote(strings.TrimPrefix(t, "command = "))
+			}
+		}
+	}
+	return l
 }

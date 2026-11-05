@@ -73,6 +73,10 @@ type StartOptions struct {
 	// Sandbox confines the session's commands for a runtime that takes it at start (Codex); one that reads it from
 	// the files Prepare wrote (Claude Code) ignores it.
 	Sandbox *Sandbox
+	// SandboxEnv is the environment the session's commands need with the sandbox (the CA variables of
+	// Prepare.SandboxEnv), for a runtime without per-session files, whose commands inherit its process environment
+	// (Codex); one that takes it through Prepare (Claude Code) ignores it.
+	SandboxEnv []string
 	// Approve decides the approvals a runtime asks its client for (Codex); one whose approvals go through Athena's
 	// hooks (Claude Code) never calls it.
 	Approve func(context.Context, ApprovalRequest) Verdict
