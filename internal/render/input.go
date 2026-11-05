@@ -30,7 +30,7 @@ const (
 )
 
 var (
-	inputHeader = regexp.MustCompile(`(?m)^\[input [^\]:\s]+: ([^\]\n]*)\]$`)
+	inputHeader = regexp.MustCompile(`(?m)^\[input [^\]\s]+: ([^\]\n]*)\]$`)
 	cardLine    = regexp.MustCompile(`^(trigger_id|acknowledged|from|at|thread|url|replies_to|context|routing note): (.*)$`)
 	cutLine     = regexp.MustCompile(`\n\[cut: [^\]\n]*\]\s*$`)
 )

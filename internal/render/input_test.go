@@ -74,7 +74,8 @@ func TestInputFirstMessageIsTheTask(t *testing.T) {
 }
 
 func TestInputOwnerGithubAndAthena(t *testing.T) {
-	eq(t, saidOf(Items(echo("[input 01HY: message from the owner (not on GitHub)]\nGo ahead, keep it per IP\n\n"), 0)),
+	// Input ids are <node>:<ULID>, with a colon.
+	eq(t, saidOf(Items(echo("[input 4ncqjcpkacjlhkrq:01M6K00K8007BTPTH81690PRTE: message from the owner (not on GitHub)]\nGo ahead, keep it per IP\n\n"), 0)),
 		said{"owner", "Go ahead, keep it per IP", ""})
 	eq(t, saidOf(Items(echo(card), 0)), said{"github", "Please also cover the 429 path.", githubDetail})
 

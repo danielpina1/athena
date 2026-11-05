@@ -18,7 +18,7 @@ func echoLine(text string) []byte {
 	return b
 }
 
-// The session view parses what the node sends: every shape the node composes reads as who sent it, with its text
+// The session view parses what the node sends (Input ids as the Engine makes them, <node>:<ULID>): every shape the node composes reads as who sent it, with its text
 // and none of the protocol. This ties internal/render's parser to the real formats.
 func TestEchoedInputsRenderAsTheirSenders(t *testing.T) {
 	at := time.Date(2026, 11, 5, 9, 46, 21, 0, time.UTC)
@@ -26,11 +26,11 @@ func TestEchoedInputsRenderAsTheirSenders(t *testing.T) {
 		At: at, Text: "Please also cover the 429 path.", Kind: core.KindMessage, Threads: []string{"github:acme/api#7"},
 		Meta: map[string]string{"repo": "acme/api", "number": "7", "url": "https://github.com/acme/api/issues/7#issuecomment-991"}}
 	tk := core.Ticket{ID: "T-0007", Title: "Add rate limiting", Inputs: []core.Input{
-		{ID: "i1", Kind: core.InputTrigger, Human: true, Text: "Add rate limiting to the bookings API."},
-		{ID: "i2", Kind: core.InputTrigger, Human: true, TriggerID: tr.ID},
-		{ID: "i3", Kind: core.InputNote, Text: "prefer small pull requests"},
-		{ID: "i4", Kind: core.InputResumed},
-		{ID: "i5", Kind: core.InputText, Text: "Asked for a status update"},
+		{ID: "4ncqjcpkacjlhkrq:01M6K00K8007BTPTH81690PRTA", Kind: core.InputTrigger, Human: true, Text: "Add rate limiting to the bookings API."},
+		{ID: "4ncqjcpkacjlhkrq:01M6K00K8007BTPTH81690PRTB", Kind: core.InputTrigger, Human: true, TriggerID: tr.ID},
+		{ID: "4ncqjcpkacjlhkrq:01M6K00K8007BTPTH81690PRTC", Kind: core.InputNote, Text: "prefer small pull requests"},
+		{ID: "4ncqjcpkacjlhkrq:01M6K00K8007BTPTH81690PRTD", Kind: core.InputResumed},
+		{ID: "4ncqjcpkacjlhkrq:01M6K00K8007BTPTH81690PRTE", Kind: core.InputText, Text: "Asked for a status update"},
 	}}
 	trigger := func(id string) (core.Trigger, bool) { return tr, id == tr.ID }
 	type said struct{ from, text string }
@@ -49,18 +49,18 @@ func TestEchoedInputsRenderAsTheirSenders(t *testing.T) {
 		}
 		return out
 	}
-	first := workerPreamble(tk, []string{"ATHENA_TICKET=T-0007", "ATHENA_DIR=/w/x"}) + "\n" + renderInputs(tk, []string{"i1"}, trigger)
+	first := workerPreamble(tk, []string{"ATHENA_TICKET=T-0007", "ATHENA_DIR=/w/x"}) + "\n" + renderInputs(tk, []string{"4ncqjcpkacjlhkrq:01M6K00K8007BTPTH81690PRTA"}, trigger)
 	if got := read(first); !slices.Equal(got, []said{{"task", "Add rate limiting to the bookings API."}}) {
 		t.Errorf("first message = %+v", got)
 	}
-	later := renderInputs(tk, []string{"i2", "i3", "i4", "i5"}, trigger)
+	later := renderInputs(tk, []string{"4ncqjcpkacjlhkrq:01M6K00K8007BTPTH81690PRTB", "4ncqjcpkacjlhkrq:01M6K00K8007BTPTH81690PRTC", "4ncqjcpkacjlhkrq:01M6K00K8007BTPTH81690PRTD", "4ncqjcpkacjlhkrq:01M6K00K8007BTPTH81690PRTE"}, trigger)
 	want := []said{{"github", "Please also cover the 429 path."}, {"athena", "Note: prefer small pull requests"},
 		{"athena", "The Ticket was reopened"}, {"athena", "Asked for a status update"}}
 	if got := read(later); !slices.Equal(got, want) {
 		t.Errorf("later message = %+v, want %+v", got, want)
 	}
-	tk.Inputs[1] = core.Input{ID: "i2", Kind: core.InputTrigger, Human: true, Text: "Go ahead"}
-	if got := read(renderInputs(tk, []string{"i2"}, trigger)); !slices.Equal(got, []said{{"owner", "Go ahead"}}) {
+	tk.Inputs[1] = core.Input{ID: "4ncqjcpkacjlhkrq:01M6K00K8007BTPTH81690PRTB", Kind: core.InputTrigger, Human: true, Text: "Go ahead"}
+	if got := read(renderInputs(tk, []string{"4ncqjcpkacjlhkrq:01M6K00K8007BTPTH81690PRTB"}, trigger)); !slices.Equal(got, []said{{"owner", "Go ahead"}}) {
 		t.Errorf("owner message = %+v", got)
 	}
 	for msg, want := range map[string]string{
