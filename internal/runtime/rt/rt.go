@@ -64,21 +64,25 @@ type StartOptions struct {
 	// Env is added to the child's environment, which is otherwise only the allowlisted part of the parent's
 	// (ChildEnv).
 	Env []string
-	// Transcript receives every line the runtime prints, as the runtime prints it. The caller opens it and closes it
-	// after Session.Wait.
+	// Transcript receives the runtime's output, one line per line: Claude Code's stdout lines as printed; for Codex,
+	// each notification and server request the app-server prints, as {"at":"<RFC3339Nano>","codex":<line>} (never
+	// its responses to Athena's requests), and a {"at":…,"athena":{"declined":<method>,"id":<request id>,"reason":…}}
+	// line for each approval the session declined on its own. The caller opens it and closes it after Session.Wait.
 	Transcript *Transcript
 	// Role is the session's role ("worker"); ReadOnly asks for a session that may not change its directory.
 	Role     string
 	ReadOnly bool
-	// Sandbox confines the session's commands for a runtime that takes it at start (Codex); one that reads it from
-	// the files Prepare wrote (Claude Code) ignores it.
+	// Sandbox is the sandbox description Prepare also gets. Neither runtime reads it at start: Claude Code takes it from
+	// the files Prepare wrote, and Codex's session sandbox is its working directory plus WritableRoots.
 	Sandbox *Sandbox
 	// SandboxEnv is the environment the session's commands need with the sandbox (the CA variables of
 	// Prepare.SandboxEnv), for a runtime without per-session files, whose commands inherit its process environment
 	// (Codex); one that takes it through Prepare (Claude Code) ignores it.
 	SandboxEnv []string
 	// Approve decides the approvals a runtime asks its client for (Codex); one whose approvals go through Athena's
-	// hooks (Claude Code) never calls it.
+	// hooks (Claude Code) never calls it. It may block (waiting for a person), but must return once its context ends
+	// (the session closed or its process exited): the session declines the approval then whatever Approve says, and an
+	// Approve that does not return leaks its goroutine.
 	Approve func(context.Context, ApprovalRequest) Verdict
 	// TicketID and AssignmentID are the session's, for a runtime that passes them to its MCP server at start.
 	TicketID, AssignmentID string
@@ -93,12 +97,15 @@ type StartOptions struct {
 // Session is a running session. All methods are safe for concurrent use.
 type Session interface {
 	// Events returns the session's events in order. The consumer must drain it; it is closed once the process has
-	// exited and everything it printed was delivered.
+	// exited and everything it printed was delivered. Init is not necessarily the first event: what the runtime
+	// reports before its session starts (Unknown events, say) may come before it.
 	Events() <-chan Event
 	// Send writes one user message; a message sent while a turn runs is folded into that turn. uuid, when not empty,
 	// comes back in the message's UserEcho. After the process has exited it returns ErrExited.
 	Send(text, uuid string) error
-	// InterruptTurn abandons the running turn and keeps the process for the next message.
+	// InterruptTurn abandons the running turn and keeps the process for the next message. Called while a turn is
+	// being started, it interrupts that turn as soon as the runtime names it; with no turn running or starting it does
+	// nothing.
 	InterruptTurn() error
 	// Close closes the session's input, waits up to the close grace for the process to exit, then kills its process
 	// group. It is idempotent.
@@ -115,7 +122,15 @@ type Session interface {
 
 // ApprovalRequest is an approval a runtime asks its client for.
 type ApprovalRequest struct {
-	// Kind is "command", "file", "network" or "permissions".
+	// Kind is "command", "file", "network" or "permissions". A runtime declines on its own, without asking, what it
+	// cannot show in full: Codex's input to a running terminal (a command approval of kind writeStdin, whose input is
+	// not in the request), a file change whose paths it does not know, and a permissions request holding anything
+	// other than plain paths and network access (a special root, an unknown field).
+	//
+	// Command is the command to run; Cwd its directory; Host the host a network approval would reach ("*" when a
+	// permissions request asks for network access in general); Reason why the runtime asks, with what else accepting
+	// grants (the paths a permissions request would make readable, a file change's write grant); Paths the paths it
+	// would write.
 	Kind                       string
 	Command, Cwd, Host, Reason string
 	Paths                      []string

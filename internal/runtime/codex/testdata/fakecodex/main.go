@@ -29,6 +29,11 @@
 //	ATHENA_FAKE_CODEX_TRUST_PROJECT  when set, a .codex/config.toml in the cwd of config/read (or a parent) is a loaded
 //	                                 layer; otherwise it is listed disabled, as Codex does for a project Athena's
 //	                                 config.toml does not trust
+//	ATHENA_FAKE_CODEX_LAYERS         "null": config/read answers layers null; "nouser": it lists no user layer
+//	ATHENA_FAKE_CODEX_HOLD_TURN_START path of a file: a turn/start between turns waits until the file exists before it
+//	                                 does anything (its answer and its turn); a turn/interrupt meanwhile finds no turn
+//	ATHENA_FAKE_CODEX_HOLD_TURN_START_REPLY  path of a file: a turn/start between turns starts its turn at once, but
+//	                                 its answer waits until the file exists
 //	ATHENA_FAKE_CODEX_VERSION        the version --version prints (default 0.160.1)
 //	ATHENA_FAKE_CODEX_PROTOCOL       path of protocol.json (default: testdata/codex/protocol.json of the source tree it
 //	                                 was built from); every request it knows is checked against it, as the real server
@@ -57,7 +62,10 @@
 // server echoes them. Lines with a "fake" key are directives, not sent to the client:
 //
 //	{"fake":"request","method":"item/commandExecution/requestApproval","params":{...}}
-//	    sends that server request (ids from 1000), waits for the client's answer and logs it
+//	    sends that server request (ids from 1000), waits for the client's answer and logs it; with "wait":false it
+//	    goes on at once (the answer is still logged when it comes)
+//	{"fake":"exit","code":3}
+//	    exits at once with that code
 //	{"fake":"hook","event":"PreToolUse","input":{...}}
 //	    runs the trusted commands config.toml names for that event (it parses only `[[hooks.<Event>]]` matcher groups
 //	    holding `[[hooks.<Event>.hooks]]` handlers with `type = "command"` and `command = "..."`; with --strict-config
@@ -347,17 +355,16 @@ func (s *server) request(w wire) {
 			go s.replay(t, fixture("ATHENA_FAKE_CODEX_LATER_FIXTURE"), userEcho{text: joinText(p.Input), clientID: p.ClientMsgID}, true, false)
 			return
 		}
-		s.turns++
-		t := &turn{id: fmt.Sprintf("turn_fixture_%04d", s.turns), cancelled: make(chan struct{})}
-		s.active = t
-		first := s.turns == 1
 		s.mu.Unlock()
-		s.reply(w.ID, map[string]any{"turn": map[string]any{"id": t.id, "items": []any{}, "status": "inProgress"}})
-		name := "ATHENA_FAKE_CODEX_LATER_FIXTURE"
-		if first {
-			name = "ATHENA_FAKE_CODEX_FIXTURE"
+		echo := userEcho{text: joinText(p.Input), clientID: p.ClientMsgID}
+		if hold := os.Getenv("ATHENA_FAKE_CODEX_HOLD_TURN_START"); hold != "" {
+			go func() { // the reader goes on meanwhile: a turn/interrupt finds no turn
+				waitFile(hold)
+				s.startTurn(w.ID, echo, "")
+			}()
+			return
 		}
-		go s.replay(t, fixture(name), userEcho{text: joinText(p.Input), clientID: p.ClientMsgID}, false, first && os.Getenv("ATHENA_FAKE_CODEX_EXIT_MID_TURN") != "")
+		s.startTurn(w.ID, echo, os.Getenv("ATHENA_FAKE_CODEX_HOLD_TURN_START_REPLY"))
 	case "turn/steer":
 		s.mu.Lock()
 		t := s.active
@@ -426,6 +433,37 @@ func (s *server) request(w wire) {
 		}})
 	default:
 		s.replyError(w.ID, -32601, "method not found: "+w.Method)
+	}
+}
+
+// startTurn starts a turn and answers the turn/start (id) with it; with holdReply, the answer waits until that file
+// exists while the turn runs.
+func (s *server) startTurn(id json.RawMessage, echo userEcho, holdReply string) {
+	s.mu.Lock()
+	s.turns++
+	t := &turn{id: fmt.Sprintf("turn_fixture_%04d", s.turns), cancelled: make(chan struct{})}
+	s.active = t
+	first := s.turns == 1
+	s.mu.Unlock()
+	reply := func() { s.reply(id, map[string]any{"turn": map[string]any{"id": t.id, "items": []any{}, "status": "inProgress"}}) }
+	if holdReply != "" {
+		go func() {
+			waitFile(holdReply)
+			reply()
+		}()
+	} else {
+		reply()
+	}
+	name := "ATHENA_FAKE_CODEX_LATER_FIXTURE"
+	if first {
+		name = "ATHENA_FAKE_CODEX_FIXTURE"
+	}
+	go s.replay(t, fixture(name), echo, false, first && os.Getenv("ATHENA_FAKE_CODEX_EXIT_MID_TURN") != "")
+}
+
+func waitFile(p string) {
+	for !fileExists(p) {
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -519,16 +557,21 @@ func (s *server) replay(t *turn, path string, echo userEcho, steer, exitMid bool
 			Params json.RawMessage `json:"params"`
 			Event  string          `json:"event"`
 			Input  json.RawMessage `json:"input"`
+			Wait   *bool           `json:"wait"`
+			Code   int             `json:"code"`
 		}
 		if json.Unmarshal(l, &line) != nil {
 			continue
 		}
 		switch line.Fake {
 		case "request":
-			if !s.serverRequest(t, line.Method, line.Params) {
+			if !s.serverRequest(t, line.Method, line.Params, line.Wait == nil || *line.Wait) {
 				return
 			}
 			continue
+		case "exit":
+			s.mu.Lock() // whatever was written is flushed: writes happen under mu
+			os.Exit(line.Code)
 		case "hook":
 			if s.runHook(line.Event, line.Input) {
 				dropping = true
@@ -606,7 +649,7 @@ func (s *server) hold(t *turn) bool {
 
 // serverRequest sends a server request and waits for the client's answer (which handleLine logs); false when the turn
 // was interrupted meanwhile.
-func (s *server) serverRequest(t *turn, method string, params json.RawMessage) bool {
+func (s *server) serverRequest(t *turn, method string, params json.RawMessage, wait bool) bool {
 	s.mu.Lock()
 	id := strconv.Itoa(s.nextReq)
 	s.nextReq++
@@ -615,6 +658,9 @@ func (s *server) serverRequest(t *turn, method string, params json.RawMessage) b
 	b, _ := json.Marshal(map[string]any{"id": json.Number(id), "method": method, "params": params})
 	s.writeLineLocked(b)
 	s.mu.Unlock()
+	if !wait {
+		return true
+	}
 	select {
 	case <-ch:
 		return true
@@ -1064,7 +1110,13 @@ func configRead(home, cwd string, layers bool) map[string]any {
 	}
 	list = append(list, map[string]any{"name": map[string]any{"type": "user", "file": userFile, "profile": nil},
 		"version": "sha256:fixture", "config": user.raw(), "disabledReason": nil})
-	res := map[string]any{"config": map[string]any{"features": features, "mcp_servers": servers}, "origins": map[string]any{}}
+	switch os.Getenv("ATHENA_FAKE_CODEX_LAYERS") {
+	case "null":
+		layers = false
+	case "nouser":
+		list = list[:len(list)-1]
+	}
+	res := map[string]any{"config": map[string]any{"features": features, "mcp_servers": servers}, "origins": map[string]any{}, "layers": nil}
 	if layers {
 		res["layers"] = list
 	}

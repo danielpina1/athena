@@ -16,11 +16,18 @@ before any thread starts, Athena checks the session is under its control (§4); 
 (`thread/start`, with the worker's instructions, approvals asked of Athena and the `workspace-write` sandbox, or
 `read-only` for a reviewer) or resumes it (`thread/resume`, which keeps the thread's instructions), and reads the account's
 usage limits once (free). A message sent while a turn runs is steered into it (`turn/steer`). Codex's approvals
-(commands, network access, file changes, more permissions) go to Athena's Approvals; every other request Codex makes of
+(commands, network access, file changes, more permissions) go to Athena's Approvals, showing everything accepting would
+grant (a permissions request's write paths, the paths it would make readable, and network access as host `*`). What
+Athena cannot show in full is declined without asking, and the transcript notes why: input typed into a running
+terminal (Codex's `writeStdin` approval, whose input the request does not carry), a file change whose paths Athena did
+not see, and a permissions request holding anything but plain paths and network access (a special path such as the
+filesystem root, or a field Athena does not know). Every other request Codex makes of
 Athena (a question for the user, an MCP elicitation, a client-side tool call, a token refresh, an attestation, anything
 newer) is answered at once, declined or refused, so a turn never waits on one. The session's transcript keeps what
 Codex printed on its own (notifications and requests), never Codex's answers to Athena, which echo the instructions and
-name the account.
+name the account. Each line is `{"at":"<time>","codex":<what Codex printed>}`, or
+`{"at":"<time>","athena":{"declined":<method>,"id":<request id>,"reason":<why>}}` for an approval Athena declined on its
+own.
 
 ## 2. Install and log in
 
@@ -90,6 +97,10 @@ Codex would run with (`config/read`). It refuses when any feature Athena turns o
 Athena's is configured or Athena's runs another command, or when a repository's `.codex/` layer is loaded at all. Codex
 0.160.1 loads one only for a project the user configuration trusts, which Athena's never does; a loaded one could
 change the model provider, the sandbox or add a notify command, none of which the effective features and servers show.
+The check also fails when Codex does not list its configuration layers, or lists none from Athena's `config.toml` as its
+user configuration. It does not refuse the layers of the machine itself: `/etc/codex/config.toml` (system), macOS
+managed preferences (MDM) and an enterprise-managed configuration are the machine owner's or administrator's, and Athena
+does not check what they set beyond the features and MCP servers above.
 
 ## 5. Sandbox
 

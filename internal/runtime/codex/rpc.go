@@ -43,6 +43,10 @@ type Conn struct {
 	// not log the line itself: it may hold account data.
 	Logf func(format string, args ...any)
 
+	// BeforeRequest, when set before Run, is called on Run's goroutine for each server request just before its handler
+	// is started on a goroutine of its own, so a caller can count the requests being answered without a gap.
+	BeforeRequest func()
+
 	wmu sync.Mutex // serialises writes: a line is written whole
 	w   io.Writer
 
@@ -237,6 +241,9 @@ func (c *Conn) dispatch(line []byte, handle func(Message)) {
 	}
 	m := Message{ID: w.ID, Method: w.Method, Params: w.Params}
 	if len(w.ID) > 0 {
+		if c.BeforeRequest != nil {
+			c.BeforeRequest()
+		}
 		go handle(m)
 		return
 	}

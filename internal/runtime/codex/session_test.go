@@ -514,7 +514,7 @@ func TestApprovalRequestUsesApprove(t *testing.T) {
 			want := []rt.ApprovalRequest{
 				{Kind: "command", Command: "/bin/zsh -lc 'rm -rf build'", Cwd: "/home/user/work", Reason: "Command is outside the sandbox's write roots"},
 				{Kind: "file", Paths: []string{"/home/user/work/a.go"}, Reason: "edit a.go"},
-				{Kind: "permissions", Cwd: "/home/user/work", Reason: "needs the cache", Paths: []string{"/home/user/.cache/x"}},
+				{Kind: "permissions", Cwd: "/home/user/work", Reason: "needs the cache (turns network access on)", Host: "*", Paths: []string{"/home/user/.cache/x"}},
 				{Kind: "network", Command: "curl https://example.com", Cwd: "/home/user/work", Host: "example.com"},
 			}
 			if !reflect.DeepEqual(asked, want) {
@@ -826,6 +826,9 @@ func TestStartRefusesUncontrolledSessions(t *testing.T) {
 		{name: "a project Codex does not load", prepare: project("[features]\nmulti_agent = true\n[mcp_servers.helper]\ncommand = \"/x\"\n")},
 		{name: "a feature turned on in the home", home: func(home string) { editConfig(t, home, "memories = false", "memories = true") },
 			why: "the Codex feature memories is on"},
+		{name: "config/read without its layers", env: []string{"ATHENA_FAKE_CODEX_LAYERS=null"}, why: "Codex did not list its configuration layers"},
+		{name: "config/read without Athena's user layer", env: []string{"ATHENA_FAKE_CODEX_LAYERS=nouser"},
+			why: "Codex does not show Athena's config.toml as its user configuration"},
 		{name: "Athena's MCP server replaced", home: func(home string) {
 			editConfig(t, home, "command = \""+testAthenaBin+"\"\nargs", "command = \"/usr/bin/other\"\nargs")
 		}, why: `Athena's MCP server runs "/usr/bin/other"`},
@@ -908,5 +911,287 @@ func TestStartRefusesIncompleteOptions(t *testing.T) {
 	r := &Runtime{Binary: g.r.Binary, Home: g.r.Home, AthenaBin: g.r.AthenaBin}
 	if _, err := r.Start(context.Background(), g.options(rt.StartOptions{})); err == nil {
 		t.Error("Start without the node's socket")
+	}
+}
+
+// declinedNotes returns the transcript's notes of the approvals the session declined on its own.
+func (g *rig) declinedNotes(t *testing.T) []map[string]any {
+	t.Helper()
+	b, err := os.ReadFile(g.transcript)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []map[string]any
+	for _, l := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		var env struct {
+			Athena map[string]any `json:"athena"`
+		}
+		if json.Unmarshal([]byte(l), &env) == nil && env.Athena != nil {
+			out = append(out, env.Athena)
+		}
+	}
+	return out
+}
+
+func noApprove(t *testing.T) func(context.Context, rt.ApprovalRequest) rt.Verdict {
+	return func(_ context.Context, r rt.ApprovalRequest) rt.Verdict {
+		t.Errorf("Approve was asked %+v, which the session must decline on its own", r)
+		return rt.Verdict{Allow: true}
+	}
+}
+
+// R50 I1, I2, M3: what Athena cannot show the approver in full is declined at once, never asked, and noted in the
+// transcript: input to a running terminal, a file change whose paths are unknown, a permissions request with a special
+// path (here the filesystem root, beside network access) or a field the schema does not have.
+func TestApprovalsAthenaCannotShowAreDeclined(t *testing.T) {
+	const ids = `"threadId":"thr_fixture_0001","turnId":"turn_fixture_0001","startedAtMs":1`
+	req := func(method, params string) string {
+		return `{"fake":"request","method":"` + method + `","params":{` + ids + `,` + params + `}}`
+	}
+	fixture := writeFixture(t, turnStartedLine,
+		req("item/commandExecution/requestApproval", `"itemId":"item_0030","kind":"writeStdin","command":"python3","cwd":"/home/user/work"`),
+		req("item/fileChange/requestApproval", `"itemId":"item_0031","reason":"edit"`),
+		req("item/permissions/requestApproval", `"itemId":"item_0032","cwd":"/home/user/work","permissions":{"network":{"enabled":true},"fileSystem":{"entries":[{"access":"write","path":{"type":"special","value":{"kind":"root"}}}]}}`),
+		req("item/permissions/requestApproval", `"itemId":"item_0033","cwd":"/home/user/work","permissions":{"fileSystem":{"write":["/x"]},"macos":{"accessibility":true}}`),
+		turnCompletedLine)
+	g := newRig(t, "ATHENA_FAKE_CODEX_FIXTURE="+fixture)
+	s := g.start(t, rt.StartOptions{Approve: noApprove(t)})
+	if err := s.Send("go", ""); err != nil {
+		t.Fatal(err)
+	}
+	next(t, s, isTurnEnd)
+	ans := g.answers(t)
+	for id, want := range map[string]any{
+		"1000": map[string]any{"decision": "decline"}, "1001": map[string]any{"decision": "decline"},
+		"1002": map[string]any{"permissions": map[string]any{}}, "1003": map[string]any{"permissions": map[string]any{}},
+	} {
+		if !reflect.DeepEqual(ans[id]["result"], want) {
+			t.Errorf("answer %s = %v, want %v", id, ans[id], want)
+		}
+	}
+	notes := g.declinedNotes(t)
+	if len(notes) != 4 {
+		t.Fatalf("declined notes = %v, want 4", notes)
+	}
+	for i, want := range []string{"writeStdin", "paths are not known", "special path (root)", "cannot read in full"} {
+		if r, _ := notes[i]["reason"].(string); !strings.Contains(r, want) {
+			t.Errorf("note %d = %v, want a reason with %q", i, notes[i], want)
+		}
+	}
+	if notes[0]["declined"] != "item/commandExecution/requestApproval" || notes[0]["id"] != float64(1000) {
+		t.Errorf("note 0 = %v", notes[0])
+	}
+}
+
+func TestDescribePermissions(t *testing.T) {
+	for name, c := range map[string]struct {
+		raw  string
+		want permissionGrant
+		why  string
+	}{
+		"writes, reads, network": {
+			raw: `{"fileSystem":{"write":["/w"],"read":["/r"],"globScanMaxDepth":2,"entries":[` +
+				`{"access":"write","path":{"type":"glob_pattern","pattern":"/g/**"}},{"access":"read","path":{"type":"path","path":"/r2"}},` +
+				`{"access":"deny","path":{"type":"path","path":"/secret"}}]},"network":{"enabled":true}}`,
+			want: permissionGrant{writes: []string{"/w", "/g/**"}, reads: []string{"/r", "/r2"}, network: true},
+		},
+		"network off, nulls":  {raw: `{"fileSystem":null,"network":{"enabled":false}}`},
+		"special tmpdir":      {raw: `{"fileSystem":{"entries":[{"access":"read","path":{"type":"special","value":{"kind":"tmpdir"}}}]}}`, why: "special path (tmpdir)"},
+		"unknown path type":   {raw: `{"fileSystem":{"entries":[{"access":"write","path":{"type":"url","url":"x"}}]}}`, why: "cannot read in full"},
+		"unknown access":      {raw: `{"fileSystem":{"entries":[{"access":"admin","path":{"type":"path","path":"/x"}}]}}`, why: "unknown access (admin)"},
+		"unknown network key": {raw: `{"network":{"enabled":true,"hosts":["*"]}}`, why: "cannot read in full"},
+		"not an object":       {raw: `["root"]`, why: "cannot read in full"},
+		"absent":              {raw: ``, why: "cannot read in full"},
+		"empty path":          {raw: `{"fileSystem":{"entries":[{"access":"write","path":{"type":"path","path":""}}]}}`, why: "empty path"},
+		"two values in a row": {raw: `{} {}`, why: "cannot read in full"},
+	} {
+		g, why := describePermissions(json.RawMessage(c.raw))
+		if c.why != "" {
+			if !strings.Contains(why, c.why) {
+				t.Errorf("%s: why = %q, want %q", name, why, c.why)
+			}
+			continue
+		}
+		if why != "" || !reflect.DeepEqual(g, c.want) {
+			t.Errorf("%s: %+v, %q; want %+v", name, g, why, c.want)
+		}
+	}
+}
+
+// R50 M5: a server request still waiting for Athena when the process exits is declined, and nothing hangs.
+func TestPendingApprovalAtExitIsDeclined(t *testing.T) {
+	fixture := writeFixture(t, turnStartedLine,
+		`{"fake":"request","wait":false,"method":"item/commandExecution/requestApproval","params":{"threadId":"thr_fixture_0001","turnId":"turn_fixture_0001","itemId":"item_0040","startedAtMs":1,"command":"make","cwd":"/home/user/work"}}`,
+		`{"fake":"exit","code":3}`)
+	g := newRig(t, "ATHENA_FAKE_CODEX_FIXTURE="+fixture)
+	asked, ended := make(chan struct{}), make(chan error, 1)
+	s, err := g.r.Start(context.Background(), g.options(rt.StartOptions{Approve: func(ctx context.Context, _ rt.ApprovalRequest) rt.Verdict {
+		close(asked)
+		<-ctx.Done()
+		ended <- ctx.Err()
+		return rt.Verdict{Allow: true}
+	}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Send("go", ""); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		for range s.Events() {
+		}
+		done <- s.Wait()
+	}()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "exit status 3") {
+			t.Fatalf("Wait = %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the session hangs after its process exited with an approval pending")
+	}
+	<-asked
+	select {
+	case err := <-ended:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Approve's context ended with %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the exit did not end Approve's context")
+	}
+	// The request was answered (declined; the dead server cannot read it): nothing is left being answered.
+	sess := s.(*session)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		sess.mu.Lock()
+		n := sess.inflight
+		sess.mu.Unlock()
+		if n == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d requests still being answered", n)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// R50 M5: Send and InterruptTurn racing Close neither hang nor misbehave (run under -race).
+func TestSendAndInterruptRaceClose(t *testing.T) {
+	hold, _ := holdFile(t)
+	g := newRig(t, "ATHENA_FAKE_CODEX_FIXTURE="+fixturePath(t, "simple-turn"), "ATHENA_FAKE_CODEX_LATER_FIXTURE="+fixturePath(t, "steer-turn"), hold)
+	s, err := g.r.Start(context.Background(), g.options(rt.StartOptions{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		for range s.Events() {
+		}
+	}()
+	if err := s.Send("first", ""); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(2)
+		go func() { defer wg.Done(); _ = s.Send("more", "") }()
+		go func() { defer wg.Done(); _ = s.InterruptTurn() }()
+	}
+	wg.Add(1)
+	go func() { defer wg.Done(); _ = s.Close() }()
+	all := make(chan struct{})
+	go func() { wg.Wait(); close(all) }()
+	select {
+	case <-all:
+	case <-time.After(20 * time.Second):
+		t.Fatal("Send, InterruptTurn or Close hangs")
+	}
+	_ = s.Wait()
+	if err := s.Send("after", ""); !errors.Is(err, rt.ErrExited) {
+		t.Fatalf("Send after Close = %v", err)
+	}
+	if err := s.InterruptTurn(); !errors.Is(err, rt.ErrExited) {
+		t.Fatalf("InterruptTurn after Close = %v", err)
+	}
+}
+
+// R50 M5: Codex names a turn (turn/started) before it answers the turn/start; an interrupt then goes out at once,
+// without waiting for the answer.
+func TestInterruptBeforeTheTurnStartAnswer(t *testing.T) {
+	release := filepath.Join(t.TempDir(), "reply")
+	g := newRig(t, "ATHENA_FAKE_CODEX_FIXTURE="+fixturePath(t, "simple-turn"), "ATHENA_FAKE_CODEX_HOLD_TURN_START_REPLY="+release,
+		"ATHENA_FAKE_CODEX_HOLD_RESULT="+filepath.Join(t.TempDir(), "never"))
+	s := g.start(t, rt.StartOptions{})
+	sent := make(chan error, 1)
+	go func() { sent <- s.Send("go", "") }()
+	next(t, s, echoOf("go")) // turn/started came: the turn has its id, its answer has not
+	if err := s.InterruptTurn(); err != nil {
+		t.Fatal(err)
+	}
+	if end := turnEnd(next(t, s, isTurnEnd)); end.Subtype != "interrupted" {
+		t.Fatalf("TurnEnd = %+v", end)
+	}
+	if err := os.WriteFile(release, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-sent; err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if reqs := g.requests(t, "turn/interrupt"); len(reqs) != 1 || params(reqs[0])["turnId"] != "turn_fixture_0001" {
+		t.Fatalf("turn/interrupt requests = %v", reqs)
+	}
+	// The late answer does not revive the turn that ended: a message now starts a new one.
+	s.(*session).mu.Lock()
+	active := s.(*session).activeTurn
+	s.(*session).mu.Unlock()
+	if active != "" {
+		t.Fatalf("active turn = %q after the turn ended", active)
+	}
+}
+
+// R50 M8: an interrupt while a turn/start waits for Codex, before Codex has named the turn, is kept and sent as soon as
+// the turn has an id.
+func TestInterruptWhileTheTurnStarts(t *testing.T) {
+	release := filepath.Join(t.TempDir(), "start")
+	g := newRig(t, "ATHENA_FAKE_CODEX_FIXTURE="+fixturePath(t, "simple-turn"), "ATHENA_FAKE_CODEX_HOLD_TURN_START="+release,
+		"ATHENA_FAKE_CODEX_HOLD_RESULT="+filepath.Join(t.TempDir(), "never"))
+	s := g.start(t, rt.StartOptions{})
+	sent := make(chan error, 1)
+	go func() { sent <- s.Send("go", "") }()
+	sess := s.(*session)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		sess.mu.Lock()
+		starting := sess.starting
+		sess.mu.Unlock()
+		if starting {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the turn/start never went out")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err := s.InterruptTurn(); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(g.requests(t, "turn/interrupt")); n != 0 {
+		t.Fatalf("an interrupt went out with no turn named (%d)", n)
+	}
+	if err := os.WriteFile(release, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-sent; err != nil {
+		t.Fatal(err)
+	}
+	if end := turnEnd(next(t, s, isTurnEnd)); end.Subtype != "interrupted" {
+		t.Fatalf("TurnEnd = %+v, want the started turn interrupted", end)
+	}
+	if reqs := g.requests(t, "turn/interrupt"); len(reqs) != 1 || params(reqs[0])["turnId"] != "turn_fixture_0001" {
+		t.Fatalf("turn/interrupt requests = %v", reqs)
 	}
 }

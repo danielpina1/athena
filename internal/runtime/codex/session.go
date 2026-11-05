@@ -61,11 +61,16 @@ type session struct {
 	trMu sync.Mutex // the translator is fed by the reader, and seeded with the quota by startSession
 	tr   *Translator
 
+	transcript *rt.Transcript // where the session notes the approvals it declines on its own
+
 	mu         sync.Mutex
 	activeTurn string              // the turn running now ("" between turns), from turn/started and turn/completed
 	lastEnded  string              // the turn that ended last, so a late turn/start response does not revive it
 	items      map[string]itemInfo // the tool items in flight, by id, for the approvals that name only the item
-	inflight   int                 // server requests being answered
+	starting   bool                // a turn/start is waiting for its answer
+	interrupt  bool                // InterruptTurn came while starting: interrupt the turn once it is named
+	inflight   int                 // server requests being answered: counted before their goroutine starts
+	answered   chan struct{}       // closed when inflight drops to 0 (nil while it is 0)
 
 	sendMu    sync.Mutex // one Send at a time: a steer's fallback must not race another message
 	closed    atomic.Bool
@@ -111,10 +116,11 @@ func startSession(ctx context.Context, r *Runtime, o rt.StartOptions) (rt.Sessio
 	sctx, cancel := context.WithCancel(context.Background())
 	s := &session{
 		proc: p, q: rt.NewQueue[rt.Event](), approve: o.Approve, sandbox: sandboxPolicy(o),
-		ctx: sctx, cancel: cancel, tr: NewTranslator(), items: map[string]itemInfo{},
+		ctx: sctx, cancel: cancel, tr: NewTranslator(), transcript: o.Transcript, items: map[string]itemInfo{},
 		closedCh: make(chan struct{}), done: make(chan struct{}),
 	}
 	s.conn = NewConn(p.Stdout(), p.Stdin(), envelope(o.Transcript))
+	s.conn.BeforeRequest = s.requestStarted
 	ran := make(chan struct{})
 	go func() {
 		defer close(ran)
@@ -315,10 +321,11 @@ type configRead struct {
 			Command string `json:"command"`
 		} `json:"mcp_servers"`
 	} `json:"config"`
-	Layers []struct {
+	Layers *[]struct {
 		Name struct {
 			Type           string `json:"type"`
 			DotCodexFolder string `json:"dotCodexFolder"`
+			File           string `json:"file"`
 		} `json:"name"`
 		DisabledReason *string `json:"disabledReason"`
 	} `json:"layers"`
@@ -328,7 +335,9 @@ type configRead struct {
 // ErrConfigUncontrolled, when one of the features Athena turns off is not off, when an MCP server other than Athena's
 // is configured or Athena's runs another command, or when a repository's .codex/ layer is loaded at all (Codex loads one
 // only for a project the user config trusts, and Athena's never does: such a layer could change the model provider,
-// the sandbox or a notify command, which the effective features and servers do not show).
+// the sandbox or a notify command, which the effective features and servers do not show). It fails closed when Codex
+// does not list its layers, or lists no enabled user layer from Athena's config.toml. The system, MDM and
+// enterprise-managed layers are the machine's owner's or administrator's, and are not refused (docs/dev/codex.md §4).
 func checkConfig(ctx context.Context, c *Conn, dir string, home Home) error {
 	var res configRead
 	if err := c.Call(ctx, "config/read", map[string]any{"cwd": dir, "includeLayers": true}, &res); err != nil {
@@ -359,18 +368,30 @@ func checkConfig(ctx context.Context, c *Conn, dir string, home Home) error {
 	case athena.Command != home.AthenaBin:
 		return ErrConfigUncontrolled{Why: fmt.Sprintf("Athena's MCP server runs %q, not %q", athena.Command, home.AthenaBin)}
 	}
-	for _, l := range res.Layers {
-		if l.Name.Type == "project" && l.DisabledReason == nil {
+	if res.Layers == nil {
+		return ErrConfigUncontrolled{Why: "Codex did not list its configuration layers"}
+	}
+	user := false
+	for _, l := range *res.Layers {
+		switch {
+		case l.DisabledReason != nil:
+		case l.Name.Type == "project":
 			return ErrConfigUncontrolled{Why: fmt.Sprintf("a repository's Codex settings are loaded (%s)", l.Name.DotCodexFolder)}
+		case l.Name.Type == "user":
+			user = user || samePath(l.Name.File, filepath.Join(home.Dir, configName))
 		}
+	}
+	if !user {
+		return ErrConfigUncontrolled{Why: "Codex does not show Athena's config.toml as its user configuration"}
 	}
 	return nil
 }
 
-// handle is the Conn's handler: a server request is answered (on its own goroutine, Conn's), a notification updates
-// the turn and item state and becomes events.
+// handle is the Conn's handler: a server request is answered (on its own goroutine, Conn's, counted by
+// requestStarted before it), a notification updates the turn and item state and becomes events.
 func (s *session) handle(m Message) {
 	if len(m.ID) > 0 {
+		defer s.requestDone()
 		s.serve(m)
 		return
 	}
@@ -381,6 +402,43 @@ func (s *session) handle(m Message) {
 	// The session's Init comes from thread/start's (or thread/resume's) answer, once; thread/started repeats it.
 	evs = slices.DeleteFunc(evs, func(e rt.Event) bool { _, init := e.(rt.Init); return init })
 	s.q.Push(evs...)
+}
+
+// requestStarted counts a server request; Conn calls it on its reader before the request's goroutine starts, so Close
+// never misses one that was read.
+func (s *session) requestStarted() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.inflight == 0 {
+		s.answered = make(chan struct{})
+	}
+	s.inflight++
+}
+
+// requestDone ends the count requestStarted began.
+func (s *session) requestDone() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.inflight--; s.inflight == 0 {
+		close(s.answered)
+		s.answered = nil
+	}
+}
+
+// waitAnswered waits up to d for the server requests being answered to be answered.
+func (s *session) waitAnswered(d time.Duration) {
+	s.mu.Lock()
+	ch := s.answered
+	s.mu.Unlock()
+	if ch == nil {
+		return
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ch:
+	case <-t.C:
+	}
 }
 
 // track follows the active turn and the tool items an approval may name.
@@ -404,8 +462,12 @@ func (s *session) track(m Message) {
 	switch m.Method {
 	case "turn/started":
 		s.activeTurn = p.Turn.ID
+		if s.interrupt { // InterruptTurn came before the turn had a name
+			s.interrupt = false
+			go func() { _ = s.interruptTurn(p.Turn.ID) }()
+		}
 	case "turn/completed":
-		s.activeTurn, s.lastEnded = "", p.Turn.ID
+		s.activeTurn, s.lastEnded, s.interrupt = "", p.Turn.ID, false
 	case "item/started":
 		switch p.Item.Type {
 		case "commandExecution":
@@ -424,14 +486,6 @@ func (s *session) track(m Message) {
 
 // serve answers one server request, once.
 func (s *session) serve(m Message) {
-	s.mu.Lock()
-	s.inflight++
-	s.mu.Unlock()
-	defer func() {
-		s.mu.Lock()
-		s.inflight--
-		s.mu.Unlock()
-	}()
 	result, rerr := s.answer(m)
 	if rerr != nil {
 		_ = s.conn.RespondError(m.ID, rerr.Code, rerr.Message)
@@ -443,8 +497,11 @@ func (s *session) serve(m Message) {
 // answer is the response to a server request, in the shape its method's response takes, or the JSON-RPC error it is
 // refused with:
 //
-//   - the command, file-change and permissions approvals go to Approve; a declined, cancelled (Close) or unanswerable
-//     (no Approve) one is declined;
+//   - the command, file-change and permissions approvals go to Approve, with everything accepting would grant; a
+//     declined, cancelled (Close, the process's exit) or unanswerable (no Approve) one is declined. Declined at once,
+//     without asking, and noted in the transcript (declined): what Athena cannot show the approver in full, which is
+//     input to a running terminal (writeStdin), a file change whose paths are unknown, and a permissions request
+//     holding anything but plain paths and network access;
 //   - an MCP elicitation and a dynamic tool call are declined at once: no person waits inside a turn (the worker asks
 //     through its report), and Athena gives the model no client-side tools;
 //   - the legacy (v1) approvals are denied at once: Athena's sessions speak v2, so one is not Athena's to approve;
@@ -455,6 +512,7 @@ func (s *session) answer(m Message) (any, *RPCError) {
 	case "item/commandExecution/requestApproval":
 		var p struct {
 			ItemID  string  `json:"itemId"`
+			Kind    string  `json:"kind"`
 			Command *string `json:"command"`
 			Cwd     *string `json:"cwd"`
 			Reason  *string `json:"reason"`
@@ -463,6 +521,10 @@ func (s *session) answer(m Message) (any, *RPCError) {
 			} `json:"networkApprovalContext"`
 		}
 		_ = json.Unmarshal(m.Params, &p)
+		if p.Kind != "" && p.Kind != "command" {
+			s.declined(m, "input to a running terminal ("+p.Kind+"), which the request does not show")
+			return map[string]any{"decision": "decline"}, nil
+		}
 		req := rt.ApprovalRequest{Kind: "command", Command: deref(p.Command), Cwd: deref(p.Cwd), Reason: deref(p.Reason)}
 		if req.Command == "" {
 			req.Command = s.item(p.ItemID).command
@@ -479,6 +541,10 @@ func (s *session) answer(m Message) (any, *RPCError) {
 		}
 		_ = json.Unmarshal(m.Params, &p)
 		req := rt.ApprovalRequest{Kind: "file", Paths: slices.Clone(s.item(p.ItemID).paths), Reason: deref(p.Reason)}
+		if len(req.Paths) == 0 {
+			s.declined(m, "a file change whose paths are not known")
+			return map[string]any{"decision": "decline"}, nil
+		}
 		if root := deref(p.GrantRoot); root != "" {
 			// Accepting also lets the session write under root for the rest of the session: the approver must see it.
 			req.Paths = append(req.Paths, root)
@@ -492,11 +558,28 @@ func (s *session) answer(m Message) (any, *RPCError) {
 			Permissions json.RawMessage `json:"permissions"`
 		}
 		_ = json.Unmarshal(m.Params, &p)
-		req := rt.ApprovalRequest{Kind: "permissions", Cwd: p.Cwd, Reason: deref(p.Reason), Paths: writePaths(p.Permissions)}
-		if !s.decide(req) || len(p.Permissions) == 0 {
+		grant, why := describePermissions(p.Permissions)
+		if why != "" {
+			s.declined(m, "a permissions request holding "+why)
 			return map[string]any{"permissions": map[string]any{}}, nil // nothing granted
 		}
-		// Granted for this turn only: what was asked, as asked (the request and grant profiles have one shape).
+		req := rt.ApprovalRequest{Kind: "permissions", Cwd: p.Cwd, Paths: grant.writes, Reason: deref(p.Reason)}
+		var also []string
+		if len(grant.reads) > 0 {
+			also = append(also, "makes readable: "+strings.Join(grant.reads, ", "))
+		}
+		if grant.network {
+			req.Host = "*"
+			also = append(also, "turns network access on")
+		}
+		if len(also) > 0 {
+			req.Reason = strings.TrimSpace(strings.TrimSuffix(req.Reason, ".") + " (" + strings.Join(also, "; ") + ")")
+		}
+		if !s.decide(req) {
+			return map[string]any{"permissions": map[string]any{}}, nil
+		}
+		// Granted for this turn only: what was asked, all of which the approver saw (the request and grant profiles
+		// have one shape).
 		return map[string]any{"permissions": p.Permissions, "scope": "turn"}, nil
 	case "mcpServer/elicitation/request":
 		return map[string]any{"action": "decline"}, nil
@@ -508,6 +591,18 @@ func (s *session) answer(m Message) (any, *RPCError) {
 		return nil, &RPCError{Code: -32000, Message: "athena: no person answers inside a turn; ask through Athena's report tool"}
 	}
 	return nil, &RPCError{Code: -32601, Message: "athena: " + m.Method + " is not supported"}
+}
+
+// declined notes in the transcript an approval the session declined on its own, and why, as
+// {"at":"<RFC3339Nano>","athena":{"declined":<method>,"id":<request id>,"reason":<why>}}.
+func (s *session) declined(m Message, why string) {
+	b, err := json.Marshal(map[string]any{
+		"at":     time.Now().UTC().Format(time.RFC3339Nano),
+		"athena": map[string]any{"declined": m.Method, "id": m.ID, "reason": "Athena declines " + why},
+	})
+	if err == nil {
+		s.transcript.Append(b)
+	}
 }
 
 func (s *session) item(id string) itemInfo {
@@ -546,38 +641,81 @@ func deref(p *string) string {
 	return *p
 }
 
-// writePaths are the paths a permissions request asks to write: its legacy write list and its write entries.
-func writePaths(perms json.RawMessage) []string {
+// permissionGrant is everything accepting a permissions request grants: paths to write, paths to read, network.
+type permissionGrant struct {
+	writes, reads []string
+	network       bool
+}
+
+// describePermissions reads a permissions request's profile (0.160.1's RequestPermissionProfile) into everything
+// accepting it would grant. why is set, and the request must be declined, when the profile holds anything else: a
+// special path (the filesystem root, the temporary directory, the project roots), a field the schema Athena knows does
+// not have, an access other than read, write or deny, or a shape it cannot read. A deny entry only takes access away.
+func describePermissions(raw json.RawMessage) (g permissionGrant, why string) {
 	var p struct {
 		FileSystem *struct {
-			Write   []string `json:"write"`
 			Entries []struct {
 				Access string `json:"access"`
 				Path   struct {
-					Path    string `json:"path"`
-					Pattern string `json:"pattern"`
+					Type    string          `json:"type"`
+					Path    string          `json:"path"`
+					Pattern string          `json:"pattern"`
+					Value   json.RawMessage `json:"value"`
 				} `json:"path"`
 			} `json:"entries"`
+			GlobScanMaxDepth *uint64  `json:"globScanMaxDepth"`
+			Read             []string `json:"read"`
+			Write            []string `json:"write"`
 		} `json:"fileSystem"`
+		Network *struct {
+			Enabled *bool `json:"enabled"`
+		} `json:"network"`
 	}
-	if json.Unmarshal(perms, &p) != nil || p.FileSystem == nil {
-		return nil
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&p); err != nil || dec.More() {
+		return g, "a profile Athena cannot read in full"
 	}
-	paths := slices.Clone(p.FileSystem.Write)
-	for _, e := range p.FileSystem.Entries {
-		if e.Access != "write" {
-			continue
+	if fs := p.FileSystem; fs != nil {
+		g.writes, g.reads = slices.Clone(fs.Write), slices.Clone(fs.Read)
+		for _, e := range fs.Entries {
+			var path string
+			switch e.Path.Type {
+			case "path":
+				path = e.Path.Path
+			case "glob_pattern":
+				path = e.Path.Pattern
+			case "special":
+				var v struct {
+					Kind string `json:"kind"`
+				}
+				_ = json.Unmarshal(e.Path.Value, &v)
+				return g, "a special path (" + v.Kind + ")"
+			default:
+				return g, "a path of an unknown type (" + e.Path.Type + ")"
+			}
+			if path == "" {
+				return g, "an empty path"
+			}
+			switch e.Access {
+			case "write":
+				g.writes = append(g.writes, path)
+			case "read":
+				g.reads = append(g.reads, path)
+			case "deny":
+			default:
+				return g, "an unknown access (" + e.Access + ")"
+			}
 		}
-		if e.Path.Path != "" {
-			paths = append(paths, e.Path.Path)
-		} else if e.Path.Pattern != "" {
-			paths = append(paths, e.Path.Pattern)
-		}
 	}
-	return paths
+	if p.Network != nil && p.Network.Enabled != nil && *p.Network.Enabled {
+		g.network = true
+	}
+	return g, ""
 }
 
-// Events returns the session's events in order (see rt.Session).
+// Events returns the session's events in order (see rt.Session). Init is not necessarily the first: what Codex
+// notifies before the thread/start answer comes before it.
 func (s *session) Events() <-chan rt.Event { return s.q.Out() }
 
 // Send starts a turn with the message, or between a turn's start and its end steers it into the running turn
@@ -612,14 +750,25 @@ func (s *session) Send(text, uuid string) error {
 			ID string `json:"id"`
 		} `json:"turn"`
 	}
-	if err := s.call("turn/start", params, &res); err != nil {
+	s.mu.Lock()
+	s.starting = true
+	s.mu.Unlock()
+	err := s.call("turn/start", params, &res)
+	s.mu.Lock()
+	id, live := res.Turn.ID, err == nil && res.Turn.ID != "" && res.Turn.ID != s.lastEnded
+	if live {
+		s.activeTurn = id
+	}
+	// An InterruptTurn that came before the turn had a name (and before turn/started named it) is for this turn.
+	interrupt := s.interrupt && live
+	s.starting, s.interrupt = false, false
+	s.mu.Unlock()
+	if err != nil {
 		return err
 	}
-	s.mu.Lock()
-	if res.Turn.ID != "" && res.Turn.ID != s.lastEnded {
-		s.activeTurn = res.Turn.ID
+	if interrupt {
+		_ = s.interruptTurn(id)
 	}
-	s.mu.Unlock()
 	return nil
 }
 
@@ -635,22 +784,31 @@ func steerRefused(err error) bool {
 		strings.Contains(msg, "cannot steer") || bytes.Contains(re.Data, []byte("activeTurnNotSteerable"))
 }
 
-// InterruptTurn interrupts the running turn (turn/interrupt), which then ends "interrupted"; with no turn running it
-// does nothing.
+// InterruptTurn interrupts the running turn (turn/interrupt), which then ends "interrupted". While a turn/start waits
+// for its answer, the turn is interrupted as soon as Codex names it (turn/started, or the answer); with no turn running
+// or starting it does nothing.
 func (s *session) InterruptTurn() error {
 	if err := s.usable(); err != nil {
 		return err
 	}
 	s.mu.Lock()
 	active := s.activeTurn
+	if active == "" && s.starting {
+		s.interrupt = true
+	}
 	s.mu.Unlock()
 	if active == "" {
 		return nil
 	}
-	err := s.call("turn/interrupt", map[string]any{"threadId": s.threadID, "turnId": active}, nil)
+	return s.interruptTurn(active)
+}
+
+// interruptTurn sends turn/interrupt for turn; a turn that ended meanwhile is not an error.
+func (s *session) interruptTurn(turn string) error {
+	err := s.call("turn/interrupt", map[string]any{"threadId": s.threadID, "turnId": turn}, nil)
 	var re *RPCError
 	if errors.As(err, &re) && strings.Contains(strings.ToLower(re.Message), "no active turn") {
-		return nil // it ended meanwhile
+		return nil
 	}
 	return err
 }
@@ -691,8 +849,9 @@ func (s *session) call(method string, params, result any) error {
 	return fmt.Errorf("codex %s: %w", method, err)
 }
 
-// Close declines the approvals still waiting (their Approve context ends), closes the input, waits up to the close
-// grace for the process to exit, then kills its process group. It is idempotent.
+// Close declines the approvals still waiting (their Approve context ends), waits up to a second for those answers to
+// be written, closes the input, waits up to the close grace for the process to exit, then kills its process group. It
+// is idempotent.
 func (s *session) Close() error {
 	s.closeOnce.Do(func() {
 		s.closed.Store(true)
@@ -702,20 +861,6 @@ func (s *session) Close() error {
 		close(s.closedCh)
 	})
 	return nil
-}
-
-// waitAnswered waits up to d for the server requests being answered to be answered.
-func (s *session) waitAnswered(d time.Duration) {
-	deadline := time.Now().Add(d)
-	for {
-		s.mu.Lock()
-		n := s.inflight
-		s.mu.Unlock()
-		if n == 0 || time.Now().After(deadline) {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
 }
 
 // Wait blocks until the process has exited and Events is closed, and returns the process's exit error.
