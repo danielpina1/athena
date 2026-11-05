@@ -16,9 +16,6 @@ import (
 // exec_command, apply_patch, web_search, update_plan and mcp__<server>__<tool>. Details follow the Claude tools':
 // a tool_call's detail is its input; an exec_command tool_result's detail is {"exitCode":n}.
 
-// resultPreCutBytes bounds what is stripped and redacted of a command's output: only ResultMaxBytes of it is shown.
-const resultPreCutBytes = 64 << 10
-
 var (
 	ansiCSI   = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]`)
 	ansiOSC   = regexp.MustCompile(`\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)`)
@@ -34,6 +31,14 @@ func stripANSI(s string) string {
 	s = ansiOSC.ReplaceAllString(s, "")
 	s = ansiCSI.ReplaceAllString(s, "")
 	return ansiOther.ReplaceAllString(s, "")
+}
+
+// approvalRequests are the server requests that ask for an approval: the dashboard shows the Approval itself. The
+// requests Athena refuses (item/tool/requestUserInput, mcpServer/elicitation/request, item/tool/call, ...) render as
+// "other" items naming the method, which explains the decline that follows.
+var approvalRequests = map[string]bool{
+	"item/commandExecution/requestApproval": true, "item/fileChange/requestApproval": true,
+	"item/permissions/requestApproval": true, "applyPatchApproval": true, "execCommandApproval": true,
 }
 
 type codexItem struct {
@@ -61,7 +66,7 @@ type codexItem struct {
 }
 
 // codexItems renders one Codex line (the value of the envelope's "codex" key); the caller adds offset and time.
-func codexItems(raw json.RawMessage) []*athenav1.StreamItem {
+func codexItems(raw json.RawMessage, offset int64) []*athenav1.StreamItem {
 	var m struct {
 		Method string          `json:"method"`
 		Params json.RawMessage `json:"params"`
@@ -71,7 +76,7 @@ func codexItems(raw json.RawMessage) []*athenav1.StreamItem {
 	}
 	switch {
 	case m.Method == "turn/started", m.Method == "thread/tokenUsage/updated", m.Method == "account/rateLimits/updated",
-		m.Method == "serverRequest/resolved", strings.HasPrefix(m.Method, "hook/"),
+		m.Method == "serverRequest/resolved", m.Method == "thread/status/changed", approvalRequests[m.Method], strings.HasPrefix(m.Method, "hook/"),
 		strings.HasPrefix(m.Method, "item/") && (strings.HasSuffix(m.Method, "Delta") || strings.HasSuffix(m.Method, "/delta") || strings.HasSuffix(m.Method, "/summaryPartAdded")):
 		return nil
 	}
@@ -100,9 +105,9 @@ func codexItems(raw json.RawMessage) []*athenav1.StreamItem {
 		_ = json.Unmarshal(m.Params, &p)
 		steps := make([]map[string]any, 0, len(p.Plan))
 		for _, s := range p.Plan {
-			steps = append(steps, map[string]any{"step": s["step"], "status": s["status"]})
+			steps = append(steps, map[string]any{"step": s["step"], "status": planStatus(s["status"])})
 		}
-		return []*athenav1.StreamItem{planItem("", steps)}
+		return planItems(fmt.Sprintf("plan-%d", offset), steps)
 	case "turn/completed":
 		var p struct {
 			Turn struct {
@@ -179,8 +184,11 @@ func codexThreadItem(it codexItem, done bool) []*athenav1.StreamItem {
 			out = *it.AggregatedOutput
 		}
 		r := &athenav1.StreamItem{Kind: "tool_result", ToolUseId: it.ID,
-			Text:    redactCut(stripANSI(cut(out, resultPreCutBytes)), ResultMaxBytes),
+			Text:    redactCut(stripANSI(out), ResultMaxBytes),
 			IsError: failed || (it.ExitCode != nil && *it.ExitCode != 0)}
+		if r.Text == "" && r.IsError {
+			r.Text = Clip(it.Status, toolInputMaxRunes)
+		}
 		if it.ExitCode != nil {
 			r.Detail = fmt.Sprintf(`{"exitCode":%d}`, *it.ExitCode)
 		}
@@ -204,7 +212,7 @@ func codexThreadItem(it codexItem, done bool) []*athenav1.StreamItem {
 		return one(&athenav1.StreamItem{Kind: "tool_call", Tool: "apply_patch", ToolUseId: it.ID, Text: Clip(strings.Join(paths, ", "), toolInputMaxRunes),
 			Detail: detailJSON(map[string]any{"changes": changes})})
 	case "mcpToolCall":
-		tool := "mcp__" + it.Server + "__" + it.Tool
+		tool := "mcp__" + toolPart(it.Server) + "__" + toolPart(it.Tool)
 		if !done {
 			return one(&athenav1.StreamItem{Kind: "tool_call", Tool: tool, ToolUseId: it.ID, Text: summarizeInput(it.Arguments, toolInputMaxRunes), Detail: toolDetail(it.Arguments)})
 		}
@@ -226,11 +234,14 @@ func codexThreadItem(it codexItem, done bool) []*athenav1.StreamItem {
 			_ = json.Unmarshal(it.Result, &res)
 			text = resultText(res.Content)
 		}
-		return one(&athenav1.StreamItem{Kind: "tool_result", ToolUseId: it.ID, IsError: isErr, Text: redactCut(stripANSI(cut(text, resultPreCutBytes)), ResultMaxBytes)})
+		return one(&athenav1.StreamItem{Kind: "tool_result", ToolUseId: it.ID, IsError: isErr, Text: redactCut(stripANSI(text), ResultMaxBytes)})
 	case "webSearch":
-		if !done {
-			return one(&athenav1.StreamItem{Kind: "tool_call", Tool: "web_search", ToolUseId: it.ID, Text: Clip(it.Query, toolInputMaxRunes),
-				Detail: detailJSON(map[string]any{"query": it.Query})})
+		// The query is known at the end (the start may carry none), so the call and its result come from the completed item.
+		if done {
+			return []*athenav1.StreamItem{
+				{Kind: "tool_call", Tool: "web_search", ToolUseId: it.ID, Text: Clip(it.Query, toolInputMaxRunes), Detail: detailJSON(map[string]any{"query": it.Query})},
+				{Kind: "tool_result", ToolUseId: it.ID, Text: "ok"},
+			}
 		}
 	case "plan":
 		if !done {
@@ -242,7 +253,7 @@ func codexThreadItem(it codexItem, done bool) []*athenav1.StreamItem {
 				steps = append(steps, map[string]any{"step": l})
 			}
 		}
-		return one(planItem(it.ID, steps))
+		return planItems(it.ID, steps)
 	default:
 		if done {
 			return one(&athenav1.StreamItem{Kind: "other", Text: Clip("codex item "+it.Type, toolInputMaxRunes)})
@@ -251,16 +262,38 @@ func codexThreadItem(it codexItem, done bool) []*athenav1.StreamItem {
 	return nil
 }
 
-func planItem(id string, steps []map[string]any) *athenav1.StreamItem {
-	return &athenav1.StreamItem{Kind: "tool_call", Tool: "update_plan", ToolUseId: id, Text: fmt.Sprintf("%d steps", len(steps)),
-		Detail: detailJSON(map[string]any{"steps": steps})}
+// planItems is the update_plan call and its result (Codex gives none, and a call without one shows as running).
+func planItems(id string, steps []map[string]any) []*athenav1.StreamItem {
+	return []*athenav1.StreamItem{
+		{Kind: "tool_call", Tool: "update_plan", ToolUseId: id, Text: fmt.Sprintf("%d steps", len(steps)), Detail: detailJSON(map[string]any{"steps": steps})},
+		{Kind: "tool_result", ToolUseId: id, Text: "ok"},
+	}
 }
 
-// detailOf is toolDetail of a map built here: masked, clipped and bounded like a Claude tool's input.
+// planStatus names a step's status as the dashboard's to-do marks do: pending, in_progress, completed.
+func planStatus(v any) any {
+	if v == "inProgress" {
+		return "in_progress"
+	}
+	return v
+}
+
+// detailJSON is toolDetail of a map built here: masked, clipped and bounded like a Claude tool's input.
 func detailJSON(v map[string]any) string {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return ""
 	}
 	return toolDetail(b)
+}
+
+var badToolChar = regexp.MustCompile(`[^A-Za-z0-9_.-]`)
+
+// toolPart makes a server or tool name safe to show as part of a tool name: word characters only, at most 64.
+func toolPart(s string) string {
+	s = badToolChar.ReplaceAllString(s, "_")
+	if len(s) > 64 {
+		s = s[:64]
+	}
+	return s
 }

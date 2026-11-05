@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/danielpina1/athena/internal/pb/athenav1"
@@ -62,7 +63,7 @@ func (r *Renderer) Render(line []byte) []LogLine {
 		}
 	}
 	if len(head.Codex) > 0 || len(head.Athena) > 0 {
-		return r.renderOther(line, head.At, len(head.Codex) > 0, head.Codex)
+		return r.renderOther(line, head.At, head.Codex)
 	}
 	evs, err := claude.ParseEvents(line)
 	if err != nil {
@@ -83,37 +84,32 @@ func (r *Renderer) Render(line []byte) []LogLine {
 		}
 		kind, text := describe(ev, head.Type, subtype)
 		// Values were masked before they were cut; a last pass catches anything a cut put back together.
-		out = append(out, LogLine{At: r.last, Kind: kind, Text: redact.String(text)})
+		out = append(out, LogLine{At: r.last, Kind: kind, Text: redact.String(cleanText(text))})
 	}
 	return out
 }
 
 // renderOther renders a Codex envelope or an Athena line from the items the dashboard shows, in the shorter words of the
 // log: a tool call is its tool and what it did, a tool result only whether it worked.
-func (r *Renderer) renderOther(line []byte, at string, isCodex bool, codexLine json.RawMessage) []LogLine {
+func (r *Renderer) renderOther(line []byte, at string, codexLine json.RawMessage) []LogLine {
 	if t, err := time.Parse(time.RFC3339Nano, at); err == nil {
 		r.last = t
 	}
 	var items []*athenav1.StreamItem
-	if isCodex {
-		items = codexItems(codexLine)
+	if len(codexLine) > 0 {
+		items = codexItems(codexLine, 0)
 	} else {
-		var m struct {
-			Athena string `json:"athena"`
-			At     string `json:"at"`
-		}
 		items = athenaItems(line)
-		if json.Unmarshal(line, &m) == nil && m.Athena == "session" && len(items) == 1 {
-			// a marker: "<runtime> session: <model> · <reason>"
-			items[0].Kind, items[0].Text = "other", items[0].Tool+" session: "+items[0].Text
-		}
 	}
 	out := make([]LogLine, 0, len(items))
 	for _, it := range items {
 		var kind, text string
 		switch it.Kind {
 		case "init":
-			kind, text = "init", it.Text
+			kind, text = "init", Clip(it.Text, sayMaxRunes)
+		case "runtime":
+			// a session marker: "<runtime> session: <model> · <reason>"
+			kind, text = "other", it.Tool+" session: "+Clip(it.Text, sayMaxRunes)
 		case "say":
 			kind, text = "say", Clip(it.Text, sayMaxRunes)
 		case "thinking":
@@ -135,7 +131,7 @@ func (r *Renderer) renderOther(line []byte, at string, isCodex bool, codexLine j
 		default:
 			kind, text = "other", Clip(it.Text, sayMaxRunes)
 		}
-		out = append(out, LogLine{At: r.last, Kind: kind, Text: redact.String(text)})
+		out = append(out, LogLine{At: r.last, Kind: kind, Text: redact.String(cleanText(text))})
 	}
 	return out
 }
@@ -235,6 +231,17 @@ func sensitiveKey(k string) bool {
 		return true
 	}
 	return redact.SecretName(k)
+}
+
+// cleanText strips terminal escape sequences from s and turns its other control characters into spaces: a log line is
+// printed to a terminal, and what a session wrote must never move its cursor, set its title or start another line.
+func cleanText(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, stripANSI(s))
 }
 
 // Clip makes s one line, masks the secrets in it and cuts it to n runes.

@@ -1,7 +1,6 @@
 package render
 
 import (
-	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -65,7 +64,7 @@ func TestCodexToolTurnItems(t *testing.T) {
 		{"tool_call", "exec_command"}, {"tool_result", ""},
 		{"tool_call", "apply_patch"}, {"tool_result", ""},
 		{"tool_call", "mcp__athena__report"}, {"tool_result", ""},
-		{"tool_call", "web_search"},
+		{"tool_call", "web_search"}, {"tool_result", ""},
 		{"say", ""}, {"result", ""},
 	}
 	if len(got) != len(exp) {
@@ -116,10 +115,10 @@ func TestCodexToolTurnItems(t *testing.T) {
 	if d := detailMap(t, all[11]); d["query"] != "go json rpc" {
 		t.Errorf("web_search detail = %v", d)
 	}
-	if all[12].Text != "Created the files and reported." {
-		t.Errorf("say = %q", all[12].Text)
+	if all[13].Text != "Created the files and reported." {
+		t.Errorf("say = %q", all[13].Text)
 	}
-	if r := all[13]; r.IsError || !strings.HasPrefix(r.Text, "completed") || !strings.Contains(r.Text, "7300") {
+	if r := all[14]; r.IsError || !strings.HasPrefix(r.Text, "completed") || !strings.Contains(r.Text, "7300") {
 		t.Errorf("result = %+v", r)
 	}
 }
@@ -143,16 +142,16 @@ func TestCodexFileChangeDiffIsClipped(t *testing.T) {
 func TestCodexUpdatePlan(t *testing.T) {
 	raw := `{"method":"turn/plan/updated","params":{"threadId":"t","turnId":"u","explanation":null,"plan":[{"step":"Read","status":"completed"},{"step":"Write","status":"inProgress"}]}}`
 	got := Items(wrap(raw), 0)
-	if len(got) != 1 || got[0].Kind != "tool_call" || got[0].Tool != "update_plan" {
+	if len(got) != 2 || got[0].Kind != "tool_call" || got[0].Tool != "update_plan" || got[1].Kind != "tool_result" || got[1].ToolUseId != got[0].ToolUseId || got[0].ToolUseId == "" {
 		t.Fatalf("items = %+v", got)
 	}
 	steps := detailMap(t, got[0])["steps"].([]any)
-	if len(steps) != 2 || steps[1].(map[string]any)["step"] != "Write" || steps[1].(map[string]any)["status"] != "inProgress" {
+	if len(steps) != 2 || steps[1].(map[string]any)["step"] != "Write" || steps[1].(map[string]any)["status"] != "in_progress" {
 		t.Errorf("steps = %v", steps)
 	}
 	item := `{"method":"item/completed","params":{"item":{"id":"p","type":"plan","text":"1. Read\n2. Write"}}}`
 	got = Items(wrap(item), 0)
-	if len(got) != 1 || got[0].Tool != "update_plan" || len(detailMap(t, got[0])["steps"].([]any)) != 2 {
+	if len(got) != 2 || got[0].Tool != "update_plan" || len(detailMap(t, got[0])["steps"].([]any)) != 2 {
 		t.Fatalf("plan item = %+v", got)
 	}
 }
@@ -230,6 +229,10 @@ func TestCodexSilentNotifications(t *testing.T) {
 		`{"method":"item/completed","params":{"item":{"id":"a","type":"reasoning","summary":[],"content":[]}}}`,
 		`{"method":"item/agentMessage/delta","params":{"itemId":"a","delta":"Do"}}`,
 		`{"method":"item/commandExecution/outputDelta","params":{"itemId":"a","delta":"x"}}`,
+		`{"method":"thread/status/changed","params":{"threadId":"t","status":{"type":"active"}}}`,
+		`{"method":"item/commandExecution/requestApproval","id":3,"params":{}}`,
+		`{"method":"item/fileChange/requestApproval","id":3,"params":{}}`,
+		`{"method":"item/started","params":{"item":{"id":"w","type":"webSearch","query":""}}}`,
 		`{"method":"error","params":{"willRetry":true,"error":{"message":"transient"}}}`,
 	} {
 		if got := Items(wrap(raw), 0); len(got) != 0 {
@@ -272,7 +275,7 @@ func TestAthenaDeclinedLine(t *testing.T) {
 	line := []byte(`{"at":"` + fixtureAt + `","athena":{"declined":"item/tool/requestUserInput","id":4,"reason":"Athena declines a question"}}`)
 	got := Items(line, 3)
 	if len(got) != 1 || got[0].Kind != "other" || !got[0].IsError || got[0].Offset != 3 ||
-		got[0].Text != "Athena declined item/tool/requestUserInput: Athena declines a question" {
+		got[0].Text != "Athena declined item/tool/requestUserInput: a question" {
 		t.Fatalf("declined = %+v", got)
 	}
 	odd := Items([]byte(`{"athena":{"something":"else"}}`), 0)
@@ -373,5 +376,62 @@ func TestMixedTranscriptRendersEveryRuntime(t *testing.T) {
 	if strings.Join(runtimes, ",") != "codex,claude" {
 		t.Errorf("runtime markers = %v", runtimes)
 	}
-	_ = bytes.MinRead
+}
+
+// The reviewer's repro: ANSI padding in front of a quoted password. No cut may fall inside the secret.
+func TestHugeAnsiPaddedSecretIsNeverShown(t *testing.T) {
+	out := strings.Repeat("\x1b[0m", 16000) + `PASSWORD="hunter2 hunter3 hunter4 hunter5"` + "\n" + strings.Repeat("y", 3000)
+	raw := `{"method":"item/completed","params":{"item":{"id":"c","type":"commandExecution","command":"x","cwd":"/w","status":"completed","aggregatedOutput":` + jsonStr(out) + `,"exitCode":0}}}`
+	got := Items(wrap(raw), 0)
+	if len(got) != 1 || strings.Contains(got[0].Text, "hunter") || strings.Contains(got[0].Text, "PASSWORD=\"h") {
+		t.Fatalf("shown %q", got[0].Text)
+	}
+}
+
+func TestCodexWebSearchComesFromCompleted(t *testing.T) {
+	got := Items(wrap(`{"method":"item/completed","params":{"item":{"id":"w","type":"webSearch","query":"go json rpc","action":{"type":"search"}}}}`), 0)
+	if len(got) != 2 || got[0].Tool != "web_search" || got[0].Text != "go json rpc" || detailMap(t, got[0])["query"] != "go json rpc" ||
+		got[1].Kind != "tool_result" || got[1].ToolUseId != "w" {
+		t.Fatalf("web search = %+v", got)
+	}
+}
+
+func TestCodexRefusedRequestsStayVisible(t *testing.T) {
+	got := Items(wrap(`{"method":"item/tool/requestUserInput","id":9,"params":{}}`), 0)
+	if len(got) != 1 || got[0].Kind != "other" || !strings.Contains(got[0].Text, "item/tool/requestUserInput") {
+		t.Fatalf("refused = %+v", got)
+	}
+}
+
+func TestCodexDeclinedCommandSaysSo(t *testing.T) {
+	got := Items(wrap(`{"method":"item/completed","params":{"item":{"id":"c","type":"commandExecution","command":"rm x","cwd":"/w","status":"declined","aggregatedOutput":null,"exitCode":null}}}`), 0)
+	if len(got) != 1 || !got[0].IsError || got[0].Text != "declined" {
+		t.Fatalf("declined = %+v", got)
+	}
+}
+
+func TestCodexToolNameIsBounded(t *testing.T) {
+	raw := `{"method":"item/started","params":{"item":{"id":"m","type":"mcpToolCall","server":"a\u001bb","tool":` + jsonStr(strings.Repeat("t", 5000)) + `,"arguments":{}}}}`
+	got := Items(wrap(raw), 0)
+	if len(got) != 1 || len(got[0].Tool) > 140 || strings.ContainsAny(got[0].Tool, "\x1b ") {
+		t.Fatalf("tool = %q", got[0].Tool)
+	}
+}
+
+// The logs path prints to a terminal: escapes and control characters in what a session wrote never reach it, for
+// Codex and Claude lines alike, and a newline in a thread id cannot start another log line.
+func TestLogsStripControlCharacters(t *testing.T) {
+	r := New(time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC))
+	for _, line := range [][]byte{
+		wrap(`{"method":"item/completed","params":{"item":{"id":"a","type":"agentMessage","text":"hi \u001b]52;c;eA==\u0007 there \u001b[31mred\u0000"}}}`),
+		wrap(`{"method":"thread/started","params":{"thread":{"id":"t\nfake line","model":"m"}}}`),
+		[]byte(`{"type":"assistant","message":{"content":[{"type":"text","text":"x \u001b]0;title\u0007 y\u0008"}]}}`),
+		[]byte(`{"type":"system","subtype":"init","session_id":"s\nforged","model":"m"}`),
+	} {
+		for _, l := range r.Render(line) {
+			if strings.ContainsFunc(l.Text, func(c rune) bool { return c < ' ' || c == 0x7f }) {
+				t.Errorf("control character in %q", l.Text)
+			}
+		}
+	}
 }

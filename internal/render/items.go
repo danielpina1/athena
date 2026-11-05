@@ -73,7 +73,7 @@ func Items(line []byte, offset int64) []*athenav1.StreamItem {
 		if t, err := time.Parse(time.RFC3339Nano, l.At); err == nil {
 			at = timestamppb.New(t)
 		}
-		items := codexItems(l.Codex)
+		items := codexItems(l.Codex, offset)
 		if len(l.Codex) == 0 {
 			items = athenaItems(line)
 		}

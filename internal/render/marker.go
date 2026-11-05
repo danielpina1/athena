@@ -73,7 +73,7 @@ func athenaItems(line []byte) []*athenav1.StreamItem {
 			var method, reason string
 			_ = json.Unmarshal(raw, &method)
 			_ = json.Unmarshal(obj["reason"], &reason)
-			return []*athenav1.StreamItem{{Kind: "other", IsError: true, Text: Clip("Athena declined "+method+": "+reason, toolInputMaxRunes)}}
+			return []*athenav1.StreamItem{{Kind: "other", IsError: true, Text: Clip("Athena declined "+method+": "+strings.TrimPrefix(reason, "Athena declines "), toolInputMaxRunes)}}
 		}
 		keys := make([]string, 0, len(obj))
 		for k := range obj {

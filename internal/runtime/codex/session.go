@@ -292,7 +292,7 @@ func envelope(tr *rt.Transcript) func([]byte) {
 		b.WriteString(`{"at":"`)
 		b.WriteString(time.Now().UTC().Format(time.RFC3339Nano))
 		b.WriteString(`","codex":`)
-		b.Write(raw)
+		b.Write(capLine(raw))
 		b.WriteByte('}')
 		tr.Append(b.Bytes())
 	}
