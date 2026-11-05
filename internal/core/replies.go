@@ -109,7 +109,8 @@ func ReceiptID(ticketID, purpose, slot, text string) string {
 // returns the same ID and queues nothing. Each purpose has its rule:
 //
 //   - acknowledgement: the open Ticket's worker takes up a person's message that reached it other than for context,
-//     at most once per Trigger (≤ 100 words); it records the Trigger's Disposition.Acknowledged.
+//     at most once per Trigger (≤ 100 words); it records the Trigger's Disposition.Acknowledged. A later request for
+//     the same Trigger, in any wording, returns the first receipt's ID and queues nothing.
 //   - answer: to a person's message that reached the Ticket; it records Disposition.Acknowledged too.
 //   - result: once per round whose Report is ready or dropped.
 //   - attention: only while the Ticket has an Attention, at most once per Attention: a later request for the same
@@ -117,19 +118,35 @@ func ReceiptID(ticketID, purpose, slot, text string) string {
 //
 // Other replies are at most 4,000 characters. A refused request returns a *UserError.
 func (e *Engine) Reply(r ReplyRequest) (string, error) {
+	out, err := e.ReplyOnce(r)
+	return out.ReceiptID, err
+}
+
+// ReplyOutcome is the receipt a reply request queued, or found queued before.
+type ReplyOutcome struct {
+	ReceiptID string
+	// Repeat: the request repeated a reply queued before (the same message again, a second acknowledgement of a
+	// Trigger the Ticket acknowledged already, or the same question again), so nothing new went out.
+	Repeat bool
+}
+
+// ReplyOnce is Reply, saying whether the request repeated a reply queued before. A second acknowledgement of the same
+// Trigger, in any wording, is such a repeat rather than a refusal: the router may have acknowledged the message when it
+// accepted the Ticket, before the worker read it.
+func (e *Engine) ReplyOnce(r ReplyRequest) (ReplyOutcome, error) {
 	if err := checkReply(r); err != nil {
-		return "", err
+		return ReplyOutcome{}, err
 	}
-	var id string
+	var out ReplyOutcome
 	err := e.command(cmdReply, func(o *op) error {
 		var err error
-		id, err = o.reply(r)
+		out, err = o.reply(r)
 		return err
 	})
 	if err != nil {
-		return "", err
+		return ReplyOutcome{}, err
 	}
-	return id, nil
+	return out, nil
 }
 
 // checkReply refuses a request whose purpose is unknown or whose text is empty or too long.
@@ -156,30 +173,36 @@ func checkReply(r ReplyRequest) error {
 }
 
 // reply checks a request against its purpose's rule and queues it once, in the command's transaction.
-func (o *op) reply(r ReplyRequest) (string, error) {
+func (o *op) reply(r ReplyRequest) (ReplyOutcome, error) {
+	id, repeat, err := o.queueReply(r)
+	return ReplyOutcome{ReceiptID: id, Repeat: repeat}, err
+}
+
+func (o *op) queueReply(r ReplyRequest) (string, bool, error) {
 	if err := checkReply(r); err != nil {
-		return "", err
+		return "", false, err
 	}
 	t, err := o.require(r.TicketID)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	var tr *Trigger
 	if r.TriggerID != "" {
 		if tr, err = o.tx.GetTrigger(r.TriggerID); err != nil {
-			return "", err
+			return "", false, err
 		}
 		if tr == nil {
-			return "", userErrorf("trigger %s not found", r.TriggerID)
+			return "", false, o.unknownTrigger(t, r.TriggerID)
 		}
 		// The owner's messages have no channel: an acknowledgement or answer would land on the Ticket's own thread.
 		if tr.Source == ownerSource && (r.Purpose == PurposeAcknowledgement || r.Purpose == PurposeAnswer) {
-			return "", userErrorf("messages from the owner need no %s: answer in your session, which the owner reads live", r.Purpose)
+			return "", false, userErrorf("messages from the owner need no %s: answer in your session, which the owner reads live; %s",
+				r.Purpose, o.triggerChoices(t))
 		}
 	}
 	// A result or attention may name a Trigger to reply where it was written: only one that reached the Ticket.
 	if tr != nil && (r.Purpose == PurposeResult || r.Purpose == PurposeAttention) && !reachedTicket(t, tr.ID, true) {
-		return "", userErrorf("trigger %s did not reach ticket %s", tr.ID, t.ID)
+		return "", false, userErrorf("trigger %s did not reach ticket %s; %s", tr.ID, t.ID, o.triggerChoices(t))
 	}
 	// The ID's third part (R15): a result's round, an attention's Attention, else the Trigger, so the same text in a
 	// later round or for a later question is a new message.
@@ -198,85 +221,88 @@ func (o *op) reply(r ReplyRequest) (string, error) {
 	id := ReceiptID(t.ID, r.Purpose, slot, r.Text)
 	existing, err := o.tx.GetReceipt(id)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	if existing != nil {
 		// Queued before: nothing new goes out, but the worker still took the message up.
-		return id, o.takeUp(t, r, tr)
+		return id, true, o.takeUp(t, r, tr)
 	}
 	receipts, err := o.tx.TicketReceipts(t.ID)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	asker := tr
 	switch r.Purpose {
 	case PurposeAcknowledgement:
 		if t.Ended != nil {
-			return "", userErrorf("ticket %s has ended", t.ID)
+			return "", false, userErrorf("ticket %s has ended", t.ID)
 		}
 		if !reachedTicket(t, tr.ID, false) {
-			return "", userErrorf("trigger %s did not reach ticket %s other than for context", tr.ID, t.ID)
+			return "", false, userErrorf("trigger %s did not reach ticket %s other than for context, so it needs no acknowledgement; %s",
+				tr.ID, t.ID, o.triggerChoices(t))
 		}
 		if !tr.Human {
-			return "", userErrorf("trigger %s is not a person's message", tr.ID)
+			return "", false, userErrorf("trigger %s is not a person's message, so it needs no acknowledgement; %s", tr.ID, o.triggerChoices(t))
 		}
-		if slices.ContainsFunc(receipts, func(x *Receipt) bool { return x.Purpose == PurposeAcknowledgement && x.TriggerID == tr.ID }) {
-			return "", userErrorf("ticket %s acknowledged trigger %s already", t.ID, tr.ID)
+		// Acknowledged before (by the router's accept, or by the worker in other words): nothing new goes out.
+		if i := slices.IndexFunc(receipts, func(x *Receipt) bool { return x.Purpose == PurposeAcknowledgement && x.TriggerID == tr.ID }); i >= 0 {
+			return receipts[i].ID, true, o.takeUp(t, r, tr)
 		}
 	case PurposeAnswer:
 		if !reachedTicket(t, tr.ID, true) {
-			return "", userErrorf("trigger %s did not reach ticket %s", tr.ID, t.ID)
+			return "", false, userErrorf("trigger %s did not reach ticket %s; %s", tr.ID, t.ID, o.triggerChoices(t))
 		}
 		if !tr.Human {
-			return "", userErrorf("trigger %s is not a person's message", tr.ID)
+			return "", false, userErrorf("trigger %s is not a person's message, so it needs no answer; %s", tr.ID, o.triggerChoices(t))
 		}
 	case PurposeResult:
 		l := t.LatestAssignment()
 		if l == nil || l.Report == nil || (l.Report.State != ReportReady && l.Report.State != ReportDropped) ||
 			(t.Ended != nil && t.Ended.By == EndByHuman) {
-			return "", userErrorf("ticket %s has no ready or dropped report to give the result of", t.ID)
+			return "", false, userErrorf("ticket %s has no ready or dropped report to give the result of: the result follows "+
+				"the worker's ready or dropped report", t.ID)
 		}
 		if slices.ContainsFunc(receipts, func(x *Receipt) bool { return x.Purpose == PurposeResult && x.Round == round }) {
-			return "", userErrorf("ticket %s gave the result of this round already", t.ID)
+			return "", false, userErrorf("ticket %s gave the result of this round already", t.ID)
 		}
 	case PurposeAttention:
 		if t.Attention == nil {
-			return "", userErrorf("ticket %s has no question for a person", t.ID)
+			return "", false, userErrorf("ticket %s has no question for a person", t.ID)
 		}
 		// At most once per question: asked again, in any wording (a relay resent after a restart), it is the receipt
 		// already queued, and nothing new goes out.
 		if i := slices.IndexFunc(receipts, func(x *Receipt) bool { return x.Purpose == PurposeAttention && x.Round == round }); i >= 0 {
-			return receipts[i].ID, nil
+			return receipts[i].ID, true, nil
 		}
 		if asker == nil && t.Attention.TriggerID != "" {
 			if asker, err = o.tx.GetTrigger(t.Attention.TriggerID); err != nil {
-				return "", err
+				return "", false, err
 			}
 		}
 	}
 	ch, ok := replyChannel(t, asker)
 	if !ok {
-		return "", userErrorf("ticket %s has no channel to reply to", t.ID)
+		return "", false, userErrorf("ticket %s has no channel to reply to", t.ID)
 	}
 	seq, err := o.tx.NextSeq(receiptSeq)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	rc := &Receipt{ID: id, TicketID: t.ID, Purpose: r.Purpose, TriggerID: r.TriggerID, Text: r.Text, Channel: ch,
 		Conversation: ch.Thread, State: ReceiptWaiting, Seq: seq, QueuedAt: o.at, Round: round}
 	if err := o.tx.PutReceipt(rc); err != nil {
-		return "", err
+		return "", false, err
 	}
 	payload, err := json.Marshal(struct {
 		ReceiptID string `json:"receiptId"`
 	}{id})
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	if err := o.enqueue(EffectReply, id, payload); err != nil {
-		return "", err
+		return "", false, err
 	}
-	return id, o.takeUp(t, r, tr)
+	return id, false, o.takeUp(t, r, tr)
 }
 
 // takeUp records, for an acknowledgement or an answer, that the Ticket's worker took the person's message up.
@@ -320,6 +346,54 @@ func reachedTicket(t *Ticket, triggerID string, context bool) bool {
 	return slices.ContainsFunc(t.Inputs, func(in Input) bool {
 		return in.Kind == InputTrigger && in.TriggerID == triggerID && (context || !in.Context)
 	})
+}
+
+// unknownTrigger refuses a trigger_id that names no Trigger. An Input's own id is the usual mistake: the refusal names
+// the Trigger that Input carries, or says it is the owner's and has none.
+func (o *op) unknownTrigger(t *Ticket, id string) error {
+	for _, in := range t.Inputs {
+		if in.ID != id {
+			continue
+		}
+		if in.TriggerID != "" {
+			if tr, err := o.tx.GetTrigger(in.TriggerID); err == nil && tr != nil && tr.Source != ownerSource {
+				return userErrorf("%s is an input id, not a trigger_id: that input's trigger_id is %s; %s", id, tr.ID, o.triggerChoices(t))
+			}
+		}
+		return userErrorf("%s is the input id of a message from the owner, which has no trigger_id: it needs no "+
+			"acknowledgement, answer or hand-back; answer in your session output, which the owner reads live; %s", id, o.triggerChoices(t))
+	}
+	return userErrorf("trigger %s not found: use a trigger_id from an input card; %s", id, o.triggerChoices(t))
+}
+
+// triggerChoices names, for a refusal, the trigger_ids a Ticket's worker may acknowledge, answer or hand back: the
+// people's messages that reached the Ticket, other than the owner's, each marked when the Ticket acknowledged it
+// already or when it reached the Ticket only for context (answer it, never acknowledge it).
+func (o *op) triggerChoices(t *Ticket) string {
+	var ids []string
+	seen := map[string]bool{}
+	for _, in := range t.Inputs {
+		if in.Kind != InputTrigger || in.TriggerID == "" || seen[in.TriggerID] {
+			continue
+		}
+		seen[in.TriggerID] = true
+		tr, err := o.tx.GetTrigger(in.TriggerID)
+		if err != nil || tr == nil || !tr.Human || tr.Source == ownerSource {
+			continue
+		}
+		label := tr.ID
+		switch {
+		case slices.Contains(tr.Disposition.Acknowledged, t.ID):
+			label += " (acknowledged already)"
+		case !reachedTicket(t, tr.ID, false):
+			label += " (context only)"
+		}
+		ids = append(ids, label)
+	}
+	if len(ids) == 0 {
+		return "ticket " + t.ID + " has no person's message with a trigger_id"
+	}
+	return "ticket " + t.ID + "'s trigger_ids: " + strings.Join(ids, ", ")
 }
 
 // ackRefusal returns a *UserError when an accept's acknowledgement text could never be sent, so the accept records

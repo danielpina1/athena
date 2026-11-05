@@ -1258,8 +1258,11 @@ func (b blockingEngine) Trigger(string) (core.Trigger, error) {
 	b.wait()
 	return core.Trigger{}, fmt.Errorf("released")
 }
-func (b blockingEngine) Reply(core.ReplyRequest) (string, error) { b.wait(); return "", nil }
-func (b blockingEngine) FollowForContext(string, string) error   { b.wait(); return nil }
+func (b blockingEngine) ReplyOnce(core.ReplyRequest) (core.ReplyOutcome, error) {
+	b.wait()
+	return core.ReplyOutcome{}, nil
+}
+func (b blockingEngine) FollowForContext(string, string) error { b.wait(); return nil }
 func (b blockingEngine) MarkUnrelated(string, string, string) error {
 	b.wait()
 	return nil
@@ -1377,6 +1380,9 @@ func TestTriggerInputCard(t *testing.T) {
 		"github:checksuite:5": {ID: "github:checksuite:5", Source: "github", Actor: core.ActorRef{Source: "github", ID: "ci"},
 			Bot: true, At: at, Kind: core.KindCI, Threads: []string{"github:o/r@main"}, Meta: map[string]string{"repo": "o/r"}},
 		"owner-1": {ID: "owner-1", Source: "owner", Human: true, At: at, Text: "owner text"},
+		"github:issue:7": {ID: "github:issue:7", Source: "github", Actor: core.ActorRef{Source: "github", ID: "carol"},
+			Human: true, At: at, Threads: []string{"github:o/r#7"}, Meta: map[string]string{"repo": "o/r", "number": "7"},
+			Disposition: core.Disposition{Acknowledged: []string{"T-1"}}},
 	}
 	lookup := func(id string) (core.Trigger, bool) { tr, ok := triggers[id]; return tr, ok }
 	tk := core.Ticket{ID: "T-1", Inputs: []core.Input{
@@ -1385,10 +1391,12 @@ func TestTriggerInputCard(t *testing.T) {
 		{ID: "i3", Kind: core.InputTrigger, TriggerID: "github:checksuite:5", Text: "CI check suite failure on main"},
 		{ID: "i4", Kind: core.InputTrigger, TriggerID: "owner-1", Text: "owner text", Human: true},
 		{ID: "i5", Kind: core.InputNote, Text: "T-2 found the root cause"},
+		{ID: "i6", Kind: core.InputTrigger, TriggerID: "github:issue:7", Text: "please review it", Human: true},
 	}}
-	got := renderInputs(tk, []string{"i1", "i2", "i3", "i4", "i5"}, lookup)
+	got := renderInputs(tk, []string{"i1", "i2", "i3", "i4", "i5", "i6"}, lookup)
 	for _, want := range []string{
-		"[input i1: message from a person]\ntrigger_id: github:issuecomment:1\nfrom: alice\nat: 2026-11-04T10:30:00Z\n" +
+		"[input i1: message from a person]\ntrigger_id: github:issuecomment:1\n" +
+			"acknowledged: no; ack it before substantial work if it is a request you take up\nfrom: alice\nat: 2026-11-04T10:30:00Z\n" +
 			"thread: O/R#12 (github:o/r#12)\nurl: https://github.com/O/R/issues/12#issuecomment-1\nreplies_to: github:issue:9\n" +
 			"routing note: same page as T-0\nplease fix the typo\n",
 		"[input i2: message from a person]\ntrigger_id: github:issuecomment:2\nfrom: bob\n",
@@ -1398,6 +1406,8 @@ func TestTriggerInputCard(t *testing.T) {
 		"thread: o/r@main (github:o/r@main)\n",
 		"[input i4: message from the owner (not on GitHub)]\nowner text\n",
 		"[input i5: note]\nNote: T-2 found the root cause\n",
+		// Athena acknowledged the Ticket's first message when it accepted it: the worker must not ack it again.
+		"[input i6: message from a person]\ntrigger_id: github:issue:7\nacknowledged: yes, already on its thread; do not ack it again\nfrom: carol\n",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("rendered inputs lack %q:\n%s", want, got)
@@ -1405,6 +1415,10 @@ func TestTriggerInputCard(t *testing.T) {
 	}
 	if strings.Contains(got, strings.Repeat("é", 601)) {
 		t.Error("a card carries more than 600 characters of text")
+	}
+	// A context message and a bot's say nothing of acknowledging: they need none.
+	if strings.Count(got, "acknowledged: ") != 2 {
+		t.Errorf("acknowledged lines on context or bot cards:\n%s", got)
 	}
 	if strings.Index(got, "[input i1") > strings.Index(got, "[input i5") {
 		t.Error("inputs out of order")
