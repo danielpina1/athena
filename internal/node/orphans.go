@@ -85,6 +85,12 @@ func processStart(pid int) (started string, alive bool) {
 // reapOrphans stops the process groups the run files record, unless the pid now belongs to another process, and
 // removes the files. It sends SIGTERM to every group at once, waits up to orphanGrace for them to end, then kills
 // what is left.
+//
+// A group is signalled only through its live leader: the recorded process, with its start time unchanged, still in
+// the recorded group (leadsGroup). When the leader is dead but children of it survive, the group is left alone: with
+// no leader to vouch for it the pgid may already name another group (pgids are pids, and pids are reused), and a
+// kill(-pgid) would hit whatever runs there. Such children outlive the server until they end on their own; they lost
+// their session's stdin and stdout with the leader, and the next session of the Ticket starts a group of its own.
 func reapOrphans(stateDir string, log *slog.Logger) {
 	if stateDir == "" {
 		return
@@ -99,9 +105,14 @@ func reapOrphans(stateDir string, log *slog.Logger) {
 				if rec.PGID <= 1 {
 					rec.PGID = rec.PID
 				}
-				log.Warn("stopping a session process left by an earlier server", "pid", rec.PID, "runtime", rec.Runtime)
-				_ = syscall.Kill(-rec.PGID, syscall.SIGTERM)
-				groups = append(groups, rec)
+				if !leadsGroup(rec) {
+					log.Warn("not stopping a session process left by an earlier server: it no longer leads its group",
+						"pid", rec.PID, "runtime", rec.Runtime)
+				} else {
+					log.Warn("stopping a session process left by an earlier server", "pid", rec.PID, "runtime", rec.Runtime)
+					_ = syscall.Kill(-rec.PGID, syscall.SIGTERM)
+					groups = append(groups, rec)
+				}
 			}
 		}
 		_ = os.Remove(f)
@@ -114,9 +125,16 @@ func reapOrphans(stateDir string, log *slog.Logger) {
 			}
 			time.Sleep(50 * time.Millisecond)
 		}
-		if started, alive := processStart(rec.PID); alive && started == rec.Started {
+		if started, alive := processStart(rec.PID); alive && started == rec.Started && leadsGroup(rec) {
 			log.Warn("killing a session process that ignored SIGTERM", "pid", rec.PID)
 			_ = syscall.Kill(-rec.PGID, syscall.SIGKILL)
 		}
 	}
+}
+
+// leadsGroup reports whether the recorded process is still in the recorded process group, so that kill(-PGID) reaches
+// the session's group and no other.
+func leadsGroup(rec processRecord) bool {
+	pgid, err := syscall.Getpgid(rec.PID)
+	return err == nil && pgid == rec.PGID
 }
