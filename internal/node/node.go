@@ -111,7 +111,7 @@ type EngineCallbacks interface {
 	// Trigger reads a stored Trigger: a Ticket's origin for its execution variables, an Input's for its card.
 	Trigger(id string) (core.Trigger, error)
 	// The worker tools' commands (workertools.go) and the binding of a reported pull request.
-	Reply(r core.ReplyRequest) (string, error)
+	ReplyOnce(r core.ReplyRequest) (core.ReplyOutcome, error)
 	FollowForContext(ticketID, thread string) error
 	MarkUnrelated(ticketID, thread, reason string) error
 	Handback(ticketID, triggerID, reason string) (bool, error)
@@ -1480,7 +1480,7 @@ func renderInputs(t core.Ticket, ids []string, trigger func(id string) (core.Tri
 			found := false
 			if in.TriggerID != "" && trigger != nil {
 				if tr, found = trigger(in.TriggerID); found && len(tr.Threads) > 0 {
-					b.WriteString(inputCard(*in, tr))
+					b.WriteString(inputCard(t.ID, *in, tr))
 					continue
 				}
 			}
