@@ -97,8 +97,8 @@ function PartEditor({ part, overridden, revision }: { part: string; overridden: 
   const block = useSaveBlock({ label: part, server, revision: fetched?.revision, equal, send });
 
   /** A decision on the part, one at a time; a conflict goes to the save bar (Reload or Overwrite). */
-  const decide = async (done: string, failed: string, action: BlockAction) => {
-    const r = await block.act(action);
+  const decide = async (done: string, failed: string, action: BlockAction, held?: string) => {
+    const r = await block.act(action, held);
     if (!r || r.code === "conflict") return;
     if (r.ok) toast({ title: done });
     else toast({ title: failed, description: errorMessage(r.code), tone: "danger" });
@@ -115,7 +115,10 @@ function PartEditor({ part, overridden, revision }: { part: string; overridden: 
           busy={block.busy}
           edited={block.bar.dirty}
           // "My text" is what the editor holds: unsaved edits included, never thrown away.
-          onKeep={() => void decide("Kept your text", "Not saved", (base) => setPrompt(part, base, block.value ?? detail.text))}
+          onKeep={() => {
+            const mine = block.value ?? detail.text;
+            void decide("Kept your text", "Not saved", (base) => setPrompt(part, base, mine), mine);
+          }}
           onUseNew={() => void decide("Using the new default", "Not reset", (base) => resetPrompt(part, base))}
         />
       )}

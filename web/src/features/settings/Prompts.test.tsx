@@ -210,3 +210,27 @@ test("keep my text keeps the editor's unsaved text, and the resets say they disc
   await user.click(within(panel).getByRole("button", { name: "Keep my text" }));
   expect(setPrompt).toHaveBeenCalledWith("worker", 7, "My own worker text. More.");
 });
+
+test("keep my text holds the editor's text, saved, until the revision moves", async () => {
+  const user = userEvent.setup();
+  renderPrompts();
+  const editor = (await screen.findByDisplayValue("My own worker text.")) as HTMLTextAreaElement;
+  await user.type(editor, " More.");
+  const panel = screen.getByRole("region", { name: "The default changed" });
+  await user.click(within(panel).getByRole("button", { name: "Keep my text" }));
+  expect(setPrompt).toHaveBeenCalledWith("worker", 7, "My own worker text. More.");
+  // The save is acknowledged, the Delta has not landed: the old text must not flash back.
+  await act(async () => {});
+  expect(editor.value).toBe("My own worker text. More.");
+  expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
+
+  // The Delta lands and the refetch brings the saved text: the editor follows the server.
+  details.worker = { ...details.worker, text: "My own worker text. More.", previousDefaultText: "" };
+  act(() => {
+    useAthena.getState().applyDelta(
+      create(DeltaSchema, { seq: 2n, change: { case: "prompts", value: { revision: 8, parts: [{ name: "worker", overridden: true }] } } }),
+    );
+  });
+  await vi.waitFor(() => expect(getPrompt).toHaveBeenCalledTimes(2));
+  expect((screen.getByRole("textbox", { name: "worker" }) as HTMLTextAreaElement).value).toBe("My own worker text. More.");
+});

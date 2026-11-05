@@ -23,6 +23,7 @@ vi.mock("@/lib/auth/session", async (orig) => ({
   getSession: vi.fn(),
   createEnrollLink: vi.fn(),
   sessionEnded: vi.fn(),
+  requestSignOut: vi.fn(),
 }));
 vi.mock("@/features/auth/ReauthDialog", async (orig) => ({
   ...(await orig<typeof import("@/features/auth/ReauthDialog")>()),
@@ -208,4 +209,29 @@ test("a revoke of this device that did not happen says so; one not confirmed say
   revokePasskey.mockResolvedValueOnce({ ok: false, code: "signed_out" } as CommandResult);
   await revoke();
   expect(await screen.findByText("You were signed out before Athena answered. Sign in and check the device list.")).toBeTruthy();
+});
+
+test("sign out is confirmed, then ends the session; a refusal keeps the owner in and says so", async () => {
+  const user = userEvent.setup();
+  const requestSignOut = vi.mocked(session.requestSignOut);
+  requestSignOut.mockRejectedValueOnce(new session.AuthError("internal", 500));
+  render(
+    <>
+      <Devices />
+      <Toaster />
+    </>,
+    { wrapper },
+  );
+  await screen.findByRole("listitem", { name: "Mac" });
+  await user.click(screen.getByRole("button", { name: "Sign out" }));
+  expect(requestSignOut).not.toHaveBeenCalled();
+  await new Promise((r) => setTimeout(r, 350));
+  await user.click(screen.getByRole("button", { name: "Sign out of this device" }));
+  expect(await screen.findByText("Not signed out")).toBeTruthy();
+  expect(requestSignOut).toHaveBeenCalledTimes(1);
+
+  await user.click(screen.getByRole("button", { name: "Sign out" }));
+  await new Promise((r) => setTimeout(r, 350));
+  await user.click(screen.getByRole("button", { name: "Sign out of this device" }));
+  expect(requestSignOut).toHaveBeenCalledTimes(2);
 });

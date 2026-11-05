@@ -87,7 +87,8 @@ function Header({ ticket, back, onReply }: { ticket: TicketSummary; back: string
       </div>
       <div className="flex flex-wrap gap-2">
         {!ended && (
-          <Button onClick={onReply} aria-keyshortcuts="r">
+          // The view's one primary action: Reply, unless the Ticket is stalled and Retry is what it needs.
+          <Button variant={ticket.canRetry ? "outline" : "primary"} onClick={onReply} aria-keyshortcuts="r">
             Reply
           </Button>
         )}
@@ -100,7 +101,9 @@ function Header({ ticket, back, onReply }: { ticket: TicketSummary; back: string
           />
         )}
         {ticket.canRetry && (
-          <Button onClick={() => void run("Retrying", "Not retried", retry(ticket.id))}>Retry</Button>
+          <Button variant="primary" onClick={() => void run("Retrying", "Not retried", retry(ticket.id))}>
+            Retry
+          </Button>
         )}
         {working && (
           <Button onClick={doInterrupt} aria-keyshortcuts="Meta+Enter Control+Enter">

@@ -53,7 +53,7 @@ export function createRuntime(opts: RuntimeOptions): Runtime {
     notify: (title, description) => toast({ title, description, tone: "danger" }),
   });
   connectOutbox(client, outbox);
-  bindSession({ outbox, store, onEnded: () => leave(SIGNED_OUT_NOTICE) });
+  bindSession({ outbox, store, onEnded: () => leave(SIGNED_OUT_NOTICE), onSignOut: () => runtime.signOut() });
   outbox.setReauthHandler(requestReauth);
 
   const gate = createStore<{ phase: Phase }>(() => ({ phase: { kind: "checking" } }));

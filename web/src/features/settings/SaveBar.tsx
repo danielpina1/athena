@@ -150,9 +150,11 @@ export type SaveBlock<T> = {
   busy: boolean;
   /**
    * Sends a decision against the current revision, one at a time (undefined while another runs). A conflict goes to
-   * the bar like a save's: Reload drops it, Overwrite sends it again on the fresh revision. Success drops the draft.
+   * the bar like a save's: Reload drops it, Overwrite sends it again on the fresh revision. Success drops the draft,
+   * unless `held` says the decision keeps that value (Keep my text): the editor then holds it, saved, until the
+   * server's revision moves, as after a normal save.
    */
-  act(action: BlockAction): Promise<CommandResult | undefined>;
+  act(action: BlockAction, held?: T): Promise<CommandResult | undefined>;
   bar: Omit<SaveBarProps, "label" | "className">;
 };
 
@@ -247,14 +249,15 @@ export function useSaveBlock<T>(opts: SaveBlockOptions<T>): SaveBlock<T> {
     }
   };
 
-  const runAction = async (action: BlockAction, base: number) => {
+  const runAction = async (action: BlockAction, base: number, held?: T) => {
     if (!begin()) return undefined;
     try {
       const r = await action(base);
       refused.current = r.ok || r.code !== "conflict" ? null : action;
-      if (r.ok) setDraft(null);
+      if (r.ok && held !== undefined) setDraft({ value: held, base });
+      else if (r.ok) setDraft(null);
       // A refusal other than a conflict is the caller's to say (a toast): the bar's Try again is for a draft.
-      setStatus(r.ok || r.code !== "conflict" ? "idle" : "conflict");
+      setStatus(r.ok ? (held !== undefined ? "saved" : "idle") : r.code !== "conflict" ? "idle" : "conflict");
       return r;
     } finally {
       running.current = false;
@@ -273,7 +276,7 @@ export function useSaveBlock<T>(opts: SaveBlockOptions<T>): SaveBlock<T> {
     edit,
     dirty: dirty || status === "conflict" || status === "failed",
     busy: status === "saving",
-    act: (action) => (revision === undefined ? Promise.resolve(undefined) : runAction(action, revision)),
+    act: (action, held) => (revision === undefined ? Promise.resolve(undefined) : runAction(action, revision, held)),
     bar: {
       dirty,
       status,

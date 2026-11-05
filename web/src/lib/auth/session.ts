@@ -23,15 +23,28 @@ let outboxRef: Clearable | undefined;
 let storeRef: { getState(): { reset(): void } } = useAthena;
 
 let endedRef: (() => void) | undefined;
+let signOutRef: (() => Promise<void>) | undefined;
 
 /**
  * Tells signOut what to clear: the app's outbox (and, in tests, its store). Called once at boot. onEnded is what runs
  * when an HTTP call learns the session is gone (sessionEnded): the app's way back to sign-in.
  */
-export function bindSession(b: { outbox: Clearable; store?: typeof storeRef; onEnded?: () => void }): void {
+export function bindSession(b: {
+  outbox: Clearable;
+  store?: typeof storeRef;
+  onEnded?: () => void;
+  /** The app's explicit sign-out (the runtime's: it also stops the link and shows sign-in). */
+  onSignOut?: () => Promise<void>;
+}): void {
   outboxRef = b.outbox;
   storeRef = b.store ?? useAthena;
   endedRef = b.onEnded;
+  signOutRef = b.onSignOut;
+}
+
+/** The owner's Sign out: ends this session and shows sign-in. Throws when the server did not take it. */
+export async function requestSignOut(): Promise<void> {
+  await (signOutRef ?? signOut)();
 }
 
 /** An HTTP call came back 401: the session ended under the open app. Shows sign-in, keeping unsent commands. */

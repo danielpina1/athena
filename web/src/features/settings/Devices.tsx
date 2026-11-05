@@ -7,7 +7,7 @@ import { timestampMs } from "@bufbuild/protobuf/wkt";
 import { useCallback, useEffect, useId, useState } from "react";
 import type { Passkey } from "@/gen/athena/v1/commands_pb";
 import { requestReauth } from "@/features/auth/ReauthDialog";
-import { AuthError, createEnrollLink, type EnrollLink, getSession, sessionEnded } from "@/lib/auth/session";
+import { AuthError, createEnrollLink, type EnrollLink, getSession, requestSignOut, sessionEnded } from "@/lib/auth/session";
 import { errorMessage, listPasskeys, revokePasskey } from "@/lib/commands/actions";
 import { Confirm } from "@/ui/athena/Confirm";
 import { Mono } from "@/ui/athena/Mono";
@@ -57,7 +57,30 @@ export function Devices() {
         )}
       </Block>
       <AddDevice onDone={() => void refresh()} />
+      <SignOut />
     </Section>
+  );
+}
+
+/** Ends this device's session (the passkey stays: it can sign in again). */
+function SignOut() {
+  const [busy, setBusy] = useState(false);
+  const out = async () => {
+    setBusy(true);
+    try {
+      await requestSignOut();
+    } catch (e) {
+      setBusy(false);
+      toast({ title: "Not signed out", description: linkFailure(e), tone: "danger" });
+    }
+  };
+  return (
+    <Block title="This session">
+      <p className="text-sm text-muted">Signing out drops this device's unsent actions. Its passkey still signs in again.</p>
+      <div>
+        <Confirm size="sm" label="Sign out" confirmLabel="Sign out of this device" disabled={busy} onConfirm={() => void out()} />
+      </div>
+    </Block>
   );
 }
 
