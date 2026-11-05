@@ -453,6 +453,8 @@ func TestReportOpEndsTicketAndStopsSession(t *testing.T) {
 // a step after a failed tool call is refused; progress and blocked reports are not.
 func TestReadyReportRefusedUntilFailureSeen(t *testing.T) {
 	h := newHarness(t, nil)
+	// The turn stays open: the session's own turn end would clear what this test's runner records.
+	t.Setenv("ATHENA_FAKE_FIXTURE", openTurnFixture(t))
 	tk := h.submit("Task", "")
 	_, a := h.running(tk.ID)
 	s := h.n.lookup(tk.ID, a.ID)
@@ -2234,5 +2236,283 @@ func TestAutoRunsClaudeUntilTheChooser(t *testing.T) {
 	}
 	if _, err := h.eng.SubmitOwnerTask("Bad", core.TaskOptions{Runtime: "gemini"}); err == nil {
 		t.Fatal("an unknown runtime was accepted")
+	}
+}
+
+// pendingWith waits for one pending Approval whose summary holds want, and returns it.
+func (h *codexHarness) pendingWith(want string) core.Approval {
+	h.t.Helper()
+	var found core.Approval
+	h.eventually("an approval about "+want, func() bool {
+		pending, _ := h.eng.PendingApprovals()
+		for _, p := range pending {
+			if strings.Contains(p.Summary, want) {
+				found = p
+				return true
+			}
+		}
+		return false
+	})
+	return found
+}
+
+// On a node that sandboxes its workers, what Codex asks to run or write outside its sandbox needs a person even when
+// the rules allow it, through either door; a rules deny stays a deny, and the PreToolUse hook (in the sandbox) is the
+// rules' alone.
+func TestCodexUnsandboxedAsksNeedApproval(t *testing.T) {
+	h := newCodexHarness(t, codexTurn(codexApprovalRequest("ls -la", true)), func(c *Config) { c.Sandbox = &SandboxConfig{} })
+	tk := h.submitCodex("List")
+	ap := h.approveOnly(tk.ID)
+	if ap.Rule != ruleCodexUnsandboxed || ap.Summary != "Run outside the sandbox: ls -la" {
+		t.Fatalf("approval = %+v", ap)
+	}
+	h.eventually("Codex is told accept", func() bool { return h.rpcHas(`"decision":"accept"`) })
+	n, s := h.n, h.n.liveSession(tk.ID)
+	if s == nil {
+		t.Fatal("no live session")
+	}
+	ctx := context.Background()
+	if v := n.approveRequest(ctx, s, rt.ApprovalRequest{Kind: "command", Command: "cat ~/.ssh/id_rsa", TurnID: "t2"}); v.Allow {
+		t.Fatalf("credential read outside the sandbox = %+v, want deny", v)
+	}
+	// A file approval names every path and the write grant.
+	got := make(chan rt.Verdict, 1)
+	go func() {
+		got <- n.approveRequest(ctx, s, rt.ApprovalRequest{Kind: "file", Paths: []string{"a.txt", "b/c.txt", "b"}, TurnID: "t2",
+			Reason: "needs b (and writes under b for the rest of the session)"})
+	}()
+	fp := h.pendingWith("a.txt")
+	if fp.Rule != ruleCodexUnsandboxed || fp.Summary != "Run outside the sandbox: a.txt, b/c.txt, b — needs b (and writes under b for the rest of the session)" {
+		t.Fatalf("file approval = %+v", fp)
+	}
+	if err := h.eng.AnswerApproval(fp.ID, false, "no"); err != nil {
+		t.Fatal(err)
+	}
+	if v := <-got; v.Allow {
+		t.Fatalf("denied file approval = %+v", v)
+	}
+	// The PermissionRequest hook asks too; PreToolUse does not.
+	hook := func(event, command string) chan HookResponse {
+		in, _ := json.Marshal(map[string]any{"tool_name": "Bash", "tool_input": map[string]any{"command": command}, "turn_id": "t3"})
+		c := make(chan HookResponse, 1)
+		go func() {
+			c <- n.handleHook(ctx, HookRequest{Event: event, Ticket: tk.ID, Assignment: s.a.ID, Runtime: core.RuntimeCodex, Input: in})
+		}()
+		return c
+	}
+	if r := <-hook(EventPreToolUse, "go test ./..."); r.Verdict != VerdictAllow {
+		t.Fatalf("PreToolUse = %+v, want allow", r)
+	}
+	pr := hook(EventPermissionRequest, "go test ./...")
+	hp := h.pendingWith("go test ./...")
+	if hp.Rule != ruleCodexUnsandboxed {
+		t.Fatalf("hook approval = %+v", hp)
+	}
+	if err := h.eng.AnswerApproval(hp.ID, true, ""); err != nil {
+		t.Fatal(err)
+	}
+	if r := <-pr; r.Verdict != VerdictAllow {
+		t.Fatalf("approved PermissionRequest = %+v", r)
+	}
+}
+
+// An answer is shared only between Codex's PermissionRequest hook and its approval request, once each, and only for
+// exactly the same action: a broader ask, a PreToolUse ask, or the same door asking again asks anew.
+func TestCodexSharedVerdictScope(t *testing.T) {
+	h := newCodexHarness(t, codexTurn(codexApprovalRequest("kubectl apply -f app.yaml", true)), nil)
+	tk := h.submitCodex("Deploy")
+	h.approveOnly(tk.ID)
+	h.eventually("Codex is told accept", func() bool { return h.rpcHas(`"decision":"accept"`) })
+	n, s := h.n, h.n.liveSession(tk.ID)
+	ctx := context.Background()
+	file := func(turn string, paths ...string) chan rt.Verdict {
+		c := make(chan rt.Verdict, 1)
+		go func() { c <- n.approveRequest(ctx, s, rt.ApprovalRequest{Kind: "file", Paths: paths, TurnID: turn}) }()
+		return c
+	}
+	hook := func(event, turn, command string) chan HookResponse {
+		in, _ := json.Marshal(map[string]any{"tool_name": "Bash", "tool_input": map[string]any{"command": command}, "turn_id": turn})
+		c := make(chan HookResponse, 1)
+		go func() {
+			c <- n.handleHook(ctx, HookRequest{Event: event, Ticket: tk.ID, Assignment: s.a.ID, Runtime: core.RuntimeCodex, Input: in})
+		}()
+		return c
+	}
+	answer := func(want string, yes bool) {
+		t.Helper()
+		ap := h.pendingWith(want)
+		if err := h.eng.AnswerApproval(ap.ID, yes, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A broader file ask in the same turn is a new Approval, naming every path it escalates.
+	a := file("t1", "../out/a")
+	answer("../out/a", true)
+	if v := <-a; !v.Allow {
+		t.Fatalf("approved = %+v", v)
+	}
+	b := file("t1", "../out/a", "src/ok.go", "../out/secret")
+	answer("Write: ../out/a, ../out/secret", false)
+	if v := <-b; v.Allow {
+		t.Fatalf("broader ask = %+v, want its own (denied) Approval", v)
+	}
+	// The hook and the request share one answer, once: the same door asking again asks anew.
+	const cmd = "kubectl apply -f x.yaml"
+	r1 := hook(EventPermissionRequest, "t2", cmd)
+	answer(cmd, true)
+	if r := <-r1; r.Verdict != VerdictAllow {
+		t.Fatalf("hook = %+v", r)
+	}
+	if v := n.approveRequest(ctx, s, rt.ApprovalRequest{Kind: "command", Command: cmd, TurnID: "t2"}); !v.Allow {
+		t.Fatalf("the request after the hook = %+v, want the shared allow", v)
+	}
+	again := make(chan rt.Verdict, 1)
+	go func() {
+		again <- n.approveRequest(ctx, s, rt.ApprovalRequest{Kind: "command", Command: cmd, TurnID: "t2"})
+	}()
+	answer(cmd, false)
+	if v := <-again; v.Allow {
+		t.Fatalf("the command run again = %+v, want a new (denied) Approval", v)
+	}
+	// A PreToolUse escalation is not shared with the request; exact text: another spacing is another command.
+	p := hook(EventPreToolUse, "t3", cmd)
+	answer(cmd, true)
+	if r := <-p; r.Verdict != VerdictAllow {
+		t.Fatalf("PreToolUse = %+v", r)
+	}
+	q := make(chan rt.Verdict, 1)
+	go func() { q <- n.approveRequest(ctx, s, rt.ApprovalRequest{Kind: "command", Command: cmd, TurnID: "t3"}) }()
+	answer(cmd, false)
+	if v := <-q; v.Allow {
+		t.Fatalf("request after a PreToolUse allow = %+v, want its own Approval", v)
+	}
+	r2 := hook(EventPermissionRequest, "t4", cmd)
+	answer(cmd, true)
+	<-r2
+	sp := make(chan rt.Verdict, 1)
+	go func() {
+		sp <- n.approveRequest(ctx, s, rt.ApprovalRequest{Kind: "command", Command: "kubectl  apply -f x.yaml", TurnID: "t4"})
+	}()
+	answer("kubectl  apply", false)
+	if v := <-sp; v.Allow {
+		t.Fatalf("differently spaced command = %+v, want its own Approval", v)
+	}
+}
+
+// A Codex hook deny shows no result; a later item means the model saw it, so a ready report after it is accepted.
+func TestCodexDenyThenLaterItemAcceptsReady(t *testing.T) {
+	h := newCodexHarness(t, codexTurn(
+		codexHook(EventPreToolUse, "cat ~/.ssh/id_rsa"),
+		codexCommandItem("item/started", "item_0003", "cat ~/.ssh/id_rsa"),
+		codexCommandItem("item/completed", "item_0003", "cat ~/.ssh/id_rsa"),
+		`{"method":"item/completed","params":{"threadId":"thr_fixture_0001","turnId":"turn_fixture_0001","item":{"id":"item_0004","type":"agentMessage","text":"That file is off limits; reporting.","phase":"commentary"},"completedAtMs":1893456003500}}`,
+		`{"fake":"mcp","tool":"report","arguments":{"status":"ready","summary":"done without the key"}}`,
+	), nil)
+	tk := h.submitCodex("Read a key, then report")
+	h.eventually("the ready report ends the ticket", func() bool {
+		cur, _ := h.ticket(tk.ID)
+		return cur.Ended != nil
+	})
+	cur, _ := h.ticket(tk.ID)
+	if cur.Ended.Outcome != core.OutcomeCompleted || cur.Stats.HookDenials != 1 {
+		t.Fatalf("ended %+v, denials %d", cur.Ended, cur.Stats.HookDenials)
+	}
+}
+
+// The rules use the runtime the session runs on: ATHENA_RUNTIME names it, and a decision hook naming another is
+// denied.
+func TestHookRuntimeIsTheSessions(t *testing.T) {
+	h := newHarness(t, nil)
+	tk := h.submit("Claude work", "")
+	_, a := h.running(tk.ID)
+	s := h.n.liveSession(tk.ID)
+	if !slices.Contains(h.n.variables(s), "ATHENA_RUNTIME=claude") {
+		t.Fatalf("variables = %v", h.n.variables(s))
+	}
+	in := json.RawMessage(`{"tool_name":"Bash","tool_input":{"command":"ls"}}`)
+	for rtName, want := range map[string]string{"": VerdictAllow, core.RuntimeClaude: VerdictAllow, core.RuntimeCodex: VerdictDeny} {
+		r := h.n.handleHook(context.Background(), HookRequest{Event: EventPreToolUse, Ticket: tk.ID, Assignment: a.ID, Runtime: rtName, Input: in})
+		if r.Verdict != want {
+			t.Errorf("hook --runtime %q: %+v, want %s", rtName, r, want)
+		}
+	}
+	ch := newCodexHarness(t, codexTurn(codexApprovalRequest("kubectl apply -f app.yaml", true)), nil)
+	ctk := ch.submitCodex("Codex work")
+	ch.approveOnly(ctk.ID)
+	cs := ch.n.liveSession(ctk.ID)
+	if !slices.Contains(ch.n.variables(cs), "ATHENA_RUNTIME=codex") || hookRuntime(cs) != core.RuntimeCodex {
+		t.Fatalf("codex variables = %v", ch.n.variables(cs))
+	}
+	r := ch.n.handleHook(context.Background(), HookRequest{Event: EventPreToolUse, Ticket: ctk.ID, Assignment: cs.a.ID, Runtime: core.RuntimeClaude, Input: in})
+	if r.Verdict != VerdictDeny || !strings.Contains(r.Reason, "runs on codex") {
+		t.Fatalf("claude hook on a codex session: %+v", r)
+	}
+}
+
+// countingCodex is Codex that counts its Invalidate calls.
+type countingCodex struct {
+	*codex.Runtime
+	invalidated *atomic.Int32
+}
+
+func (c countingCodex) Invalidate() { c.invalidated.Add(1); c.Runtime.Invalidate() }
+
+// A Start that finds the session out of Athena's control fails the Ticket with why, and the next launch checks anew.
+func TestCodexStartUncontrolledFailsWithWhy(t *testing.T) {
+	t.Setenv("ATHENA_FAKE_CODEX_TRUST_PROJECT", "1")
+	repo := newRepo(t)
+	if err := os.MkdirAll(filepath.Join(repo, ".codex"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".codex", "config.toml"), []byte("model = \"other\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	git(t, repo, "add", ".codex/config.toml")
+	git(t, repo, "commit", "-q", "-m", "codex settings")
+	var invalidated atomic.Int32
+	h := newCodexHarness(t, codexTurn(), func(c *Config) {
+		c.Runtimes[core.RuntimeCodex] = countingCodex{Runtime: c.Runtimes[core.RuntimeCodex].(*codex.Runtime), invalidated: &invalidated}
+	})
+	tk, err := h.eng.SubmitOwnerTask("Work in a repo with Codex settings", core.TaskOptions{Dir: repo, Runtime: core.RuntimeCodex})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var r *core.Report
+	h.eventually("failed report", func() bool {
+		cur, _ := h.ticket(tk.ID)
+		r = cur.LatestAssignment().Report
+		return r != nil && r.State == core.ReportFailed
+	})
+	if !strings.Contains(r.Summary, "a repository's Codex settings are loaded") {
+		t.Fatalf("summary = %q", r.Summary)
+	}
+	if invalidated.Load() != 1 {
+		t.Fatalf("Invalidate called %d times, want 1", invalidated.Load())
+	}
+}
+
+// A share key covers every call, in any order, by exact text; an input that does not decode is keyed by its bytes.
+func TestShareKey(t *testing.T) {
+	w := func(p string) ToolCall {
+		return ToolCall{Tool: "Write", Input: mustJSON(map[string]string{"file_path": p})}
+	}
+	if shareKey("t", []ToolCall{w("a"), w("b")}) != shareKey("t", []ToolCall{w("b"), w("a")}) {
+		t.Error("the key depends on the calls' order")
+	}
+	if shareKey("t", []ToolCall{w("a")}) == shareKey("t", []ToolCall{w("a"), w("b")}) {
+		t.Error("a broader ask has the same key")
+	}
+	if shareKey("", []ToolCall{w("a")}) != "" {
+		t.Error("an ask without a turn is shared")
+	}
+	bash := func(c string) ToolCall {
+		return ToolCall{Tool: "Bash", Input: mustJSON(map[string]string{"command": c})}
+	}
+	if shareKey("t", []ToolCall{bash(`echo "a  b"`)}) == shareKey("t", []ToolCall{bash(`echo "a b"`)}) {
+		t.Error("spacing is collapsed")
+	}
+	bad1, bad2 := ToolCall{Tool: "Bash", Input: json.RawMessage(`{"command":`)}, ToolCall{Tool: "Bash", Input: json.RawMessage(`{"command":"x`)}
+	if callSubject(bad1) != `{"command":` || shareKey("t", []ToolCall{bad1}) == shareKey("t", []ToolCall{bad2}) {
+		t.Errorf("undecodable input subject = %q", callSubject(bad1))
 	}
 }

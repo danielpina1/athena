@@ -634,6 +634,24 @@ type session struct {
 	proc rt.Session
 	// shared holds the escalations an ask about the same action in the same turn shares (escalateShared), by key.
 	shared map[string]*sharedVerdict
+	// runtime is the runtime the session's runner started (runtimeFor), set before its first process.
+	runtime string
+}
+
+func (s *session) setRuntime(name string) {
+	s.mu.Lock()
+	s.runtime = name
+	s.mu.Unlock()
+}
+
+// currentRuntime is the runtime the session runs on: its runner's, or before the runner chose, the Ticket's.
+func (s *session) currentRuntime() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.runtime != "" {
+		return s.runtime
+	}
+	return runtimeName(s.t)
 }
 
 func (s *session) setProcess(p rt.Session) {
@@ -786,6 +804,13 @@ func (s *session) noteDenial() {
 	s.mu.Unlock()
 }
 
+// denialSeen records that the model has seen the node's last deny (a runtime that shows no result of a denied call).
+func (s *session) denialSeen() {
+	s.mu.Lock()
+	s.deniedUnseen = false
+	s.mu.Unlock()
+}
+
 // turnOver clears both: whatever failed in the turn, its end has been seen.
 func (s *session) turnOver() {
 	s.mu.Lock()
@@ -844,7 +869,7 @@ func (n *Node) variables(s *session) []string {
 		"ATHENA_DIR=" + s.place.workDir,
 		"ATHENA_BLOCKED_COMMANDS=" + strings.Join(n.cfg.Blocked, ","),
 		"ATHENA_SOCKET=" + n.cfg.SocketPath,
-		"ATHENA_RUNTIME=" + runtimeName(s.t),
+		"ATHENA_RUNTIME=" + s.currentRuntime(),
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -974,6 +999,7 @@ func (r *runner) run() {
 		r.fail(err.Error())
 		return
 	}
+	s.setRuntime(rtm.Name())
 	// The Ticket's model, else the node's default for Claude Code; Codex runs its own default (config.toml), which its
 	// session names at start (Init).
 	model := ""
@@ -1008,7 +1034,7 @@ func (r *runner) run() {
 		trPath = filepath.Join(adir, "transcript.jsonl")
 	}
 	sandbox, sandboxEnv := n.sandboxFor(s.place.workDir)
-	roots := writableRoots(s.place.workDir)
+	roots := n.writableRoots(s.place.workDir)
 	for crashes := 0; ; {
 		spawnStart := time.Now()
 		// One transcript per process: the session appends every line it prints, and it is closed after the process.
@@ -1394,6 +1420,11 @@ func (r *runner) onEvent(ev rt.Event) {
 		}
 	case rt.AssistantText, rt.ToolUse:
 		r.s.stepTaken()
+		if r.runtime == core.RuntimeCodex {
+			// Codex shows no result of a call its PreToolUse hook denied, and runs that hook before the call's item
+			// starts: a later item means the deny already went back to the model.
+			r.s.denialSeen()
+		}
 	case rt.TurnEnd:
 		r.s.turnOver()
 		if r.redeliver {

@@ -2,6 +2,8 @@ package node
 
 import (
 	"encoding/json"
+	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/danielpina1/athena/internal/core"
@@ -23,10 +25,14 @@ var codexShellTools = map[string]bool{"Bash": true, "shell": true, "local_shell"
 //
 //   - a shell tool (Bash, shell, local_shell, exec_command, unified_exec) is Bash{command}, an argv array joined with
 //     POSIX shell quoting, with its "workdir" (or "cwd") as the Bash input's workdir; a command it cannot read is
-//     Bash{command: ""}, which EvaluateCalls escalates;
-//   - apply_patch is one Write{file_path} per path its patch adds, updates, deletes or moves to (a patch whose paths it
-//     cannot read is one Write with no path, which escalates);
+//     Bash{command: ""}, which EvaluateCalls escalates. Codex applies a patch a shell command carries itself
+//     (`apply_patch <<'EOF'…`, or the argv ["apply_patch", patch]), so a command that carries patch headers is also a
+//     Write per path they name, relative paths under its workdir;
+//   - apply_patch is one Write{file_path} per path its patch adds, updates, deletes or moves to;
 //   - every other tool (write_stdin, mcp__…, web_search, the rest) is one call, unchanged.
+//
+// A patch whose paths cannot all be read (none, or a line naming a header without a path it reads) adds a Write with
+// no path, which escalates.
 func NormalizeTool(runtime, tool string, input json.RawMessage) []ToolCall {
 	if runtime != core.RuntimeCodex {
 		return []ToolCall{{Tool: tool, Input: input}}
@@ -38,18 +44,33 @@ func NormalizeTool(runtime, tool string, input json.RawMessage) []ToolCall {
 		if dir != "" {
 			in["workdir"] = dir
 		}
-		return []ToolCall{{Tool: "Bash", Input: mustJSON(in)}}
-	case tool == "apply_patch":
-		var calls []ToolCall
-		for _, p := range patchPaths(input) {
-			calls = append(calls, ToolCall{Tool: "Write", Input: mustJSON(map[string]string{"file_path": p})})
-		}
-		if len(calls) == 0 {
-			calls = []ToolCall{{Tool: "Write", Input: mustJSON(map[string]string{"file_path": ""})}}
+		calls := []ToolCall{{Tool: "Bash", Input: mustJSON(in)}}
+		if paths, bad := patchPaths(input); len(paths) > 0 || bad {
+			for i, p := range paths {
+				if dir != "" && !filepath.IsAbs(p) && !strings.HasPrefix(p, "~") {
+					paths[i] = filepath.Join(dir, p)
+				}
+			}
+			calls = append(calls, patchWrites(paths, bad)...)
 		}
 		return calls
+	case tool == "apply_patch":
+		paths, bad := patchPaths(input)
+		return patchWrites(paths, bad || len(paths) == 0)
 	}
 	return []ToolCall{{Tool: tool, Input: input}}
+}
+
+// patchWrites are the Writes of a patch's paths, and with unread a Write with no path, which escalates.
+func patchWrites(paths []string, unread bool) []ToolCall {
+	calls := make([]ToolCall, 0, len(paths)+1)
+	for _, p := range paths {
+		calls = append(calls, ToolCall{Tool: "Write", Input: mustJSON(map[string]string{"file_path": p})})
+	}
+	if unread {
+		calls = append(calls, ToolCall{Tool: "Write", Input: mustJSON(map[string]string{"file_path": ""})})
+	}
+	return calls
 }
 
 func mustJSON(v any) json.RawMessage {
@@ -112,28 +133,42 @@ func argvQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
 }
 
-// patchHeaders begin the lines of an apply_patch patch that name a path it writes.
-var patchHeaders = []string{"*** Add File: ", "*** Update File: ", "*** Delete File: ", "*** Move to: "}
+// patchHeaders begin the lines of an apply_patch patch that name a path it writes; patchHeaderRe finds a line that
+// mentions one, however spaced or cased.
+var (
+	patchHeaders  = []string{"*** Add File:", "*** Update File:", "*** Delete File:", "*** Move to:"}
+	patchHeaderRe = regexp.MustCompile(`(?i)\*\*\*\s*(?:(?:add|update|delete)\s*file|move\s*to)`)
+)
 
 // patchPaths are the paths an apply_patch input writes, in order: those its patch's headers name, in whichever string
-// of the input holds the patch (the input itself, or any field of it).
-func patchPaths(input json.RawMessage) []string {
+// of the input holds the patch (the input itself, or any field of it). Codex's parser trims the marker lines, so a
+// header may be indented. bad reports a line that mentions a header the patch cannot be read from (no path, or text
+// before it on the line): the patch may write a path this cannot name.
+func patchPaths(input json.RawMessage) (paths []string, bad bool) {
 	var v any
 	if json.Unmarshal(input, &v) != nil {
-		return nil
+		return nil, true
 	}
-	var out []string
 	for _, s := range stringsIn(v, nil) {
+		if !patchHeaderRe.MatchString(s) {
+			continue
+		}
 		for _, line := range strings.Split(s, "\n") {
-			line = strings.TrimRight(line, "\r")
+			if !patchHeaderRe.MatchString(line) {
+				continue
+			}
+			line = strings.TrimSpace(line)
+			read := false
 			for _, h := range patchHeaders {
 				if p, ok := strings.CutPrefix(line, h); ok && strings.TrimSpace(p) != "" {
-					out = append(out, strings.TrimSpace(p))
+					paths, read = append(paths, strings.TrimSpace(p)), true
+					break
 				}
 			}
+			bad = bad || !read
 		}
 	}
-	return out
+	return paths, bad
 }
 
 // stringsIn appends every string in v (a decoded JSON value), keys and values, to out.
@@ -155,7 +190,7 @@ func stringsIn(v any, out []string) []string {
 
 // EvaluateCalls evaluates every call of one tool call of runtime (NormalizeTool) and returns the strictest decision
 // (deny, then escalate, then allow; the first of equals) with the call it was made on. Codex calls are evaluated as
-// their mapped tool: write_stdin is allowed (its process was already allowed to start); Bash, Write, MCP tools and
+// their mapped tool: write_stdin by the Bash text rules (stdinRule); Claude Code's tool names, MCP tools and
 // web_search by Evaluate; any other tool's input is searched, every string of it, for credential and state paths.
 func EvaluateCalls(ctx RuleContext, runtime string, calls []ToolCall) (Decision, ToolCall) {
 	best, at := allow(), ToolCall{}
@@ -184,13 +219,16 @@ func strictness(verdict string) int {
 	return 0
 }
 
+// claudeToolNames are Claude Code's tool names the rules know; a Codex call by one of them is evaluated as Claude's.
+var claudeToolNames = map[string]bool{"Bash": true, "WebFetch": true, "WebSearch": true, "Task": true, "TodoWrite": true, "LS": true}
+
 func evaluateCall(ctx RuleContext, runtime string, c ToolCall) Decision {
 	if runtime != core.RuntimeCodex {
 		return Evaluate(ctx, c.Tool, c.Input)
 	}
 	switch {
 	case c.Tool == "write_stdin":
-		return allow()
+		return stdinRule(ctx, c.Input)
 	case c.Tool == "Bash":
 		var in struct {
 			Command string `json:"command"`
@@ -199,7 +237,7 @@ func evaluateCall(ctx RuleContext, runtime string, c ToolCall) Decision {
 			return escalate(ruleInput, "the command cannot be read, ask the owner")
 		}
 		return Evaluate(ctx, c.Tool, c.Input)
-	case c.Tool == "Write", strings.HasPrefix(c.Tool, "mcp__"), c.Tool == "web_search":
+	case fileTools[c.Tool], writeTools[c.Tool], claudeToolNames[c.Tool], strings.HasPrefix(c.Tool, "mcp__"), c.Tool == "web_search":
 		return Evaluate(ctx, c.Tool, c.Input)
 	}
 	var v any
@@ -209,6 +247,28 @@ func evaluateCall(ctx RuleContext, runtime string, c ToolCall) Decision {
 	for _, s := range stringsIn(v, nil) {
 		if reason := ctx.protectedText(s); reason != "" {
 			return deny(ruleCredential, reason)
+		}
+	}
+	return allow()
+}
+
+// stdinRule decides a write_stdin: what it types into a running process (an interactive shell or REPL the model
+// started) is held to the Bash text rules, every string of it: a credential or state path, a token variable, a
+// blocked command or an AI attribution denies; anything else is allowed (the process itself was allowed to start).
+func stdinRule(ctx RuleContext, input json.RawMessage) Decision {
+	var v any
+	if json.Unmarshal(input, &v) != nil {
+		return deny(ruleInput, "tool input is not JSON")
+	}
+	for _, s := range stringsIn(v, nil) {
+		if d, ok := credentialRule(ctx, "Bash", map[string]any{"command": s}); ok {
+			return d
+		}
+		if d, ok := blockedRule(ctx, s); ok {
+			return d
+		}
+		if d, ok := attributionRule(ctx, s, ""); ok {
+			return d
 		}
 	}
 	return allow()

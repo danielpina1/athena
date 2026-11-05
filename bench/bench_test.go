@@ -153,6 +153,9 @@ func TestBudgets(t *testing.T) {
 		{"hook_decision", func() Result {
 			return measureRounds("hook_decision", hookBudget, hookFloor, 5000, func(n int) []time.Duration { return measureHook(t, n) }, nil)
 		}},
+		{"hook_decision_codex", func() Result {
+			return measureRounds("hook_decision_codex", hookBudget, hookFloor, 5000, func(n int) []time.Duration { return measureHookCodex(t, n) }, nil)
+		}},
 		{"engine_command", func() Result {
 			return measureRounds("engine_command", engineBudget, engineFloor, 2000, func(n int) []time.Duration { return measureEngine(t, n) }, nil)
 		}},
@@ -307,6 +310,8 @@ func reportLatencies(b *testing.B, d []time.Duration) {
 
 func BenchmarkHookDecision(b *testing.B) { reportLatencies(b, measureHook(b, b.N)) }
 
+func BenchmarkHookDecisionCodex(b *testing.B) { reportLatencies(b, measureHookCodex(b, b.N)) }
+
 func BenchmarkEngineCommand(b *testing.B) { reportLatencies(b, measureEngine(b, b.N)) }
 
 func BenchmarkDispatch(b *testing.B) { reportLatencies(b, measureDispatch(b, b.N, false)) }
@@ -315,12 +320,13 @@ func BenchmarkDispatch(b *testing.B) { reportLatencies(b, measureDispatch(b, b.N
 // timings, which race-detector builds distort.
 func TestHarnessSmoke(t *testing.T) {
 	for name, d := range map[string][]time.Duration{
-		"hook":     measureHook(t, 10),
-		"engine":   measureEngine(t, 6),
-		"dispatch": measureDispatch(t, 2, false),
-		"link":     measureLinkDelta(t, 2),
-		"stream":   measureStreamItem(t, 2),
-		"command":  measureCommandResult(t, 2),
+		"hook":       measureHook(t, 10),
+		"hook_codex": measureHookCodex(t, 10),
+		"engine":     measureEngine(t, 6),
+		"dispatch":   measureDispatch(t, 2, false),
+		"link":       measureLinkDelta(t, 2),
+		"stream":     measureStreamItem(t, 2),
+		"command":    measureCommandResult(t, 2),
 	} {
 		if len(d) == 0 || quantile(d, 0.99) <= 0 {
 			t.Errorf("%s: no measurements: %v", name, d)

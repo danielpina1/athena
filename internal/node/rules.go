@@ -109,7 +109,7 @@ func Evaluate(ctx RuleContext, tool string, input json.RawMessage) Decision {
 		if d, ok := blockedRule(ctx, str(in, "command")); ok {
 			return d
 		}
-		if d, ok := attributionRule(ctx, str(in, "command")); ok {
+		if d, ok := attributionRule(ctx, str(in, "command"), str(in, "workdir")); ok {
 			return d
 		}
 	}

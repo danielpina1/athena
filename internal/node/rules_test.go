@@ -635,11 +635,7 @@ func TestCodexShellMapsToBash(t *testing.T) {
 	if d := codexEval(e.ctx, "shell", in(map[string]any{"command": []any{"rm", "-rf", "x y"}})); d.Verdict != VerdictDeny || d.Rule != ruleBlocked {
 		t.Fatalf("blocked command: %+v, want deny", d)
 	}
-	// write_stdin is allowed; MCP tools and web_search are evaluated unchanged; another tool's strings are searched for
-	// credential paths.
-	if d := codexEval(e.ctx, "write_stdin", in(map[string]any{"chars": "cat ~/.ssh/id_rsa\n"})); d.Verdict != VerdictAllow {
-		t.Fatalf("write_stdin: %+v, want allow", d)
-	}
+	// MCP tools and web_search are evaluated unchanged; another tool's strings are searched for credential paths.
 	if d := codexEval(e.ctx, "mcp__athena__report", in(map[string]any{"status": "ready", "summary": "done"})); d.Verdict != VerdictAllow {
 		t.Fatalf("mcp tool: %+v, want allow", d)
 	}
@@ -702,6 +698,102 @@ func TestApplyPatchEvaluatesEveryPath(t *testing.T) {
 	// A patch whose paths cannot be read asks the owner.
 	if d := codexEval(e.ctx, "apply_patch", in(map[string]any{"command": "not a patch"})); d.Verdict != VerdictEscalate {
 		t.Fatalf("unreadable patch: %+v, want escalate", d)
+	}
+}
+
+// What write_stdin types into a running shell or REPL is held to the Bash text rules: credential and state paths, token
+// variables, blocked commands and AI attributions deny; anything else is allowed.
+func TestWriteStdinUsesBashTextRules(t *testing.T) {
+	e := newRuleEnv(t)
+	stdin := func(chars string) Decision {
+		return codexEval(e.ctx, "write_stdin", in(map[string]any{"session_id": 3, "chars": chars}))
+	}
+	for chars, rule := range map[string]string{
+		"cat ~/.ssh/id_rsa\n": ruleCredential,
+		"echo $GH_TOKEN\n":    ruleCredentialEnv,
+		"rm -rf build\n":      ruleBlocked,
+		"gh auth token\n":     ruleBlocked,
+		"git commit -m 'x' -m 'Co-Authored-By: Claude <noreply@anthropic.com>'\n": ruleAttribution,
+	} {
+		if d := stdin(chars); d.Verdict != VerdictDeny || d.Rule != rule {
+			t.Errorf("write_stdin %q: %+v, want deny by %s", chars, d, rule)
+		}
+	}
+	for _, chars := range []string{"print(1 + 1)\n", "go test ./...\n", "\u0003", ""} {
+		if d := stdin(chars); d.Verdict != VerdictAllow {
+			t.Errorf("write_stdin %q: %+v, want allow", chars, d)
+		}
+	}
+}
+
+// Codex's apply_patch fails closed: indented headers are read, a shell command that carries a patch (heredoc or argv)
+// writes its paths, and a line naming a header the rules cannot read escalates.
+func TestApplyPatchFailsClosed(t *testing.T) {
+	e := newRuleEnv(t)
+	c := e.ctx
+	if err := os.MkdirAll(filepath.Join(c.TicketDir, ".git", "hooks"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	c.Protected = ProtectedPaths(c.TicketDir)
+	const hidden = "*** Begin Patch\n*** Add File: ok.txt\n+x\n  *** Add File: .git/hooks/pre-commit\n+#!/bin/sh\n*** End Patch\n"
+	// An indented header is a header (Codex's parser trims marker lines).
+	if d := codexEval(c, "apply_patch", in(map[string]any{"command": hidden})); d.Verdict != VerdictDeny || d.Rule != ruleProtectedPath {
+		t.Errorf("indented header: %+v, want deny", d)
+	}
+	// Through a shell tool: a heredoc, the argv form, and a relative path under the command's workdir.
+	for name, input := range map[string]map[string]any{
+		"heredoc":  {"cmd": "apply_patch <<'EOF'\n" + hidden + "EOF\n"},
+		"bash -lc": {"cmd": []any{"bash", "-lc", "apply_patch <<'EOF'\n" + hidden + "EOF"}},
+		"argv":     {"command": []any{"apply_patch", hidden}},
+	} {
+		if d := codexEval(c, "exec_command", in(input)); d.Verdict != VerdictDeny || d.Rule != ruleProtectedPath {
+			t.Errorf("%s: %+v, want deny", name, d)
+		}
+	}
+	out := "*** Begin Patch\n*** Add File: notes.txt\n+x\n*** End Patch\n"
+	if d := codexEval(c, "shell", in(map[string]any{"command": []any{"apply_patch", out}, "workdir": e.outDir})); d.Verdict != VerdictEscalate || d.Rule != ruleWrite {
+		t.Errorf("shell patch under an outside workdir: %+v, want escalate", d)
+	}
+	if d := codexEval(c, "shell", in(map[string]any{"command": []any{"apply_patch", out}, "workdir": c.TicketDir})); d.Verdict != VerdictAllow {
+		t.Errorf("shell patch in the ticket dir: %+v, want allow", d)
+	}
+	// A header the rules cannot read escalates, beside the paths they can.
+	for name, patch := range map[string]string{
+		"no path":      "*** Begin Patch\n*** Add File: ok.txt\n+x\n*** Update File:\n*** End Patch\n",
+		"text before":  "*** Begin Patch\n*** Add File: ok.txt\n+x\nx *** Delete File: .git/config\n*** End Patch\n",
+		"other casing": "*** Begin Patch\n*** Add File: ok.txt\n+x\n*** add file: y\n*** End Patch\n",
+	} {
+		if d := codexEval(c, "apply_patch", in(map[string]any{"command": patch})); d.Verdict != VerdictEscalate {
+			t.Errorf("%s: %+v, want escalate", name, d)
+		}
+	}
+	if d := codexEval(c, "exec_command", in(map[string]any{"cmd": "grep -rn '*** Add File' docs"})); d.Verdict != VerdictEscalate {
+		t.Errorf("a command naming a patch header: %+v, want escalate", d)
+	}
+}
+
+// Under Codex a Claude Code tool name is evaluated as Claude's: an Edit outside the ticket directory escalates, one of
+// a protected path is denied; an unknown tool's strings are still searched for credential paths.
+func TestCodexClaudeToolNamesUseEvaluate(t *testing.T) {
+	e := newRuleEnv(t)
+	c := e.ctx
+	if err := os.MkdirAll(filepath.Join(c.TicketDir, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	c.Protected = ProtectedPaths(c.TicketDir)
+	for _, tool := range []string{"Edit", "MultiEdit", "Write", "NotebookEdit"} {
+		if d := codexEval(c, tool, in(map[string]any{"file_path": "/etc/passwd", "old_string": "a", "new_string": "b"})); d.Verdict != VerdictEscalate || d.Rule != ruleWrite {
+			t.Errorf("%s /etc/passwd: %+v, want escalate", tool, d)
+		}
+		if d := codexEval(c, tool, in(map[string]any{"file_path": ".git/config"})); d.Verdict != VerdictDeny || d.Rule != ruleProtectedPath {
+			t.Errorf("%s .git/config: %+v, want deny", tool, d)
+		}
+	}
+	if d := codexEval(c, "Read", in(map[string]any{"file_path": c.Home + "/.aws/credentials"})); d.Verdict != VerdictDeny || d.Rule != ruleCredential {
+		t.Errorf("Read a credential: %+v, want deny", d)
+	}
+	if d := codexEval(c, "view_image", in(map[string]any{"path": "~/.ssh/id_rsa"})); d.Verdict != VerdictDeny {
+		t.Errorf("unknown tool naming a credential: %+v, want deny", d)
 	}
 }
 
@@ -805,6 +897,15 @@ Co-authored-by: codex <codex@example.com>'`,
 		`gh pr create -t Fix -b 'noreply@openai.com'`,
 		`gh pr edit 7 --body-file body.md`,
 		`gh pr create --title="Co-Authored-By: Codex" --body x`,
+		// Abbreviated long options, stdin by its device name, wrappers with operands, a file the same command writes.
+		`git commit --mess "fix" --mess="Co-Authored-By: Claude"`,
+		`git commit --tr "Co-authored-by: Codex <x@example.com>" -m fix`,
+		`git commit --fil msg.txt`,
+		"git commit -F /dev/stdin <<'EOF'\nFix\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nEOF",
+		`timeout 60 git commit -m "fix" -m "Co-Authored-By: Claude"`,
+		`nice -n 5 git commit -m "Generated with [Claude Code]"`,
+		`sudo -u dev env -u X git commit -m "noreply@openai.com"`,
+		"cat > new-msg.txt <<'EOF'\nFix\n\nCo-Authored-By: Codex <noreply@openai.com>\nEOF\ngit commit -F new-msg.txt",
 	} {
 		d := Evaluate(c, "Bash", in(map[string]any{"command": cmd}))
 		if d.Verdict != VerdictDeny || d.Rule != ruleAttribution || d.Reason != "remove the AI attribution trailer or footer: commits and pull requests carry none" {
@@ -819,6 +920,60 @@ Co-authored-by: codex <codex@example.com>'`,
 	c.Blocked = []string{"git commit"}
 	if d := Evaluate(c, "Bash", in(map[string]any{"command": `git commit -m "Co-Authored-By: Claude"`})); d.Rule != ruleBlocked {
 		t.Errorf("blocked commit: %+v, want the blocked-command deny", d)
+	}
+}
+
+// A message file is read only inside the ticket directory (a symlink out of it is outside), only its first 64 KiB, and
+// relative paths name it from where the command runs: the workdir, a cd, or git -C.
+func TestAttributionMessageFiles(t *testing.T) {
+	e := newRuleEnv(t)
+	c := e.ctx
+	c.Blocked = nil
+	write := func(p, body string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bash := func(cmd string) Decision { return Evaluate(c, "Bash", in(map[string]any{"command": cmd})) }
+	// A symlink in the ticket directory to a file outside it is not read: its content is not the rule's to see.
+	outside := filepath.Join(e.outDir, "msg.txt")
+	write(outside, "Fix\n\nCo-Authored-By: Claude\n")
+	if err := os.Symlink(outside, filepath.Join(c.TicketDir, "link.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if body, ok := c.messageFile("link.txt", c.TicketDir); ok || body != "" {
+		t.Fatalf("a symlink out of the ticket dir was read: %q", body)
+	}
+	if d := bash(`git commit -F link.txt`); d.Verdict == VerdictDeny {
+		t.Errorf("symlinked message: %+v, want it not denied (the file is not read, the command carries nothing)", d)
+	}
+	// Only the first 64 KiB are read.
+	pad := strings.Repeat("x", maxMessageFile)
+	write(filepath.Join(c.TicketDir, "long.txt"), pad+"\nCo-Authored-By: Claude\n")
+	write(filepath.Join(c.TicketDir, "short.txt"), pad[:maxMessageFile-100]+"\nCo-Authored-By: Claude\n")
+	if d := bash(`git commit -F long.txt`); d.Verdict == VerdictDeny {
+		t.Errorf("attribution past the cap: %+v, want it not seen", d)
+	}
+	if d := bash(`git commit -F short.txt`); d.Rule != ruleAttribution {
+		t.Errorf("attribution within the cap: %+v, want the attribution deny", d)
+	}
+	// Relative paths after cd, git -C or from the workdir.
+	write(filepath.Join(c.TicketDir, "sub", "m.txt"), "Fix\n\nGenerated with [Claude Code]\n")
+	write(filepath.Join(c.TicketDir, "m.txt"), "Fix\n")
+	for _, cmd := range []string{`cd sub && git commit -F m.txt`, `git -C sub commit -F m.txt`, `cd sub; git -C . commit --file=m.txt`} {
+		if d := bash(cmd); d.Rule != ruleAttribution {
+			t.Errorf("%q: %+v, want the attribution deny", cmd, d)
+		}
+	}
+	if d := Evaluate(c, "Bash", in(map[string]any{"command": `git commit -F m.txt`, "workdir": filepath.Join(c.TicketDir, "sub")})); d.Rule != ruleAttribution {
+		t.Errorf("relative to the workdir: %+v, want the attribution deny", d)
+	}
+	if d := bash(`git commit -F m.txt`); d.Verdict == VerdictDeny {
+		t.Errorf("the ticket dir's own m.txt: %+v, want it not denied", d)
 	}
 }
 

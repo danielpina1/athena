@@ -49,21 +49,34 @@ onto Claude Code's vocabulary first:
 
 | Codex tool | judged as |
 | --- | --- |
-| `Bash`, `shell`, `local_shell`, `exec_command`, `unified_exec` | `Bash` with the command (an argv array joined with POSIX quoting), run in its `workdir` |
-| `apply_patch` | one `Write` per path the patch adds, updates, deletes or moves to; the strictest verdict wins |
-| `write_stdin` | allowed (its process was already allowed to start) |
-| `mcp__…`, `web_search` | as they are |
+| `Bash`, `shell`, `local_shell`, `exec_command`, `unified_exec` | `Bash` with the command (an argv array joined with POSIX quoting), run in its `workdir`; a command carrying a patch (`apply_patch <<'EOF'`, or the argv `["apply_patch", patch]`) is also a `Write` per path, as below |
+| `apply_patch` | one `Write` per path the patch adds, updates, deletes or moves to (indented headers too); the strictest verdict wins |
+| `write_stdin` | what it types, by the `Bash` text rules: a credential or state path, a token variable, a blocked command or an AI attribution denies; anything else is allowed |
+| Claude Code's tool names (`Edit`, `Write`, `Read`, `WebFetch`, …), `mcp__…`, `web_search` | as Claude Code's |
 | any other | allowed unless one of its strings names a credential or Athena's state directory |
 
-A command the hook cannot read, and a patch whose paths it cannot read, ask the owner. Codex's own approval requests are
-judged the same way: a command as a `PermissionRequest` on `Bash`, a file change on a `Write` of each path, while network
-access (rule `network_access`, "Network: <host>", "any host" for `*`) and more permissions (rule `codex_permissions`)
-always ask the owner. Escalations become Approvals exactly as Claude Code's do (the timeout, the expiry, the end with the
-session). When Codex asks about one action through more than one door in the same turn (its `PreToolUse` and
-`PermissionRequest` hooks, and an approval request, in any order), the owner answers one Approval and every ask gets its
-answer: an ask about the same command (or path, or host) in the same turn, while the Approval waits or within 10
-minutes of its answer, shares it. Whether Codex 0.160.1 does ask twice, and in which order, is not verified yet (it takes
-a real turn); sharing is correct in either order.
+A command the hook cannot read, and a patch whose paths it cannot all read (a line naming a patch header it cannot
+parse), ask the owner. Codex's own approval requests are judged the same way: a command as a `PermissionRequest` on
+`Bash`, a file change on a `Write` of each path, while network access (rule `network_access`, "Network: <host>", "any
+host" for `*`) and more permissions (rule `codex_permissions`) always ask the owner. Escalations become Approvals exactly
+as Claude Code's do (the timeout, the expiry, the end with the session); a file Approval's summary names every path the
+rules escalate and Codex's reason (with any write grant).
+
+A command or file approval, and the `PermissionRequest` hook, ask to run the action outside Codex's sandbox. On a node
+with `sandbox` set, where a Claude Code worker can never run anything unsandboxed, the rules' deny stays a deny and
+their allow becomes an Approval (rule `codex_unsandboxed`, "Run outside the sandbox: <command or paths>"). Without
+`sandbox`, where Claude Code's commands run unsandboxed under the rules alone, the rules' verdict stands. Inside Codex's
+sandbox the network stays off: Codex cannot allow hosts by name the way Claude Code's sandbox does, so a command that
+needs the network (`git push`, a package install) asks to leave the sandbox, and on a sandboxed node that is an Approval.
+
+Codex may ask about one action outside its sandbox through both its `PermissionRequest` hook and an approval request,
+in either order: the owner answers one Approval, which the other door's ask about exactly the same action (the same
+turn, and the same commands' exact text or the same paths, every one) gets once, while it waits or within 10 minutes of
+its answer. A `PreToolUse` ask (to run the action in the sandbox) shares nothing, and the same door asking again asks
+anew. Whether Codex 0.160.1 does ask twice, and in which order, is not verified yet (it takes a real turn).
+
+A call Codex's `PreToolUse` hook denies shows no result in Codex's events; the call's next item means the model has
+seen the deny, so a report after it is accepted (Claude Code's waits for the failed result).
 
 What the hook prints follows the output schemas Codex 0.160.1 embeds (`pre-tool-use.command.output`,
 `permission-request.command.output`; pinned in `internal/node/testdata/hooks/codex`). They are Claude Code's shapes with
@@ -73,8 +86,10 @@ and a deny always carries a non-empty reason.
 Codex's sandbox cannot keep Athena's files and the repository's git config and hooks read-only inside its writable roots
 (§5), so for Codex sessions the rules deny, with rule `protected_path`, any write (a patch, a file change, a shell
 redirection or file command) to `.athena/settings.json`, `.athena/mcp.json`, `.athena/.gitignore`, the git common
-directory's `config`, `config.worktree` and `hooks/`, and a worktree's own `config.worktree`: the same list Claude Code's
-sandbox denies.
+directory's `config`, `config.worktree` and `hooks/`, the git directory's `commondir` and, for a worktree, its own
+`config.worktree` and `gitdir` and the working directory's `.git` file: the same list Claude Code's sandbox denies.
+The node's own git (creating and removing worktrees, `git status`) runs with `core.fsmonitor=false` and
+`core.hooksPath=/dev/null`, whatever a repository's config says.
 
 ### Keep one athena binary
 
@@ -172,8 +187,9 @@ Caveats:
 The node computes exactly those roots for a worktree (its git directory, and the common directory's `objects`, `refs`
 and `logs`) and protects `<gitDir>/config.worktree`, the git config and hooks and Athena's own files with its rules
 (§1, "Hooks, approvals and the rules"). A session passes the node's writable roots, as the node computed them, in every `turn/start`'s `sandboxPolicy`
-(`workspaceWrite` with `writableRoots`, network off; `readOnly` for a reviewer). The session's working directory is
-always writable. The CA variables a sandboxed command needs are in the session process's environment, which its
+(`workspaceWrite` with `writableRoots`, network off; `readOnly` for a reviewer). The owner's `sandbox.allowWrite`
+paths (a build cache) are writable roots too, less any that holds a protected path or lies in one (the node logs each
+it leaves out): Codex's sandbox has no deny list. The session's working directory is always writable. The CA variables a sandboxed command needs are in the session process's environment, which its
 commands inherit.
 
 ## 6. Attribution
@@ -182,11 +198,13 @@ Commits and pull requests carry no AI attribution, whichever runtime made them. 
 both runtimes, right after the blocked commands) a `git commit` or a `gh pr create|edit` (also as `athena gh`, or inside
 `sh -c`) whose message, `--trailer`, title or body matches a co-author trailer naming Codex or Claude, a "Generated
 with Codex" or "Generated with [Claude Code]" footer, or a `noreply@openai.com` or `noreply@anthropic.com` address. The
-rule reads `-m`/`--message`, `--trailer`, `--title`/`-t` and `--body`/`-b`, and the files `-F`/`--file`/`--body-file`
-name when they are in the Ticket's directory (up to 64 KiB); a message read from stdin (`-F -`, a here-document) is
-looked for in the whole command. Its reason tells the worker: "remove the AI attribution trailer or footer: commits and
+rule reads `-m`/`--message`, `--trailer` (and git's abbreviations, `--mess`), `--title`/`-t` and `--body`/`-b`, and the
+files `-F`/`--file`/`--body-file` name when they are in the Ticket's directory (up to 64 KiB; relative to where the
+command runs them: its `workdir`, a `cd`, `git -C`); a message read from stdin (`-F -`, `/dev/stdin`, a here-document)
+or from a file the rule cannot read there (outside the Ticket's directory, or written by the same command) is looked
+for in the whole command. Wrappers are seen through (`env`, `sudo -u x`, `nice -n 5`, `timeout 60`). Its reason tells the worker: "remove the AI attribution trailer or footer: commits and
 pull requests carry none". It is a guard against a model's habit, not against a worker set on evading it (a message
-built by command substitution, or a file outside the Ticket's directory, is not read).
+built by command substitution is not read, nor is a file outside the Ticket's directory).
 
 ## 7. Quota and failover
 

@@ -79,6 +79,25 @@ func TestSessionRunsOnConfiguredRuntime(t *testing.T) {
 	}
 }
 
+// The owner's sandbox write paths are writable roots too, less any that holds a protected path or lies in one.
+func TestWritableRootsAddSandboxAllowWrite(t *testing.T) {
+	repo := newRepo(t)
+	cache := filepath.Join(t.TempDir(), "go-build")
+	rec := newRecordingRuntime(fakeClaude(t))
+	h := newHarness(t, func(c *Config) {
+		c.Runtimes = map[string]rt.Runtime{"claude": rec}
+		c.Sandbox = &SandboxConfig{AllowWrite: []string{cache, repo, filepath.Join(repo, ".git", "hooks", "x"), filepath.Dir(repo)}}
+	})
+	tk := h.submit("Use the cache", repo)
+	h.running(tk.ID)
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	roots := (*rec.starts)[0].WritableRoots
+	if len(roots) != 5 || roots[4] != cache {
+		t.Fatalf("writable roots = %v, want the four git roots and %s only", roots, cache)
+	}
+}
+
 // A Ticket whose runtime the node does not have fails with why; no other runtime runs in its place.
 func TestUnavailableRuntimeFailsWithWhy(t *testing.T) {
 	h := newHarness(t, func(c *Config) { c.Runtimes = map[string]rt.Runtime{"other": claude.Runtime{Binary: c.ClaudeBinary}} })

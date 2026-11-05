@@ -105,16 +105,39 @@ func ProtectedPaths(workDir string) []string {
 }
 
 // writableRoots are the directories besides its working directory a session's sandbox must let it write, for a runtime
-// whose sandbox takes them at start (Codex's), so that a worktree can commit: the worktree's git directory and the
-// repository's objects, refs and logs. Codex keeps a .git directory inside a writable root read-only, and a root of the
-// whole common directory does not let a commit through (docs/dev/codex.md §5); the config and hooks stay outside every
-// root. Nil outside a git repository.
-func writableRoots(workDir string) []string {
-	gitDir, common := gitDirs(workDir)
-	if common == "" {
-		return nil
+// whose sandbox takes them at start (Codex's):
+//   - for a worktree to commit, its git directory and the repository's objects, refs and logs. Codex keeps a .git
+//     directory inside a writable root read-only, and a root of the whole common directory does not let a commit through
+//     (docs/dev/codex.md §5); the config and hooks stay outside every root;
+//   - the owner's Sandbox.AllowWrite (a build cache), less any root that holds a protected path or lies in one: Codex's
+//     sandbox has no deny list to keep it read-only. Each one dropped is logged.
+func (n *Node) writableRoots(workDir string) []string {
+	var roots []string
+	if gitDir, common := gitDirs(workDir); common != "" {
+		roots = []string{gitDir, filepath.Join(common, "objects"), filepath.Join(common, "refs"), filepath.Join(common, "logs")}
 	}
-	return []string{gitDir, filepath.Join(common, "objects"), filepath.Join(common, "refs"), filepath.Join(common, "logs")}
+	if n.cfg.Sandbox == nil {
+		return roots
+	}
+	var protected []string
+	for _, p := range ProtectedPaths(workDir) {
+		if real, ok := realpath(p); ok {
+			protected = append(protected, real)
+		}
+	}
+	for _, root := range n.cfg.Sandbox.AllowWrite {
+		real, ok := realpath(filepath.Clean(root))
+		if !ok {
+			n.log.Warn("sandbox write path left out of the codex sandbox: it does not resolve", "path", root)
+			continue
+		}
+		if i := slices.IndexFunc(protected, func(p string) bool { return within(real, p) || within(p, real) }); i >= 0 {
+			n.log.Warn("sandbox write path left out of the codex sandbox: it holds a protected path", "path", root, "protected", protected[i])
+			continue
+		}
+		roots = append(roots, filepath.Clean(root))
+	}
+	return roots
 }
 
 // gitDirs returns the git directory of the repository or worktree whose top level is dir and its common directory

@@ -28,7 +28,7 @@ type HookRequest struct {
 	Role  string `json:"role,omitempty"`
 	Token string `json:"token,omitempty"`
 	// Runtime is the runtime whose hook this is (`athena hook --runtime`): "claude" or "codex", whose tool names and
-	// inputs differ. Empty is Claude Code's.
+	// inputs differ. A decision hook that names another runtime than its session's is denied; empty is the session's.
 	Runtime string `json:"runtime,omitempty"`
 	// Input is the raw JSON the hook received on stdin, forwarded verbatim.
 	Input json.RawMessage `json:"input"`
