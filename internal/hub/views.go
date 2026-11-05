@@ -72,7 +72,8 @@ func prURL(t *core.Ticket) string {
 // defaultRuntime is the runtime of a Ticket whose Execution does not name one: Claude Code is the only one.
 const defaultRuntime = "claude"
 
-func ticketSummary(t *core.Ticket, st core.Stage) *athenav1.TicketSummary {
+// ticketSummary maps a Ticket; gitFolder tells its branch (see node.WorktreeBranch; nil: no folder has a .git entry).
+func ticketSummary(t *core.Ticket, st core.Stage, gitFolder func(dir string) bool) *athenav1.TicketSummary {
 	v := &athenav1.TicketSummary{
 		Id: t.ID, Title: t.Title, Stage: st.Stage, Action: st.Action, Repo: t.Repo,
 		CreatedAt: ts(t.CreatedAt), UpdatedAt: ts(t.UpdatedAt),
@@ -86,7 +87,7 @@ func ticketSummary(t *core.Ticket, st core.Stage) *athenav1.TicketSummary {
 			v.Runtime = t.Execution.Runtime
 		}
 	}
-	v.Branch = node.WorktreeBranch(*t)
+	v.Branch = node.WorktreeBranch(*t, gitFolder)
 	if a := t.LatestAssignment(); a != nil && a.Model != "" {
 		v.Model = a.Model
 	}
@@ -254,8 +255,9 @@ func ticketTimeline(t *core.Ticket, origin *core.Trigger, pending *core.Approval
 	return out
 }
 
-func ticketDetail(t *core.Ticket, st core.Stage, origin *core.Trigger, pending *core.Approval, answered []core.Approval) *athenav1.TicketDetail {
-	d := &athenav1.TicketDetail{Summary: ticketSummary(t, st), Timeline: ticketTimeline(t, origin, pending, answered)}
+func ticketDetail(t *core.Ticket, st core.Stage, gitFolder func(string) bool, origin *core.Trigger, pending *core.Approval,
+	answered []core.Approval) *athenav1.TicketDetail {
+	d := &athenav1.TicketDetail{Summary: ticketSummary(t, st, gitFolder), Timeline: ticketTimeline(t, origin, pending, answered)}
 	for _, f := range t.Follows {
 		d.Threads = append(d.Threads, f.Thread)
 	}

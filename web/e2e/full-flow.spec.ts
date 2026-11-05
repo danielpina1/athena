@@ -21,7 +21,7 @@ async function inBothThemes(page: Page, testInfo: TestInfo, state: string) {
     await expect(page.locator("html")).toHaveAttribute("data-theme", scheme);
     await expectAccessible(page);
     await expectNoSideScroll(page);
-    if (project === "phone") await expectTouchTargets(page);
+    if (full.width < 1024) await expectTouchTargets(page);
     await page.evaluate(() => document.fonts.ready);
     const path = join(shotsDir ?? testInfo.outputDir, `${state}-${scheme}-${project}.png`);
     await page.screenshot({ path });
@@ -35,27 +35,72 @@ async function inBothThemes(page: Page, testInfo: TestInfo, state: string) {
   await page.emulateMedia({ colorScheme: "light", reducedMotion: "reduce" });
 }
 
-/** On the phone every button, link-button, tab and field a thumb must hit is at least 44 px tall (inline text links excepted). */
+/**
+ * In the phone shell (under 1024 px: the phone and the tablet) every control a thumb must hit is at least 44 px tall:
+ * buttons and link-buttons, tabs, radios, checkboxes, switches, menu items, options, fields, the navigation's links
+ * and the list rows (inline text links excepted).
+ */
 async function expectTouchTargets(page: Page) {
-  const small = await page.evaluate(() =>
-    [...document.querySelectorAll<HTMLElement>('button, [role="tab"], [role="radio"], input:not([type="hidden"]), select, textarea, nav a')]
+  const targets = [
+    "button",
+    '[data-slot="button"]',
+    '[role="button"]',
+    '[role="tab"]',
+    '[role="radio"]',
+    '[role="checkbox"]',
+    '[role="switch"]',
+    '[role="menuitem"]',
+    '[role="option"]',
+    'input:not([type="hidden"])',
+    "select",
+    "textarea",
+    "summary",
+    "nav a",
+    "a[data-ticket-row]",
+  ].join(", ");
+  const small = await page.evaluate((targets) =>
+    [...document.querySelectorAll<HTMLElement>(targets)]
       .filter((el) => {
         const r = el.getBoundingClientRect();
         const hidden = r.width === 0 || r.height === 0 || getComputedStyle(el).visibility === "hidden" || el.closest("[hidden]") !== null;
         return !hidden && !el.matches(".sr-only, .sr-only *") && r.height < 43.5;
       })
       .map((el) => `${el.tagName.toLowerCase()} "${(el.getAttribute("aria-label") || el.textContent || "").trim().slice(0, 30)}" ${Math.round(el.getBoundingClientRect().height)}px`),
+    targets,
   );
   expect(small, "targets under 44 px").toEqual([]);
 }
 
-/** The page is no wider than its viewport (polled: a resize re-lays the page out a frame later). */
+/**
+ * The page is no wider than its viewport, and nothing is cut off sideways by a box that hides its overflow (the
+ * desktop shell's overflow-hidden would hide a page too wide; polled: a resize re-lays the page out a frame later).
+ * Clipping meant as such is left alone: a truncated line (text-overflow: ellipsis), a box that scrolls (auto,
+ * scroll), a field's own text and the screen-reader-only text.
+ */
 async function expectNoSideScroll(page: Page) {
   await expect
     .poll(() => page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth), {
       message: "page scrollWidth minus clientWidth",
     })
     .toBeLessThanOrEqual(0);
+  await expect
+    .poll(
+      () =>
+        page.evaluate(() =>
+          [...document.querySelectorAll<HTMLElement>("body, body *")]
+            .filter((el) => {
+              const cs = getComputedStyle(el);
+              if (cs.overflowX !== "hidden" && cs.overflowX !== "clip") return false;
+              if (cs.textOverflow === "ellipsis" || el.matches("input, textarea, select, .sr-only, .sr-only *")) return false;
+              const r = el.getBoundingClientRect();
+              if (r.width === 0 || r.height === 0 || cs.visibility === "hidden") return false;
+              return el.scrollWidth - el.clientWidth > 1;
+            })
+            .map((el) => `${el.tagName.toLowerCase()}.${[...el.classList].slice(0, 4).join(".")} scrollWidth ${el.scrollWidth} > ${el.clientWidth}`),
+        ),
+      { message: "content clipped sideways by overflow-x: hidden" },
+    )
+    .toEqual([]);
 }
 
 /** The 320 px check re-lays the page out (a desktop becomes a phone for a moment), which closes an open confirmation: ask again. */
