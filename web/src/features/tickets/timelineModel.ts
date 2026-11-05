@@ -41,7 +41,7 @@ const REPORT: Record<string, [string, Tone]> = {
   progress: ["Progress update", "neutral"],
   blocked: ["Blocked", "warn"],
   failed: ["Failed", "danger"],
-  dropped: ["Finished", "neutral"],
+  dropped: ["Finished", "ok"],
 };
 
 const INPUT: Record<string, string> = {

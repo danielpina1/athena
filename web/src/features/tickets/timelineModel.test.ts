@@ -54,6 +54,7 @@ test("a Report is one line: its state, the summary's first line and its pull req
   expect(titleOf("report", "waiting")).toBe("Waiting on you");
   expect(titleOf("report", "progress")).toBe("Progress update");
   expect(titleOf("report", "dropped")).toBe("Finished");
+  expect(describeEntry(e("report", "dropped")).tone).toBe("ok");
   expect(titleOf("report", "blocked")).toBe("Blocked");
   expect(describeEntry(e("report", "failed", "", "**Tests** fail")).subtitle).toBe("Tests fail");
   expect(describeEntry(e("report", "failed")).tone).toBe("danger");

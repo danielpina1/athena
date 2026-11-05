@@ -40,9 +40,13 @@ function Pill({ state, ended, attention }: { state: string; ended: boolean; atte
           ? "border-accent bg-accent text-accent-fg"
           : state === "failed" || state === "blocked"
             ? "border-danger text-danger"
-            : state === "ready" || state === "dropped"
-              ? "border-ok bg-ok text-bg"
-              : "border-line-soft text-muted",
+            : state === "ready" && !ended
+              ? "border-success bg-success text-bg"
+              : state === "ready" || state === "dropped"
+                ? "border-ok bg-ok text-bg"
+                : state === "waiting"
+                  ? "border-warning text-warning"
+                  : "border-line-soft text-muted",
       )}
     >
       {label}

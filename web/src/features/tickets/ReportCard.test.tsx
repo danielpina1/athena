@@ -66,3 +66,14 @@ test("no Report, no card", () => {
   const view = render(<ReportCard reports={[]} repo="" />);
   expect(view.container.textContent).toBe("");
 });
+
+test("the state pill is green for review and amber while waiting", () => {
+  const { unmount } = render(<ReportCard reports={[report({ assignmentId: "a1", state: "ready", summary: "x" })]} repo="" />);
+  const ready = document.querySelector("[data-state]")!;
+  expect(ready.className).toContain("bg-success");
+  unmount();
+  render(<ReportCard reports={[report({ assignmentId: "a1", state: "waiting", summary: "x" })]} repo="" />);
+  const waiting = document.querySelector("[data-state]")!;
+  expect(waiting.className).toContain("text-warning");
+  expect(waiting.className).toContain("border-warning");
+});
