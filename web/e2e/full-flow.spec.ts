@@ -1,9 +1,15 @@
-// The whole flow in one test, on the phone and the desktop (R37: its Tickets run the default fakeclaude fixture and
-// the session helpers act as their workers; both are ended): sign in, New task without a repository, watch it live,
-// answer its question, approve its Approval, see it Ready for review, stop a second Ticket (asked twice), open the
-// graph, sign out. Every state is checked for axe, a 320 px column without sideways scroll, light and dark; the
-// test fails on any console.error (the harness already fails it on a CSP violation) and on any page error.
-// Set ATHENA_E2E_SHOTS=<dir> to keep each state's screenshots there (<state>-<light|dark>-<project>.png).
+// The whole flow in one test, at the three widths (R37: its Tickets run the default fakeclaude fixture and the session
+// helpers act as their workers; both are ended): sign in, New task without a repository, watch it live, answer its
+// question, approve its Approval, see it Ready for review, stop a second Ticket (asked twice), open the graph, sign
+// out. Every state is checked for axe, no sideways scroll and nothing clipped sideways (also in a 320 px column),
+// 44 px touch targets in the phone shell (the phone and the tablet), light and dark; the test fails on any
+// console.error (the harness already fails it on a CSP violation) and on any page error.
+//
+// The tablet runs it too: it is the phone shell at a width the phone does not cover, and it costs about 30 s of
+// `make e2e`. The states' screenshots are kept, not compared (toHaveScreenshot): each view's look is pinned by its
+// own spec on a fixed fixture, while here the Ticket ids follow the specs that ran before and the session output is
+// live, so a comparison would mask most of the page or flake. Set ATHENA_E2E_SHOTS=<dir> to keep them there
+// (<state>-<light|dark>-<project>.png); otherwise they go with the test's output.
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import type { Locator, Page, TestInfo } from "@playwright/test";
@@ -75,7 +81,7 @@ async function expectTouchTargets(page: Page) {
  * The page is no wider than its viewport, and nothing is cut off sideways by a box that hides its overflow (the
  * desktop shell's overflow-hidden would hide a page too wide; polled: a resize re-lays the page out a frame later).
  * Clipping meant as such is left alone: a truncated line (text-overflow: ellipsis), a box that scrolls (auto,
- * scroll), a field's own text and the screen-reader-only text.
+ * scroll), a field's own text and the visually hidden text (sr-only, 1 px boxes, a clip).
  */
 async function expectNoSideScroll(page: Page) {
   await expect
@@ -93,7 +99,8 @@ async function expectNoSideScroll(page: Page) {
               if (cs.overflowX !== "hidden" && cs.overflowX !== "clip") return false;
               if (cs.textOverflow === "ellipsis" || el.matches("input, textarea, select, .sr-only, .sr-only *")) return false;
               const r = el.getBoundingClientRect();
-              if (r.width === 0 || r.height === 0 || cs.visibility === "hidden") return false;
+              if (r.width <= 1 || r.height <= 1 || cs.visibility === "hidden") return false; // hidden, or visually hidden
+              if (cs.clip !== "auto" || cs.clipPath !== "none") return false; // visually hidden the other way
               return el.scrollWidth - el.clientWidth > 1;
             })
             .map((el) => `${el.tagName.toLowerCase()}.${[...el.classList].slice(0, 4).join(".")} scrollWidth ${el.scrollWidth} > ${el.clientWidth}`),
