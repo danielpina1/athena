@@ -3,7 +3,8 @@
 // TLS off and no GitHub source, and fakeclaude as the runtime (`athena server --claude`). fakeclaude replays
 // <state>/fixture-<ticket>.jsonl, or fixture-default.jsonl (a turn that never ends, so every Ticket's session stays
 // live) when a spec wrote none; after each later message it replays <state>/later-<ticket>.jsonl if a spec wrote one
-// (R37: each spec gives its own Tickets their fixtures, see harness.ts). It logs each session's environment to
+// (R37: each spec gives its own Tickets their fixtures, see harness.ts), its result line waiting while
+// <state>/hold-<ticket> exists. It logs each session's environment to
 // <state>/env-<ticket>.log (ATHENA_FAKE_ENV_LOG) for sessionctl and its stdin to <state>/stdin-<ticket>.log. The
 // harness reads the location from ATHENA_E2E_* variables. Set ATHENA_E2E_KEEP=1 to keep the state dir (with server.log) afterwards.
 import { execFileSync, spawn } from "node:child_process";
@@ -68,6 +69,7 @@ export default async function globalSetup() {
       ...process.env,
       ATHENA_FAKE_FIXTURE: join(state, "fixture-{ticket}.jsonl"),
       ATHENA_FAKE_LATER_FIXTURE: join(state, "later-{ticket}.jsonl"),
+      ATHENA_FAKE_LATER_HOLD: join(state, "hold-{ticket}"),
       ATHENA_FAKE_STDIN_LOG: join(state, "stdin-{ticket}.log"),
       ATHENA_FAKE_ENV_LOG: join(state, "env-{ticket}.log"),
     },

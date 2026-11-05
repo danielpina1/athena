@@ -266,6 +266,15 @@ describe("Graph", () => {
     // The running Ticket carries a ring.
     expect(node("T-1").querySelector("[data-ring]")).toBeTruthy();
     expect(node("T-2").querySelector("[data-ring]")).toBeNull();
+    // Its faint halo pulses (CSS only); other Tickets have none.
+    const glow = node("T-1").querySelector("[data-glow]")!;
+    const box = node("T-1").querySelector("[data-box]")!;
+    expect(glow.classList.contains("motion-glow")).toBe(true);
+    // A halo just outside the box, for the eyes only.
+    expect(Number(glow.getAttribute("x"))).toBe(Number(box.getAttribute("x")) - 3);
+    expect(Number(glow.getAttribute("width"))).toBe(Number(box.getAttribute("width")) + 6);
+    expect(glow.getAttribute("aria-hidden")).toBe("true");
+    expect(node("T-2").querySelector("[data-glow]")).toBeNull();
   });
 
   test("needs-you filter keeps the URL and shows only what needs you", async () => {

@@ -9,8 +9,10 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"log/slog"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -128,6 +130,10 @@ type Hub struct {
 	// folders are the placement folders whose facts changed since the loop last republished their Tickets.
 	folders map[string]bool
 
+	// actors caches the GitHub login of a reply's Trigger, by Trigger id (replyActors); "" for none.
+	actorMu sync.Mutex
+	actors  map[string]string
+
 	// running counts the loop and the health probe; Wait waits for both after ctx is done.
 	running sync.WaitGroup
 }
@@ -149,7 +155,7 @@ func New(src Source, log *slog.Logger) *Hub {
 		src: src, log: log, epoch: hex.EncodeToString(b[:]), now: time.Now,
 		in: make(chan store.Changes, changeBuffer), wake: make(chan struct{}, 1), nodeWake: make(chan struct{}, 1),
 		reposWake: make(chan struct{}, 1), healthTick: healthEvery, subs: map[*Sub]struct{}{}, healthSince: map[string]healthState{},
-		folders: map[string]bool{},
+		folders: map[string]bool{}, actors: map[string]string{},
 	}
 }
 
@@ -802,5 +808,52 @@ func (h *Hub) detail(t *core.Ticket, st core.Stage) *athenav1.TicketDetail {
 	if err != nil {
 		h.log.Warn("hub: detail: answered approvals", "ticket", t.ID, "error", err)
 	}
-	return ticketDetail(t, st, h.src.GitFolder, origin, pending, answered)
+	return ticketDetail(t, st, h.src.GitFolder, origin, pending, answered, h.replyActors(t))
+}
+
+// replyActorsMax bounds the Trigger reads one detail makes to name who replied; actorCacheMax bounds the logins the
+// hub remembers (a Trigger never changes, so a login read once holds).
+const (
+	replyActorsMax = 50
+	actorCacheMax  = 4096
+)
+
+// replyActors are the GitHub logins of the people whose messages reached t, by Trigger id. It looks at the newest
+// replies first, each Trigger once, and reads at most replyActorsMax Triggers the cache does not know.
+func (h *Hub) replyActors(t *core.Ticket) map[string]string {
+	out := map[string]string{}
+	looked := map[string]bool{}
+	reads := 0
+	for i := len(t.Inputs) - 1; i >= 0 && reads < replyActorsMax; i-- {
+		in := &t.Inputs[i]
+		id := in.TriggerID
+		if !in.Human || in.Context || !strings.HasPrefix(id, "github:") || looked[id] {
+			continue
+		}
+		looked[id] = true
+		h.actorMu.Lock()
+		login, known := h.actors[id]
+		h.actorMu.Unlock()
+		if !known {
+			reads++
+			// A Trigger the store does not have is remembered with no login too: an Input's Trigger is stored before
+			// it, so a missing one stays missing, and asking again on every commit would only cost reads. A store
+			// that failed is not an answer: nothing is remembered, and the next detail asks again.
+			tr, err := h.src.Trigger(id)
+			if err != nil && !errors.Is(err, core.ErrNotFound) {
+				continue
+			}
+			login = tr.Actor.ID
+			h.actorMu.Lock()
+			if len(h.actors) >= actorCacheMax {
+				clear(h.actors)
+			}
+			h.actors[id] = login
+			h.actorMu.Unlock()
+		}
+		if login != "" {
+			out[id] = login
+		}
+	}
+	return out
 }

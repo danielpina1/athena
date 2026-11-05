@@ -40,9 +40,19 @@ var OwnerActor = ActorRef{Source: ownerSource, ID: "owner"}
 
 // UserError is an invalid request: an unknown Ticket, a command its state does not allow, or a malformed input.
 // Commands return it as *UserError; match it with errors.As.
-type UserError struct{ Msg string }
+type UserError struct {
+	Msg string
+	// Err is what the error is, for errors.Is: ErrNotFound for a record that is not stored, else nil.
+	Err error
+}
 
 func (e *UserError) Error() string { return e.Msg }
+
+func (e *UserError) Unwrap() error { return e.Err }
+
+// ErrNotFound is in the UserError of a lookup whose record is not stored (Trigger): a real answer, unlike a store
+// that could not be read.
+var ErrNotFound = errors.New("not found")
 
 // ErrDuplicate is returned with the existing Ticket when a task is submitted again under the same request id.
 var ErrDuplicate = errors.New("duplicate request")
@@ -64,11 +74,13 @@ type TaskOptions struct {
 
 // ReportInput is a worker's report on its Ticket. A Question asks a person (an empty one keeps the current question);
 // AssignmentID, when set, names the Assignment the report is from, and a report from one that no longer runs is refused.
+// Pull is the pull request the report names, kept on the Report (binding it is the caller's).
 type ReportInput struct {
 	AssignmentID string
 	State        ReportState
 	Summary      string
 	Question     string
+	Pull         int
 }
 
 // Engine is the domain's single entry point. Each command runs in one transaction; the Executor calls and Events it
@@ -407,7 +419,7 @@ func (e *Engine) FileReport(ticketID string, r ReportInput) error {
 		if !hasReport(t) {
 			t.Stats.TimeToFirstReport = nonNegative(o.at.Sub(t.CreatedAt))
 		}
-		a.Report = &Report{State: r.State, Summary: r.Summary, At: o.at}
+		a.Report = &Report{State: r.State, Summary: r.Summary, Question: r.Question, Pull: r.Pull, At: o.at}
 		t.UpdatedAt = o.at
 		if r.State == ReportBlocked || r.State == ReportFailed {
 			t.Undelivered = slices.DeleteFunc(t.Undelivered, func(id string) bool { return automatic(findInput(t, id)) })
@@ -1056,7 +1068,7 @@ func (e *Engine) Trigger(id string) (Trigger, error) {
 		return Trigger{}, err
 	}
 	if t == nil {
-		return Trigger{}, userErrorf("trigger %s not found", id)
+		return Trigger{}, &UserError{Msg: fmt.Sprintf("trigger %s not found", id), Err: ErrNotFound}
 	}
 	return *t, nil
 }

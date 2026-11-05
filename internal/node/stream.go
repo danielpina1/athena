@@ -27,8 +27,9 @@ const (
 	maxLineBytes = 256 << 10
 	// subscriberBuffer is a live channel's capacity.
 	subscriberBuffer = 512
-	// TailLines is how many lines from = -1 asks for.
-	TailLines = 200
+	// TailLines is how many lines from = -1 asks for: about twice the items a tail shows (internal/web sends the last
+	// 200), since about half of a session's lines render to nothing (bookkeeping the session view drops).
+	TailLines = 400
 	// tailScanBytes bounds how much of a transcript's end is read to find the last TailLines lines.
 	tailScanBytes = 4 << 20
 )

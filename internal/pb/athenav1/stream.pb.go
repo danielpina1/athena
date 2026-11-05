@@ -25,7 +25,7 @@ const (
 type StreamOpen struct {
 	state    protoimpl.MessageState `protogen:"open.v1"`
 	TicketId string                 `protobuf:"bytes,1,opt,name=ticket_id,json=ticketId,proto3" json:"ticket_id,omitempty"`
-	// from_offset -1 means "the last 200 items".
+	// from_offset -1 means "the last 200 items" (of the last 400 transcript lines).
 	FromOffset    int64 `protobuf:"varint,2,opt,name=from_offset,json=fromOffset,proto3" json:"from_offset,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -131,12 +131,17 @@ type StreamItem struct {
 	state  protoimpl.MessageState `protogen:"open.v1"`
 	Offset int64                  `protobuf:"varint,1,opt,name=offset,proto3" json:"offset,omitempty"`
 	At     *timestamppb.Timestamp `protobuf:"bytes,2,opt,name=at,proto3" json:"at,omitempty"`
-	// kind is init, say, thinking, tool_call, tool_result, result or other.
-	Kind          string `protobuf:"bytes,3,opt,name=kind,proto3" json:"kind,omitempty"`
-	Text          string `protobuf:"bytes,4,opt,name=text,proto3" json:"text,omitempty"`
-	Tool          string `protobuf:"bytes,5,opt,name=tool,proto3" json:"tool,omitempty"`
-	ToolUseId     string `protobuf:"bytes,6,opt,name=tool_use_id,json=toolUseId,proto3" json:"tool_use_id,omitempty"`
-	IsError       bool   `protobuf:"varint,7,opt,name=is_error,json=isError,proto3" json:"is_error,omitempty"`
+	// kind is init, say, thinking, tool_call, tool_result, result, user (a message from the owner) or other.
+	Kind      string `protobuf:"bytes,3,opt,name=kind,proto3" json:"kind,omitempty"`
+	Text      string `protobuf:"bytes,4,opt,name=text,proto3" json:"text,omitempty"`
+	Tool      string `protobuf:"bytes,5,opt,name=tool,proto3" json:"tool,omitempty"`
+	ToolUseId string `protobuf:"bytes,6,opt,name=tool_use_id,json=toolUseId,proto3" json:"tool_use_id,omitempty"`
+	IsError   bool   `protobuf:"varint,7,opt,name=is_error,json=isError,proto3" json:"is_error,omitempty"`
+	// detail is a tool_call's input as compact JSON, empty for other kinds. Its string values are redacted, its
+	// secret-looking keys hold "***", and each long string is clipped to about 2000 runes and an ellipsis; past
+	// 8 KiB in all the long values go and the keys stay. "_lines" maps the dotted path of each value it shortened
+	// (content, edits.0.old_string) to that value's full line count.
+	Detail        string `protobuf:"bytes,8,opt,name=detail,proto3" json:"detail,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -218,6 +223,13 @@ func (x *StreamItem) GetIsError() bool {
 		return x.IsError
 	}
 	return false
+}
+
+func (x *StreamItem) GetDetail() string {
+	if x != nil {
+		return x.Detail
+	}
+	return ""
 }
 
 // StreamGap says the items from..to were dropped from the ring.
@@ -337,7 +349,7 @@ const file_athena_v1_stream_proto_rawDesc = "" +
 	"fromOffset\"W\n" +
 	"\vStreamItems\x12\x1b\n" +
 	"\tticket_id\x18\x01 \x01(\tR\bticketId\x12+\n" +
-	"\x05items\x18\x02 \x03(\v2\x15.athena.v1.StreamItemR\x05items\"\xc7\x01\n" +
+	"\x05items\x18\x02 \x03(\v2\x15.athena.v1.StreamItemR\x05items\"\xdf\x01\n" +
 	"\n" +
 	"StreamItem\x12\x16\n" +
 	"\x06offset\x18\x01 \x01(\x03R\x06offset\x12*\n" +
@@ -346,7 +358,8 @@ const file_athena_v1_stream_proto_rawDesc = "" +
 	"\x04text\x18\x04 \x01(\tR\x04text\x12\x12\n" +
 	"\x04tool\x18\x05 \x01(\tR\x04tool\x12\x1e\n" +
 	"\vtool_use_id\x18\x06 \x01(\tR\ttoolUseId\x12\x19\n" +
-	"\bis_error\x18\a \x01(\bR\aisError\"L\n" +
+	"\bis_error\x18\a \x01(\bR\aisError\x12\x16\n" +
+	"\x06detail\x18\b \x01(\tR\x06detail\"L\n" +
 	"\tStreamGap\x12\x1b\n" +
 	"\tticket_id\x18\x01 \x01(\tR\bticketId\x12\x12\n" +
 	"\x04from\x18\x02 \x01(\x03R\x04from\x12\x0e\n" +

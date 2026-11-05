@@ -1,5 +1,6 @@
 // Fails when the initial route loads more than 200 KB of JS or 30 KB of CSS, gzipped: the entry chunk and its static
-// imports, from the Vite manifest. Lazy chunks (dynamic imports) do not count.
+// imports, from the Vite manifest. Lazy chunks (dynamic imports) do not count. It also fails when a chunk that must stay
+// lazy (the session view, the diff viewer, the file viewer: their sentinels) is in the initial route.
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -31,6 +32,27 @@ visit(entry);
 
 console.log(`sw.js ${(gz("sw.js") / 1024).toFixed(1)} KB gzipped`);
 let failed = false;
+
+// Chunks that must stay lazy carry a sentinel, "athena-lazy-chunk:<name>" (their LAZY_SENTINEL constant). Inlined, the
+// session view (about 9 KB) would still fit the budget, so a stray static import of it would pass unseen without this.
+// Each sentinel must be in the build (in a lazy chunk), and none in the initial route.
+const SENTINEL = "athena-lazy-chunk:";
+const sentinels = ["athena-lazy-chunk:session-view", "athena-lazy-chunk:diff-view", "athena-lazy-chunk:doc-viewer"];
+for (const key of seen) {
+  const code = readFileSync(join(dist, manifest[key].file), "utf8");
+  if (code.includes(SENTINEL)) {
+    const name = code.slice(code.indexOf(SENTINEL)).match(/^athena-lazy-chunk:[a-z-]+/)?.[0];
+    console.error(`bundle-budget: ${name} is in the initial route (${manifest[key].file}): import it lazily`);
+    failed = true;
+  }
+}
+const all = Object.values(manifest).map((c) => readFileSync(join(dist, c.file), "utf8")).join("\n");
+for (const s of sentinels) {
+  if (!all.includes(s)) {
+    console.error(`bundle-budget: no chunk carries ${s}: its LAZY_SENTINEL is gone, so the check above cannot see it`);
+    failed = true;
+  }
+}
 for (const kind of ["js", "css"]) {
   const kb = sizes[kind] / 1024;
   console.log(`bundle ${kind} ${kb.toFixed(1)} KB / ${budgets[kind]} KB`);

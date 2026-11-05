@@ -811,7 +811,7 @@ func (n *Node) variables(s *session) []string {
 // sessionContext is what the SessionStart hook adds to the session: the execution variables and the Mandate.
 func (n *Node) sessionContext(s *session) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "Athena Ticket %s: %s\n\nExecution variables:\n", s.t.ID, s.t.Title)
+	fmt.Fprintf(&b, "Athena Ticket %s: %s\n\nExecution variables:\n", s.t.ID, oneLine(s.t.Title))
 	for _, v := range n.variables(s) {
 		b.WriteString(v + "\n")
 	}
@@ -941,6 +941,9 @@ func (r *runner) run() {
 			Env:                env,
 			TranscriptPath:     n.transcriptPath(s.t.ID),
 			OnLine:             func(off int64, line []byte) { n.streams.add(s.t.ID, off, line) },
+			// The transcript keeps what the worker was sent, so the session view shows it (internal/render); the echo
+			// is no event the runner acts on (onEvent and account ignore claude.UserEcho).
+			ReplayUserMessages: true,
 		})
 		if err != nil {
 			r.fail("start claude: " + err.Error())
@@ -1074,10 +1077,7 @@ func (r *runner) sendFirst(sess *claude.Session, recovering bool) {
 	} else if recovering {
 		b.WriteString(recoveryNote + recoveryAdvice + "\n")
 	} else {
-		fmt.Fprintf(&b, "You are the worker of Athena Ticket %s: %s\n\nExecution variables:\n", t.ID, t.Title)
-		for _, v := range r.n.variables(s) {
-			b.WriteString(v + "\n")
-		}
+		b.WriteString(workerPreamble(t, r.n.variables(s)))
 	}
 	// Inputs a crashed process received but never took into a step go again, ahead of what waits.
 	if len(r.unread) > 0 {
@@ -1099,6 +1099,17 @@ func (r *runner) sendFirst(sess *claude.Session, recovering bool) {
 	}
 	r.inputSent()
 	r.markSent(ids)
+}
+
+// workerPreamble opens a new session's first message: who the worker is and its execution variables. The session view
+// (internal/render) recognises it and shows only the Inputs after it.
+func workerPreamble(t core.Ticket, vars []string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "You are the worker of Athena Ticket %s: %s\n\nExecution variables:\n", t.ID, oneLine(t.Title))
+	for _, v := range vars {
+		b.WriteString(v + "\n")
+	}
+	return b.String()
 }
 
 // deliver sends the Inputs that wait for the Ticket now and reports exactly those as delivered.
@@ -1474,7 +1485,7 @@ func renderInputs(t core.Ticket, ids []string, trigger func(id string) (core.Tri
 		case core.InputResumed:
 			fmt.Fprintf(&b, "[input %s: the Ticket was resumed by the message that follows]\n\n", in.ID)
 		case core.InputNote:
-			fmt.Fprintf(&b, "[input %s: note]\nNote: %s\n\n", in.ID, in.Text)
+			fmt.Fprintf(&b, "[input %s: note]\nNote: %s\n\n", in.ID, quoteText(in.Text))
 		default:
 			var tr core.Trigger
 			found := false
@@ -1490,7 +1501,7 @@ func renderInputs(t core.Ticket, ids []string, trigger func(id string) (core.Tri
 			if in.Human && (in.TriggerID == "" || (found && tr.Source == core.OwnerActor.Source)) {
 				from = "message from the owner (not on GitHub)"
 			}
-			fmt.Fprintf(&b, "[input %s: %s]\n%s\n\n", in.ID, from, in.Text)
+			fmt.Fprintf(&b, "[input %s: %s]\n%s\n\n", in.ID, from, quoteText(in.Text))
 		}
 	}
 	return b.String()
@@ -1610,11 +1621,20 @@ type placement struct {
 }
 
 // place is a Ticket's placement on this node: a GitHub Ticket without a directory of its own works in a worktree of
-// the node's clone of its repository.
+// the node's clone of its repository. A directory that is the state directory, or inside it, is refused.
 func (n *Node) place(t core.Ticket) (placement, error) {
 	p, err := place(n.cfg.WorkRoot, t)
 	if err != nil {
 		return p, err
+	}
+	if t.Execution != nil && t.Execution.Directory != "" {
+		dir := p.dirKey
+		if dir == "" {
+			dir = p.repo
+		}
+		if err := n.checkDirectory(dir); err != nil {
+			return placement{}, err
+		}
 	}
 	if t.Repo != "" && p.repo == "" && p.dirKey == "" {
 		if _, _, err := splitRepo(t.Repo); err != nil {

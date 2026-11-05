@@ -56,8 +56,9 @@ test("pinned sessions show side by side at 1440 px, up to 3, from the URL", asyn
   // Each one is watched and streamed, read-only.
   await waitFor(() => expect(actions.watch).toHaveBeenCalledTimes(3));
   expect(link.opens().map((o) => o.ticketId)).toEqual(["T-1", "T-2", "T-3"]);
+  // The stream opens at once; its output shows when the session view's chunk has loaded.
   act(() => link.items("T-2", says(2)));
-  expect(within(pinned[1]).getByText("line 10")).toBeTruthy();
+  expect(await within(pinned[1]).findByText("line 10")).toBeTruthy();
   expect(within(strip).queryByRole("textbox")).toBeNull();
 
   await userEvent.click(within(pinned[0]).getByRole("button", { name: "Unpin T-1" }));

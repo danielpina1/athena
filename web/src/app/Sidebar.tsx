@@ -1,20 +1,46 @@
-// The desktop sidebar (240 px): the name and the palette key, the navigation, the node with its live load, and
-// today's counts. Every count is the length of the list it stands for (selectCounts).
+// The desktop sidebar (240 px): Athena's mark and name and the palette key, the navigation, the node with its live
+// load, the live feed and today's counts. Every count is the length of the list it stands for (selectCounts).
+import { useState } from "react";
 import { NavLink } from "react-router";
-import { ConnectionDot, type LinkSource } from "@/app/ConnectionBanner";
+import type { LinkSource } from "@/app/ConnectionBanner";
 import { NAV, type NavItem, useNavCount } from "@/app/routes";
 import { modKeyLabel } from "@/app/shortcuts";
 import { selectCounts, selectSynced } from "@/lib/store/selectors";
 import { useAthena } from "@/lib/store/state";
+import { LiveFeed } from "@/features/activity/LiveFeed";
+import { AthenaMark } from "@/app/AthenaMark";
 import { Kbd } from "@/ui/athena/Kbd";
 import { Waiting } from "@/ui/athena/Waiting";
 import { cn } from "@/ui/cn";
 
-/** A count that needs the owner: orange fill, ink text. Hidden at zero. */
+/**
+ * How many times n has risen since the store first synced: the badge remounts on each, so its pop plays once. The
+ * first render, the count the first Snapshot brings and a fall do not count.
+ */
+function useRises(n: number): number {
+  const synced = useAthena(selectSynced);
+  const [seen, setSeen] = useState({ n, synced, rises: 0 });
+  if (seen.n !== n || seen.synced !== synced) {
+    const rises = seen.synced && synced && n > seen.n ? seen.rises + 1 : seen.rises;
+    setSeen({ n, synced, rises });
+    return rises;
+  }
+  return seen.rises;
+}
+
+/** A count that needs the owner: orange fill, ink text. Hidden at zero. It pops briefly when it goes up. */
 export function NeedsCount({ n, className }: { n: number; className?: string }) {
+  const rises = useRises(n);
   if (n <= 0) return null;
   return (
-    <span className={cn("bg-accent px-1.5 font-mono text-xs font-semibold text-accent-fg tabular-nums", className)}>
+    <span
+      key={rises}
+      className={cn(
+        "inline-block bg-accent px-1.5 font-mono text-xs font-semibold text-accent-fg tabular-nums",
+        rises > 0 && "motion-pop",
+        className,
+      )}
+    >
       {n}
     </span>
   );
@@ -117,10 +143,9 @@ export function Sidebar({ link, onOpenPalette }: { link: LinkSource; onOpenPalet
   return (
     <aside className="flex h-dvh w-[240px] shrink-0 flex-col overflow-y-auto border-r border-line">
       <div className="flex h-14 items-center justify-between gap-2 border-b border-line px-4">
-        <span className="flex items-center gap-2 font-semibold">
+        <AthenaMark link={link} className="font-semibold">
           Athena
-          <ConnectionDot link={link} />
-        </span>
+        </AthenaMark>
         <button
           type="button"
           onClick={onOpenPalette}
@@ -138,7 +163,7 @@ export function Sidebar({ link, onOpenPalette }: { link: LinkSource; onOpenPalet
         </ul>
       </nav>
       <NodeCard />
-      <div className="flex-1" />
+      <LiveFeed className="mt-4 min-h-40 flex-1 overflow-y-auto border-t border-line-soft px-4 py-4" />
       <Today />
     </aside>
   );

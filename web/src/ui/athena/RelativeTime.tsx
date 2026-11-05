@@ -34,6 +34,20 @@ function snapshot() {
   return now;
 }
 
+/** Now, from the shared once-a-minute clock: a component that shows a time relative to it re-renders on each tick. */
+export function useNow(): number {
+  return useSyncExternalStore(subscribe, snapshot);
+}
+
+/** The shortest relative time, for a dense list: now, 2m, 3h, 4d. */
+export function formatAgo(at: number, reference: number): string {
+  const diff = Math.max(0, reference - at);
+  if (diff < MINUTE) return "now";
+  if (diff < HOUR) return `${Math.floor(diff / MINUTE)}m`;
+  if (diff < DAY) return `${Math.floor(diff / HOUR)}h`;
+  return `${Math.floor(diff / DAY)}d`;
+}
+
 const day = new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short" });
 const dayYear = new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short", year: "numeric" });
 const full = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });

@@ -19,11 +19,20 @@ const (
 	SayMaxBytes       = 16 << 10
 	ResultMaxBytes    = 4 << 10
 	toolInputMaxRunes = 400
+	// DetailValueMaxRunes clips each string of a tool call's detail, DetailMaxBytes the whole detail.
+	DetailValueMaxRunes = 2000
+	DetailMaxBytes      = 8 << 10
 )
 
 // Items renders one transcript line (without its newline), which starts at offset in the transcript file, into the
-// StreamItems a dashboard shows: one per content block, at least one. Every item carries the line's offset. Text is
-// redacted before it is cut, so a cut never leaves part of a secret. A nil line stands for one too big to keep.
+// StreamItems a dashboard shows: one per content block. Every item carries the line's offset. Text is redacted before
+// it is cut, so a cut never leaves part of a secret. A nil line stands for one too big to keep.
+//
+// The session's bookkeeping renders to no items: system lines other than init (task progress, thinking tokens,
+// hooks, background tasks, ...), rate limit events, tool progress heartbeats, command lifecycle lines and thinking
+// blocks without text (thinking is redacted upstream). A message the session was sent (echoed back) renders as one
+// "user" item per Input in it (inputItems).
+// A line of an unknown type renders to one "other" item that names it.
 func Items(line []byte, offset int64) []*athenav1.StreamItem {
 	other := func(text string) []*athenav1.StreamItem {
 		return []*athenav1.StreamItem{{Offset: offset, Kind: "other", Text: text}}
@@ -40,6 +49,8 @@ func Items(line []byte, offset int64) []*athenav1.StreamItem {
 		IsError   bool    `json:"is_error"`
 		NumTurns  int     `json:"num_turns"`
 		CostUSD   float64 `json:"total_cost_usd"`
+		Duration  int64   `json:"duration_ms"`
+		IsReplay  bool    `json:"isReplay"`
 		Result    string  `json:"result"`
 		Message   struct {
 			Content json.RawMessage `json:"content"`
@@ -58,22 +69,31 @@ func Items(line []byte, offset int64) []*athenav1.StreamItem {
 		out = append(out, it)
 	}
 
+	// silent is set when the line rendered to nothing on purpose.
+	silent := false
 	switch l.Type {
 	case "system":
 		if l.Subtype == "init" {
 			add(&athenav1.StreamItem{Kind: "init", Text: redact.String(strings.TrimSpace(fmt.Sprintf("session %s model %s", l.SessionID, l.Model)))})
 		}
+		silent = true
+	case "rate_limit_event", "tool_progress", "command_lifecycle":
+		silent = true
 	case "result":
-		s := fmt.Sprintf("%s turns=%d cost=$%.4f", l.Subtype, l.NumTurns, l.CostUSD)
+		s := fmt.Sprintf("%s turns=%d cost=$%.4f duration_ms=%d", l.Subtype, l.NumTurns, l.CostUSD, max(l.Duration, 0))
 		if l.Result != "" {
 			s += "\n" + l.Result
 		}
 		add(&athenav1.StreamItem{Kind: "result", Text: redactCut(s, SayMaxBytes), IsError: l.IsError})
 	case "assistant", "user":
-		var text string
-		if json.Unmarshal(l.Message.Content, &text) == nil && l.Type == "user" && text != "" {
-			add(&athenav1.StreamItem{Kind: "other", Text: redactCut("user: "+text, ResultMaxBytes)})
-			break
+		if l.Type == "user" {
+			if text, ok := userText(l.Message.Content, l.IsReplay); ok {
+				for _, it := range inputItems(text) {
+					add(it)
+				}
+				silent = true
+				break
+			}
 		}
 		var blocks []struct {
 			Type      string          `json:"type"`
@@ -92,16 +112,21 @@ func Items(line []byte, offset int64) []*athenav1.StreamItem {
 			case l.Type == "assistant" && b.Type == "text":
 				add(&athenav1.StreamItem{Kind: "say", Text: redactCut(b.Text, SayMaxBytes)})
 			case l.Type == "assistant" && b.Type == "thinking":
+				if strings.TrimSpace(b.Thinking) == "" {
+					silent = true
+					break
+				}
 				add(&athenav1.StreamItem{Kind: "thinking", Text: redactCut(b.Thinking, SayMaxBytes)})
 			case l.Type == "assistant" && b.Type == "tool_use":
-				add(&athenav1.StreamItem{Kind: "tool_call", Tool: b.Name, ToolUseId: b.ID, Text: summarizeInput(b.Input, toolInputMaxRunes)})
+				add(&athenav1.StreamItem{Kind: "tool_call", Tool: b.Name, ToolUseId: b.ID, Text: summarizeInput(b.Input, toolInputMaxRunes),
+					Detail: toolDetail(b.Input)})
 			case l.Type == "user" && b.Type == "tool_result":
 				add(&athenav1.StreamItem{Kind: "tool_result", ToolUseId: b.ToolUseID, IsError: b.IsError,
 					Text: redactCut(resultText(b.Content), ResultMaxBytes)})
 			}
 		}
 	}
-	if len(out) == 0 {
+	if len(out) == 0 && !silent {
 		label := l.Type
 		if l.Subtype != "" {
 			label += "/" + l.Subtype
@@ -112,6 +137,31 @@ func Items(line []byte, offset int64) []*athenav1.StreamItem {
 		add(&athenav1.StreamItem{Kind: "other", Text: redact.String(oneLine(label))})
 	}
 	return out
+}
+
+// userText is the text of a message the session was sent: its string content, or (for an echo) its text blocks.
+func userText(raw json.RawMessage, echo bool) (string, bool) {
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s, s != ""
+	}
+	if !echo {
+		return "", false
+	}
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(raw, &blocks) != nil {
+		return "", false
+	}
+	var parts []string
+	for _, b := range blocks {
+		if b.Type == "text" {
+			parts = append(parts, b.Text)
+		}
+	}
+	return strings.Join(parts, "\n"), len(parts) > 0
 }
 
 // resultText is the text of a tool result's content: a string, or the text blocks of an array joined by newlines.

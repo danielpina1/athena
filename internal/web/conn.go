@@ -675,7 +675,8 @@ func fitDetail(td *athenav1.TicketDetail) (*athenav1.TicketDetail, bool) {
 	if size(td) <= maxSnapshot {
 		return td, true
 	}
-	out := &athenav1.TicketDetail{Summary: td.GetSummary(), Timeline: td.GetTimeline(), Threads: td.GetThreads(), TimelineTrimmed: true}
+	out := &athenav1.TicketDetail{Summary: td.GetSummary(), Timeline: td.GetTimeline(), Threads: td.GetThreads(),
+		Reports: td.GetReports(), TimelineTrimmed: true}
 	for size(out) > maxSnapshot {
 		n := len(out.Timeline)
 		if n == 0 {

@@ -10,7 +10,7 @@ option go_package = "github.com/danielpina1/athena/internal/pb/athenav1;athenav1
 
 message StreamOpen {
   string ticket_id = 1;
-  // from_offset -1 means "the last 200 items".
+  // from_offset -1 means "the last 200 items" (of the last 400 transcript lines).
   int64 from_offset = 2;
 }
 
@@ -22,12 +22,17 @@ message StreamItems {
 message StreamItem {
   int64 offset = 1;
   google.protobuf.Timestamp at = 2;
-  // kind is init, say, thinking, tool_call, tool_result, result or other.
+  // kind is init, say, thinking, tool_call, tool_result, result, user (a message from the owner) or other.
   string kind = 3;
   string text = 4;
   string tool = 5;
   string tool_use_id = 6;
   bool is_error = 7;
+  // detail is a tool_call's input as compact JSON, empty for other kinds. Its string values are redacted, its
+  // secret-looking keys hold "***", and each long string is clipped to about 2000 runes and an ellipsis; past
+  // 8 KiB in all the long values go and the keys stay. "_lines" maps the dotted path of each value it shortened
+  // (content, edits.0.old_string) to that value's full line count.
+  string detail = 8;
 }
 
 // StreamGap says the items from..to were dropped from the ring.

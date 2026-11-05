@@ -535,6 +535,9 @@ func TestReportPullBindsThread(t *testing.T) {
 	if tk.Ended != nil {
 		t.Fatalf("a ready report with an open pull request ended the ticket: %+v", tk.Ended)
 	}
+	if r := tk.LatestAssignment().Report; r == nil || r.Pull != 7 {
+		t.Fatalf("report = %+v, want pull 7", r)
+	}
 	if len(tk.Follows) != 1 || tk.Follows[0] != (core.Follow{Thread: "github:o/r#7", Own: true}) {
 		t.Fatalf("follows = %+v, want github:o/r#7 own", tk.Follows)
 	}

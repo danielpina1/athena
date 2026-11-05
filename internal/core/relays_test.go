@@ -2,6 +2,7 @@ package core
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -203,8 +204,9 @@ func TestCoreQueries(t *testing.T) {
 	tr, err := h.eng.Trigger("c:1")
 	h.must(err)
 	eq(t, "trigger", tr.ID, "c:1")
-	if _, err := h.eng.Trigger("nope"); err == nil {
-		t.Error("unknown trigger found")
+	var ue *UserError
+	if _, err := h.eng.Trigger("nope"); !errors.Is(err, ErrNotFound) || !errors.As(err, &ue) {
+		t.Errorf("unknown trigger: %v, want a UserError that is ErrNotFound", err)
 	}
 	th, err := h.eng.Thread(issue)
 	h.must(err)

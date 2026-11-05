@@ -23,6 +23,9 @@ const LIGHT = {
   "--accent-ink": "#C2410C",
   "--ok": "#0A0A0A",
   "--danger": "#B42318",
+  // Ruling R59: the only colours beyond the tables, a success green and a warning amber.
+  "--success": "#15803D",
+  "--warning": "#B45309",
 };
 const DARK = {
   "--bg": "#0A0A0A",
@@ -38,6 +41,8 @@ const DARK = {
   "--accent-ink": "#FF5A1F",
   "--ok": "#F5F5F5",
   "--danger": "#FF6B5E",
+  "--success": "#4ADE80",
+  "--warning": "#FBBF24",
 };
 
 test("tokens are exactly the Global Constraints values", () => {
@@ -45,6 +50,15 @@ test("tokens are exactly the Global Constraints values", () => {
   expect(themes.dark).toEqual(DARK);
   // The no-JS default for a dark system is the same dark theme.
   expect(themes.systemDark).toEqual(DARK);
+});
+
+test("success and warning are paired on every surface they sit on", () => {
+  for (const fg of ["--success", "--warning"]) {
+    for (const bg of ["--bg", "--surface", "--surface-2"]) {
+      expect(PAIRS.some((p) => p.fg === fg && p.bg === bg && p.kind === "text"), `${fg} on ${bg}`).toBe(true);
+    }
+  }
+  expect(PAIRS.some((p) => p.fg === "--bg" && p.bg === "--success")).toBe(true);
 });
 
 test("WCAG math matches known ratios", () => {

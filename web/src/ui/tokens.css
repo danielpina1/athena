@@ -3,6 +3,8 @@
  * contrast.test.ts parses this file and fails on any drift or on a contrast pair below WCAG AA.
  *
  * Orange marks only what needs the owner. Orange text uses --accent-ink; an orange fill carries --accent-fg.
+ * Green (--success) marks what went well and amber (--warning) what was interrupted or waits (ruling R59); --ok stays
+ * ink.
  */
 
 :root,
@@ -20,6 +22,8 @@
   --accent-ink: #C2410C;
   --ok: #0A0A0A;
   --danger: #B42318;
+  --success: #15803D;
+  --warning: #B45309;
   color-scheme: light;
 }
 
@@ -37,6 +41,8 @@
   --accent-ink: #FF5A1F;
   --ok: #F5F5F5;
   --danger: #FF6B5E;
+  --success: #4ADE80;
+  --warning: #FBBF24;
   color-scheme: dark;
 }
 
@@ -56,6 +62,8 @@
     --accent-ink: #FF5A1F;
     --ok: #F5F5F5;
     --danger: #FF6B5E;
+    --success: #4ADE80;
+    --warning: #FBBF24;
     color-scheme: dark;
   }
 }
@@ -100,6 +108,8 @@
   --color-accent-ink: var(--accent-ink);
   --color-ok: var(--ok);
   --color-danger: var(--danger);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
 
   --radius-*: initial;
   --radius-xs: 2px;
@@ -138,6 +148,7 @@
   --animate-pop-out: athena-fade-out var(--motion-fast) var(--ease);
   --animate-rise-in: athena-rise-in var(--motion-slow) var(--ease);
   --animate-rise-out: athena-rise-out var(--motion) var(--ease);
+  --animate-slide-in: athena-slide-in var(--motion) var(--ease);
   --animate-pulse: athena-pulse 1.6s ease-in-out infinite;
 }
 
@@ -165,6 +176,12 @@
 @keyframes athena-rise-out {
   to {
     transform: translateY(100%);
+  }
+}
+@keyframes athena-slide-in {
+  from {
+    opacity: 0;
+    transform: translateX(24px);
   }
 }
 @keyframes athena-pulse {

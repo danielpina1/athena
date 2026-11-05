@@ -26,11 +26,14 @@ const (
 	AssignmentEnded   AssignmentState = "ended"
 )
 
-// Report is what an Assignment last said.
+// Report is what an Assignment last said: its Question for a person, if it asked one, and the pull request it named
+// (Pull, 0 for none).
 type Report struct {
-	State   ReportState `json:"state"`
-	Summary string      `json:"summary"`
-	At      time.Time   `json:"at"`
+	State    ReportState `json:"state"`
+	Summary  string      `json:"summary"`
+	Question string      `json:"question,omitempty"`
+	Pull     int         `json:"pull,omitempty"`
+	At       time.Time   `json:"at"`
 }
 
 // Assignment binds a Ticket to one executor instance.

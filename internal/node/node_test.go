@@ -372,6 +372,9 @@ func TestStartRunsSessionAndReportsStarted(t *testing.T) {
 	if slices.Contains(args, "--resume") {
 		t.Errorf("first start resumed: %v", args)
 	}
+	if !slices.Contains(args, "--replay-user-messages") {
+		t.Errorf("worker session does not echo its input: %v", args)
+	}
 	for k, want := range map[string]string{
 		"ATHENA_TICKET":           tk.ID,
 		"ATHENA_ASSIGNMENT":       a.ID,

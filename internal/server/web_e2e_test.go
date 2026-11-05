@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -210,7 +211,9 @@ func TestWebE2E(t *testing.T) {
 		t.Fatal(err)
 	}
 	items := c.next("stream items", func(f *athenav1.Frame) bool { return f.GetStreamItems().GetTicketId() == id }).GetStreamItems()
-	if len(items.GetItems()) == 0 || items.GetItems()[0].GetKind() != "init" {
+	// The task as the session echoed it, and its init line.
+	if !slices.ContainsFunc(items.GetItems(), func(it *athenav1.StreamItem) bool { return it.GetKind() == "init" }) ||
+		!slices.ContainsFunc(items.GetItems(), func(it *athenav1.StreamItem) bool { return it.GetKind() == "user" && it.GetTool() == "task" }) {
 		t.Fatalf("stream items = %v", items)
 	}
 

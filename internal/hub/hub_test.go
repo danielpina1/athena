@@ -38,6 +38,9 @@ type fakeSource struct {
 	kinds     []string
 	muted     []string
 	prompts   *athenav1.PromptsView
+	// triggerReads counts Trigger calls; triggerErr fails them, as a store that cannot be read does.
+	triggerReads int
+	triggerErr   error
 }
 
 func newFake() *fakeSource {
@@ -168,9 +171,13 @@ func (f *fakeSource) RecentTriggers(limit int) ([]core.Trigger, error) {
 func (f *fakeSource) Trigger(id string) (core.Trigger, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.triggerReads++
+	if f.triggerErr != nil {
+		return core.Trigger{}, f.triggerErr
+	}
 	t, ok := f.triggers[id]
 	if !ok {
-		return t, fmt.Errorf("trigger %s not found", id)
+		return t, fmt.Errorf("trigger %s: %w", id, core.ErrNotFound)
 	}
 	return t, nil
 }

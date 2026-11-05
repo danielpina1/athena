@@ -263,12 +263,24 @@ is the reference client.
     merge-base with `origin/HEAD`, else with the repository's `HEAD`. `status` is `A`, `M`, `D`, `R`, `C` or `T`.
     `patch` is cut at 2 MiB. `truncated` is set when the patch was cut, and also when the file list was (git's
     file-list output passed 4 MiB: the files listed carry real counts, the rest are missing).
-  - `/api/tickets/{id}/files` (a Ticket without a repository): `{"files":[{"path","size","modTime"}],"truncated"}`,
-    at most 1000 regular files in at most 2000 directories (and 10 s of walking), breadth-first, sorted by path;
-    `truncated` says a cap was hit. `.athena/` (any letter case), symlinks and hard-linked files are left out.
-  - `/api/tickets/{id}/files/{path...}`: the file as an attachment (`Content-Type: application/octet-stream`,
-    `X-Content-Type-Options: nosniff`). Paths outside the Ticket's directory, under `.athena/` (any letter case), through a symlink, or to a
-    hard-linked file are 404.
+  - `/api/tickets/{id}/files`: `{"files":[{"path","status"?,"size","modTime"}],"truncated"}`. For a Ticket without
+    a repository, at most 1000 regular files in at most 2000 directories (and 10 s of walking), breadth-first,
+    sorted by path, with no `status`. For a Ticket with one, the files its worktree added or changed: those its
+    branch changes against the base (as in the diff; `status` `A`, `M`, `R`, `C` or `T`, deleted ones left out) and
+    new files not committed yet that git does not ignore (`status` `?`), each as it is in the worktree, at most 1000,
+    sorted by path; a worktree that is gone is 404. `truncated` says a cap was hit. Either way `.athena/` (any letter
+    case), `.git`, names that look like secrets (`.env*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `id_*`, `.netrc`,
+    `.npmrc`, `.pypirc`, `.pgpass`, as any component of the path), symlinks and hard-linked files are left out.
+  - `/api/tickets/{id}/files/{path...}`: one of the listed files as an attachment (`Content-Type:
+    application/octet-stream`, `X-Content-Type-Options: nosniff`). Paths outside the Ticket's directory, under
+    `.athena/` (any letter case), with a left-out name, through a symlink, to a hard-linked file, or (in a worktree)
+    not in the listing are 404.
+  - `/api/tickets/{id}/files/{path...}?view=1`: the same file to read in the page, `Content-Disposition: inline`,
+    `X-Content-Type-Options: nosniff`, and `Content-Security-Policy: sandbox; default-src 'none'` added to the app's
+    own policy. `.png`, `.jpg`/`.jpeg`, `.gif` and `.webp` are served as their `image/*` type, whole, up to 8 MiB
+    (past that, 413 `{"code":"too_large"}`); anything else, HTML and SVG included, is `text/plain; charset=utf-8`,
+    its first 1 MiB cut at a character boundary, with `X-Athena-Truncated: true` when cut. `X-Athena-Size` is the
+    whole file's size.
 - **Close codes.** The server closes a connection with one of these:
 
   | Code | Meaning | Client action |

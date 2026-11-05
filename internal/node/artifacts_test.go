@@ -10,7 +10,9 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/danielpina1/athena/internal/core"
 )
@@ -193,8 +195,8 @@ func TestTicketDiffUnknownAndNoRepo(t *testing.T) {
 	if _, err := m.TicketDiff(context.Background(), "T-0002"); !errors.Is(err, ErrNoWorkspace) {
 		t.Fatalf("a Ticket without a repository: %v", err)
 	}
-	if _, _, err := n.TicketFiles("T-0001"); !errors.Is(err, ErrNoWorkspace) {
-		t.Fatalf("files of a repository Ticket: %v", err)
+	if _, _, err := n.TicketFiles(context.Background(), "T-9999"); !errors.Is(err, ErrNoWorkspace) {
+		t.Fatalf("files of an unknown Ticket: %v", err)
 	}
 }
 
@@ -222,7 +224,7 @@ func TestTicketFilesSkipsAthenaDirAndSymlinks(t *testing.T) {
 	if err := os.Symlink(filepath.Dir(outside), filepath.Join(dir, "linkdir")); err != nil {
 		t.Fatal(err)
 	}
-	files, truncated, err := n.TicketFiles("T-0002")
+	files, truncated, err := n.TicketFiles(context.Background(), "T-0002")
 	if err != nil || truncated {
 		t.Fatalf("err=%v truncated=%v", err, truncated)
 	}
@@ -245,7 +247,7 @@ func TestTicketFilesCapsAt1000BreadthFirst(t *testing.T) {
 		writeFile(t, filepath.Join(dir, "top"+string(rune('a'+i%26))+strings.Repeat("x", i/26)), "")
 	}
 	writeFile(t, filepath.Join(dir, "d", "deep"), "")
-	files, truncated, err := n.TicketFiles("T-0002")
+	files, truncated, err := n.TicketFiles(context.Background(), "T-0002")
 	if err != nil || !truncated || len(files) != 1000 {
 		t.Fatalf("err=%v truncated=%v len=%d", err, truncated, len(files))
 	}
@@ -268,7 +270,7 @@ func TestOpenTicketFileRefusesEscape(t *testing.T) {
 	if err := os.Symlink(filepath.Join(dir, ".athena"), filepath.Join(dir, "viaathena")); err != nil {
 		t.Fatal(err)
 	}
-	f, err := n.OpenTicketFile("T-0002", "ok.txt")
+	f, err := n.OpenTicketFile(context.Background(), "T-0002", "ok.txt")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -277,14 +279,14 @@ func TestOpenTicketFileRefusesEscape(t *testing.T) {
 	}
 	f.Close()
 	for _, rel := range []string{"../x", "/etc/passwd", ".athena/socket", ".ATHENA/socket", ".Athena/socket", "./.athena/socket", "a/../.athena/socket", "", ".", "..", "esc", "viaathena/socket", "missing", "ok.txt/x"} {
-		if f, err := n.OpenTicketFile("T-0002", rel); !errors.Is(err, ErrNotFound) {
+		if f, err := n.OpenTicketFile(context.Background(), "T-0002", rel); !errors.Is(err, ErrNotFound) {
 			if f != nil {
 				f.Close()
 			}
 			t.Errorf("OpenTicketFile(%q) = %v, want ErrNotFound", rel, err)
 		}
 	}
-	if _, err := n.OpenTicketFile("T-9999", "ok.txt"); !errors.Is(err, ErrNoWorkspace) {
+	if _, err := n.OpenTicketFile(context.Background(), "T-9999", "ok.txt"); !errors.Is(err, ErrNoWorkspace) {
 		t.Fatalf("unknown Ticket: %v", err)
 	}
 }
@@ -381,13 +383,13 @@ func TestOpenTicketFileRefusesHardLinks(t *testing.T) {
 		t.Skip(err)
 	}
 	writeFile(t, filepath.Join(dir, "plain"), "p")
-	if f, err := n.OpenTicketFile("T-0002", "hard"); !errors.Is(err, ErrNotFound) {
+	if f, err := n.OpenTicketFile(context.Background(), "T-0002", "hard"); !errors.Is(err, ErrNotFound) {
 		if f != nil {
 			f.Close()
 		}
 		t.Fatalf("hard link opened: %v", err)
 	}
-	files, _, _ := n.TicketFiles("T-0002")
+	files, _, _ := n.TicketFiles(context.Background(), "T-0002")
 	if len(files) != 1 || files[0].Path != "plain" {
 		t.Fatalf("files = %+v", files)
 	}
@@ -398,7 +400,7 @@ func TestTicketFilesDirectoryQueueCapped(t *testing.T) {
 	for i := range maxWalkDirs + 50 {
 		writeFile(t, filepath.Join(dir, "d"+strings.Repeat("0", 4-len(strconv.Itoa(i)))+strconv.Itoa(i), "f"), "")
 	}
-	files, truncated, err := n.TicketFiles("T-0002")
+	files, truncated, err := n.TicketFiles(context.Background(), "T-0002")
 	if err != nil || !truncated || len(files) >= maxWalkDirs+50 {
 		t.Fatalf("err=%v truncated=%v files=%d", err, truncated, len(files))
 	}
@@ -415,5 +417,358 @@ func TestTicketDiffNonASCIINamesAreNotQuoted(t *testing.T) {
 	}
 	if !strings.Contains(d.Patch, "diff --git a/café.txt b/café.txt") || strings.Contains(d.Patch, `\303`) {
 		t.Fatalf("patch = %q", d.Patch)
+	}
+}
+
+// Names that look like secrets are never listed, and never served, in either kind of Ticket.
+var secretNames = []string{".env", ".env.local", ".ENV.production", "server.pem", "tls.KEY", "id_rsa", "id_ed25519.pub", "id_dsa", "id_ecdsa_sk",
+	"conf/.env", ".env.d/inner.txt", "a/certs/ca.pem", ".git-credentials", ".aws/credentials", ".ssh/config", "home/.ssh/known_hosts",
+	"infra/prod.tfstate", "infra/prod.tfstate.backup", "vault.KDBX", ".htpasswd", ".docker/config.json", ".kube/config", ".netrc"}
+
+func TestTicketFilesSkipSecretNames(t *testing.T) {
+	n, dir := filesNode(t)
+	writeFile(t, filepath.Join(dir, "notes.md"), "fine")
+	writeFile(t, filepath.Join(dir, "keys.md"), "a document about keys")
+	// Not secrets: an id_ name that is no SSH key, and the same base names outside the directories that hold secrets.
+	for _, name := range []string{"id_mapping.md", "aws/credentials.md", "kube/config", "docker/config.json"} {
+		writeFile(t, filepath.Join(dir, filepath.FromSlash(name)), "fine")
+	}
+	for _, name := range secretNames {
+		writeFile(t, filepath.Join(dir, filepath.FromSlash(name)), "SECRET=1")
+	}
+	files, _, err := n.TicketFiles(context.Background(), "T-0002")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, f := range files {
+		got = append(got, f.Path)
+	}
+	if want := []string{"aws/credentials.md", "docker/config.json", "id_mapping.md", "keys.md", "kube/config", "notes.md"}; !slices.Equal(got, want) {
+		t.Fatalf("files = %v, want %v", got, want)
+	}
+	for _, name := range secretNames {
+		if f, err := n.OpenTicketFile(context.Background(), "T-0002", name); !errors.Is(err, ErrNotFound) {
+			if f != nil {
+				f.Close()
+			}
+			t.Errorf("OpenTicketFile(%q) = %v, want ErrNotFound", name, err)
+		}
+	}
+}
+
+// repoFilesNode is diffNode with work in the worktree: on the branch a changed README, a new docs/REVIEW.md and a
+// deleted old.txt (from the base); uncommitted, a new REPORT.md, an ignored build/out.log, a new .env, a symlink and
+// the node's .athena directory.
+func repoFilesNode(t *testing.T) (*Node, string) {
+	t.Helper()
+	n, wt := diffNode(t)
+	repo := filepath.Dir(git(t, wt, "rev-parse", "--path-format=absolute", "--git-common-dir"))
+	writeFile(t, filepath.Join(repo, "old.txt"), "old\n")
+	writeFile(t, filepath.Join(repo, "untouched.txt"), "base\n")
+	git(t, repo, "add", "-A")
+	git(t, repo, "commit", "-q", "-m", "base files")
+	git(t, wt, "merge", "-q", "--ff-only", "main")
+	writeFile(t, filepath.Join(wt, "README"), "hi\nmore\n")
+	writeFile(t, filepath.Join(wt, "docs", "REVIEW.md"), "# Review\n")
+	writeFile(t, filepath.Join(wt, ".gitignore"), "build/\n.athena/\n")
+	git(t, wt, "rm", "-q", "old.txt")
+	git(t, wt, "add", "-A")
+	git(t, wt, "commit", "-q", "-m", "work")
+	writeFile(t, filepath.Join(wt, "REPORT.md"), "# Report\n\nAll good.\n")
+	writeFile(t, filepath.Join(wt, "build", "out.log"), "ignored\n")
+	writeFile(t, filepath.Join(wt, ".env"), "TOKEN=x\n")
+	writeFile(t, filepath.Join(wt, ".athena", "socket"), "s")
+	writeFile(t, filepath.Join(wt, "ATHENA-notes", "keep.txt"), "kept\n")
+	if err := os.Symlink(filepath.Join(repo, "untouched.txt"), filepath.Join(wt, "link.md")); err != nil {
+		t.Fatal(err)
+	}
+	return n, wt
+}
+
+func TestTicketFilesOfRepositoryTicket(t *testing.T) {
+	n, _ := repoFilesNode(t)
+	files, truncated, err := n.TicketFiles(context.Background(), "T-0001")
+	if err != nil || truncated {
+		t.Fatalf("err=%v truncated=%v", err, truncated)
+	}
+	type entry struct{ path, status string }
+	var got []entry
+	for _, f := range files {
+		got = append(got, entry{f.Path, f.Status})
+		if f.ModTime.IsZero() {
+			t.Errorf("%s has no time", f.Path)
+		}
+	}
+	want := []entry{{".gitignore", "A"}, {"ATHENA-notes/keep.txt", "?"}, {"README", "M"}, {"REPORT.md", "?"}, {"docs/REVIEW.md", "A"}}
+	if !slices.Equal(got, want) {
+		t.Fatalf("files = %v, want %v", got, want)
+	}
+	if files[3].Size != int64(len("# Report\n\nAll good.\n")) {
+		t.Errorf("REPORT.md size = %d", files[3].Size)
+	}
+}
+
+func TestOpenTicketFileInWorktree(t *testing.T) {
+	n, wt := repoFilesNode(t)
+	for rel, want := range map[string]string{"REPORT.md": "# Report\n\nAll good.\n", "docs/REVIEW.md": "# Review\n", "README": "hi\nmore\n"} {
+		f, err := n.OpenTicketFile(context.Background(), "T-0001", rel)
+		if err != nil {
+			t.Fatalf("%s: %v", rel, err)
+		}
+		b, _ := io.ReadAll(f)
+		f.Close()
+		if string(b) != want {
+			t.Errorf("%s = %q", rel, b)
+		}
+	}
+	// Only what the Ticket added or changed opens: not an ignored file, a file of the base, git's own files, a secret
+	// or a symlink.
+	if err := os.Symlink("/etc/hosts", filepath.Join(wt, "hosts.txt")); err != nil {
+		t.Fatal(err)
+	}
+	for _, rel := range []string{"build/out.log", "untouched.txt", "old.txt", ".git", ".git/HEAD", ".env", ".athena/socket", "link.md", "hosts.txt", "../x", "/etc/passwd", "docs/../REPORT.md/x", ""} {
+		if f, err := n.OpenTicketFile(context.Background(), "T-0001", rel); !errors.Is(err, ErrNotFound) {
+			if f != nil {
+				f.Close()
+			}
+			t.Errorf("OpenTicketFile(%q) = %v, want ErrNotFound", rel, err)
+		}
+	}
+	// A worktree that is gone (an ended Ticket's, cleaned up) has no files.
+	if err := os.RemoveAll(wt); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := n.TicketFiles(context.Background(), "T-0001"); !errors.Is(err, ErrNoWorkspace) {
+		t.Fatalf("files of a removed worktree: %v", err)
+	}
+}
+
+// The node's state directory (and the work root, which holds every Ticket's worktree) is never listed or served
+// through a Ticket, however deep it sits under the Ticket's directory and whatever it is called; a Ticket whose
+// directory is the state directory, or inside it, has no files at all. Matched by identity, not by name.
+func TestStateDirIsNeverReachable(t *testing.T) {
+	top := t.TempDir()
+	state := filepath.Join(top, "home", "athena-state") // not named .athena
+	work := filepath.Join(top, "srv", "work")
+	writeFile(t, filepath.Join(state, "athena.db"), "STATE")
+	writeFile(t, filepath.Join(state, "shims", "gh"), "#!/bin/sh")
+	writeFile(t, filepath.Join(work, "other-t-0009", "SECRET.md"), "another Ticket's")
+	writeFile(t, filepath.Join(top, "notes.md"), "fine")
+	tickets := map[string]core.Ticket{
+		"T-0002": {ID: "T-0002", Title: "Top", Execution: &core.Execution{Directory: top}},
+		"T-0003": {ID: "T-0003", Title: "State", Execution: &core.Execution{Directory: state}},
+		"T-0004": {ID: "T-0004", Title: "Inside", Execution: &core.Execution{Directory: filepath.Join(state, "shims")}},
+	}
+	n := New(Config{WorkRoot: work, StateDir: state}, ticketEngine{tickets: tickets})
+	files, _, err := n.TicketFiles(context.Background(), "T-0002")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, f := range files {
+		got = append(got, f.Path)
+	}
+	if want := []string{"notes.md"}; !slices.Equal(got, want) {
+		t.Fatalf("listed %v, want %v", got, want)
+	}
+	for _, rel := range []string{"home/athena-state/athena.db", "home/athena-state/shims/gh", "srv/work/other-t-0009/SECRET.md"} {
+		if f, err := n.OpenTicketFile(context.Background(), "T-0002", rel); err == nil {
+			f.Close()
+			t.Errorf("served %s", rel)
+		}
+	}
+	for _, id := range []string{"T-0003", "T-0004"} {
+		if _, _, err := n.TicketFiles(context.Background(), id); !errors.Is(err, ErrNoWorkspace) {
+			t.Errorf("files of %s: %v, want ErrNoWorkspace", id, err)
+		}
+		if f, err := n.OpenTicketFile(context.Background(), id, "athena.db"); !errors.Is(err, ErrNoWorkspace) {
+			if f != nil {
+				f.Close()
+			}
+			t.Errorf("open in %s: %v, want ErrNoWorkspace", id, err)
+		}
+	}
+	// A directory inside the state directory is refused where the Ticket is placed, saying why.
+	if _, err := n.place(tickets["T-0004"]); err == nil || !strings.Contains(err.Error(), "state directory") {
+		t.Errorf("placing a Ticket inside the state directory: %v", err)
+	}
+}
+
+// The usual layout, a work root inside the state directory (~/.athena/work), still lists a worktree's files.
+func TestWorktreeInsideTheStateDirIsListed(t *testing.T) {
+	repo := newRepo(t)
+	state := t.TempDir()
+	work := filepath.Join(state, "work")
+	tk := core.Ticket{ID: "T-0001", Title: "Diff me", Execution: &core.Execution{Directory: repo}}
+	n := New(Config{WorkRoot: work, StateDir: state}, ticketEngine{tickets: map[string]core.Ticket{"T-0001": tk}})
+	wt := TicketDir(work, tk)
+	git(t, repo, "worktree", "add", "-q", "-b", "athena/t-0001", wt)
+	writeFile(t, filepath.Join(wt, "REPORT.md"), "# R\n")
+	files, _, err := n.TicketFiles(context.Background(), "T-0001")
+	if err != nil || len(files) != 1 || files[0].Path != "REPORT.md" {
+		t.Fatalf("files=%v err=%v", files, err)
+	}
+	f, err := n.OpenTicketFile(context.Background(), "T-0001", "REPORT.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+}
+
+// A FIFO put where a checked file was (a worker's rename in the window) fails at once: open does not wait for a
+// writer.
+func TestOpenCheckedNeverBlocksOnAFIFO(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "plain"), "p")
+	if err := syscall.Mkfifo(filepath.Join(dir, "pipe"), 0o644); err != nil {
+		t.Skip(err)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	last, err := root.Lstat("plain")
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		f, err := openChecked(root, "pipe", last)
+		if f != nil {
+			f.Close()
+		}
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrNotFound) {
+			t.Fatalf("open of a FIFO: %v, want ErrNotFound", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("open of a FIFO blocked")
+	}
+}
+
+// The worker may rewrite its worktree's .git file to point at a git dir of its own. The listing pins the git dir from
+// the repository's own record of the worktree, so that git dir is never read: its exclude file (hiding REPORT.md) and
+// its programs (fsmonitor, pager, hooks, filters) have no effect.
+func TestWorktreeGitDirIsPinned(t *testing.T) {
+	n, wt := repoFilesNode(t)
+	markers := t.TempDir()
+	fake := filepath.Join(t.TempDir(), "fake")
+	git(t, t.TempDir(), "init", "-q", fake)
+	gd := filepath.Join(fake, ".git")
+	mark := func(name string) string {
+		script := filepath.Join(markers, "..", name+".sh")
+		writeFile(t, script, "#!/bin/sh\ntouch "+filepath.Join(markers, name)+"\nexit 1\n")
+		if err := os.Chmod(script, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return script
+	}
+	cfg := "[core]\n\tfsmonitor = " + mark("fsmonitor") + "\n\tpager = " + mark("pager") + "\n\thooksPath = " + filepath.Join(gd, "hooks") +
+		"\n[filter \"evil\"]\n\tclean = " + mark("clean") + "\n\tprocess = " + mark("process") + "\n"
+	b, _ := os.ReadFile(filepath.Join(gd, "config"))
+	writeFile(t, filepath.Join(gd, "config"), string(b)+cfg)
+	for _, h := range []string{"post-index-change", "reference-transaction", "fsmonitor-watchman"} {
+		writeFile(t, filepath.Join(gd, "hooks", h), "#!/bin/sh\ntouch "+filepath.Join(markers, "hook-"+h)+"\n")
+		if err := os.Chmod(filepath.Join(gd, "hooks", h), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeFile(t, filepath.Join(gd, "info", "exclude"), "REPORT.md\n")
+	writeFile(t, filepath.Join(wt, ".gitattributes"), "* filter=evil\n")
+	writeFile(t, filepath.Join(wt, ".git"), "gitdir: "+gd+"\n")
+	files, _, err := n.TicketFiles(context.Background(), "T-0001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(files, func(f FileEntry) bool { return f.Path == "REPORT.md" && f.Status == "?" }) {
+		t.Errorf("REPORT.md is not listed: the worktree's own .git chose the git dir: %v", files)
+	}
+	f, err := n.OpenTicketFile(context.Background(), "T-0001", "REPORT.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	ents, _ := os.ReadDir(markers)
+	for _, e := range ents {
+		t.Errorf("ran: %s", e.Name())
+	}
+}
+
+// A worker that rewrites its worktree's commondir (the sandbox leaves it writable) cannot point the listing at a
+// git config of its own: the common dir is pinned too.
+func TestWorktreeCommonDirIsPinned(t *testing.T) {
+	n, wt := repoFilesNode(t)
+	b, err := os.ReadFile(filepath.Join(wt, ".git"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin := strings.TrimSpace(strings.TrimPrefix(string(b), "gitdir:"))
+	fake := filepath.Join(t.TempDir(), "fake")
+	git(t, t.TempDir(), "init", "-q", fake)
+	gd := filepath.Join(fake, ".git")
+	writeFile(t, filepath.Join(gd, "info", "exclude"), "REPORT.md\n")
+	writeFile(t, filepath.Join(admin, "commondir"), gd+"\n")
+	files, _, err := n.TicketFiles(context.Background(), "T-0001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(files, func(f FileEntry) bool { return f.Path == "REPORT.md" && f.Status == "?" }) {
+		t.Errorf("REPORT.md is not listed: the worktree's commondir chose the git config: %v", files)
+	}
+}
+
+// A worktree recorded with a relative gitdir (worktree.useRelativePaths, git 2.48+) is found: the path is relative
+// to its admin directory, not to the server's working directory.
+func TestRelativeWorktreeGitdirIsFound(t *testing.T) {
+	n, wt := repoFilesNode(t)
+	b, err := os.ReadFile(filepath.Join(wt, ".git"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin := strings.TrimSpace(strings.TrimPrefix(string(b), "gitdir:"))
+	rel, err := filepath.Rel(admin, filepath.Join(wt, ".git"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(admin, "gitdir"), rel+"\n")
+	if _, _, err := n.TicketFiles(context.Background(), "T-0001"); err != nil {
+		t.Fatalf("relative gitdir: %v", err)
+	}
+}
+
+// The repository's own core.fsmonitor (which ls-files does run, as the control shows) never runs for a listing.
+func TestWorktreeFilesRunNoFsmonitor(t *testing.T) {
+	n, wt := repoFilesNode(t)
+	repo := filepath.Dir(git(t, wt, "rev-parse", "--path-format=absolute", "--git-common-dir"))
+	marker := filepath.Join(t.TempDir(), "ran")
+	script := filepath.Join(t.TempDir(), "monitor.sh")
+	writeFile(t, script, "#!/bin/sh\ntouch "+marker+"\nexit 1\n")
+	if err := os.Chmod(script, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	git(t, repo, "config", "core.fsmonitor", script)
+	// The control: plain git runs it.
+	git(t, wt, "ls-files", "--others", "--exclude-standard")
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("the control did not run the fsmonitor (%v): this test would prove nothing", err)
+	}
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := n.TicketFiles(context.Background(), "T-0001"); err != nil {
+		t.Fatal(err)
+	}
+	f, err := n.OpenTicketFile(context.Background(), "T-0001", "REPORT.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("a listing ran the repository's fsmonitor")
 	}
 }

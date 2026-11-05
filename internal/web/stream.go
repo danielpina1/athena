@@ -36,7 +36,7 @@ const InitialStreamCredit = 256
 const (
 	// maxStreams is how many Tickets one connection streams at once.
 	maxStreams = 16
-	// tailItems is how many of the latest items follow a gap.
+	// tailItems is how many of the latest items follow a gap, and how many a stream opened from the tail starts with.
 	tailItems = 200
 	// pendingItems and pendingBytes bound what a stream holds for a client without credit.
 	pendingItems = 2000
@@ -261,6 +261,11 @@ func (c *conn) runStream(ctx context.Context, st *streamer) {
 	p := &pending{skipFrom: -1}
 	for _, l := range backfill {
 		p.absorb(l)
+	}
+	if st.from < 0 {
+		// From the tail: the last tailItems items, however many lines that took (many render to nothing). What is
+		// left out is history the client did not ask for, not a loss: no gap.
+		p.dropFront(len(p.items) - tailItems)
 	}
 	var retry <-chan time.Time
 	for {

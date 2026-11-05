@@ -140,27 +140,28 @@ func TestSubscribeBackfillFromFileThenLive(t *testing.T) {
 }
 
 func TestTailMinusOne(t *testing.T) {
+	const n = TailLines
 	e := newStreamEnv(t)
-	e.file(t, 0, 300)
+	e.file(t, 0, n+100)
 	back, _, cancel, err := e.n.Subscribe("T-1", -1)
 	if err != nil {
 		t.Fatal(err)
 	}
 	cancel()
-	if len(back) != TailLines || string(back[0].Data) != body(100) || string(back[len(back)-1].Data) != body(299) {
+	if len(back) != n || string(back[0].Data) != body(100) || string(back[len(back)-1].Data) != body(n+99) {
 		t.Fatalf("file tail = %d lines %s..", len(back), nums(back[:1]))
 	}
 	// Some in the ring, the rest from the file before it.
-	for i := 300; i < 350; i++ {
+	for i := n + 100; i < n+150; i++ {
 		e.write(t, i)
 	}
 	back, _, cancel, _ = e.n.Subscribe("T-1", -1)
 	cancel()
-	if len(back) != TailLines || string(back[0].Data) != body(150) || string(back[len(back)-1].Data) != body(349) {
+	if len(back) != n || string(back[0].Data) != body(150) || string(back[len(back)-1].Data) != body(n+149) {
 		t.Fatalf("mixed tail = %d lines from %s", len(back), nums(back[:1]))
 	}
 	// A full ring answers alone.
-	for i := 350; i < 600; i++ {
+	for i := n + 150; i < 2*n+200; i++ {
 		e.write(t, i)
 	}
 	if err := os.Remove(e.path); err != nil {
@@ -168,7 +169,7 @@ func TestTailMinusOne(t *testing.T) {
 	}
 	back, _, cancel, _ = e.n.Subscribe("T-1", -1)
 	cancel()
-	if len(back) != TailLines || string(back[0].Data) != body(400) {
+	if len(back) != n || string(back[0].Data) != body(n+200) {
 		t.Fatalf("ring tail = %d lines from %s", len(back), nums(back[:1]))
 	}
 	// A Ticket with no transcript and no ring: empty.

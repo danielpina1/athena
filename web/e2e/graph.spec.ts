@@ -15,7 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import type { Page } from "@playwright/test";
-import { athena, expect, expectAccessible, signedInPage, test } from "./harness";
+import { athena, expect, expectAccessible, signedInPage, test, liveFeed } from "./harness";
 
 const run = promisify(execFile);
 const git = (cwd: string, ...args: string[]) =>
@@ -99,11 +99,11 @@ test("six Tickets in lanes by repository, opened from the graph and the list, li
     await expectNoSideScroll(page);
     await expectAccessible(page);
     await page.evaluate(() => document.fonts.ready);
-    await expect(page).toHaveScreenshot("graph-light.png", { mask: volatile(page) });
+    await expect(page).toHaveScreenshot("graph-light.png", { mask: [...volatile(page), ...liveFeed(page)] });
     await page.emulateMedia({ colorScheme: "dark", reducedMotion: "reduce" });
     await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
     await expectAccessible(page);
-    await expect(page).toHaveScreenshot("graph-dark.png", { mask: volatile(page) });
+    await expect(page).toHaveScreenshot("graph-dark.png", { mask: [...volatile(page), ...liveFeed(page)] });
 
     // The list fallback: every node, its stage, its lane.
     await page.getByRole("radio", { name: "List" }).click();
@@ -113,10 +113,10 @@ test("six Tickets in lanes by repository, opened from the graph and the list, li
     await expect(list.getByRole("heading", { name: "LOCAL · api" })).toBeVisible();
     await expectNoSideScroll(page);
     await expectAccessible(page);
-    await expect(page).toHaveScreenshot("graph-list-dark.png", { mask: volatile(page) });
+    await expect(page).toHaveScreenshot("graph-list-dark.png", { mask: [...volatile(page), ...liveFeed(page)] });
     await page.emulateMedia({ colorScheme: "light", reducedMotion: "reduce" });
     await expectAccessible(page);
-    await expect(page).toHaveScreenshot("graph-list-light.png", { mask: volatile(page) });
+    await expect(page).toHaveScreenshot("graph-list-light.png", { mask: [...volatile(page), ...liveFeed(page)] });
     await page.getByRole("radio", { name: "Graph" }).click();
 
     // A node opens its Ticket: beside the graph on the desktop, as a page on the phone.
@@ -151,7 +151,7 @@ test("six Tickets in lanes by repository, opened from the graph and the list, li
       await replayAboveNav("375×812");
       const scroll = await page.evaluate(() => document.documentElement.scrollHeight - window.innerHeight);
       expect(scroll).toBe(0);
-      await expect(page).toHaveScreenshot("graph-375-light.png", { mask: volatile(page) });
+      await expect(page).toHaveScreenshot("graph-375-light.png", { mask: [...volatile(page), ...liveFeed(page)] });
       // A short phone, and one on its side: the page scrolls, and the scrubber stays above the navigation.
       for (const [width, height] of [
         [375, 600],

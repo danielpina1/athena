@@ -3,7 +3,7 @@
 // zero), the filters live in the URL, and `/` goes to the tab's own search box. The screenshots mask the counts and the
 // rows, which depend on what ran before. This spec creates no Tickets (R37).
 import type { Page } from "@playwright/test";
-import { expect, expectAccessible, signedInPage, test } from "./harness";
+import { expect, expectAccessible, signedInPage, test, liveFeed } from "./harness";
 
 const tabs = (page: Page) => page.getByRole("tablist", { name: "Routing records" });
 
@@ -41,7 +41,7 @@ test("the empty state and a filter that matches nothing, light and dark", async 
   ];
   const shot = async (name: string) => {
     await page.evaluate(() => document.fonts.ready);
-    await expect(page).toHaveScreenshot(name, { mask: unstable });
+    await expect(page).toHaveScreenshot(name, { mask: [...unstable, ...liveFeed(page)] });
   };
 
   // Without GitHub there is no Thread: that tab is empty on every run and says what will appear there.

@@ -818,6 +818,61 @@ func TestStreamResumesFromOffsetAndRedacts(t *testing.T) {
 	}
 }
 
+// Bookkeeping lines (system lines other than init, rate limit events) render to no items: the stream sends none for
+// them, and a client that resumes after its last item (from_offset = its offset + 1) gets the next real item, with
+// no gap over the silent lines.
+func TestStreamSkipsSilentLinesAndResumes(t *testing.T) {
+	_, fs, c := streamConn(t, 256, "T-0001")
+	noise := func(n int, line string) node.Line { return node.Line{Offset: int64(n) * 100, Data: []byte(line)} }
+	fs.push("T-0001", say(1, "one"))
+	fs.push("T-0001", noise(2, `{"type":"system","subtype":"task_progress","description":"Reading"}`))
+	fs.push("T-0001", say(3, "three"))
+	fs.push("T-0001", noise(4, `{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"}}`))
+	streamOpen(c, "T-0001", -1)
+	texts, offs := c.items(2)
+	if texts[0] != "one" || texts[1] != "three" || offs[1] != 300 {
+		t.Fatalf("texts %q at %v", texts, offs)
+	}
+	c.quiet(200 * time.Millisecond)
+
+	// Reconnected: resume after the last item. The silent line after it is read again and still sends nothing.
+	streamOpen(c, "T-0001", offs[1]+1)
+	eventually(t, func() bool { o, _, _ := fs.state(); return o == 2 })
+	fs.push("T-0001", say(5, "five"))
+	texts, offs = c.items(1)
+	if texts[0] != "five" || offs[0] != 500 {
+		t.Fatalf("after resume: %q at %v", texts, offs)
+	}
+	for _, f := range c.backlog {
+		if f.GetStreamGap() != nil {
+			t.Fatalf("a gap over silent lines: %v", f.GetStreamGap())
+		}
+	}
+}
+
+// From the tail (from_offset -1) a stream sends the last tailItems items, however many transcript lines that takes: a
+// tail of silent lines does not leave the first screen sparse, and a dense one does not overrun the starting credit.
+func TestStreamTailIsTheLastItems(t *testing.T) {
+	_, fs, c := streamConn(t, InitialStreamCredit, "T-0001")
+	for i := 1; i <= node.TailLines; i++ {
+		fs.push("T-0001", say(i, fmt.Sprintf("line %d", i)))
+	}
+	streamOpen(c, "T-0001", -1)
+	texts, _ := c.items(tailItems)
+	if texts[0] != fmt.Sprintf("line %d", node.TailLines-tailItems+1) || texts[len(texts)-1] != fmt.Sprintf("line %d", node.TailLines) {
+		t.Fatalf("tail runs %q..%q", texts[0], texts[len(texts)-1])
+	}
+	c.quiet(200 * time.Millisecond)
+	for _, f := range c.backlog {
+		if f.GetStreamGap() != nil {
+			t.Fatalf("a gap in the tail: %v", f.GetStreamGap())
+		}
+	}
+	if node.TailLines < 2*tailItems {
+		t.Fatalf("the node reads %d lines for a tail of %d items: too few once half the lines are silent", node.TailLines, tailItems)
+	}
+}
+
 func TestStreamOpenErrorsAndClose(t *testing.T) {
 	_, fs, c := streamConn(t, 100, "T-0001")
 	streamOpen(c, "T-9999", -1)
@@ -1029,13 +1084,17 @@ func TestDetailTrimmedFlag(t *testing.T) {
 	if out, ok := fitDetail(small); !ok || out != small || out.TimelineTrimmed {
 		t.Fatalf("a detail that fits: ok %v, same message %v, trimmed %v", ok, out == small, out.GetTimelineTrimmed())
 	}
-	many := &athenav1.TicketDetail{Summary: &athenav1.TicketSummary{Id: "T-2"}}
+	many := &athenav1.TicketDetail{Summary: &athenav1.TicketSummary{Id: "T-2"},
+		Reports: []*athenav1.ReportView{{AssignmentId: "a1", State: "ready", Summary: "done"}}}
 	for i := 0; i < 600; i++ {
 		many.Timeline = append(many.Timeline, &athenav1.TimelineEntry{Kind: "input", Text: strings.Repeat("y", 4096)})
 	}
 	out, ok := fitDetail(many)
 	if !ok || !out.TimelineTrimmed {
 		t.Fatalf("a trimmed detail: ok %v, trimmed %v", ok, out.GetTimelineTrimmed())
+	}
+	if len(out.Reports) != 1 || out.Reports[0] != many.Reports[0] {
+		t.Fatalf("a trimmed detail keeps its reports: %v", out.Reports)
 	}
 	if many.TimelineTrimmed {
 		t.Fatal("the hub's shared detail must not be marked")

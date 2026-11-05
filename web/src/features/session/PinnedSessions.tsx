@@ -14,7 +14,7 @@ import { useAthena } from "@/lib/store/state";
 import { Mono } from "@/ui/athena/Mono";
 import { cn } from "@/ui/cn";
 import { Button } from "@/ui/primitives/button";
-import { SessionView } from "./SessionView";
+import { LazySessionView } from "./SessionFrame";
 
 export const WIDE_QUERY = "(min-width: 1440px)";
 export const MAX_PINS = 3;
@@ -111,7 +111,7 @@ function PinnedSession({ id, onUnpin }: { id: string; onUnpin(): void }) {
   );
   return (
     <article aria-label={`Pinned session ${id}`} className="flex min-h-0 min-w-0 flex-col border-r border-line-soft p-3 last:border-r-0">
-      <SessionView
+      <LazySessionView
         ticketId={id}
         compact
         title={heading}
