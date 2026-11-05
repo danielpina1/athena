@@ -49,6 +49,12 @@ test("offline reload shows the shell with the unreachable banner", async ({ page
   // A deep link opens offline too: the routes are the app's.
   await page.goto("/tickets");
   await expect(page.getByRole("heading", { name: "Tickets", level: 1 }).first()).toBeVisible();
+  // Settings is a lazy chunk (and Prompts one inside it): the precache serves both offline.
+  await page.goto("/settings/general");
+  await expect(page.getByRole("heading", { name: "General", exact: true })).toBeVisible();
+  await expect(page.getByText("Waiting for the server.").first()).toBeVisible();
+  await page.goto("/settings/prompts");
+  await expect(page.getByRole("heading", { name: "Prompts", exact: true })).toBeVisible();
   await page.goto("/");
   await expect(page.getByText("Control server unreachable — retrying")).toBeVisible();
   // No Snapshot yet: nothing claims "nothing" or "0".

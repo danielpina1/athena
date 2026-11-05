@@ -51,6 +51,7 @@ describe("actions", () => {
       [() => actions.visibility(true), { case: "visibility", value: { visible: true } }],
       [() => actions.listPasskeys(), { case: "listPasskeys", value: {} }],
       [() => actions.revokePasskey("P-1"), { case: "revokePasskey", value: { id: "P-1" } }],
+      [() => actions.revokePasskey("P-2", { thisDevice: true }), { case: "revokePasskey", value: { id: "P-2" } }],
       [() => actions.getPrompt("worker"), { case: "getPrompt", value: { part: "worker" } }],
       [() => actions.setPrompt("worker", 2, "be brief"), { case: "setPrompt", value: { part: "worker", baseRevision: 2, text: "be brief" } }],
       [() => actions.resetPrompt("worker", 3), { case: "resetPrompt", value: { part: "worker", baseRevision: 3 } }],

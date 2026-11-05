@@ -190,3 +190,67 @@ test("waiting for the server before the first Snapshot", () => {
   renderBlock("general");
   expect(screen.getByText("Waiting for the server.")).toBeTruthy();
 });
+
+test("overwrite can conflict again and still keeps the edit", async () => {
+  const user = userEvent.setup();
+  renderBlock("general");
+  await user.click(mode("Auto"));
+  setPolicy.mockResolvedValueOnce(result({ ok: false, code: "conflict" }));
+  await user.click(screen.getByRole("button", { name: "Save" }));
+  await screen.findByText("Changed on another device");
+  act(() => delta(2n, 4, { ...settings, mode: "off" }));
+  setPolicy.mockResolvedValueOnce(result({ ok: false, code: "conflict" }));
+  await user.click(screen.getByRole("button", { name: "Overwrite" }));
+  expect(setPolicy).toHaveBeenLastCalledWith(4, expect.any(String));
+  expect(await screen.findByText("Changed on another device")).toBeTruthy();
+  expect(mode("Auto").checked).toBe(true);
+  act(() => delta(3n, 5, { ...settings, mode: "off" }));
+  setPolicy.mockResolvedValueOnce(result({ result: { case: "policyRevision", value: 6 } }));
+  await user.click(screen.getByRole("button", { name: "Overwrite" }));
+  expect(setPolicy).toHaveBeenLastCalledWith(5, expect.any(String));
+  expect(sent(2).mode).toBe("auto");
+});
+
+test("a conflict focuses Reload, and a finished save focuses the heading", async () => {
+  const user = userEvent.setup();
+  renderBlock("general");
+  await user.click(mode("Auto"));
+  setPolicy.mockResolvedValueOnce(result({ ok: false, code: "conflict" }));
+  await user.click(screen.getByRole("button", { name: "Save" }));
+  await screen.findByText("Changed on another device");
+  expect(document.activeElement).toBe(screen.getByRole("button", { name: "Reload" }));
+
+  setPolicy.mockResolvedValueOnce(result({ result: { case: "policyRevision", value: 4 } }));
+  await user.click(screen.getByRole("button", { name: "Overwrite" }));
+  expect(screen.queryByRole("region", { name: "Save General" })).toBeNull();
+  expect(document.activeElement).toBe(screen.getByRole("heading", { name: "General" }));
+});
+
+test("moving and removing rules keeps the keyboard's place", async () => {
+  const user = userEvent.setup();
+  load({
+    policy: policy(3, {
+      ...settings,
+      rules: [
+        { name: "a", instructions: "", enabled: true },
+        { name: "b", instructions: "", enabled: true },
+        { name: "c", instructions: "", enabled: true },
+      ],
+    }),
+  });
+  renderBlock("general");
+  const focused = () => document.activeElement?.getAttribute("aria-label") ?? document.activeElement?.textContent;
+  await user.click(screen.getByRole("button", { name: "Move b down" }));
+  // a, c, b: b is last, so its down arrow is disabled and the up arrow takes the focus.
+  expect(focused()).toBe("Move b up");
+  await user.click(screen.getByRole("button", { name: "Move b up" }));
+  expect(focused()).toBe("Move b up");
+  await user.click(screen.getByRole("button", { name: "Move a down" }));
+  expect(focused()).toBe("Move a down");
+  // b, a, c: removing b moves the focus to the next rule.
+  await user.click(screen.getByRole("button", { name: "Remove b" }));
+  expect(document.activeElement).toBe(screen.getAllByRole("textbox", { name: "Name" })[0]);
+  await user.click(screen.getByRole("button", { name: "Remove c" }));
+  await user.click(screen.getByRole("button", { name: "Remove a" }));
+  expect(document.activeElement).toBe(screen.getByRole("button", { name: "Add rule" }));
+});

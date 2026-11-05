@@ -37,7 +37,22 @@ export function saveBarVisible(dirty: boolean, status: SaveStatus): boolean {
 
 export function SaveBar({ label, dirty, status, error, invalid, onSave, onDiscard, onReload, onOverwrite, className }: SaveBarProps) {
   const id = useId();
-  if (!saveBarVisible(dirty, status)) return null;
+  const reload = useRef<HTMLButtonElement>(null);
+  const focusHeading = useContext(HeadingFocusContext);
+  const visible = saveBarVisible(dirty, status);
+  const was = useRef({ status, visible });
+  useEffect(() => {
+    const before = was.current;
+    was.current = { status, visible };
+    // Save gave way to Reload and Overwrite: the keyboard goes to Reload, not to the page.
+    if (status === "conflict" && before.status !== "conflict") reload.current?.focus();
+    // The save is done and the bar went with the focused button: back to the block's heading.
+    else if (before.visible && !visible && before.status === "saving") {
+      const active = document.activeElement;
+      if (!active || active === document.body) focusHeading();
+    }
+  }, [status, visible, focusHeading]);
+  if (!visible) return null;
   const saving = status === "saving";
   let message: string;
   let tone = "text-text";
@@ -66,7 +81,7 @@ export function SaveBar({ label, dirty, status, error, invalid, onSave, onDiscar
       <div className="flex flex-wrap gap-2">
         {status === "conflict" ? (
           <>
-            <Button size="sm" onClick={onReload} aria-describedby={id}>
+            <Button ref={reload} size="sm" onClick={onReload} aria-describedby={id}>
               Reload
             </Button>
             <Button size="sm" variant="primary" onClick={onOverwrite} aria-describedby={id}>
@@ -87,6 +102,9 @@ export function SaveBar({ label, dirty, status, error, invalid, onSave, onDiscar
     </div>
   );
 }
+
+/** Focuses the enclosing section's heading (Section provides it). */
+export const HeadingFocusContext = createContext<() => void>(() => {});
 
 // --- unsaved changes ---
 
@@ -118,19 +136,35 @@ export type SaveBlockOptions<T> = {
   send(draft: T, base: number): Promise<CommandResult>;
   /** Why draft cannot be saved, if it cannot. */
   validate?(draft: T): string | undefined;
-  /**
-   * Whether a draft based on base may move to revision without a conflict: the revisions between came from this
-   * page's other blocks, so no other device changed anything.
-   */
-  rebase?(base: number, revision: number): boolean;
 };
+
+/** A decision sent against a revision (Keep my text, Use the new default, Reset). */
+export type BlockAction = (base: number) => Promise<CommandResult>;
 
 export type SaveBlock<T> = {
   /** What the block shows: the owner's draft, else the server's value. */
   value: T | undefined;
   edit(next: T | ((current: T) => T)): void;
   dirty: boolean;
+  /** A save or an action is on its way: the block's other buttons wait. */
+  busy: boolean;
+  /**
+   * Sends a decision against the current revision, one at a time (undefined while another runs). A conflict goes to
+   * the bar like a save's: Reload drops it, Overwrite sends it again on the fresh revision. Success drops the draft.
+   */
+  act(action: BlockAction): Promise<CommandResult | undefined>;
   bar: Omit<SaveBarProps, "label" | "className">;
+};
+
+type Draft<T> = {
+  value: T;
+  base: number;
+  /**
+   * The value of this block's own save that the draft was edited on top of, before that save's revision was known
+   * (a prompt save returns none). The next revision change that brings exactly this value is that save: the draft
+   * follows it instead of conflicting with itself.
+   */
+  onOwn?: T;
 };
 
 /**
@@ -140,23 +174,27 @@ export type SaveBlock<T> = {
  * top of the current revision.
  */
 export function useSaveBlock<T>(opts: SaveBlockOptions<T>): SaveBlock<T> {
-  const { label, server, revision, equal, send, validate, rebase } = opts;
-  const [draft, setDraft] = useState<{ value: T; base: number } | null>(null);
+  const { label, server, revision, equal, send, validate } = opts;
+  const [draft, setDraft] = useState<Draft<T> | null>(null);
   const [status, setStatus] = useState<SaveStatus>("idle");
   const [error, setError] = useState<string>();
   /** The revision the last successful save made, when its result says (a Policy save does). */
   const [savedRevision, setSavedRevision] = useState<number>();
   const running = useRef(false);
+  /** The decision a conflict refused, for Overwrite; none when the conflict was a save's. */
+  const refused = useRef<BlockAction | null>(null);
 
-  // The save landed and the server moved on: show the server's value again. (Adjusted while rendering, as React
-  // recommends for state that follows a prop.)
-  if (status === "saved" && draft && revision !== undefined && revision !== draft.base) {
-    setDraft(null);
-    setStatus("idle");
-  }
-  // The revision moved under an unsaved draft, by this page's own other block: the draft follows it.
-  if (status === "idle" && draft && revision !== undefined && revision !== draft.base && rebase?.(draft.base, revision)) {
-    setDraft({ value: draft.value, base: revision });
+  // (Adjusted while rendering, as React recommends for state that follows a prop.)
+  if (draft && revision !== undefined && revision !== draft.base) {
+    if (status === "saved") {
+      // The save landed and the server moved on: show the server's value again.
+      setDraft(null);
+      setStatus("idle");
+    } else if (draft.onOwn !== undefined) {
+      // Edited on top of this block's own save: the revision that brings that save's value is ours to build on.
+      const ours = server !== undefined && equal(server, draft.onOwn);
+      setDraft({ value: draft.value, base: ours ? revision : draft.base });
+    }
   }
 
   const value = draft?.value ?? server;
@@ -170,20 +208,28 @@ export function useSaveBlock<T>(opts: SaveBlockOptions<T>): SaveBlock<T> {
         const current = d?.value ?? server;
         if (current === undefined || revision === undefined) return d;
         const v = typeof next === "function" ? (next as (c: T) => T)(current) : next;
-        // A save just landed and its Delta has not: the next edit starts from it, on the revision that save made.
-        const base = d && status !== "saved" ? d.base : status === "saved" ? (savedRevision ?? revision) : revision;
-        return { value: v, base };
+        if (d && status === "saved") {
+          // A save just landed and its Delta has not: build on it, on the revision it made when that is known.
+          return savedRevision !== undefined ? { value: v, base: savedRevision } : { value: v, base: d.base, onOwn: d.value };
+        }
+        return d ? { ...d, value: v } : { value: v, base: revision };
       });
       setStatus((s) => (s === "saved" || s === "failed" ? "idle" : s));
     },
     [server, revision, status, savedRevision],
   );
 
-  const run = async (value: T, base: number) => {
-    if (running.current) return;
+  const begin = () => {
+    if (running.current) return false;
     running.current = true;
     setStatus("saving");
     setError(undefined);
+    return true;
+  };
+
+  const run = async (value: T, base: number) => {
+    if (!begin()) return;
+    refused.current = null;
     try {
       const r = await send(value, base);
       if (r.ok) {
@@ -201,7 +247,22 @@ export function useSaveBlock<T>(opts: SaveBlockOptions<T>): SaveBlock<T> {
     }
   };
 
+  const runAction = async (action: BlockAction, base: number) => {
+    if (!begin()) return undefined;
+    try {
+      const r = await action(base);
+      refused.current = r.ok || r.code !== "conflict" ? null : action;
+      if (r.ok) setDraft(null);
+      // A refusal other than a conflict is the caller's to say (a toast): the bar's Try again is for a draft.
+      setStatus(r.ok || r.code !== "conflict" ? "idle" : "conflict");
+      return r;
+    } finally {
+      running.current = false;
+    }
+  };
+
   const discard = () => {
+    refused.current = null;
     setDraft(null);
     setStatus("idle");
     setError(undefined);
@@ -211,6 +272,8 @@ export function useSaveBlock<T>(opts: SaveBlockOptions<T>): SaveBlock<T> {
     value,
     edit,
     dirty: dirty || status === "conflict" || status === "failed",
+    busy: status === "saving",
+    act: (action) => (revision === undefined ? Promise.resolve(undefined) : runAction(action, revision)),
     bar: {
       dirty,
       status,
@@ -220,7 +283,12 @@ export function useSaveBlock<T>(opts: SaveBlockOptions<T>): SaveBlock<T> {
       onDiscard: discard,
       onReload: discard,
       onOverwrite: () => {
-        if (!draft || revision === undefined) return;
+        if (revision === undefined) return;
+        if (refused.current) {
+          void runAction(refused.current, revision);
+          return;
+        }
+        if (!draft) return;
         setDraft({ value: draft.value, base: revision });
         void run(draft.value, revision);
       },

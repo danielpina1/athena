@@ -66,8 +66,14 @@ function DeviceRow({ passkey, current, onRevoked }: { passkey: Passkey; current:
   const [busy, setBusy] = useState(false);
   const revoke = async () => {
     setBusy(true);
-    const r = await revokePasskey(passkey.id);
+    const r = await revokePasskey(passkey.id, { thisDevice: current });
     setBusy(false);
+    if (r.ok && current) {
+      // This device can no longer sign in: leave now rather than wait for the server's close.
+      sessionEnded();
+      return;
+    }
+    if (r.code === "signed_out") return; // the session ended first; sign-in says so
     if (r.ok) {
       toast({ title: "Passkey revoked", description: `${passkey.name || "The device"} can no longer sign in.` });
       onRevoked();

@@ -438,6 +438,27 @@ describe("Outbox", () => {
     expect(reloaded.pending()).toEqual([]);
   });
 
+  test("a command that ends this session is dropped when the session ends, never replayed", async () => {
+    const link = new FakeLink();
+    const outbox = new Outbox(idb, link.send);
+    link.connect(outbox);
+    const revoke = track(outbox.submit({ case: "revokePasskey", value: { id: "P-me" } }, { endsSession: true }));
+    const other = track(outbox.submit(reply()));
+    await outbox.settled();
+    link.drop();
+    // The session ended before either result came.
+    outbox.dropSessionEnders();
+    await outbox.settled();
+    expect(revoke.result).toMatchObject({ ok: false, code: "signed_out" });
+    expect(other.result).toBeUndefined();
+    link.connect(outbox);
+    await outbox.settled();
+    expect(link.actions().map((a) => a?.case)).toEqual(["reply"]);
+    const reloaded = new Outbox(idb, () => true);
+    await reloaded.settled();
+    expect(reloaded.pending().map((c) => c.action.case)).toEqual(["reply"]);
+  });
+
   test("without IndexedDB the outbox still works in memory", async () => {
     const broken = { open: () => { throw new Error("blocked"); } } as unknown as IDBFactory;
     const reportError = vi.fn();

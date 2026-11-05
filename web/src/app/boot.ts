@@ -74,7 +74,9 @@ export function createRuntime(opts: RuntimeOptions): Runtime {
    * everything and no stale epoch or cursor is used) but the outbox is kept: its commands go out after sign-in.
    */
   const leave = (notice?: string) => {
-    // Commands held for a step-up stay (released, not failed) and go out after the next sign-in.
+    // Commands held for a step-up stay (released, not failed) and go out after the next sign-in; one whose success
+    // ends the session (revoking this device) is dropped, never replayed into the next session.
+    outbox.dropSessionEnders();
     outbox.releaseHeld();
     cancelReauth();
     client.stop();

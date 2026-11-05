@@ -101,10 +101,20 @@ function ThisDevice({ ios }: { ios: boolean }) {
           <ToggleGroupItem value="on">On</ToggleGroupItem>
           <ToggleGroupItem value="off">Off</ToggleGroupItem>
         </ToggleGroup>
-        <p id={`${id}-hint`} className="max-w-prose min-w-0 text-sm text-muted">
-          {(pending && PENDING[state]) || HINT[state]}
-        </p>
-        {ios && <p className="max-w-prose min-w-0 text-sm font-medium">{IOS_NOTE}</p>}
+        {/* On an iPhone or iPad outside the Home Screen app the iOS note is the one message: it replaces the
+            generic "unsupported" hint, which says the same less precisely. */}
+        {ios && state === "unsupported" ? (
+          <p id={`${id}-hint`} className="max-w-prose min-w-0 text-sm font-medium">
+            {IOS_NOTE}
+          </p>
+        ) : (
+          <>
+            <p id={`${id}-hint`} className="max-w-prose min-w-0 text-sm text-muted">
+              {(pending && PENDING[state]) || HINT[state]}
+            </p>
+            {ios && <p className="max-w-prose min-w-0 text-sm font-medium">{IOS_NOTE}</p>}
+          </>
+        )}
       </div>
     </Block>
   );

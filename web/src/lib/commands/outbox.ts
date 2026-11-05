@@ -29,6 +29,11 @@ export type SubmitOptions = {
   rollback?: (s: AthenaState) => void;
   /** Runs when the command succeeds, once. */
   commit?: (s: AthenaState) => void;
+  /**
+   * Its success ends this very session (revoking this device's passkey): when the session ends before its result,
+   * dropSessionEnders forgets it, so it is never replayed into the next sign-in's session.
+   */
+  endsSession?: boolean;
 };
 
 export type OutboxOptions = {
@@ -79,6 +84,7 @@ type Entry = {
   stepUps: number;
   /** The promise of the submit that made it; a command loaded after a reload has none. */
   resolve?: (r: CommandResult) => void;
+  endsSession?: boolean;
   rollback?: (s: AthenaState) => void;
   commit?: (s: AthenaState) => void;
 };
@@ -242,6 +248,17 @@ export class Outbox {
   }
 
   /**
+   * The session ended (signed out by the server, or this device revoked): forgets the commands whose success would end
+   * a session (endsSession), held ones included, so the next sign-in does not replay them; each resolves `signed_out`.
+   * Every other command stays for after the sign-in.
+   */
+  dropSessionEnders(): void {
+    for (const e of this.sorted()) {
+      if (e.endsSession) this.finish(e, failure(e.cmd.id, "signed_out", "the session ended"));
+    }
+  }
+
+  /**
    * Forgets every command: only for an explicit sign-out, when nothing may be sent for this device again. Each
    * waiting submit resolves unauthenticated, after its rollback.
    */
@@ -282,6 +299,7 @@ export class Outbox {
       resolve,
       rollback: opts.rollback,
       commit: opts.commit,
+      endsSession: opts.endsSession,
       rewatch,
     };
     this.entries.set(cmd.id, e);

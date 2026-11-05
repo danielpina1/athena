@@ -4,6 +4,7 @@ import { type ReactNode, useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router";
 import type { LinkSource } from "@/app/ConnectionBanner";
 import { DesktopShell } from "@/app/DesktopShell";
+import { guardedNavigate } from "@/app/guardedNavigate";
 import { Palette } from "@/app/Palette";
 import { LayoutProvider, useIsDesktop } from "@/app/Panes";
 import { PhoneShell } from "@/app/PhoneShell";
@@ -61,9 +62,9 @@ export function Shell({ link }: { link: LinkSource }) {
     if (box) box.focus();
     else setPalette(true);
   });
-  useShortcut("g n", () => navigate("/"));
-  useShortcut("g t", () => navigate("/tickets"));
-  useShortcut("g g", () => navigate("/graph"));
+  useShortcut("g n", () => guardedNavigate(navigate, "/"));
+  useShortcut("g t", () => guardedNavigate(navigate, "/tickets"));
+  useShortcut("g g", () => guardedNavigate(navigate, "/graph"));
 
   const openPalette = () => setPalette(true);
   const content: ReactNode = <AppRoutes />;

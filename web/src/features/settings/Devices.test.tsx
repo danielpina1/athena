@@ -22,6 +22,7 @@ vi.mock("@/lib/auth/session", async (orig) => ({
   ...(await orig<typeof import("@/lib/auth/session")>()),
   getSession: vi.fn(),
   createEnrollLink: vi.fn(),
+  sessionEnded: vi.fn(),
 }));
 vi.mock("@/features/auth/ReauthDialog", async (orig) => ({
   ...(await orig<typeof import("@/features/auth/ReauthDialog")>()),
@@ -32,6 +33,7 @@ const revokePasskey = vi.mocked(actions.revokePasskey);
 const getSession = vi.mocked(session.getSession);
 const createEnrollLink = vi.mocked(session.createEnrollLink);
 const requestReauth = vi.mocked(reauthDialog.requestReauth);
+const sessionEnded = vi.mocked(session.sessionEnded);
 
 const NOW = Date.parse("2026-11-04T12:00:00Z");
 const passkeys = [
@@ -73,13 +75,36 @@ test("revoke current device warns", async () => {
   expect(revokePasskey).not.toHaveBeenCalled();
   await new Promise((r) => setTimeout(r, 350));
   await user.click(within(mac).getByRole("button", { name: "Revoke and sign out this device" }));
-  expect(revokePasskey).toHaveBeenCalledWith("pk-mac");
+  // This device's revoke ends the session: it never replays after the next sign-in, and on success the app leaves
+  // at once instead of waiting for the server's close.
+  expect(revokePasskey).toHaveBeenCalledWith("pk-mac", { thisDevice: true });
+  await vi.waitFor(() => expect(sessionEnded).toHaveBeenCalledTimes(1));
 
   // Another device's passkey says only that it is revoked.
   const phone = row("iPhone");
   expect(within(phone).queryByText("Revoking it signs this device out.")).toBeNull();
   await user.click(within(phone).getByRole("button", { name: "Revoke" }));
-  expect(within(phone).getByRole("button", { name: "Revoke this passkey" })).toBeTruthy();
+  await new Promise((r) => setTimeout(r, 350));
+  await user.click(within(phone).getByRole("button", { name: "Revoke this passkey" }));
+  expect(revokePasskey).toHaveBeenLastCalledWith("pk-phone", { thisDevice: false });
+  expect(sessionEnded).toHaveBeenCalledTimes(1);
+});
+
+test("the QR code encodes exactly the link", async () => {
+  const url = "https://athena.test/enroll#exact-token-123";
+  createEnrollLink.mockResolvedValue({ url, expiresAt: new Date(Date.now() + 60_000) });
+  const user = userEvent.setup();
+  render(<Devices />, { wrapper });
+  await user.click(screen.getByRole("button", { name: "Add a device" }));
+  const qr = await screen.findByRole("img", { name: "QR code of the enrollment link" });
+  const { encode } = await import("uqr");
+  const want = encode(url, { ecc: "M", border: 4 });
+  expect(qr.getAttribute("viewBox")).toBe(`0 0 ${want.size} ${want.size}`);
+  // Each dark module of the code for exactly this link, and no other.
+  const modules = new Set<string>();
+  want.data.forEach((row, y) => row.forEach((on, x) => on && modules.add(`${x},${y}`)));
+  const drawn = new Set([...(qr.querySelector("path")?.getAttribute("d") ?? "").matchAll(/M(\d+),(\d+)/g)].map((m) => `${m[1]},${m[2]}`));
+  expect(drawn).toEqual(modules);
 });
 
 test("add device shows QR and never puts the token in location or console", async () => {

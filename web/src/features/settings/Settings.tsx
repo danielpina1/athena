@@ -1,9 +1,12 @@
 // The Settings screen: /settings/<section>. On the desktop the section list sits in the list pane and the section
 // beside it (General when none is named); on the phone the list comes first and a section opens on tap, with a link
 // back. A section with unsaved changes asks before the owner follows a link away from it (any in-app link: the
-// section list, the navigation) and before the page unloads. Prompts is a lazy chunk.
+// section list, the navigation), before the palette or a g shortcut navigates (guardedNavigate) and before the page
+// unloads. Browser Back is not asked about: the router has already moved when it hears of it. The whole screen is a
+// lazy chunk (routes.tsx), and Prompts a further one inside it.
 import { lazy, type ReactNode, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { Link, Navigate, useLocation, useNavigate, useParams } from "react-router";
+import { setNavigationGuard } from "@/app/guardedNavigate";
 import { Panes, useLayout } from "@/app/Panes";
 import { Waiting } from "@/ui/athena/Waiting";
 import { cn } from "@/ui/cn";
@@ -121,9 +124,16 @@ function UnsavedGuard({ children }: { children: ReactNode }) {
     const onUnload = (e: BeforeUnloadEvent) => {
       e.preventDefault();
     };
+    // The palette and the g shortcuts navigate in code: they ask through the same dialog.
+    const offGuard = setNavigationGuard((to) => {
+      if (to === here) return false;
+      setLeaving(to);
+      return true;
+    });
     document.addEventListener("click", onClick, true);
     window.addEventListener("beforeunload", onUnload);
     return () => {
+      offGuard();
       document.removeEventListener("click", onClick, true);
       window.removeEventListener("beforeunload", onUnload);
     };

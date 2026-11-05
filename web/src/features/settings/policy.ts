@@ -157,20 +157,3 @@ export function validateGeneral(g: General): string | undefined {
   }
   return undefined;
 }
-
-/**
- * The Policy revisions this page's own saves made. A block whose draft is based on an older revision may move its
- * base past them: the other block's save changed only the other block's fields, so that is not another device.
- */
-const ownRevisions = new Set<number>();
-
-export function noteOwnRevision(rev: number): void {
-  ownRevisions.add(rev);
-}
-
-/** Whether every revision after base up to rev came from this page. */
-export function onlyOwnSince(base: number, rev: number): boolean {
-  if (rev <= base) return false;
-  for (let r = base + 1; r <= rev; r++) if (!ownRevisions.has(r)) return false;
-  return true;
-}

@@ -19,7 +19,7 @@ import { Button } from "@/ui/primitives/button";
 import { Textarea } from "@/ui/primitives/textarea";
 import { toast } from "@/ui/primitives/toast";
 import { useFilterParams } from "../tickets/Filters";
-import { SaveBar, useSaveBlock } from "./SaveBar";
+import { type BlockAction, SaveBar, useSaveBlock } from "./SaveBar";
 import { Block, Section } from "./Section";
 
 const EDITED = "Edited";
@@ -96,23 +96,25 @@ function PartEditor({ part, overridden, revision }: { part: string; overridden: 
   const equal = useCallback((a: string, b: string) => a === b, []);
   const block = useSaveBlock({ label: part, server, revision: fetched?.revision, equal, send });
 
-  const act = async (done: string, failed: string, run: () => Promise<{ ok: boolean; code: string }>) => {
-    const r = await run();
+  /** A decision on the part, one at a time; a conflict goes to the save bar (Reload or Overwrite). */
+  const decide = async (done: string, failed: string, action: BlockAction) => {
+    const r = await block.act(action);
+    if (!r || r.code === "conflict") return;
     if (r.ok) toast({ title: done });
     else toast({ title: failed, description: errorMessage(r.code), tone: "danger" });
   };
-  const reset = () => act("Reset to the default", "Not reset", () => resetPrompt(part, fetched?.revision ?? revision));
+  const reset = () => decide("Reset to the default", "Not reset", (base) => resetPrompt(part, base));
 
   if (!fetched || !detail || block.value === undefined) return <Waiting className="px-4 py-6 lg:px-6" />;
-  const base = fetched.revision;
   return (
     <>
       {!!detail.previousDefaultText && (
         <DefaultChanged
           before={detail.previousDefaultText}
           after={detail.defaultText}
-          onKeep={() => void act("Kept your text", "Not saved", () => setPrompt(part, base, detail.text))}
-          onUseNew={() => void act("Using the new default", "Not reset", () => resetPrompt(part, base))}
+          busy={block.busy}
+          onKeep={() => void decide("Kept your text", "Not saved", (base) => setPrompt(part, base, detail.text))}
+          onUseNew={() => void decide("Using the new default", "Not reset", (base) => resetPrompt(part, base))}
         />
       )}
       <Block title="Text">
@@ -129,7 +131,13 @@ function PartEditor({ part, overridden, revision }: { part: string; overridden: 
         />
         {overridden && (
           <div>
-            <Confirm size="sm" label="Reset" confirmLabel={`Reset ${part} to its default`} onConfirm={() => void reset()} />
+            <Confirm
+              size="sm"
+              label="Reset"
+              confirmLabel={`Reset ${part} to its default`}
+              disabled={block.busy}
+              onConfirm={() => void reset()}
+            />
           </div>
         )}
       </Block>
@@ -206,10 +214,12 @@ export function diffLines(a: string, b: string): Line[] {
 function DefaultChanged({
   before,
   after,
+  busy,
   onKeep,
   onUseNew,
 }: {
   before: string;
+  busy: boolean;
   after: string;
   onKeep(): void;
   onUseNew(): void;
@@ -241,8 +251,15 @@ function DefaultChanged({
         ))}
       </pre>
       <div className="flex flex-wrap gap-2">
-        <Button onClick={onKeep}>Keep my text</Button>
-        <Confirm label="Use the new default" confirmLabel="Replace my text with the new default" onConfirm={onUseNew} />
+        <Button disabled={busy} onClick={onKeep}>
+          Keep my text
+        </Button>
+        <Confirm
+          label="Use the new default"
+          confirmLabel="Replace my text with the new default"
+          disabled={busy}
+          onConfirm={onUseNew}
+        />
       </div>
     </section>
   );

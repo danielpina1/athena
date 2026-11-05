@@ -1,5 +1,5 @@
-// The signed-in app's routes and its navigation. Graph is a lazy chunk (app/routes/graph.tsx), as is Settings ›
-// Prompts. /design and /enroll render outside the session gate (App.tsx).
+// The signed-in app's routes and its navigation. Graph (app/routes/graph.tsx) and Settings are lazy chunks, and
+// Settings › Prompts a further one. /design and /enroll render outside the session gate (App.tsx).
 //
 // Query contracts the palette already uses: /tickets/:id?tab=session opens a Ticket's live session, and
 // /routing?tab=triggers&trigger=<id> and /routing?tab=threads&thread=<key> open one record (Task 14). On the Ticket
@@ -23,12 +23,12 @@ import { NewTask } from "@/features/new-task/NewTask";
 import { Routing } from "@/features/routing/Routing";
 import { PinnedSessions } from "@/features/session/PinnedSessions";
 import { Nodes } from "@/features/nodes/Nodes";
-import { Settings } from "@/features/settings/Settings";
 import { TicketDetail } from "@/features/tickets/TicketDetail";
 import { TicketList } from "@/features/tickets/TicketList";
 import { selectCounts, selectSynced } from "@/lib/store/selectors";
 import { useAthena } from "@/lib/store/state";
 import { EmptyState } from "@/ui/athena/EmptyState";
+import { Waiting } from "@/ui/athena/Waiting";
 
 export type NavItem = {
   to: string;
@@ -111,6 +111,8 @@ function NewView() {
 }
 
 const GraphView = lazy(() => import("@/app/routes/graph"));
+/** Settings is a lazy chunk too (Prompts a further one inside it): only routes.tsx imports features/settings. */
+const SettingsView = lazy(() => import("@/features/settings/Settings").then((m) => ({ default: m.Settings })));
 
 function RoutingView() {
   return <Panes detail={<Routing />} />;
@@ -157,7 +159,14 @@ export function AppRoutes() {
       />
       <Route path="routing" element={<RoutingView />} />
       <Route path="nodes" element={<NodesView />} />
-      <Route path="settings/:group?" element={<Settings />} />
+      <Route
+        path="settings/:group?"
+        element={
+          <Suspense fallback={<Panes detail={<Waiting className="p-4 lg:p-6" />} />}>
+            <SettingsView />
+          </Suspense>
+        }
+      />
       <Route path="*" element={<NotFound />} />
     </Routes>
   );

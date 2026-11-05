@@ -224,6 +224,31 @@ test("close 4002 keeps a command held for a step-up and resends it after sign-in
   expect(settled).toBe(false);
 });
 
+test("close 4002 drops a revoke of this device, so it is never replayed after sign-in", async () => {
+  const { server, runtime } = setup();
+  fakeFetch({ "GET /auth/session": { json: { authenticated: true } }, ...signInRoutes });
+  fakeCredentials();
+  const user = userEvent.setup();
+  gate(runtime);
+  await screen.findByText("the app");
+  server.welcome();
+  await waitFor(() => expect(runtime.client.status).toBe("open"));
+  const result = runtime.outbox.submit({ case: "revokePasskey", value: { id: "P-me" } }, { endsSession: true });
+  await runtime.outbox.settled();
+  expect(server.socket.sent("command")).toHaveLength(1);
+
+  // The server ends the session before the result arrives.
+  act(() => server.socket.serverClose(4002));
+  await screen.findByText(SIGNED_OUT_NOTICE);
+  expect(await result).toMatchObject({ ok: false, code: "signed_out" });
+
+  await user.click(screen.getByRole("button", { name: "Sign in with passkey" }));
+  await screen.findByText("the app");
+  server.welcome();
+  await runtime.outbox.settled();
+  expect(server.socket.sent("command")).toHaveLength(0);
+});
+
 test("an explicit sign out leaves no step-up request behind", async () => {
   const { server, runtime } = setup();
   fakeFetch({

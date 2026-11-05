@@ -3,7 +3,7 @@
 // json): each block writes its own fields over the latest document, so the other block's fields and anything this
 // client does not know are kept. Each block has its own save bar.
 import { ArrowDownIcon, ArrowUpIcon, PlusIcon, Trash2Icon } from "lucide-react";
-import { useCallback, useId, useMemo, useRef } from "react";
+import { useCallback, useId, useLayoutEffect, useMemo, useRef } from "react";
 import { useLayout } from "@/app/Panes";
 import { setPolicy } from "@/lib/commands/actions";
 import { selectSynced } from "@/lib/store/selectors";
@@ -20,8 +20,6 @@ import {
   type General,
   type GitHub,
   MODES,
-  noteOwnRevision,
-  onlyOwnSince,
   parsePolicy,
   readGeneral,
   readGitHub,
@@ -50,12 +48,10 @@ function usePolicyDoc() {
   return { doc, revision: policy?.revision, ready: synced && !!policy };
 }
 
-/** Sends the block's fields written over the latest document, and remembers the revision it made. */
-async function savePolicy(base: number, write: (doc: ReturnType<typeof parsePolicy>) => string) {
+/** Sends the block's fields written over the latest document. */
+function savePolicy(base: number, write: (doc: ReturnType<typeof parsePolicy>) => string) {
   const latest = useAthena.getState().policy;
-  const r = await setPolicy(base, write(parsePolicy(latest?.settingsJson ?? "{}")));
-  if (r.ok && r.result?.case === "policyRevision") noteOwnRevision(r.result.value);
-  return r;
+  return setPolicy(base, write(parsePolicy(latest?.settingsJson ?? "{}")));
 }
 
 export function GeneralSettings() {
@@ -68,7 +64,6 @@ export function GeneralSettings() {
     revision,
     equal: equalGeneral,
     validate: validateGeneral,
-    rebase: onlyOwnSince,
     send,
   });
 
@@ -119,43 +114,70 @@ function ModePicker({ mode, onChange }: { mode: string; onChange(mode: string): 
   );
 }
 
+/** Where the keyboard goes once the rules re-render: a rule's control, or Add rule. */
+type FocusTarget = { key: string; control: "up" | "down" | "name" } | { key: null; control: "add" };
+
 function Rules({ rules, onChange }: { rules: Rule[]; onChange(rules: Rule[]): void }) {
   const next = useRef(0);
+  const list = useRef<HTMLDivElement>(null);
+  const focusAfter = useRef<FocusTarget | null>(null);
+  // A moved rule's button, the next rule after a removal, or Add rule: the focused control may have moved, been
+  // disabled or gone.
+  useLayoutEffect(() => {
+    const t = focusAfter.current;
+    focusAfter.current = null;
+    if (!t || !list.current) return;
+    const sel = t.key === null ? '[data-control="add"]' : `[data-rule="${CSS.escape(t.key)}"] [data-control="${t.control}"]`;
+    list.current.querySelector<HTMLElement>(sel)?.focus();
+  }, [rules]);
+
   const set = (i: number, patch: Partial<Rule>) => onChange(rules.map((r, j) => (j === i ? { ...r, ...patch } : r)));
   const move = (i: number, by: -1 | 1) => {
     const out = [...rules];
     [out[i], out[i + by]] = [out[i + by], out[i]];
+    const at = i + by;
+    // The same arrow, unless the move made it disabled (top or bottom): then the other one.
+    const control = by === -1 ? (at === 0 ? "down" : "up") : at === out.length - 1 ? "up" : "down";
+    focusAfter.current = { key: rules[i].key, control };
     onChange(out);
+  };
+  const remove = (i: number) => {
+    const after = rules[i + 1];
+    focusAfter.current = after ? { key: after.key, control: "name" } : { key: null, control: "add" };
+    onChange(rules.filter((_, j) => j !== i));
   };
   return (
     <Block title="Rules">
-      <p className="max-w-prose text-sm text-muted">
-        Each rule describes a kind of proactive work; a Ticket it matches gets its instructions.
-      </p>
-      {rules.length > 0 && (
-        <ol className="grid gap-3">
-          {rules.map((r, i) => (
-            <RuleEditor
-              key={r.key}
-              rule={r}
-              index={i}
-              last={i === rules.length - 1}
-              onChange={(patch) => set(i, patch)}
-              onMove={(by) => move(i, by)}
-              onRemove={() => onChange(rules.filter((_, j) => j !== i))}
-            />
-          ))}
-        </ol>
-      )}
-      <div>
-        <Button
-          onClick={() =>
-            onChange([...rules, { key: `n${++next.current}`, name: "", instructions: "", enabled: true, orig: {} }])
-          }
-        >
-          <PlusIcon aria-hidden />
-          Add rule
-        </Button>
+      <div ref={list} className="grid gap-3">
+        <p className="max-w-prose text-sm text-muted">
+          Each rule describes a kind of proactive work; a Ticket it matches gets its instructions.
+        </p>
+        {rules.length > 0 && (
+          <ol className="grid gap-3">
+            {rules.map((r, i) => (
+              <RuleEditor
+                key={r.key}
+                rule={r}
+                index={i}
+                last={i === rules.length - 1}
+                onChange={(patch) => set(i, patch)}
+                onMove={(by) => move(i, by)}
+                onRemove={() => remove(i)}
+              />
+            ))}
+          </ol>
+        )}
+        <div>
+          <Button
+            data-control="add"
+            onClick={() =>
+              onChange([...rules, { key: `n${++next.current}`, name: "", instructions: "", enabled: true, orig: {} }])
+            }
+          >
+            <PlusIcon aria-hidden />
+            Add rule
+          </Button>
+        </div>
       </div>
     </Block>
   );
@@ -179,13 +201,14 @@ function RuleEditor({
   const id = useId();
   const called = rule.name.trim() || `rule ${index + 1}`;
   return (
-    <li className="grid min-w-0 gap-3 rounded-md border border-line-soft p-3">
+    <li data-rule={rule.key} className="grid min-w-0 gap-3 rounded-md border border-line-soft p-3">
       <div className="grid gap-1">
         <label htmlFor={`${id}-name`} className="text-sm font-semibold">
           Name
         </label>
         <Input
           id={`${id}-name`}
+          data-control="name"
           value={rule.name}
           aria-invalid={rule.name.trim() === "" || undefined}
           onChange={(e) => onChange({ name: e.target.value })}
@@ -207,10 +230,10 @@ function RuleEditor({
           <span aria-hidden>Enabled</span>
         </label>
         <div className="ml-auto flex gap-1">
-          <Button size="icon" variant="ghost" disabled={index === 0} onClick={() => onMove(-1)} aria-label={`Move ${called} up`}>
+          <Button size="icon" variant="ghost" disabled={index === 0} onClick={() => onMove(-1)} aria-label={`Move ${called} up`} data-control="up">
             <ArrowUpIcon aria-hidden />
           </Button>
-          <Button size="icon" variant="ghost" disabled={last} onClick={() => onMove(1)} aria-label={`Move ${called} down`}>
+          <Button size="icon" variant="ghost" disabled={last} onClick={() => onMove(1)} aria-label={`Move ${called} down`} data-control="down">
             <ArrowDownIcon aria-hidden />
           </Button>
           <Button size="icon" variant="ghost" onClick={onRemove} aria-label={`Remove ${called}`}>
@@ -227,7 +250,7 @@ export function GitHubSettings() {
   const { doc, revision, ready } = usePolicyDoc();
   const server = useMemo(() => (doc ? readGitHub(doc) : undefined), [doc]);
   const send = useCallback((g: GitHub, base: number) => savePolicy(base, (d) => writeGitHub(d, g)), []);
-  const block = useSaveBlock({ label: "GitHub", server, revision, equal: equalGitHub, rebase: onlyOwnSince, send });
+  const block = useSaveBlock({ label: "GitHub", server, revision, equal: equalGitHub, send });
   const id = useId();
 
   return (

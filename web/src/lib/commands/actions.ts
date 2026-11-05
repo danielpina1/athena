@@ -124,8 +124,12 @@ export function listPasskeys() {
   return submit({ case: "listPasskeys", value: {} });
 }
 
-export function revokePasskey(id: string) {
-  return submit({ case: "revokePasskey", value: { id } });
+/**
+ * thisDevice: the passkey this session signed in with. Its revoke ends the session, so it is dropped rather than
+ * replayed if the session ends before its result (Outbox.dropSessionEnders).
+ */
+export function revokePasskey(id: string, opts: { thisDevice?: boolean } = {}) {
+  return submit({ case: "revokePasskey", value: { id } }, { endsSession: opts.thisDevice === true });
 }
 
 export function getPrompt(part: string) {
@@ -149,6 +153,8 @@ const MESSAGES: Record<string, string> = {
   conflict: "Changed on another device. Reload to see the latest.",
   unavailable: "The server is busy. Try again in a moment.",
   internal: "Something went wrong on the server. Try again.",
+  // The outbox's own: the session ended before a command that ends it got its result.
+  signed_out: "You were signed out before it was confirmed.",
   // The outbox's own: a command that waited offline past the server's 24 h memory.
   expired: "It waited offline too long and was not sent. Try again.",
 };

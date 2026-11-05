@@ -159,6 +159,26 @@ test("a refused mute goes back and says why", async () => {
   expect(screen.getByRole("switch", { name: "Mute Failed" }).getAttribute("aria-checked")).toBe("false");
 });
 
+test("on an iPhone outside the Home Screen the note replaces the unsupported hint", () => {
+  state = "unsupported";
+  vi.stubGlobal("navigator", { ...navigator, userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X)" });
+  render(<Notifications />, { wrapper });
+  expect(screen.getByText("Add Athena to your Home Screen to get notifications on iPhone.")).toBeTruthy();
+  expect(screen.queryByText(/Not available in this browser/)).toBeNull();
+});
+
+test("the iOS note is absent on a desktop browser", () => {
+  state = "unsupported";
+  vi.stubGlobal("navigator", {
+    ...navigator,
+    userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Version/17.4 Safari/605.1.15",
+    maxTouchPoints: 0,
+  });
+  render(<Notifications />, { wrapper });
+  expect(screen.queryByText("Add Athena to your Home Screen to get notifications on iPhone.")).toBeNull();
+  expect(screen.getByText(/Not available in this browser/)).toBeTruthy();
+});
+
 test("the iOS note shows on iPhone outside the Home Screen app only", () => {
   vi.stubGlobal("navigator", { ...navigator, userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X)" });
   const { unmount } = render(<Notifications />, { wrapper });

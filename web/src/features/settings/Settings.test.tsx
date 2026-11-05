@@ -1,6 +1,7 @@
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter, Route, Routes } from "react-router";
+import { MemoryRouter, Route, Routes, useNavigate } from "react-router";
+import { guardedNavigate } from "@/app/guardedNavigate";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { LayoutProvider } from "@/app/Panes";
 import { stubWidth, Where } from "@/app/testkit";
@@ -35,6 +36,16 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
+/** What the palette and the g shortcuts do: navigate through the guard. */
+function GoTickets() {
+  const navigate = useNavigate();
+  return (
+    <button type="button" onClick={() => guardedNavigate(navigate, "/tickets")}>
+      Go to Tickets
+    </button>
+  );
+}
+
 function renderSettings(path: string, layout: "phone" | "desktop") {
   stubWidth(layout === "phone" ? 390 : 1440);
   return render(
@@ -45,6 +56,7 @@ function renderSettings(path: string, layout: "phone" | "desktop") {
           <Route path="*" element={<p>Elsewhere</p>} />
         </Routes>
         <Where />
+        <GoTickets />
       </LayoutProvider>
     </MemoryRouter>,
   );
@@ -126,4 +138,21 @@ test("leaving with unsaved changes asks first", async () => {
 test("an unknown section goes back to the list", () => {
   renderSettings("/settings/nowhere", "desktop");
   expect(where()).toBe("/settings");
+});
+
+test("the palette and shortcuts ask first too, and go straight through when nothing is unsaved", async () => {
+  const user = userEvent.setup();
+  renderSettings("/settings/general", "desktop");
+  await user.click(screen.getByRole("radio", { name: /^Auto/ }));
+  await user.click(screen.getByRole("button", { name: "Go to Tickets" }));
+  expect(where()).toBe("/settings/general");
+  await user.click(within(screen.getByRole("dialog", { name: "Discard unsaved changes?" })).getByRole("button", { name: "Discard changes" }));
+  expect(where()).toBe("/tickets");
+});
+
+test("guarded navigation goes straight through without Settings open", async () => {
+  const user = userEvent.setup();
+  renderSettings("/elsewhere", "desktop");
+  await user.click(screen.getByRole("button", { name: "Go to Tickets" }));
+  expect(where()).toBe("/tickets");
 });

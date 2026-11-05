@@ -141,3 +141,55 @@ test("reset is confirmed and only for an edited part", async () => {
   await user.click(screen.getByRole("button", { name: "Reset worker to its default" }));
   expect(resetPrompt).toHaveBeenCalledWith("worker", 7);
 });
+
+const promptsDelta = (seq: bigint, revision: number) =>
+  act(() => {
+    useAthena.getState().applyDelta(
+      create(DeltaSchema, { seq, change: { case: "prompts", value: { revision, parts: [{ name: "router" }] } } }),
+    );
+  });
+
+test("an edit right after a save is based on that save, not reported as another device's change", async () => {
+  const user = userEvent.setup();
+  renderPrompts("/settings/prompts?part=router");
+  const editor = (await screen.findByDisplayValue("Route it.")) as HTMLTextAreaElement;
+  await user.type(editor, " A");
+  await user.click(screen.getByRole("button", { name: "Save" }));
+  expect(setPrompt).toHaveBeenLastCalledWith("router", 7, "Route it. A");
+  // Edited again before this save's own Delta arrives (setPrompt returns no revision).
+  await user.type(editor, "B");
+  details.router = { ...details.router, text: "Route it. A" };
+  promptsDelta(2n, 8);
+  await vi.waitFor(() => expect(getPrompt).toHaveBeenCalledTimes(2));
+  await user.click(screen.getByRole("button", { name: "Save" }));
+  expect(setPrompt).toHaveBeenLastCalledWith("router", 8, "Route it. AB");
+  details.router = { ...details.router, text: "" };
+});
+
+test("keep my text sends once, and a conflict on it offers Reload and Overwrite", async () => {
+  const user = userEvent.setup();
+  let answer!: (r: CommandResult) => void;
+  setPrompt.mockImplementationOnce(() => new Promise((r) => (answer = r)));
+  renderPrompts();
+  const panel = await screen.findByRole("region", { name: "The default changed" });
+  const keep = within(panel).getByRole("button", { name: "Keep my text" });
+  await user.click(keep);
+  expect((keep as HTMLButtonElement).disabled).toBe(true);
+  expect((within(panel).getByRole("button", { name: "Use the new default" }) as HTMLButtonElement).disabled).toBe(true);
+  expect((screen.getByRole("button", { name: "Reset" }) as HTMLButtonElement).disabled).toBe(true);
+  await user.click(keep);
+  expect(setPrompt).toHaveBeenCalledTimes(1);
+
+  await act(async () => answer({ ok: false, code: "conflict" } as CommandResult));
+  const bar = screen.getByRole("region", { name: "Save worker" });
+  expect(within(bar).getByText("Changed on another device")).toBeTruthy();
+  act(() => {
+    useAthena.getState().applyDelta(
+      create(DeltaSchema, { seq: 2n, change: { case: "prompts", value: { revision: 9, parts: [{ name: "worker", overridden: true, defaultUpdated: true }] } } }),
+    );
+  });
+  await vi.waitFor(() => expect(getPrompt).toHaveBeenCalledTimes(2));
+  await user.click(within(bar).getByRole("button", { name: "Overwrite" }));
+  // Overwrite repeats the same decision on the fresh revision.
+  expect(setPrompt).toHaveBeenLastCalledWith("worker", 9, "My own worker text.");
+});

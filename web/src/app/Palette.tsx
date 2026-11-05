@@ -34,6 +34,7 @@ import {
 } from "@/ui/primitives/command";
 import { toast } from "@/ui/primitives/toast";
 import { useTheme } from "@/ui/theme";
+import { guardedNavigate } from "@/app/guardedNavigate";
 
 type Results = {
   tickets: Extract<SearchHit, { kind: "ticket" }>[];
@@ -95,7 +96,7 @@ export function Palette({ open, onOpenChange }: { open: boolean; onOpenChange: (
   };
   const go = (to: string) => {
     setOpen(false);
-    navigate(to);
+    guardedNavigate(navigate, to);
   };
   const toStep = (next: Step) => {
     setStep(next);
