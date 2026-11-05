@@ -2,9 +2,11 @@ package codex
 
 import (
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/danielpina1/athena/internal/render"
 	"github.com/danielpina1/athena/internal/runtime/rt"
@@ -65,5 +67,68 @@ func TestHugeOtherStringIsCut(t *testing.T) {
 	small := []byte(`{"method":"turn/started"}`)
 	if string(capLine(small)) != string(small) {
 		t.Error("a short line changed")
+	}
+}
+
+// The re-reviewer's probe: ANSI padding up to the cut, then a quoted password with no newline. No prefix of the secret
+// is in the transcript line or in what render shows.
+func TestCutNeverLeavesPartOfASecret(t *testing.T) {
+	for _, pad := range []int{outputKeep/4 - 3, outputKeep/4 - 6, outputKeep/4 + 20} {
+		out := strings.Repeat("\x1b[0m", pad) + `PASSWORD="hunter2 hunter3 hunter4"`
+		out += strings.Repeat("\x1b[0m", 80<<10)
+		raw := `{"method":"item/completed","params":{"item":{"id":"c","type":"commandExecution","command":"x","cwd":"/w","status":"completed","aggregatedOutput":` + jstr(out) + `,"exitCode":0}}}`
+		got := capLine([]byte(raw))
+		if len(got) > maxEnvelopeLine || !json.Valid(got) {
+			t.Fatalf("pad %d: %d bytes valid=%v", pad, len(got), json.Valid(got))
+		}
+		for _, frag := range []string{"hunter", `PASSWORD="h`, `PASSWORD=\"h`} {
+			if strings.Contains(string(got), frag) {
+				t.Fatalf("pad %d: %q in the transcript line", pad, frag)
+			}
+		}
+		for _, it := range render.Items([]byte(`{"at":"2030-01-01T00:00:00Z","codex":`+string(got)+`}`), 0) {
+			if strings.Contains(it.Text, "hunter") || strings.Contains(it.Text, `PASSWORD="h`) {
+				t.Fatalf("pad %d: shown %q", pad, it.Text)
+			}
+		}
+	}
+	// a string with no newline keeps no partial line at all, and a URL's userinfo cannot be split.
+	long := "https://user:pass@example.com/" + strings.Repeat("a", 300<<10)
+	got := capLine([]byte(`{"method":"item/completed","params":{"item":{"id":"a","type":"agentMessage","text":` + jstr(long) + `}}}`))
+	if strings.Contains(string(got), "user:") || strings.Contains(string(got), "https://") {
+		t.Errorf("partial line kept: %.120s", got)
+	}
+}
+
+// Many large fields with multibyte text at the cut share the cap in one pass: valid JSON, under the cap, one mark each.
+func TestCutManyFieldsMultibyte(t *testing.T) {
+	var fields []string
+	for i := 0; i < 80; i++ {
+		fields = append(fields, `"f`+string(rune('a'+i%26))+strings.Repeat("x", i)+`":`+jstr(strings.Repeat("日本語 line\n", 700+i)))
+	}
+	raw := `{"method":"item/completed","params":{"item":{"id":"a","type":"x",` + strings.Join(fields, ",") + `}}}`
+	got := capLine([]byte(raw))
+	if len(got) > maxEnvelopeLine || !json.Valid(got) || strings.Contains(string(got), "line-too-large") {
+		t.Fatalf("%d bytes valid=%v", len(got), json.Valid(got))
+	}
+	var v struct {
+		Params struct{ Item map[string]string } `json:"params"`
+	}
+	if err := json.Unmarshal(got, &v); err != nil {
+		t.Fatal(err)
+	}
+	for k, s := range v.Params.Item {
+		if strings.Count(s, "[cut: ") > 1 || strings.ContainsRune(s, utf8.RuneError) {
+			t.Errorf("%s: marks %d, bad rune", k, strings.Count(s, "[cut: "))
+		}
+	}
+	// the non-string part alone over the cap is the only reason for a stub
+	var keys []string
+	for i := 0; i < 30000; i++ {
+		keys = append(keys, fmt.Sprintf(`"key%08d":1`, i))
+	}
+	big := `{"method":"m","params":{` + strings.Join(keys, ",") + `}}`
+	if g := capLine([]byte(big)); !strings.Contains(string(g), "line-too-large") {
+		t.Errorf("non-string overhead over the cap: %.60s", g)
 	}
 }
