@@ -1,12 +1,27 @@
 # Dashboard setup
 
-`athena server` can serve the dashboard over HTTPS for your phone and laptop: you sign in with a passkey, and the page
-follows your Tickets live over one WebSocket. Plan 3 ships the endpoint, the login and push; the page itself is a
-placeholder that signs in and shows a live count of open Tickets, which is enough to prove the whole path from a
-phone. Plan 4 replaces it with the React app in `web/`, embedded in the binary.
+`athena server` serves the dashboard over HTTPS for your phone and laptop: you sign in with a passkey, and the app
+follows your Tickets live over one WebSocket. It is a PWA (the React app in `web/`, embedded in the binary), so on
+an iPhone it installs from Safari's **Add to Home Screen** and can send push notifications.
 
 The endpoint is meant for a private network: your home LAN or, better, the VPN your devices use to reach the server.
 It is off until you run `athena web setup`.
+
+## What the dashboard shows
+
+| View | What it is for |
+| --- | --- |
+| **Needs you** | Everything waiting on you, one tap each: answer a question inline, approve or deny an Approval (with a note), review finished work, retry or stop a stalled Ticket. Approvals come first. |
+| **Tickets** | The Tickets, filtered by stage, repository and model, with a search. A Ticket opens to its live session (streamed output, tool calls paired with their results, a reply box), its timeline, and its Changes (the diff) or Files. On a wide screen up to three sessions can be pinned side by side. |
+| **New task** | A task in free text, an optional repository (a known one, a local git repository, or `owner/name`) and a model. |
+| **Graph** | The Tickets as nodes in lanes by repository, orange where you are needed, with a list fallback and a time scrubber. |
+| **Routing** | The Triggers, Threads and Decisions behind the Tickets. |
+| **Nodes** | The nodes, their slots and load. |
+| **Settings** | The Policy (with conflict handling when two screens edit it), Prompts, the Devices (passkeys, add a device, sign out), Notifications and the execution environment. |
+
+Keyboard (desktop): `⌘K` command palette, `j`/`k` move, `⏎` open, `a` approve, `d` deny, `r` reply, `/` search,
+`g n`, `g t`, `g g` go to Needs you, Tickets, Graph, `?` the list. The app works offline from its last state and sends
+what you did once the link is back, exactly once.
 
 ## 1. Choose the host
 
@@ -123,8 +138,9 @@ phone's camera (or open the link on the laptop) and create the passkey; the devi
 browser never sends to the server; the page replaces the address in place (dropping the fragment) before it makes any
 request, and the token is spent the moment the page starts enrolling: a failed attempt needs a new link.
 
-Then open `https://athena.home.arpa:8443/` and sign in with the passkey. The page says **Signed in. The dashboard
-arrives in plan 4.** and counts your open Tickets live: submit a task with `athena task` and watch the count change.
+Then open the dashboard's address (for example `https://athena.home.arpa:8443/`) and sign in with the passkey: the
+app opens on **Needs you**, and a Ticket you start with `athena task` shows up in **Tickets** at once. A link that was
+already used or has expired says so and shows `athena web enroll` to run for a new one.
 
 `athena web passkeys` lists the enrolled passkeys.
 
@@ -132,8 +148,8 @@ arrives in plan 4.** and counts your open Tickets live: submit a task with `athe
 
 In Safari, **Share** > **Add to Home Screen** opens the dashboard as its own app. iOS delivers web push only to a site
 added to the home screen, and only over a certificate it trusts: in mode `ca`, install and fully trust the CA first
-(step 3a). Push subscription lives in plan 4's dashboard; the server side (stage-entry notifications for Tickets
-waiting on you and for Approvals) runs already.
+(step 3a). Then open the app from the home screen and choose **On** under **Settings** > **Notifications**:
+stage-entry notifications for Tickets waiting on you and for Approvals arrive as push.
 
 ## 6. Local repositories for New task
 
@@ -176,9 +192,38 @@ The dashboard shows these paths only to the signed-in owner. Typing any absolute
   push key (`push/vapid.key`) are 0600 in the 0700 state directory. Back the state directory up as a whole, and treat
   the backup as secret.
 
+## Phone check
+
+Run it once after a release that changes the dashboard. The owner's setup is the primary path: the server is reached
+at a public name, `app.athena-ops.com`, whose DNS points at the server's VPN address, with a Let's Encrypt
+certificate obtained by Cloudflare DNS-01 (mode `acme`, section 3b). The phone reaches it over the UniFi VPN, so no CA
+profile is needed on it.
+
+    athena web setup --host app.athena-ops.com --listen <vpn-ip>:8443 --tls acme \
+        --acme-provider cloudflare --acme-email <you@example.com> --acme-agree-tos
+
+The server reads the Cloudflare token from the file `CLOUDFLARE_DNS_API_TOKEN_FILE` names (a file with mode 0600
+that holds the token; never paste the token into a command line, a shell history, a config file or the repository).
+
+Checklist, on the iPhone with the VPN on:
+
+- [ ] 1. `make build`, then run the setup above (once), then restart the server. `athena web status` shows a valid
+  Let's Encrypt certificate, and `https://app.athena-ops.com:8443/healthz` answers `ok` in Safari.
+- [ ] 2. On the Mac run `athena web enroll`, scan the QR code with the phone's camera and create the passkey with
+  Face ID.
+- [ ] 3. In Safari, **Share** > **Add to Home Screen**, then open Athena from the home screen icon and sign in.
+- [ ] 4. **Settings** > **Notifications**, choose **On** (enable them), and allow notifications when iOS asks.
+- [ ] 5. Start a task from the phone, watch it live, reply to it, then approve an Approval from the lock-screen push.
+- [ ] 6. On the Mac open the same dashboard: an action on one screen shows on the other in under a second.
+- [ ] 7. Turn on Airplane mode in the middle of an approve, then turn it off: the approval happens exactly once.
+
+**Alternative: Athena's own CA.** Without a public name, use `athena web setup --host <vpn-name> --ip <vpn-ip>
+--listen <vpn-ip>:8443` (mode `ca`), restart the server, and before step 2 install the CA profile on the phone and turn
+on full trust for it (section 3a). The other steps are the same.
+
 ## For developers: the client contract
 
-Plan 4's dashboard (and any other client) talks to `/ws` with subprotocol `athena.v1`: one protobuf `Frame`
+The dashboard (and any other client) talks to `/ws` with subprotocol `athena.v1`: one protobuf `Frame`
 (`proto/athena/v1`) per binary WebSocket message, at most 1 MiB, `permessage-deflate` without context takeover.
 Unknown fields and a `Hello.protocol` other than 1 are refused with error code `invalid`. The dashboard in `web/`
 is the reference client.
@@ -252,7 +297,8 @@ embeds (the directory is git-ignored; without a build the server shows "Dashboar
    `http://localhost:8443` (the built app), then open the Vite dev server at `http://localhost:5173`: the session
    cookie is not port-scoped, so the proxy reuses it.
 3. `make web-check` runs typecheck, lint, unit tests, the build and the bundle budget; `make check` includes it.
-   `make e2e` will run the browser tests.
+   `make e2e` runs the browser tests (Playwright against a real server built into `bin/e2e/`, never `bin/athena`, with a
+   fake runtime), including `full-flow.spec.ts`, the whole path from sign-in to sign-out on a phone and a desktop viewport.
 
 Browser enrollment is the dashboard's `/enroll` page: it reads the token from the link's fragment, removes the
 fragment from the address, asks for a device name, creates the passkey (`/auth/register/begin|finish`) and signs in. A
