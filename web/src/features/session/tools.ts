@@ -279,6 +279,9 @@ export function describeTool(tool: string, input: ToolInput, summary: string): T
 
 export type GithubFrom = { from: string; url?: string; kind: string };
 
+/** Who wrote a card and its kind are at most this many characters (the server caps them too). */
+const FIELD_MAX = 80;
+
 const SAFE_LINK = /^https?:\/\/[^\s\u0000-\u001f]+$/i;
 
 /** Who wrote a GitHub message the worker was sent (a "user" item's detail), its link only when it is http(s). */
@@ -291,5 +294,6 @@ export function githubFrom(it: StreamItem): GithubFrom {
     // No detail: a message from someone on GitHub.
   }
   const url = typeof d.url === "string" && SAFE_LINK.test(d.url) ? d.url : undefined;
-  return { from: stripAnsi(typeof d.from === "string" ? d.from : "") || "Someone", url, kind: typeof d.kind === "string" ? d.kind : "" };
+  const cap = (v: unknown) => (typeof v === "string" ? [...stripAnsi(v)].slice(0, FIELD_MAX).join("") : "");
+  return { from: cap(d.from) || "Someone", url, kind: cap(d.kind) };
 }

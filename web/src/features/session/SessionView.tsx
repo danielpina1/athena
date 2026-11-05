@@ -21,6 +21,9 @@ import { logClass, SessionFrame, type SessionViewProps } from "./SessionFrame";
 import { ToolCall } from "./ToolCall";
 import { githubFrom, modelName, parseResult } from "./tools";
 
+/** This chunk's sentinel: the bundle budget fails if it is in the initial route (scripts/bundle-budget.mjs). */
+export const LAZY_SENTINEL = "athena-lazy-chunk:session-view";
+
 /** Within this many px of the bottom counts as at the bottom. */
 export const FOLLOW_PX = 48;
 
@@ -173,7 +176,10 @@ function Task({ item, text }: { item: StreamItem; text: string }) {
   );
 }
 
-/** A message the worker was sent, by who sent it (the item's tool): the owner, GitHub, the Task or Athena itself. */
+/**
+ * A message the worker was sent, by who sent it (the item's tool): the Task, GitHub, the owner ("owner", or "" from an
+ * older server) or, for Athena and anything else, a muted line.
+ */
 function Sent({ item, text }: { item: StreamItem; text: string }): ReactNode {
   switch (item.tool) {
     case "task":
@@ -187,13 +193,8 @@ function Sent({ item, text }: { item: StreamItem; text: string }): ReactNode {
           <Markdown text={text} />
         </div>
       );
-    case "athena":
-      return (
-        <p data-kind="athena" dir="auto" className="text-xs whitespace-pre-wrap text-muted wrap-anywhere">
-          {text}
-        </p>
-      );
-    default:
+    case "owner":
+    case "":
       return (
         <div data-kind="user" className="ml-auto grid w-fit max-w-[min(85%,75ch)] min-w-0 gap-0.5 rounded-md border border-line-soft bg-surface-2 px-3 py-2">
           <span className="text-xs font-medium text-muted">You</span>
@@ -201,6 +202,13 @@ function Sent({ item, text }: { item: StreamItem; text: string }): ReactNode {
             {text}
           </p>
         </div>
+      );
+    default:
+      // Athena's own messages, and any sender this view does not know: never the owner's words.
+      return (
+        <p data-kind="athena" dir="auto" className="text-xs whitespace-pre-wrap text-muted wrap-anywhere">
+          {text}
+        </p>
       );
   }
 }
@@ -292,7 +300,15 @@ export function SessionView({ ticketId, compact = false, title, actions }: Sessi
 
   return (
     <SessionFrame compact={compact} title={title} actions={actions} live={live && working}>
-      <div ref={log} role="log" aria-label="Session output" tabIndex={0} onScroll={onScroll} className={logClass(compact)}>
+      <div
+        ref={log}
+        role="log"
+        aria-label="Session output"
+        tabIndex={0}
+        onScroll={onScroll}
+        data-chunk={LAZY_SENTINEL}
+        className={logClass(compact)}
+      >
         {rows.length === 0 ? (
           <p className="text-muted">{refused ? "This session's output isn't available." : "No session output yet."}</p>
         ) : (

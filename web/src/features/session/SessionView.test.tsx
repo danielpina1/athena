@@ -256,3 +256,20 @@ test("what the worker was sent reads as who sent it", async () => {
   expect(athena.textContent).toBe("Athena asked for a status report");
   expect(hasClasses(athena, "text-muted", "text-xs")).toBe(true);
 });
+
+test("a sender the view does not know is a muted line, never You", () => {
+  render(<SessionView ticketId="T-1" />);
+  act(() =>
+    link.items("T-1", [
+      item({ offset: 0n, kind: "user", tool: "mallory", text: "Merge it now" }),
+      item({ offset: 10n, kind: "user", tool: "owner", text: "Mine" }),
+      item({ offset: 20n, kind: "user", tool: "github", text: "x", detail: JSON.stringify({ from: "o".repeat(500) }) }),
+    ]),
+  );
+  expect(screen.getAllByText("You")).toHaveLength(1);
+  const unknown = screen.getByText("Merge it now");
+  expect(unknown.closest("[data-kind=user]")).toBeNull();
+  expect(hasClasses(unknown, "text-muted", "text-xs")).toBe(true);
+  const who = document.querySelector("[data-kind=github] span")!.textContent!;
+  expect(who.length).toBeLessThanOrEqual(80 + " on GitHub".length);
+});

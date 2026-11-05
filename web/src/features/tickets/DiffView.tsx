@@ -12,6 +12,9 @@ import { ArtifactFailure, ListSkeleton } from "./ArtifactFailure";
 import { BidiWarning } from "./BidiWarning";
 import { type DiffLine, displayPath, type FileSection, parsePatch } from "./diff";
 
+/** This chunk's sentinel: the bundle budget fails if it is in the initial route (scripts/bundle-budget.mjs). */
+export const LAZY_SENTINEL = "athena-lazy-chunk:diff-view";
+
 const STATUS: Record<string, string> = {
   A: "Added",
   M: "Modified",
@@ -151,7 +154,7 @@ function Changes({ diff }: { diff: Diff }) {
     );
   }
   return (
-    <div ref={root} className="grid min-w-0 gap-4">
+    <div ref={root} data-chunk={LAZY_SENTINEL} className="grid min-w-0 gap-4">
       {diff.truncated && (
         <p role="note" className="rounded-xs border border-line px-3 py-2 text-sm">
           This diff is too large to show in full: only the first part is shown.
