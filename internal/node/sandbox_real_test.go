@@ -119,8 +119,8 @@ r otherhost 'curl -sS -o /dev/null --max-time 15 https://example.com'
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Send("Run this exact Bash command once, in the sandbox (never ask to disable it): sh probe.sh   " +
-		"Do not run anything else. Then say done."); err != nil {
+	if err := s.Send("Run this exact Bash command once, in the sandbox (never ask to disable it): sh probe.sh   "+
+		"Do not run anything else. Then say done.", ""); err != nil {
 		t.Fatal(err)
 	}
 	for ev := range s.Events() {

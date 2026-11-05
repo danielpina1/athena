@@ -7,10 +7,10 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/danielpina1/athena/internal/runtime/claude"
+	"github.com/danielpina1/athena/internal/runtime/rt"
 )
 
-// SandboxConfig turns on Claude Code's sandbox for worker sessions (claude.Sandbox). A worker's Bash commands, and
+// SandboxConfig turns on Claude Code's sandbox for worker sessions (rt.Sandbox). A worker's Bash commands, and
 // everything they start, may then write only to the Ticket's working directory, its git directory (not the git
 // config or hooks, and not Athena's files in .athena) and the sandbox's own temporary directory ($TMPDIR), and connect
 // only to GitHub, AllowedDomains and the node socket (so `athena git-credential` and `athena gh` keep working).
@@ -47,13 +47,13 @@ var caEnvNames = []string{"SSL_CERT_FILE", "GIT_SSL_CAINFO", "CURL_CA_BUNDLE"}
 
 // sandboxFor is the sandbox block of a session working in workDir, and the settings env it needs; nil without
 // Config.Sandbox.
-func (n *Node) sandboxFor(workDir string) (*claude.Sandbox, []string) {
+func (n *Node) sandboxFor(workDir string) (*rt.Sandbox, []string) {
 	c := n.cfg.Sandbox
 	if c == nil {
 		return nil, nil
 	}
 	adir := filepath.Join(workDir, ".athena")
-	sb := &claude.Sandbox{
+	sb := &rt.Sandbox{
 		Required:   c.Required,
 		AllowWrite: append([]string{workDir}, c.AllowWrite...),
 		// Athena's own files: a worker that rewrote its settings would run its next process without hooks or sandbox.

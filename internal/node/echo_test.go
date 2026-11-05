@@ -10,7 +10,7 @@ import (
 
 	"github.com/danielpina1/athena/internal/core"
 	"github.com/danielpina1/athena/internal/render"
-	"github.com/danielpina1/athena/internal/runtime/claude"
+	"github.com/danielpina1/athena/internal/runtime/rt"
 )
 
 // echoLine is the transcript line the CLI writes for a message it took in (--replay-user-messages).
@@ -92,11 +92,11 @@ func TestWorkerEchoesAreNotOutput(t *testing.T) {
 		send: func(text string) error { sent = append(sent, text); return nil }}
 	r.firstSent = time.Now()
 	r.inputSent()
-	r.onEvent(claude.UserEcho{Text: "[input x: message from the owner (not on GitHub)]\nGo", UUID: "u"})
+	r.onEvent(rt.UserEcho{Text: "[input x: message from the owner (not on GitHub)]\nGo", UUID: "u"})
 	if r.outputSeen || r.usage.Turns != 0 || r.idle {
 		t.Fatalf("an echo counted: outputSeen %v turns %d idle %v", r.outputSeen, r.usage.Turns, r.idle)
 	}
-	r.onEvent(claude.Result{Subtype: "success"})
+	r.onEvent(rt.TurnEnd{OK: true, Subtype: "success"})
 	if len(sent) != 1 || sent[0] != nudgeText {
 		t.Fatalf("sent %q, want one nudge", sent)
 	}

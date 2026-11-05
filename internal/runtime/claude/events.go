@@ -5,6 +5,9 @@ package claude
 import (
 	"encoding/json"
 	"strings"
+	"time"
+
+	"github.com/danielpina1/athena/internal/runtime/rt"
 )
 
 // Event is one thing a Claude Code session reported on stdout.
@@ -218,4 +221,60 @@ func contentBlocks(env envelope) []contentBlock {
 		return nil
 	}
 	return blocks
+}
+
+// windowNames maps Claude Code's limit windows (rate_limit_info.unifiedWindows keys and rateLimitType) to rt's, in the
+// order a QuotaUpdate lists them. Windows of other names (per model) are left out.
+var windowNames = []struct{ claude, rt string }{{"five_hour", "5h"}, {"seven_day", "7d"}}
+
+// parseRateLimit reads a rate_limit_event line (checked against Claude Code 2.1.280):
+//
+//	{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1794085200,"rateLimitType":"seven_day",
+//	 "overageStatus":"rejected",...,"unifiedWindows":{"seven_day":{"utilization":0.12,"resetsAt":1794085200}}}}
+//
+// Each known window of unifiedWindows becomes a Window, utilization its Used (a fraction, kept in [0, 1]). status is
+// the state of the one window rateLimitType names: "rejected" limits that window (Used 1 when the event gives no
+// utilization for it). overageStatus is the state of paid overage, not of any window, and is ignored. ok is false
+// when the line carries no known window.
+func parseRateLimit(line []byte) (q rt.QuotaUpdate, ok bool) {
+	var ev struct {
+		Info *struct {
+			Status         string `json:"status"`
+			ResetsAt       int64  `json:"resetsAt"`
+			RateLimitType  string `json:"rateLimitType"`
+			UnifiedWindows map[string]struct {
+				Utilization *float64 `json:"utilization"`
+				ResetsAt    int64    `json:"resetsAt"`
+			} `json:"unifiedWindows"`
+		} `json:"rate_limit_info"`
+	}
+	if json.Unmarshal(line, &ev) != nil || ev.Info == nil {
+		return q, false
+	}
+	info := ev.Info
+	for _, n := range windowNames {
+		uw, inUnified := info.UnifiedWindows[n.claude]
+		named := info.RateLimitType == n.claude
+		limited := named && info.Status == "rejected"
+		if !inUnified && !limited {
+			continue
+		}
+		w := rt.Window{Name: n.rt, Limited: limited}
+		switch {
+		case uw.Utilization != nil:
+			w.Used = min(max(*uw.Utilization, 0), 1)
+		case limited:
+			w.Used = 1
+		}
+		reset := uw.ResetsAt
+		if reset == 0 && named {
+			reset = info.ResetsAt
+		}
+		if reset > 0 {
+			at := time.Unix(reset, 0)
+			w.ResetsAt = &at
+		}
+		q.Windows = append(q.Windows, w)
+	}
+	return q, len(q.Windows) > 0
 }

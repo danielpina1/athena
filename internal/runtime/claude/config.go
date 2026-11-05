@@ -9,6 +9,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/danielpina1/athena/internal/runtime/rt"
 )
 
 const (
@@ -73,24 +75,9 @@ type attributionSettings struct {
 // The block always sets autoAllowBashIfSandboxed false, so a sandboxed command still goes through the hooks and the
 // permission flow as before, allowUnsandboxedCommands false, so a session cannot ask to run a command outside the
 // sandbox (dangerouslyDisableSandbox is ignored), and strictAllowlist, so a host not on the list is refused, never
-// asked about.
-type Sandbox struct {
-	// Required makes the session fail at startup when the sandbox cannot start (failIfUnavailable); otherwise Claude
-	// Code warns on stderr and runs commands unsandboxed.
-	Required bool
-	// AllowWrite are paths writable besides the working directory; DenyWrite are paths never writable, even inside
-	// an allowed one; DenyRead are paths that cannot be read.
-	AllowWrite, DenyWrite, DenyRead []string
-	// AllowedDomains are the hosts commands may reach ("*.example.com" matches the subdomains).
-	AllowedDomains []string
-	// UnixSockets are the Unix sockets commands may connect to (macOS only: Linux cannot filter sockets by path).
-	UnixSockets []string
-	// AllowAllUnixSockets lets commands connect to any Unix socket; on Linux it is the only way to reach one.
-	AllowAllUnixSockets bool
-	// WeakerNetworkIsolation (macOS) lets commands reach the trustd service, which Go programs such as gh verify every
-	// TLS certificate through (enableWeakerNetworkIsolation). It opens a path out of the sandbox through that service.
-	WeakerNetworkIsolation bool
-}
+// asked about. Required sets failIfUnavailable: the session fails at startup when the sandbox cannot start; otherwise
+// Claude Code warns on stderr and runs commands unsandboxed. WeakerNetworkIsolation is enableWeakerNetworkIsolation.
+type Sandbox = rt.Sandbox
 
 type sandboxSettings struct {
 	Enabled                      bool              `json:"enabled"`
@@ -115,8 +102,8 @@ type sandboxNetwork struct {
 	AllowAllUnixSockets bool     `json:"allowAllUnixSockets,omitempty"`
 }
 
-// settings is the "sandbox" block of sb, nil without one.
-func (sb *Sandbox) settings() *sandboxSettings {
+// sandboxBlock is the "sandbox" block of sb, nil without one.
+func sandboxBlock(sb *rt.Sandbox) *sandboxSettings {
 	if sb == nil {
 		return nil
 	}
@@ -148,7 +135,7 @@ func WriteSettings(path, athenaBin, socket string, hookTimeout time.Duration) er
 // DefaultDecisionHookTimeout); the other events get 30 seconds. A non-nil sb adds
 // the "sandbox" block; env is added to the settings "env" (Claude Code passes it
 // to the commands it runs).
-func WriteSettingsWith(path, athenaBin, socket string, hookTimeout time.Duration, sb *Sandbox, env ...string) error {
+func WriteSettingsWith(path, athenaBin, socket string, hookTimeout time.Duration, sb *rt.Sandbox, env ...string) error {
 	if athenaBin == "" {
 		return errors.New("claude: athena binary path is empty")
 	}
@@ -161,7 +148,7 @@ func WriteSettingsWith(path, athenaBin, socket string, hookTimeout time.Duration
 	s := settingsFile{
 		Env:     map[string]string{},
 		Hooks:   map[string][]hookMatcher{},
-		Sandbox: sb.settings(),
+		Sandbox: sandboxBlock(sb),
 	}
 	for _, kv := range env {
 		k, v, ok := strings.Cut(kv, "=")

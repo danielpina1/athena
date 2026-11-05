@@ -19,7 +19,7 @@ import (
 	"github.com/danielpina1/athena/internal/core"
 	"github.com/danielpina1/athena/internal/metrics"
 	"github.com/danielpina1/athena/internal/redact"
-	"github.com/danielpina1/athena/internal/runtime/claude"
+	"github.com/danielpina1/athena/internal/runtime/rt"
 	"github.com/danielpina1/athena/prompts"
 )
 
@@ -71,8 +71,11 @@ type Config struct {
 	Blocked []string
 	// Model is the model of a Ticket that names none (default "sonnet").
 	Model string
-	// ClaudeBinary is the claude executable (default "claude").
+	// ClaudeBinary is the claude executable (default "claude") of the default Runtimes.
 	ClaudeBinary string
+	// Runtimes are the runtimes sessions run on, by name (rt.Runtime.Name); a Ticket runs on the one its Execution
+	// names, Claude Code when it names none. Default: Claude Code alone (defaultRuntimes).
+	Runtimes map[string]rt.Runtime
 	// ApprovalTimeout is how long an escalated tool call waits for a person before it is denied (default 30m).
 	ApprovalTimeout time.Duration
 	// Metrics receives the node's timings and gauges (session_spawn_seconds, session_init_seconds,
@@ -204,6 +207,9 @@ func New(cfg Config, eng EngineCallbacks) *Node {
 	if abs, err := filepath.Abs(cfg.WorkRoot); err == nil {
 		cfg.WorkRoot = abs
 	}
+	if cfg.Runtimes == nil {
+		cfg.Runtimes = defaultRuntimes(cfg)
+	}
 	if cfg.AthenaBin == "" {
 		if exe, err := os.Executable(); err == nil {
 			cfg.AthenaBin = exe
@@ -283,7 +289,7 @@ func (n *Node) Interrupt(ticketID string) error {
 		return ErrNoSession
 	}
 	if err := p.InterruptTurn(); err != nil {
-		if errors.Is(err, claude.ErrExited) || s.over() { // the process is ending
+		if errors.Is(err, rt.ErrExited) || s.over() { // the process is ending
 			return ErrNoSession
 		}
 		return err
@@ -617,16 +623,16 @@ type session struct {
 	credAttempt int
 	notBefore   time.Time
 	// proc is the session's running process, nil between processes and after the last.
-	proc *claude.Session
+	proc rt.Session
 }
 
-func (s *session) setProcess(p *claude.Session) {
+func (s *session) setProcess(p rt.Session) {
 	s.mu.Lock()
 	s.proc = p
 	s.mu.Unlock()
 }
 
-func (s *session) process() *claude.Session {
+func (s *session) process() rt.Session {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.proc
@@ -953,30 +959,48 @@ func (r *runner) run() {
 		model = s.t.Execution.Model
 	}
 	r.model = model
+	rtm, err := n.runtimeFor(s.t)
+	if err != nil {
+		r.fail(err.Error())
+		return
+	}
 	adir := filepath.Join(s.place.workDir, ".athena")
 	env := append([]string{"ATHENA_ASSIGNMENT=" + s.a.ID}, n.variables(s)...)
 	env = append(env, n.githubEnv(s)...)
 	systemPrompt := n.sessionPrompt(s.t.ID, resumeID != "")
+	trPath := n.transcriptPath(s.t.ID)
+	if trPath == "" {
+		trPath = filepath.Join(adir, "transcript.jsonl")
+	}
+	sandbox, _ := n.sandboxFor(s.place.workDir)
+	roots := writableRoots(s.place.workDir)
 	for crashes := 0; ; {
 		spawnStart := time.Now()
-		sess, err := claude.Start(n.ctx, claude.Options{
-			Binary:             n.cfg.ClaudeBinary,
-			CloseGrace:         n.cfg.CloseGrace,
-			Dir:                s.place.workDir,
-			Model:              model,
-			ResumeID:           resumeID,
-			SettingsPath:       filepath.Join(adir, "settings.json"),
-			MCPConfigPath:      filepath.Join(adir, "mcp.json"),
-			AppendSystemPrompt: systemPrompt,
-			Env:                env,
-			TranscriptPath:     n.transcriptPath(s.t.ID),
-			OnLine:             func(off int64, line []byte) { n.streams.add(s.t.ID, off, line) },
-			// The transcript keeps what the worker was sent, so the session view shows it (internal/render); the echo
-			// is no event the runner acts on (onEvent and account ignore claude.UserEcho).
-			ReplayUserMessages: true,
+		// One transcript per process: the session appends every line it prints, and it is closed after the process.
+		tr, err := rt.OpenTranscript(trPath, func(off int64, line []byte) { n.streams.add(s.t.ID, off, line) })
+		if err != nil {
+			r.fail("start " + rtm.Name() + ": " + err.Error())
+			return
+		}
+		// The transcript keeps what the worker was sent, so the session view shows it (internal/render); the echo is no
+		// event the runner acts on (onEvent and account ignore rt.UserEcho).
+		sess, err := rtm.Start(n.ctx, rt.StartOptions{
+			Dir:           s.place.workDir,
+			Model:         model,
+			ResumeID:      resumeID,
+			SystemPrompt:  systemPrompt,
+			Env:           env,
+			Transcript:    tr,
+			Role:          roleWorker,
+			Sandbox:       sandbox,
+			TicketID:      s.t.ID,
+			AssignmentID:  s.a.ID,
+			WritableRoots: roots,
+			CloseGrace:    n.cfg.CloseGrace,
 		})
 		if err != nil {
-			r.fail("start claude: " + err.Error())
+			_ = tr.Close()
+			r.fail("start " + rtm.Name() + ": " + err.Error())
 			return
 		}
 		r.spawned = time.Now()
@@ -984,6 +1008,7 @@ func (r *runner) run() {
 		n.recordProcess(s.t.ID, sess.Pid())
 		r.log.Info("session started", "resume", resumeID != "", "recovering", recovering)
 		crashed, cause := r.drive(sess, recovering)
+		_ = tr.Close()
 		if !crashed {
 			return
 		}
@@ -1009,13 +1034,13 @@ func (r *runner) run() {
 // drive runs one process: it sends the first message, then turns events and delivery requests into Engine facts
 // until the process exits (reported true: a crash, with its cause) or the session is stopped (false). It always
 // drains the events and closes the process.
-func (r *runner) drive(sess *claude.Session, recovering bool) (crashed bool, cause string) {
+func (r *runner) drive(sess rt.Session, recovering bool) (crashed bool, cause string) {
 	s := r.s
 	s.setProcess(sess)
 	defer s.setProcess(nil)
 	events := sess.Events()
 	r.initSeen = false
-	r.send = sess.Send
+	r.send = func(text string) error { return sess.Send(text, "") }
 	r.sendFirst(sess, recovering)
 	crashed = true
 loop:
@@ -1097,7 +1122,7 @@ func crashCause(err error, stderr string) string {
 	return cause + ": " + strings.Join(tail, " | ")
 }
 
-func (r *runner) sendFirst(sess *claude.Session, recovering bool) {
+func (r *runner) sendFirst(sess rt.Session, recovering bool) {
 	s := r.s
 	t, _, err := r.eng.Ticket(s.t.ID)
 	if err != nil {
@@ -1125,7 +1150,7 @@ func (r *runner) sendFirst(sess *claude.Session, recovering bool) {
 	if r.firstSent.IsZero() {
 		r.firstSent = time.Now()
 	}
-	if err := sess.Send(b.String()); err != nil {
+	if err := sess.Send(b.String(), ""); err != nil {
 		r.log.Warn("send first message", "error", err)
 		return
 	}
@@ -1149,7 +1174,7 @@ func workerPreamble(t core.Ticket, vars []string) string {
 }
 
 // deliver sends the Inputs that wait for the Ticket now and reports exactly those as delivered.
-func (r *runner) deliver(sess *claude.Session) {
+func (r *runner) deliver(sess rt.Session) {
 	t, _, err := r.eng.Ticket(r.s.t.ID)
 	if err != nil {
 		r.log.Error("read ticket", "error", err)
@@ -1162,8 +1187,8 @@ func (r *runner) deliver(sess *claude.Session) {
 	if len(ids) == 0 {
 		return
 	}
-	if err := sess.Send(renderInputs(t, ids, r.trigger)); err != nil {
-		if errors.Is(err, claude.ErrExited) {
+	if err := sess.Send(renderInputs(t, ids, r.trigger), ""); err != nil {
+		if errors.Is(err, rt.ErrExited) {
 			return // still waiting: the restarted process takes them
 		}
 		r.log.Warn("delivery failed", "error", err)
@@ -1227,35 +1252,35 @@ func (r *runner) delivered(ids []string) {
 	}
 }
 
-// account adds an event to the usage the runner has not yet recorded and feeds the tool call counters; a Result ends
+// account adds an event to the usage the runner has not yet recorded and feeds the tool call counters; a TurnEnd ends
 // a turn and records it.
-func (r *runner) account(ev claude.Event) {
+func (r *runner) account(ev rt.Event) {
 	switch e := ev.(type) {
-	case claude.AssistantText:
+	case rt.AssistantText:
 		r.firstOutput()
-	case claude.ToolUse:
+	case rt.ToolUse:
 		r.firstOutput()
 		r.usage.ToolCalls++
 		if r.tools == nil {
 			r.tools = map[string]string{}
 		}
 		r.tools[e.ID] = e.Name
-	case claude.ToolResult:
-		tool, ok := r.tools[e.ToolUseID]
+	case rt.ToolResult:
+		tool, ok := r.tools[e.ID]
 		if !ok {
 			tool = "unknown"
 		}
-		delete(r.tools, e.ToolUseID)
+		delete(r.tools, e.ID)
 		if e.IsError {
 			r.usage.ToolErrors++
 		}
 		r.n.reg.Counter("tool_calls_total", "tool", tool, "error", strconv.FormatBool(e.IsError)).Add(1)
-	case claude.Result:
+	case rt.TurnEnd:
 		r.usage.Turns += max(e.NumTurns, 1)
-		r.usage.ActiveTime += time.Duration(e.DurationMS) * time.Millisecond
-		r.usage.InputTokens += int64(e.InputTokens)
-		r.usage.OutputTokens += int64(e.OutputTokens)
-		r.usage.CacheReadTokens += int64(e.CacheReadTokens)
+		r.usage.ActiveTime += e.Duration
+		r.usage.InputTokens += e.InputTokens
+		r.usage.OutputTokens += e.OutputTokens
+		r.usage.CacheReadTokens += e.CacheReadTokens
 		// total_cost_usd is the session's cumulative cost (carried across resumed processes); the Engine records its growth.
 		r.usage.SessionID, r.usage.SessionCostUSD = e.SessionID, e.CostUSD
 		r.flushUsage()
@@ -1283,10 +1308,11 @@ func (r *runner) flushUsage() {
 	}
 }
 
-func (r *runner) onEvent(ev claude.Event) {
+// onEvent acts on one of the session's events. A QuotaUpdate is not acted on yet.
+func (r *runner) onEvent(ev rt.Event) {
 	r.account(ev)
 	switch e := ev.(type) {
-	case claude.Init:
+	case rt.Init:
 		r.initSeen = true
 		if !r.spawned.IsZero() {
 			r.n.initHist.Observe(time.Since(r.spawned))
@@ -1305,21 +1331,21 @@ func (r *runner) onEvent(ev claude.Event) {
 			r.unconfirmed = nil
 			r.delivered(ids)
 		}
-	case claude.ToolResult:
+	case rt.ToolResult:
 		// The CLI runs the tool calls of one model step together: a ready report in the same step as a Write that
 		// was denied runs after the denial, but the model wrote it without knowing. Its next step has seen the result.
 		if e.IsError {
 			r.s.toolFailed()
 		}
-	case claude.AssistantText, claude.ToolUse:
+	case rt.AssistantText, rt.ToolUse:
 		r.s.stepTaken()
-	case claude.Result:
+	case rt.TurnEnd:
 		r.s.turnOver()
 		// A failed turn (an API error, an expired login, a rate limit, too many turns) leaves the CLI waiting for the
 		// next message: report it, or the Ticket stays working with nothing running. Its Inputs may not have reached
 		// the model, so they stay unread and a retry sends them again. A turn Athena itself ends (a stop) never gets
 		// here: the stop drains the events without onEvent, and fail does nothing once the session is stopped.
-		if e.IsError || (e.Subtype != "" && e.Subtype != "success") {
+		if !e.OK {
 			r.nudged = false
 			r.fail(turnFailure(e))
 			return
@@ -1387,7 +1413,7 @@ func pausedAt(a core.Assignment) bool {
 }
 
 // turnFailure is the summary of a failed turn's report: its subtype and its reason, secrets masked.
-func turnFailure(e claude.Result) string {
+func turnFailure(e rt.TurnEnd) string {
 	why := strings.TrimSpace(e.Text)
 	if why == "" {
 		why = strings.Join(e.Errors, "; ")
@@ -1797,12 +1823,15 @@ func (n *Node) prepare(s *session) error {
 	if err := os.WriteFile(filepath.Join(adir, ".gitignore"), []byte("*\n"), 0o600); err != nil {
 		return err
 	}
-	hookTimeout := n.cfg.ApprovalTimeout + hookTimeoutMargin
-	sb, sbEnv := n.sandboxFor(p.workDir)
-	if err := claude.WriteSettingsWith(filepath.Join(adir, "settings.json"), n.cfg.AthenaBin, n.cfg.SocketPath, hookTimeout, sb, sbEnv...); err != nil {
+	rtm, err := n.runtimeFor(s.t)
+	if err != nil {
 		return err
 	}
-	return claude.WriteMCPConfig(filepath.Join(adir, "mcp.json"), n.cfg.AthenaBin, n.cfg.SocketPath, s.t.ID, s.a.ID)
+	sb, sbEnv := n.sandboxFor(p.workDir)
+	return rtm.Prepare(rt.Prepare{
+		WorkDir: p.workDir, AthenaBin: n.cfg.AthenaBin, Socket: n.cfg.SocketPath, TicketID: s.t.ID, AssignmentID: s.a.ID,
+		HookTimeout: n.cfg.ApprovalTimeout + hookTimeoutMargin, Sandbox: sb, SandboxEnv: sbEnv, Role: roleWorker,
+	})
 }
 
 // ensureWorktree creates dir as a worktree of repo on branch, from base for a new branch (without tracking it); an

@@ -2,38 +2,29 @@ package claude
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
 
-	"github.com/danielpina1/athena/internal/redact"
+	"github.com/danielpina1/athena/internal/runtime/rt"
 )
 
 const (
-	defaultCloseGrace = 10 * time.Second
-	// drainGrace bounds how long the reader keeps reading stdout after the
-	// process has exited (a stray grandchild may hold the pipe open).
-	drainGrace = 2 * time.Second
 	// abandonAfter is how long, once Close has returned, the event pump waits
 	// for a consumer before it concludes nobody is reading and drops the rest.
 	abandonAfter = 250 * time.Millisecond
 	eventBuffer  = 64
-	stderrTail   = 4096
 )
 
-// ErrExited is returned by Send and Interrupt once the process has exited.
-var ErrExited = errors.New("claude: process has exited")
+// ErrExited is returned by Send and Interrupt once the process has exited. It is rt.ErrExited.
+var ErrExited = rt.ErrExited
 
 // Options configures one Claude Code session.
 type Options struct {
@@ -50,6 +41,9 @@ type Options struct {
 	// CloseGrace is how long Close waits after closing stdin before it kills
 	// the process. Default 10s.
 	CloseGrace time.Duration
+	// Transcript, when set, receives every stdout line instead of a file the session opens itself (TranscriptPath and
+	// OnLine are then unused); the caller closes it after Wait.
+	Transcript *rt.Transcript
 	// TranscriptPath, when set, is the file every stdout line is appended to instead of <Dir>/.athena/transcript.jsonl.
 	// Its directory is created 0700 and the file 0600.
 	TranscriptPath string
@@ -99,38 +93,36 @@ func buildArgs(o Options) []string {
 // Session is a running Claude Code process. All methods are safe for
 // concurrent use.
 type Session struct {
-	cmd        *exec.Cmd
-	stdout     *os.File // read end of the stdout pipe
-	closeGrace time.Duration
+	proc *rt.Proc
 
 	// stdinMu serialises writers only; it is never taken by Close, because a
 	// writer can block on a full pipe while holding it.
 	stdinMu     sync.Mutex
-	stdin       io.WriteCloser
 	stdinClosed atomic.Bool
 	reqSeq      atomic.Int64
 
-	events chan Event
+	// events carries the session's events for Events; rtEvents the same translated for the node (Runtime.Start). A
+	// session fills one of them: push queues a line's events for it, finish marks the reader done, pump delivers.
+	events   chan Event
+	rtEvents chan rt.Event
+	push     func([]Event)
+	finish   func()
+	pump     func()
 
-	qmu        sync.Mutex
-	queue      []Event
-	readerDone bool
-	notify     chan struct{} // cap 1: queue changed
-	closedCh   chan struct{} // closed once Close has returned
-	closeOnce  sync.Once
-	closeMu    sync.Mutex
-	exited     chan struct{} // closed after cmd.Wait returned
-	done       chan struct{} // closed after exit and after Events closed
-	waitErr    error
-	killed     atomic.Bool
-	transcript *os.File
-	onLine     func(offset int64, line []byte)
-	trOff      int64 // where the next transcript write lands (reader goroutine only)
-	stderr     *tailBuffer
+	closedCh  chan struct{} // closed once Close has returned
+	closeOnce sync.Once
+	closeMu   sync.Mutex
+	done      chan struct{} // closed after exit and after Events closed
+
+	transcript    *rt.Transcript
+	ownTranscript bool // the session opened the transcript and closes it
 }
 
 // Start launches the process. The child's environment is the allowlisted part of the parent's plus o.Env.
-func Start(ctx context.Context, o Options) (*Session, error) {
+func Start(ctx context.Context, o Options) (*Session, error) { return start(ctx, o, false) }
+
+// start launches the process; forRT makes the session deliver its events translated for the node (rtEvents).
+func start(ctx context.Context, o Options, forRT bool) (*Session, error) {
 	if o.Dir == "" {
 		return nil, errors.New("claude: Options.Dir is required")
 	}
@@ -149,157 +141,88 @@ func Start(ctx context.Context, o Options) (*Session, error) {
 	if o.Binary == "" {
 		o.Binary = "claude"
 	}
-	if o.CloseGrace <= 0 {
-		o.CloseGrace = defaultCloseGrace
-	}
 
 	adir := filepath.Join(o.Dir, ".athena")
-	if err := privateDir(adir); err != nil {
-		return nil, err
-	}
-	trPath := o.TranscriptPath
-	if trPath == "" {
-		trPath = filepath.Join(adir, "transcript.jsonl")
-	} else if err := privateDir(filepath.Dir(trPath)); err != nil {
-		return nil, err
-	}
-	tr, err := os.OpenFile(trPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-	if err != nil {
-		return nil, fmt.Errorf("claude: open transcript: %w", err)
-	}
-	if err := tr.Chmod(0o600); err != nil {
-		tr.Close()
-		return nil, fmt.Errorf("claude: chmod transcript: %w", err)
-	}
-
-	var trOff int64
-	if st, err := tr.Stat(); err == nil {
-		trOff = st.Size()
+	if err := rt.PrivateDir(adir); err != nil {
+		return nil, fmt.Errorf("claude: %w", err)
 	}
 	s := &Session{
-		closeGrace: o.CloseGrace,
-		events:     make(chan Event, eventBuffer),
-		notify:     make(chan struct{}, 1),
 		closedCh:   make(chan struct{}),
-		exited:     make(chan struct{}),
 		done:       make(chan struct{}),
-		transcript: tr,
-		onLine:     o.OnLine,
-		trOff:      trOff,
-		stderr:     &tailBuffer{max: stderrTail},
+		transcript: o.Transcript,
+	}
+	if s.transcript == nil {
+		trPath := o.TranscriptPath
+		if trPath == "" {
+			trPath = filepath.Join(adir, "transcript.jsonl")
+		}
+		tr, err := rt.OpenTranscript(trPath, o.OnLine)
+		if err != nil {
+			return nil, fmt.Errorf("claude: %w", err)
+		}
+		s.transcript, s.ownTranscript = tr, true
+	}
+	if forRT {
+		q := newQueue[rt.Event]()
+		s.rtEvents = q.out
+		s.push = func(evs []Event) {
+			out := make([]rt.Event, len(evs))
+			for i, ev := range evs {
+				out[i] = toRT(ev)
+			}
+			q.push(out)
+		}
+		s.finish, s.pump = q.finish, func() { q.pump(s.closedCh) }
+	} else {
+		q := newQueue[Event]()
+		s.events = q.out
+		s.push, s.finish, s.pump = q.push, q.finish, func() { q.pump(s.closedCh) }
 	}
 
-	pr, pw, err := os.Pipe()
+	p, err := rt.StartProc(ctx, rt.ProcOptions{
+		Binary:     o.Binary,
+		Args:       buildArgs(o),
+		Dir:        o.Dir,
+		Env:        childEnv(os.Environ(), o.Env),
+		CloseGrace: o.CloseGrace,
+	})
 	if err != nil {
-		tr.Close()
-		return nil, err
+		if s.ownTranscript {
+			s.transcript.Close()
+		}
+		return nil, fmt.Errorf("claude: %w", err)
 	}
-	cmd := exec.CommandContext(ctx, o.Binary, buildArgs(o)...)
-	s.cmd = cmd
-	cmd.Dir = o.Dir
-	cmd.Env = childEnv(os.Environ(), o.Env)
-	cmd.Stdout = pw
-	cmd.Stderr = s.stderr
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true} // own group: Ctrl-C and kills stay scoped
-	cmd.WaitDelay = 2 * time.Second
-	cmd.Cancel = func() error {
-		s.killed.Store(true)
-		return s.killGroup()
-	}
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		pr.Close()
-		pw.Close()
-		tr.Close()
-		return nil, err
-	}
-	if err := cmd.Start(); err != nil {
-		pr.Close()
-		pw.Close()
-		tr.Close()
-		return nil, fmt.Errorf("claude: start %s: %w", o.Binary, err)
-	}
-	pw.Close() // the child holds the write end now
-	s.stdin, s.stdout = stdin, pr
+	s.proc = p
 
-	go s.wait()
 	go s.readLoop()
 	pumpDone := make(chan struct{})
 	go func() { s.pump(); close(pumpDone) }()
 	go func() {
-		<-s.exited
+		<-p.Exited()
 		<-pumpDone
 		close(s.done)
 	}()
 	return s, nil
 }
 
-// envNames are the parent variables a session inherits by name; envPrefixes those it inherits by prefix.
-var (
-	envNames    = []string{"PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "TERM", "LANG"}
-	envPrefixes = []string{"LC_", "XDG_", "CLAUDE_", "ANTHROPIC_", "ATHENA_"}
-)
-
-// childEnv returns a session's environment: the parent's variables named in envNames or starting with one of
-// envPrefixes, except those whose name looks secret (redact.SecretName), then extra. Claude Code's own CLAUDE_ and
-// ANTHROPIC_ variables are kept whatever their name: they carry the credentials the session needs. The server's other
-// variables, its tokens and cloud keys among them, never reach a worker.
+// childEnv is a session's environment (rt.ChildEnv): Claude Code's own CLAUDE_ and ANTHROPIC_ variables are kept
+// whatever their name, since they carry the credentials the session needs.
 func childEnv(parent, extra []string) []string {
-	var env []string
-	for _, kv := range parent {
-		name, _, ok := strings.Cut(kv, "=")
-		if !ok || !inheritable(name) {
-			continue
-		}
-		env = append(env, kv)
-	}
-	return append(env, extra...)
-}
-
-func inheritable(name string) bool {
-	if strings.HasPrefix(name, "CLAUDE_") || strings.HasPrefix(name, "ANTHROPIC_") {
-		return true
-	}
-	allowed := false
-	for _, n := range envNames {
-		allowed = allowed || name == n
-	}
-	for _, p := range envPrefixes {
-		allowed = allowed || strings.HasPrefix(name, p)
-	}
-	return allowed && !redact.SecretName(name)
-}
-
-// privateDir creates dir 0700, or makes an existing one 0700.
-func privateDir(dir string) error {
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("claude: create %s: %w", dir, err)
-	}
-	if err := os.Chmod(dir, 0o700); err != nil {
-		return fmt.Errorf("claude: chmod %s: %w", dir, err)
-	}
-	return nil
-}
-
-func (s *Session) wait() {
-	err := s.cmd.Wait()
-	s.waitErr = err
-	close(s.exited)
-	_ = s.stdout.SetReadDeadline(time.Now().Add(drainGrace))
+	return rt.ChildEnv(parent, extra, "CLAUDE_", "ANTHROPIC_")
 }
 
 // readLoop copies stdout lines to the transcript and the event queue. It never
 // waits on the consumer. Raw lines are never logged: they may contain secrets.
 func (s *Session) readLoop() {
+	stdout := s.proc.Stdout()
 	defer func() {
-		s.stdout.Close()
-		s.transcript.Close()
-		s.qmu.Lock()
-		s.readerDone = true
-		s.qmu.Unlock()
-		s.wake()
+		stdout.Close()
+		if s.ownTranscript {
+			s.transcript.Close()
+		}
+		s.finish()
 	}()
-	r := bufio.NewReaderSize(s.stdout, 64*1024)
+	r := bufio.NewReaderSize(stdout, 64*1024)
 	for {
 		line, err := r.ReadBytes('\n')
 		if len(line) > 0 {
@@ -312,82 +235,86 @@ func (s *Session) readLoop() {
 }
 
 func (s *Session) handleLine(line []byte) {
-	at := s.trOff
-	n, _ := s.transcript.Write(line)
-	if line[len(line)-1] != '\n' {
-		m, _ := s.transcript.Write([]byte{'\n'})
-		n += m
-	}
-	if n != len(line)+btoi(line[len(line)-1] != '\n') {
-		// A short write: the file is the truth for where the next line lands.
-		if st, err := s.transcript.Stat(); err == nil {
-			n = int(st.Size() - at)
-		}
-	}
-	s.trOff = at + int64(n)
-	if s.onLine != nil {
-		s.onLine(at, bytes.TrimSuffix(line, []byte{'\n'}))
-	}
+	s.transcript.Append(line)
 	evs, err := ParseEvents(line)
 	if err != nil {
 		evs = []Event{Unknown{Type: "invalid", Raw: json.RawMessage("null")}}
 	}
-	s.qmu.Lock()
-	s.queue = append(s.queue, evs...)
-	s.qmu.Unlock()
-	s.wake()
+	s.push(evs)
 }
 
-func btoi(b bool) int {
-	if b {
-		return 1
-	}
-	return 0
+// queue holds a session's events until its pump delivers them, so the stdout reader never waits on the consumer.
+type queue[E any] struct {
+	mu         sync.Mutex
+	items      []E
+	readerDone bool
+	notify     chan struct{} // cap 1: queue changed
+	out        chan E
 }
 
-func (s *Session) wake() {
+func newQueue[E any]() *queue[E] {
+	return &queue[E]{notify: make(chan struct{}, 1), out: make(chan E, eventBuffer)}
+}
+
+func (q *queue[E]) push(evs []E) {
+	q.mu.Lock()
+	q.items = append(q.items, evs...)
+	q.mu.Unlock()
+	q.wake()
+}
+
+// finish marks the reader done: the pump closes out once the queue is empty.
+func (q *queue[E]) finish() {
+	q.mu.Lock()
+	q.readerDone = true
+	q.mu.Unlock()
+	q.wake()
+}
+
+func (q *queue[E]) wake() {
 	select {
-	case s.notify <- struct{}{}:
+	case q.notify <- struct{}{}:
 	default:
 	}
 }
 
-// pump delivers queued events to the Events channel and closes it once the
-// reader is done and the queue is empty.
-func (s *Session) pump() {
-	defer close(s.events)
+// pump delivers queued events to out and closes it once the reader is done
+// and the queue is empty. closed is closed once the session's Close returned.
+func (q *queue[E]) pump(closed <-chan struct{}) {
+	defer close(q.out)
 	abandoned := false
+	var zero E
 	for {
-		s.qmu.Lock()
-		var ev Event
-		have := len(s.queue) > 0
+		q.mu.Lock()
+		var ev E
+		have := len(q.items) > 0
 		if have {
-			ev = s.queue[0]
-			s.queue[0] = nil
-			s.queue = s.queue[1:]
+			ev = q.items[0]
+			q.items[0] = zero
+			q.items = q.items[1:]
 		}
-		finished := s.readerDone && !have
-		s.qmu.Unlock()
+		finished := q.readerDone && !have
+		q.mu.Unlock()
 		if finished {
 			return
 		}
 		if !have {
-			<-s.notify
+			<-q.notify
 			continue
 		}
 		if abandoned {
 			continue
 		}
 		select {
-		case s.events <- ev:
+		case q.out <- ev:
 			continue
-		case <-s.closedCh:
+		case <-closed:
 		}
 		// Close has returned: keep delivering to a consumer that is still
 		// draining, but give up on one that has gone away.
 		t := time.NewTimer(abandonAfter)
 		select {
-		case s.events <- ev:
+		case q.out <- ev:
 			t.Stop()
 		case <-t.C:
 			abandoned = true
@@ -404,13 +331,11 @@ func (s *Session) pump() {
 func (s *Session) Events() <-chan Event { return s.events }
 
 // Send writes one user message to the session. A message sent while a turn is
-// running is folded into that turn. After the process has exited it returns an
-// error.
-func (s *Session) Send(text string) error { return s.SendMessage(text, "") }
-
-// SendMessage is Send with the message's uuid (left out when empty): with --replay-user-messages, the echo of the
-// message carries it back (UserEcho.UUID), so the message is known by it whatever the CLI does to its text.
-func (s *Session) SendMessage(text, uuid string) error {
+// running is folded into that turn. uuid, when not empty, is the message's uuid:
+// with --replay-user-messages, the echo of the message carries it back
+// (UserEcho.UUID), so the message is known by it whatever the CLI does to its
+// text. After the process has exited it returns ErrExited.
+func (s *Session) Send(text, uuid string) error {
 	msg := map[string]any{
 		"type":    "user",
 		"message": map[string]any{"role": "user", "content": text},
@@ -424,6 +349,9 @@ func (s *Session) SendMessage(text, uuid string) error {
 	}
 	return s.writeLine(line)
 }
+
+// SendMessage is Send.
+func (s *Session) SendMessage(text, uuid string) error { return s.Send(text, uuid) }
 
 // InterruptTurn asks the session to abandon the running turn and keep the
 // process alive for the next message (stream-json control request). The turn
@@ -442,8 +370,9 @@ func (s *Session) InterruptTurn() error {
 }
 
 func (s *Session) writeLine(line []byte) error {
+	exited := s.proc.Exited()
 	select {
-	case <-s.exited:
+	case <-exited:
 		return ErrExited
 	default:
 	}
@@ -452,12 +381,12 @@ func (s *Session) writeLine(line []byte) error {
 	if s.stdinClosed.Load() {
 		return errors.New("claude: session input is closed")
 	}
-	if _, err := s.stdin.Write(append(line, '\n')); err != nil {
+	if _, err := s.proc.Stdin().Write(append(line, '\n')); err != nil {
 		if s.stdinClosed.Load() {
 			return errors.New("claude: session input is closed")
 		}
 		select {
-		case <-s.exited:
+		case <-exited:
 			return ErrExited
 		default:
 		}
@@ -469,96 +398,35 @@ func (s *Session) writeLine(line []byte) error {
 // Interrupt sends SIGINT to the process. Claude Code treats that as the end of
 // the session (it prints an error Result and exits); use InterruptTurn to stop
 // only the current turn.
-func (s *Session) Interrupt() error {
-	select {
-	case <-s.exited:
-		return ErrExited
-	default:
-	}
-	if err := s.cmd.Process.Signal(syscall.SIGINT); err != nil {
-		if errors.Is(err, os.ErrProcessDone) {
-			return ErrExited
-		}
-		return err
-	}
-	return nil
-}
+func (s *Session) Interrupt() error { return s.proc.Signal(syscall.SIGINT) }
 
 // Close closes the session's stdin, waits up to the close grace for the
 // process to exit, then kills it (and its process group). It is idempotent.
 func (s *Session) Close() error {
 	s.closeMu.Lock()
 	defer s.closeMu.Unlock()
-
 	// Closing the pipe also unblocks a Send stuck on a full pipe; the grace
-	// timer and kill below never depend on the writers' lock.
-	if s.stdinClosed.CompareAndSwap(false, true) {
-		_ = s.stdin.Close()
-	}
-
-	t := time.NewTimer(s.closeGrace)
-	defer t.Stop()
-	select {
-	case <-s.exited:
-	case <-t.C:
-		s.killed.Store(true)
-		_ = s.killGroup()
-		<-s.exited
-	}
+	// timer and kill never depend on the writers' lock.
+	s.stdinClosed.Store(true)
+	s.proc.CloseStdin()
 	s.closeOnce.Do(func() { close(s.closedCh) })
 	return nil
 }
 
 // Killed reports whether Athena had to kill the process (Close timed out or
 // the context was cancelled) rather than the process exiting on its own.
-func (s *Session) Killed() bool { return s.killed.Load() }
+func (s *Session) Killed() bool { return s.proc.Killed() }
 
 // Wait blocks until the process has exited and Events is closed, and returns
 // the process's exit error (nil on a clean exit).
 func (s *Session) Wait() error {
 	<-s.done
-	return s.waitErr
+	return s.proc.Wait()
 }
 
 // Stderr returns the last few KB of the process's stderr. It may contain
 // anything the CLI printed; do not log it unfiltered.
-func (s *Session) Stderr() string { return s.stderr.String() }
-
-func (s *Session) killGroup() error {
-	select {
-	case <-s.exited:
-		return os.ErrProcessDone
-	default:
-	}
-	pid := s.cmd.Process.Pid
-	if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil {
-		return s.cmd.Process.Kill()
-	}
-	return nil
-}
-
-// tailBuffer keeps the last max bytes written to it.
-type tailBuffer struct {
-	mu  sync.Mutex
-	max int
-	b   []byte
-}
-
-func (t *tailBuffer) Write(p []byte) (int, error) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.b = append(t.b, p...)
-	if len(t.b) > t.max {
-		t.b = append([]byte(nil), t.b[len(t.b)-t.max:]...)
-	}
-	return len(p), nil
-}
-
-func (t *tailBuffer) String() string {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return string(t.b)
-}
+func (s *Session) Stderr() string { return s.proc.Stderr() }
 
 // Pid returns the process id of the session's process, which leads its own process group.
-func (s *Session) Pid() int { return s.cmd.Process.Pid }
+func (s *Session) Pid() int { return s.proc.Pid() }

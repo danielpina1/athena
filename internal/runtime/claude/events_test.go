@@ -4,7 +4,11 @@ import (
 	"bufio"
 	"encoding/json"
 	"os"
+	"reflect"
 	"testing"
+	"time"
+
+	"github.com/danielpina1/athena/internal/runtime/rt"
 )
 
 func readFixture(t *testing.T, name string) [][]byte {
@@ -226,5 +230,133 @@ func TestParseUserEcho(t *testing.T) {
 	}
 	if len(evs) != 1 || evs[0] != (UserEcho{Text: "say\nBANANA", UUID: "u-1"}) {
 		t.Fatalf("events = %#v, want the echo with its uuid", evs)
+	}
+}
+
+// rtOf parses a fixture line and translates its events for the node, as the runtime's sessions do.
+func rtOf(t *testing.T, line []byte) []rt.Event {
+	t.Helper()
+	evs, err := ParseEvents(line)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []rt.Event
+	for _, ev := range evs {
+		out = append(out, toRT(ev))
+	}
+	return out
+}
+
+func fixtureLine(t *testing.T, name, typ string) []byte {
+	t.Helper()
+	for _, l := range readFixture(t, name) {
+		var head struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(l, &head) == nil && head.Type == typ {
+			return l
+		}
+	}
+	t.Fatalf("%s has no %s line", name, typ)
+	return nil
+}
+
+func TestClaudeResultBecomesTurnEnd(t *testing.T) {
+	evs := rtOf(t, fixtureLine(t, "simple-turn.jsonl", "result"))
+	if len(evs) != 1 {
+		t.Fatalf("got %d events", len(evs))
+	}
+	want := rt.TurnEnd{SessionID: "27abadfa-c58f-4e97-aaf3-64a8fdaff179", OK: true, Subtype: "success", Text: "Done.",
+		CostUSD: 0.0227632, InputTokens: 18, OutputTokens: 215, CacheReadTokens: 51902, NumTurns: 2,
+		Duration: 4973 * time.Millisecond}
+	if got, ok := evs[0].(rt.TurnEnd); !ok || !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %#v\nwant %#v", evs[0], want)
+	}
+
+	failed, ok := rtOf(t, fixtureLine(t, "max-turns.jsonl", "result"))[0].(rt.TurnEnd)
+	if !ok || failed.OK || failed.Subtype != "error_max_turns" || len(failed.Errors) != 1 || failed.Limit != nil {
+		t.Fatalf("max turns = %#v", failed)
+	}
+	// Not OK: an error flag, or any subtype but success.
+	for line, wantOK := range map[string]bool{
+		`{"type":"result","subtype":"success","is_error":false}`:                true,
+		`{"type":"result","is_error":false}`:                                    true,
+		`{"type":"result","subtype":"success","is_error":true}`:                 false,
+		`{"type":"result","subtype":"error_during_execution","is_error":false}`: false,
+	} {
+		if e := rtOf(t, []byte(line))[0].(rt.TurnEnd); e.OK != wantOK {
+			t.Errorf("%s: OK = %v, want %v", line, e.OK, wantOK)
+		}
+	}
+}
+
+func TestClaudeEventsTranslate(t *testing.T) {
+	for _, c := range []struct {
+		in   Event
+		want rt.Event
+	}{
+		{Init{SessionID: "s", Model: "m", CWD: "/w", Tools: []string{"Bash"}}, rt.Init{SessionID: "s", Model: "m"}},
+		{AssistantText{Text: "hi"}, rt.AssistantText{Text: "hi"}},
+		{ToolUse{ID: "t1", Name: "Bash", Input: json.RawMessage(`{"command":"ls"}`)}, rt.ToolUse{ID: "t1", Name: "Bash", Input: json.RawMessage(`{"command":"ls"}`)}},
+		{ToolResult{ToolUseID: "t1", IsError: true}, rt.ToolResult{ID: "t1", IsError: true}},
+		{UserEcho{Text: "go", UUID: "u"}, rt.UserEcho{Text: "go", UUID: "u"}},
+		{Unknown{Type: "stream_event", Raw: json.RawMessage(`{}`)}, rt.Unknown{Kind: "stream_event"}},
+	} {
+		if got := toRT(c.in); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("toRT(%#v) = %#v, want %#v", c.in, got, c.want)
+		}
+	}
+}
+
+func TestClaudeRateLimitEventBecomesQuota(t *testing.T) {
+	evs := rtOf(t, fixtureLine(t, "simple-turn.jsonl", "rate_limit_event"))
+	q, ok := evs[0].(rt.QuotaUpdate)
+	if len(evs) != 1 || !ok {
+		t.Fatalf("got %#v, want one QuotaUpdate", evs)
+	}
+	reset := time.Unix(1794085200, 0)
+	if len(q.Windows) != 1 {
+		t.Fatalf("windows = %#v", q.Windows)
+	}
+	w := q.Windows[0]
+	if w.Name != "7d" || w.Used != 0.12 || w.ResetsAt == nil || !w.ResetsAt.Equal(reset) {
+		t.Fatalf("window = %+v (resets %v), want 7d at 0.12 resetting %v", w, w.ResetsAt, reset)
+	}
+	// Every fixture says overageStatus "rejected": that is the overage's state, not the window's.
+	if w.Limited {
+		t.Fatal("an allowed window reads as limited")
+	}
+}
+
+// Only rate_limit_info.status "rejected" limits, and only the window rateLimitType names.
+func TestClaudeRateLimitRejectedLimitsItsWindow(t *testing.T) {
+	line := `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1794000000,"rateLimitType":"five_hour",` +
+		`"overageStatus":"rejected","unifiedWindows":{"five_hour":{"utilization":1,"resetsAt":1794000000},"seven_day":{"utilization":0.4,"resetsAt":1794085200}}}}`
+	q := rtOf(t, []byte(line))[0].(rt.QuotaUpdate)
+	if len(q.Windows) != 2 {
+		t.Fatalf("windows = %+v", q.Windows)
+	}
+	five, seven := q.Windows[0], q.Windows[1]
+	if five.Name != "5h" || !five.Limited || five.Used != 1 || five.ResetsAt == nil || five.ResetsAt.Unix() != 1794000000 {
+		t.Fatalf("5h = %+v", five)
+	}
+	if seven.Name != "7d" || seven.Limited || seven.Used != 0.4 {
+		t.Fatalf("7d = %+v", seven)
+	}
+	// A rejection with no utilization for its window: the window is used up, resetting when the event says.
+	bare := `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1794000000,"rateLimitType":"five_hour"}}`
+	q = rtOf(t, []byte(bare))[0].(rt.QuotaUpdate)
+	if len(q.Windows) != 1 || q.Windows[0].Name != "5h" || !q.Windows[0].Limited || q.Windows[0].Used != 1 ||
+		q.Windows[0].ResetsAt == nil || q.Windows[0].ResetsAt.Unix() != 1794000000 {
+		t.Fatalf("bare rejection = %+v", q.Windows)
+	}
+	// Utilization stays a fraction; a window Athena does not name is left out; an event with nothing usable is Unknown.
+	odd := `{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","unifiedWindows":{"five_hour":{"utilization":1.7},"seven_day_opus":{"utilization":0.2}}}}`
+	q = rtOf(t, []byte(odd))[0].(rt.QuotaUpdate)
+	if len(q.Windows) != 1 || q.Windows[0].Used != 1 || q.Windows[0].ResetsAt != nil {
+		t.Fatalf("odd = %+v", q.Windows)
+	}
+	if u, ok := rtOf(t, []byte(`{"type":"rate_limit_event","x":1}`))[0].(rt.Unknown); !ok || u.Kind != "rate_limit_event" {
+		t.Fatalf("an event without rate_limit_info = %#v", u)
 	}
 }

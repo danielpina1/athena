@@ -17,7 +17,7 @@ import (
 	"time"
 
 	"github.com/danielpina1/athena/internal/core"
-	"github.com/danielpina1/athena/internal/runtime/claude"
+	"github.com/danielpina1/athena/internal/runtime/rt"
 	"github.com/danielpina1/athena/internal/store"
 	"github.com/danielpina1/athena/prompts"
 )
@@ -457,9 +457,9 @@ func TestReadyReportRefusedUntilFailureSeen(t *testing.T) {
 		t.Fatal("no live session")
 	}
 	r := &runner{n: h.n, s: s, eng: h.eng, log: s.log, sent: map[string]bool{}}
-	r.onEvent(claude.ToolUse{ID: "w1", Name: "Write"})
-	r.onEvent(claude.ToolUse{ID: "r1", Name: "mcp__athena__report"})
-	r.onEvent(claude.ToolResult{ToolUseID: "w1", IsError: true})
+	r.onEvent(rt.ToolUse{ID: "w1", Name: "Write"})
+	r.onEvent(rt.ToolUse{ID: "r1", Name: "mcp__athena__report"})
+	r.onEvent(rt.ToolResult{ID: "w1", IsError: true})
 	for _, st := range []core.ReportState{core.ReportReady, core.ReportDropped} {
 		if got := h.report(tk.ID, a.ID, st, "wrote it"); got.OK || !strings.Contains(got.Error, "failed") {
 			t.Fatalf("%s report = %+v, want a refusal", st, got)
@@ -472,7 +472,7 @@ func TestReadyReportRefusedUntilFailureSeen(t *testing.T) {
 		t.Fatalf("blocked report = %+v", got)
 	}
 	// The model's next step has seen the failure.
-	r.onEvent(claude.AssistantText{Text: "The write was denied."})
+	r.onEvent(rt.AssistantText{Text: "The write was denied."})
 	if got := h.report(tk.ID, a.ID, core.ReportReady, "done without it"); !got.OK {
 		t.Fatalf("ready report after the next step = %+v", got)
 	}
@@ -494,13 +494,13 @@ func TestHookDenialRefusesSameStepReport(t *testing.T) {
 		t.Fatalf("ready report right after the deny = %+v, want a refusal", got)
 	}
 	// The step's own tool_use line, read late, is not a later step.
-	r.onEvent(claude.ToolUse{ID: "b1", Name: "Bash"})
-	r.onEvent(claude.ToolUse{ID: "r1", Name: "mcp__athena__report"})
+	r.onEvent(rt.ToolUse{ID: "b1", Name: "Bash"})
+	r.onEvent(rt.ToolUse{ID: "r1", Name: "mcp__athena__report"})
 	if got := h.report(tk.ID, a.ID, core.ReportReady, "built"); got.OK {
 		t.Fatalf("ready report before the failed result was seen = %+v, want a refusal", got)
 	}
-	r.onEvent(claude.ToolResult{ToolUseID: "b1", IsError: true})
-	r.onEvent(claude.AssistantText{Text: "rm is blocked."})
+	r.onEvent(rt.ToolResult{ID: "b1", IsError: true})
+	r.onEvent(rt.AssistantText{Text: "rm is blocked."})
 	if got := h.report(tk.ID, a.ID, core.ReportReady, "built without it"); !got.OK {
 		t.Fatalf("ready report after the next step = %+v", got)
 	}
@@ -975,14 +975,14 @@ func TestReportedTurnIsNotNudged(t *testing.T) {
 	if got := h.report(tk.ID, a.ID, core.ReportProgress, "on it"); !got.OK {
 		t.Fatalf("report = %+v", got)
 	}
-	r.onEvent(claude.Result{Subtype: "success"})
-	r.onEvent(claude.Result{Subtype: "success"})
+	r.onEvent(rt.TurnEnd{OK: true, Subtype: "success"})
+	r.onEvent(rt.TurnEnd{OK: true, Subtype: "success"})
 	if len(sent) != 0 {
 		t.Fatalf("sent %q after a reported turn", sent)
 	}
 	// A new Input without a Report: the turn's end is nudged once.
 	r.inputSent()
-	r.onEvent(claude.Result{Subtype: "success"})
+	r.onEvent(rt.TurnEnd{OK: true, Subtype: "success"})
 	if len(sent) != 1 || sent[0] != nudgeText {
 		t.Fatalf("sent %q, want one nudge", sent)
 	}
