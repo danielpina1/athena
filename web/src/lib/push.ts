@@ -2,7 +2,8 @@
 // is made with the server's VAPID key (GET /push/key) and given to the server with PushSubscribe; plan 3 ties it to
 // the web session, so after every sign-in the app sends the existing one again (resubscribePush), quietly: it never
 // asks for permission and never subscribes a device the owner turned off. A start that finds the session still live
-// sends nothing (readPushState): the server has the subscription already.
+// sends nothing (readPushState): the server has the subscription already. When the push service rotates the
+// subscription, the service worker gives the server the new one itself (sw.ts, pushsubscriptionchange).
 import type { CommandResult } from "@/gen/athena/v1/commands_pb";
 import * as actions from "@/lib/commands/actions";
 

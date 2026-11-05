@@ -281,7 +281,10 @@ is the reference client.
   | 4002 | The login behind the connection ended (revoked, logged out, expired). | Sign in again, then reconnect and resend commands without a result. |
 - **Prompts.** Prompt overrides: `GetPrompt` (a read, not stored) returns a `PromptDetail`; `SetPrompt` and `ResetPrompt` (sensitive) carry the `PromptsView.revision` as `base_revision`, which is one counter for all parts (stale: `conflict`; empty or over 64 KiB text: `invalid`; unknown part: `not_found`). A new session starts with the effective prompt, and a session resumed while its Ticket is open keeps the prompt it started with, and a reopened ended Ticket gets the current effective prompt (kept in the state directory, outside the sandbox's write set; with the sandbox off, or an owner `allowWrite` that covers the state directory, a worker could rewrite its kept prompt).
 - **Push.** `GET /push/key` is the VAPID public key for `pushManager.subscribe`; `PushSubscribe`,
-  `PushUnsubscribe` and `SetNotificationPrefs` are commands (sensitive). Report `Visibility{visible}` while the
+  `PushUnsubscribe` and `SetNotificationPrefs` are commands (sensitive). `POST /push/renew`
+  `{oldEndpoint, subscription}` (the service worker's `pushsubscriptionchange`) moves a subscription the session holds
+  to the push service's new endpoint with the cookie alone, no step-up: 204, or 404 when the session does not hold
+  `oldEndpoint`. Report `Visibility{visible}` while the
   dashboard is on screen: no push is sent while a client reported visible in the last 30 s.
 
 ## Working on the UI

@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"log/slog"
-	"net/url"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -443,8 +442,7 @@ func (d *Dispatcher) act(o web.Origin, c *athenav1.Command) *athenav1.CommandRes
 // pushSubscribe stores a browser's push subscription, tied to the calling session, after checking it is one a push service can serve: an https
 // endpoint and the browser's P-256 key and 16-byte auth secret.
 func (d *Dispatcher) pushSubscribe(o web.Origin, p *athenav1.PushSubscribe) error {
-	u, err := url.Parse(p.GetEndpoint())
-	if err != nil || u.Scheme != "https" || u.Host == "" || len(p.GetEndpoint()) > 2048 {
+	if !web.ValidPushEndpoint(p.GetEndpoint()) {
 		return userErrorf("the push endpoint must be an https URL")
 	}
 	if !web.ValidSubscriptionKeys(p.GetP256Dh(), p.GetAuth()) {

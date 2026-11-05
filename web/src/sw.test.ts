@@ -57,7 +57,7 @@ function client(url = `${ORIGIN}/`): Client {
 
 let listeners: Map<string, Listener[]>;
 let scope: {
-  registration: { showNotification: ReturnType<typeof vi.fn> };
+  registration: { showNotification: ReturnType<typeof vi.fn>; pushManager: { subscribe: ReturnType<typeof vi.fn> } };
   clients: { claim: ReturnType<typeof vi.fn>; matchAll: ReturnType<typeof vi.fn>; openWindow: ReturnType<typeof vi.fn> };
   skipWaiting: ReturnType<typeof vi.fn>;
 };
@@ -71,7 +71,7 @@ beforeEach(async () => {
   network = vi.fn<(input: string | Req) => Promise<Response>>(async (input) => new Response(`network ${new URL(typeof input === "string" ? input : input.url, ORIGIN).pathname}`));
   caches = fakeCaches((p) => network(p));
   scope = {
-    registration: { showNotification: vi.fn(async () => {}) },
+    registration: { showNotification: vi.fn(async () => {}), pushManager: { subscribe: vi.fn(async () => subscription("https://push.test/fresh")) } },
     clients: {
       claim: vi.fn(async () => {}),
       matchAll: vi.fn(async () => windows),
@@ -111,6 +111,22 @@ async function dispatch(type: string, fields: object = {}) {
 }
 
 const get = (path: string, mode = "cors"): Req => ({ url: ORIGIN + path, method: "GET", mode });
+
+/** A PushSubscription as the worker sees one. */
+function subscription(endpoint: string) {
+  const json = { endpoint, keys: { p256dh: "pk-" + endpoint, auth: "auth" } };
+  return { endpoint, options: { applicationServerKey: new Uint8Array([4, 1, 2]).buffer }, toJSON: () => json };
+}
+
+/** The bodies the worker posted to /push/renew. */
+function renewals() {
+  return (network.mock.calls as unknown as [string | Req, RequestInit][])
+    .filter(([url]) => url === "/push/renew")
+    .map(([, init]) => {
+      expect(init).toMatchObject({ method: "POST", credentials: "same-origin" });
+      return JSON.parse(init.body as string) as unknown;
+    });
+}
 
 async function installed() {
   await dispatch("install");
@@ -156,6 +172,37 @@ test("sw push with the same tag replaces the earlier one, and one without a Tick
 
   await dispatch("notificationclick", { notification: { data: { url: "/" }, close: vi.fn() } });
   expect(scope.clients.openWindow).toHaveBeenCalledWith("/");
+});
+
+test("sw posts a rotated push subscription to /push/renew with the old endpoint", async () => {
+  // The browser made the new subscription.
+  await dispatch("pushsubscriptionchange", {
+    oldSubscription: subscription("https://push.test/old"),
+    newSubscription: subscription("https://push.test/new"),
+  });
+  expect(renewals()).toEqual([
+    { oldEndpoint: "https://push.test/old", subscription: subscription("https://push.test/new").toJSON() },
+  ]);
+  expect(scope.registration.pushManager.subscribe).not.toHaveBeenCalled();
+
+  // It did not: the worker subscribes again with the old one's key.
+  network.mockClear();
+  await dispatch("pushsubscriptionchange", { oldSubscription: subscription("https://push.test/old"), newSubscription: null });
+  expect(scope.registration.pushManager.subscribe).toHaveBeenCalledWith({
+    userVisibleOnly: true,
+    applicationServerKey: subscription("x").options.applicationServerKey,
+  });
+  expect(renewals()).toEqual([
+    { oldEndpoint: "https://push.test/old", subscription: subscription("https://push.test/fresh").toJSON() },
+  ]);
+
+  // No old subscription proves nothing to the server: the next sign-in sends the current one. A failure is quiet.
+  network.mockClear();
+  await dispatch("pushsubscriptionchange", { oldSubscription: null, newSubscription: subscription("https://push.test/new") });
+  expect(renewals()).toEqual([]);
+  scope.registration.pushManager.subscribe.mockRejectedValueOnce(new Error("denied"));
+  await dispatch("pushsubscriptionchange", { oldSubscription: subscription("https://push.test/old"), newSubscription: null });
+  expect(renewals()).toEqual([]);
 });
 
 test("sw install precaches the shell and the build's assets; activate drops old caches and claims", async () => {

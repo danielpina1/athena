@@ -360,6 +360,34 @@ func (s *Store) PutPushSubscription(p PushSubscription) error {
 	return nil
 }
 
+// RenewPushSubscription replaces the session's subscription for oldEndpoint with next (the push service rotated the
+// endpoint), in one transaction. It reports false and changes nothing when the session holds no subscription for
+// oldEndpoint.
+func (s *Store) RenewPushSubscription(sessionHash []byte, oldEndpoint string, next PushSubscription) (bool, error) {
+	renewed := false
+	err := s.Tx(func(tx *Tx) error {
+		res, err := tx.sql.Exec(`DELETE FROM push_subscriptions WHERE endpoint = ? AND session_hash = ?`, oldEndpoint, sessionHash)
+		if err != nil {
+			return err
+		}
+		if n, err := res.RowsAffected(); err != nil || n == 0 {
+			return err
+		}
+		if _, err := tx.sql.Exec(`INSERT INTO push_subscriptions (endpoint, p256dh, auth, created_at, failures, session_hash) VALUES (?, ?, ?, ?, 0, ?)
+			ON CONFLICT(endpoint) DO UPDATE SET p256dh = excluded.p256dh, auth = excluded.auth,
+				created_at = excluded.created_at, failures = 0, session_hash = excluded.session_hash`,
+			next.Endpoint, next.P256dh, next.Auth, formatTime(next.CreatedAt), sessionHash); err != nil {
+			return err
+		}
+		renewed = true
+		return nil
+	})
+	if err != nil {
+		return false, fmt.Errorf("store: renew push subscription: %w", err)
+	}
+	return renewed, nil
+}
+
 // PushSubscriptions returns every subscription, oldest first.
 func (s *Store) PushSubscriptions() ([]PushSubscription, error) {
 	rows, err := s.db.Query(`SELECT endpoint, p256dh, auth, created_at, failures, session_hash FROM push_subscriptions ORDER BY created_at, endpoint`)
