@@ -9,7 +9,9 @@ import { useMemo, useRef, useState } from "react";
 import type { ApprovalView, TicketSummary } from "@/gen/athena/v1/state_pb";
 import { selectCounts, selectNeedsYou, selectSynced, type NeedsYouItem } from "@/lib/store/selectors";
 import { useAthena } from "@/lib/store/state";
+import { useLayout } from "@/app/Panes";
 import { useShortcut } from "@/app/shortcuts";
+import { LiveFeed } from "@/features/activity/LiveFeed";
 import { EmptyState } from "@/ui/athena/EmptyState";
 import { Waiting } from "@/ui/athena/Waiting";
 import { Button } from "@/ui/primitives/button";
@@ -65,6 +67,8 @@ export function NeedsYou() {
   const node = useAthena((s) => s.node);
   const synced = useAthena(selectSynced);
   const [shown, setShown] = useState(PAGE);
+  // The desktop has the live feed in its sidebar; the phone has it here, under the cards.
+  const phone = useLayout() === "phone";
   const list = useRef<HTMLUListElement>(null);
 
   const items = useMemo(() => withAnswered(live, answering, approvals, tickets), [live, answering, approvals, tickets]);
@@ -111,6 +115,7 @@ export function NeedsYou() {
           )}
         </>
       )}
+      {phone && synced && <LiveFeed limit={5} className="mt-4 border-t border-line pt-4" />}
     </section>
   );
 }

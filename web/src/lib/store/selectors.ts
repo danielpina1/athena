@@ -37,6 +37,9 @@ function needsYouKind(t: TicketSummary, answering: Answering): NeedsYouKind | un
   return t.action as NeedsYouKind;
 }
 
+/** The Needs you kind of a Ticket, with nothing being answered here: what the server says it waits on. */
+export const needsYouKindOf = (t: TicketSummary): NeedsYouKind | undefined => needsYouKind(t, NOTHING_ANSWERED);
+
 const ms = (ts: Timestamp | undefined) => (ts ? timestampMs(ts) : 0);
 
 /** Approvals first, then answers, then the rest, each oldest first. */

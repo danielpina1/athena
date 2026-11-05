@@ -122,6 +122,8 @@ test("long and ANSI content stays inside the column", async () => {
   const view = renderDetail();
 
   const column = (await screen.findByTestId("ticket-detail")) as HTMLElement;
+  // The timeline is a lazy chunk.
+  await screen.findAllByTestId("timeline-row");
   expect(hasClasses(column, "min-w-0", "max-w-full")).toBe(true);
   const heading = screen.getByRole("heading", { level: 1 });
   expect((heading).textContent).toContain(title);
@@ -279,4 +281,31 @@ test("reply from the header focuses the composer", async () => {
   expect(screen.queryByRole("textbox", { name: "Reply to the session" })).toBeNull();
   await user.keyboard("r");
   await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "Reply to the session" })));
+});
+
+test("the Report is above the tabs: View report brings it into view, and its question's Reply opens the composer", async () => {
+  const user = userEvent.setup();
+  load({ tickets: [{ ...working, stage: "idle" }] });
+  detail({
+    summary: { ...working, stage: "idle" },
+    timeline: [{ kind: "report", subkind: "waiting", text: "Two caches fit", refId: "as1", at: at(1000) }],
+    reports: [
+      { assignmentId: "as0", state: "failed", summary: "first try", at: at(500) },
+      { assignmentId: "as1", state: "waiting", summary: "Two caches fit\n\n- Redis\n- in-process", question: "Which one?", at: at(1000) },
+    ],
+  });
+  renderDetail("/tickets/T-1?tab=timeline");
+  const card = await screen.findByRole("region", { name: "Report" });
+  expect(within(card).getByText("Waiting on you")).toBeTruthy();
+  expect(within(card).getAllByRole("listitem")).toHaveLength(2);
+  // The card comes before the tabs.
+  expect(card.compareDocumentPosition(screen.getByRole("tablist")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+  const row = (await screen.findAllByTestId("timeline-row"))[0];
+  await user.click(within(row).getByRole("button", { name: "View report" }));
+  expect(document.activeElement).toBe(card);
+
+  await user.click(within(within(card).getByRole("note", { name: "Question" })).getByRole("button", { name: "Reply" }));
+  const box = await screen.findByRole("textbox", { name: "Reply to the session" });
+  await waitFor(() => expect(document.activeElement).toBe(box));
 });

@@ -9,6 +9,7 @@ import { connectOutbox, linkSender, Outbox } from "@/lib/commands/outbox";
 import { LinkClient } from "@/lib/link/client";
 import { readPushState, resubscribePush } from "@/lib/push";
 import { connectStreams } from "@/lib/stream/useSessionStream";
+import { connectActivity } from "@/lib/store/activity";
 import { connectStore, useAthena } from "@/lib/store/state";
 import { appUpdates } from "@/lib/update";
 import { trackVisibility } from "@/lib/visibility";
@@ -54,6 +55,7 @@ export function createRuntime(opts: RuntimeOptions): Runtime {
   const store = opts.store ?? useAthena;
   const client = new LinkClient({ url: opts.url, clientId: opts.clientId, WebSocketImpl: opts.WebSocketImpl });
   connectStore(client, store);
+  connectActivity(store);
   const outbox = new Outbox(opts.indexedDB ?? indexedDB, linkSender(client), {
     store,
     notify: (title, description) => toast({ title, description, tone: "danger" }),

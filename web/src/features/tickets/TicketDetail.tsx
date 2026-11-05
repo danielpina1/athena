@@ -1,4 +1,5 @@
-// One Ticket: its header with the actions, what it waits on (the Needs you cards, inline), its facts and its tabs:
+// One Ticket: its header with the actions, what it waits on (the Needs you cards, inline), its latest Report (the
+// report card), its facts and its tabs:
 // Session (the live session and its composer), Timeline, and Changes (a Ticket with a branch) or Files (one without a
 // repository). The Ticket's detail Deltas come from useWatch for as long as the page is open. The header's Reply (and
 // r) opens the Session tab and puts the cursor in the composer; replying is the composer's.
@@ -29,10 +30,23 @@ import { ListSkeleton } from "./ArtifactFailure";
 import { Facts } from "./Facts";
 import { filterSearch } from "./Filters";
 import { FilesView } from "./FilesView";
-import { Timeline } from "./Timeline";
 
 // The diff viewer is outside the initial bundle budget: its chunk loads when the Changes tab opens.
 const DiffView = lazy(() => import("./DiffView"));
+// The report card renders Markdown, which shares its chunk with the session view. The timeline is a chunk of its own.
+const ReportCard = lazy(() => import("./ReportCard"));
+const Timeline = lazy(() => import("./Timeline").then((m) => ({ default: m.Timeline })));
+
+/** Brings an Assignment's Report into view: the card's, or an earlier one's, opened. */
+function revealReport(assignmentId: string) {
+  const el = document.getElementById(`report-${assignmentId}`);
+  if (!el) return;
+  const fold = el.closest("details");
+  if (fold) fold.open = true;
+  const still = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? true;
+  el.scrollIntoView?.({ block: "start", behavior: still ? "auto" : "smooth" });
+  el.focus({ preventScroll: true });
+}
 
 const COLUMN = "grid min-w-0 max-w-full content-start gap-4 p-4 lg:p-6";
 
@@ -175,7 +189,9 @@ function TicketTabs({
       </TabsContent>
       <TabsContent value="timeline" className="min-w-0">
         {detail ? (
-          <Timeline entries={detail.timeline} trimmed={detail.timelineTrimmed} />
+          <Suspense fallback={<ListSkeleton />}>
+            <Timeline entries={detail.timeline} trimmed={detail.timelineTrimmed} onViewReport={revealReport} />
+          </Suspense>
         ) : (
           <ListSkeleton />
         )}
@@ -250,6 +266,18 @@ export function TicketDetail({ id }: { id: string }) {
       )}
       {summary.stage === "person" && summary.action === "answer" && (
         <AnswerCard key={summary.attentionQuestion} ticket={summary} header={false} />
+      )}
+      {detail && detail.reports.length > 0 && (
+        <Suspense fallback={<Skeleton className="h-32 w-full" />}>
+          <ReportCard
+            reports={detail.reports}
+            repo={summary.repo}
+            needsYou={summary.stage === "person" && summary.action !== "approval" && summary.action !== "delivery"}
+            ended={summary.stage === "ended"}
+            showQuestion={!(summary.stage === "person" && summary.action === "answer")}
+            onReply={summary.stage === "ended" ? undefined : reply}
+          />
+        </Suspense>
       )}
       <Facts ticket={summary} threads={detail?.threads ?? []} />
       <TicketTabs ticket={summary} focusComposer={focusComposer} onComposerFocused={onComposerFocused} />

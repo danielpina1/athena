@@ -1,11 +1,12 @@
-// The desktop sidebar (240 px): the name and the palette key, the navigation, the node with its live load, and
-// today's counts. Every count is the length of the list it stands for (selectCounts).
+// The desktop sidebar (240 px): the name and the palette key, the navigation, the node with its live load, the live
+// feed and today's counts. Every count is the length of the list it stands for (selectCounts).
 import { NavLink } from "react-router";
 import { ConnectionDot, type LinkSource } from "@/app/ConnectionBanner";
 import { NAV, type NavItem, useNavCount } from "@/app/routes";
 import { modKeyLabel } from "@/app/shortcuts";
 import { selectCounts, selectSynced } from "@/lib/store/selectors";
 import { useAthena } from "@/lib/store/state";
+import { LiveFeed } from "@/features/activity/LiveFeed";
 import { Kbd } from "@/ui/athena/Kbd";
 import { Waiting } from "@/ui/athena/Waiting";
 import { cn } from "@/ui/cn";
@@ -138,7 +139,7 @@ export function Sidebar({ link, onOpenPalette }: { link: LinkSource; onOpenPalet
         </ul>
       </nav>
       <NodeCard />
-      <div className="flex-1" />
+      <LiveFeed className="mt-4 min-h-40 flex-1 overflow-y-auto border-t border-line-soft px-4 py-4" />
       <Today />
     </aside>
   );
