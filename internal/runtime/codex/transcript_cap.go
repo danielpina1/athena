@@ -4,11 +4,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"math"
 	"sort"
-	"strings"
 	"unicode/utf8"
 
 	"github.com/danielpina1/athena/internal/redact"
+	"github.com/danielpina1/athena/internal/render"
 )
 
 const (
@@ -28,9 +29,10 @@ const (
 
 // slot is a string of a decoded line and the way to replace it.
 type slot struct {
-	key string
-	s   string
-	set func(string)
+	key  string
+	s    string
+	orig int // the string's size as the server sent it
+	set  func(string)
 }
 
 // capLine keeps a Codex line short enough for the transcript. A line over outputKeep is decoded; each string of at least
@@ -57,56 +59,74 @@ func capLine(raw []byte) []byte {
 		if len(sl.s) < minCut {
 			continue
 		}
-		sl.s = redact.String(sl.s)
-		if sl.key == "aggregatedOutput" {
-			sl.s = cutFit(sl.s, outputKeep)
-		}
+		// Escapes go first (a code between a name and its value would hide the secret from the redactor), then the
+		// secrets; only then may anything be cut.
+		sl.s = redact.String(render.StripANSI(sl.s))
 		sl.set(sl.s)
 		cuttable = append(cuttable, sl)
 	}
 	out := encode(v)
-	if out != nil && len(out) <= maxEnvelopeLine {
-		return out
-	}
 	if out == nil {
 		return stub()
 	}
-	// Share what the strings may take: the line less everything that is not a long string.
+	// Each long string gets a budget, and is cut once at most: a command's output at most outputKeep, and all of them
+	// together what the line has left once the rest of it is counted.
 	enc := make([]int, len(cuttable))
-	total := 0
+	capOf := func(sl *slot) int {
+		if sl.key == "aggregatedOutput" {
+			return outputKeep
+		}
+		return math.MaxInt
+	}
+	total, over := 0, false
+	eff := make([]int, len(cuttable))
 	for i, sl := range cuttable {
 		enc[i] = jsonLen(sl.s)
+		eff[i] = min(enc[i], capOf(sl))
 		total += enc[i]
+		over = over || enc[i] > capOf(sl)
 	}
-	budget := maxEnvelopeLine - slack - (len(out) - total)
-	order := make([]int, len(cuttable))
-	for i := range order {
-		order[i] = i
+	if len(out) <= maxEnvelopeLine && !over {
+		return out
 	}
-	sort.Slice(order, func(a, b int) bool { return enc[order[a]] < enc[order[b]] })
-	// t is the largest budget per string such that the strings fit: the short ones keep their size, the others get t.
-	t, left := 0, budget
-	for k, i := range order {
-		if share := left / (len(order) - k); enc[i] <= share {
-			left -= enc[i]
-			continue
-		} else {
+	t := math.MaxInt
+	if budget := maxEnvelopeLine - slack - (len(out) - total); len(out)-total+sumInts(eff) > maxEnvelopeLine-slack {
+		// t is the largest budget per string such that the strings fit: the short ones keep their size, the others get t.
+		order := make([]int, len(eff))
+		for i := range order {
+			order[i] = i
+		}
+		sort.Slice(order, func(a, b int) bool { return eff[order[a]] < eff[order[b]] })
+		left := budget
+		for k, i := range order {
+			share := left / (len(order) - k)
+			if eff[i] <= share {
+				left -= eff[i]
+				continue
+			}
 			t = share
 			break
 		}
-	}
-	if t < markReserve+2 {
-		return stub()
+		if t < markReserve+2 {
+			return stub()
+		}
 	}
 	for i, sl := range cuttable {
-		if enc[i] > t {
-			sl.set(cutFit(sl.s, t))
+		if b := min(t, capOf(sl)); enc[i] > b {
+			sl.set(cutFit(sl.s, b, sl.orig))
 		}
 	}
 	if out = encode(v); out == nil || len(out) > maxEnvelopeLine {
 		return stub()
 	}
 	return out
+}
+
+func sumInts(a []int) (n int) {
+	for _, x := range a {
+		n += x
+	}
+	return n
 }
 
 func stub() []byte { return []byte(`{"method":"athena/line-too-large"}`) }
@@ -126,7 +146,7 @@ func collect(v any, key string, out *[]slot) {
 	case map[string]any:
 		for k, e := range x {
 			if s, ok := e.(string); ok {
-				*out = append(*out, slot{k, s, func(n string) { x[k] = n }})
+				*out = append(*out, slot{k, s, len(s), func(n string) { x[k] = n }})
 			} else {
 				collect(e, k, out)
 			}
@@ -134,7 +154,7 @@ func collect(v any, key string, out *[]slot) {
 	case []any:
 		for i, e := range x {
 			if s, ok := e.(string); ok {
-				*out = append(*out, slot{key, s, func(n string) { x[i] = n }})
+				*out = append(*out, slot{key, s, len(s), func(n string) { x[i] = n }})
 			} else {
 				collect(e, key, out)
 			}
@@ -166,14 +186,10 @@ func runeJSONLen(s string, i *int) int {
 	return size
 }
 
-// cutFit keeps the part of s that fits in budget bytes as JSON with a cut mark: whole lines only, so no line is cut in
-// two (the last, partial one goes). A string that fits is returned as it is.
-func cutFit(s string, budget int) string {
-	if jsonLen(s) <= budget {
-		return s
-	}
-	room, n := budget-2-markReserve, 0
-	i := 0
+// cutFit keeps the longest part of s that fits in budget bytes as JSON with a cut mark, cut at a rune boundary. s is
+// already redacted, so no cut can leave part of a secret. The mark says how many bytes of the original (orig bytes) are gone.
+func cutFit(s string, budget, orig int) string {
+	room, n, i := budget-2-markReserve, 0, 0
 	for i < len(s) {
 		j := i
 		c := runeJSONLen(s[i:], &j)
@@ -182,13 +198,5 @@ func cutFit(s string, budget int) string {
 		}
 		n, i = n+c, j
 	}
-	kept := s[:i]
-	if i < len(s) && s[i] == '\n' {
-		// the kept part ends at the end of a line
-	} else if k := strings.LastIndexByte(kept, '\n'); k >= 0 {
-		kept = kept[:k]
-	} else {
-		kept = ""
-	}
-	return kept + fmt.Sprintf("\n[cut: %d bytes]", len(s)-len(kept))
+	return s[:i] + fmt.Sprintf("\n[cut: %d bytes]", orig-i)
 }

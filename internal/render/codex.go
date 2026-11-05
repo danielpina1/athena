@@ -23,6 +23,9 @@ var (
 	listMark  = regexp.MustCompile(`^\s*(?:[-*]|\d+[.)])\s+`)
 )
 
+// StripANSI removes terminal escape sequences from s (the codex transcript writer strips before it redacts).
+func StripANSI(s string) string { return stripANSI(s) }
+
 // stripANSI removes terminal escape sequences from s.
 func stripANSI(s string) string {
 	if !strings.Contains(s, "\x1b") {
