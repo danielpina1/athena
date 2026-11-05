@@ -72,14 +72,46 @@ message TicketDetail {
   repeated string threads = 3;
   // timeline_trimmed is set when the oldest timeline entries were dropped to fit one frame.
   bool timeline_trimmed = 4;
+  // reports are the Ticket's Reports in full, one per Assignment that filed one, newest last: at most the last 5.
+  repeated ReportView reports = 5;
 }
 
 message TimelineEntry {
   google.protobuf.Timestamp at = 1;
   // kind is trigger, decision, input, report, assignment, approval or reply.
   string kind = 2;
+  // text is redacted, on one line and cut; Athena's hidden markers (<!-- athena:… -->) are removed.
   string text = 3;
   string ref_id = 4;
+  // subkind refines kind, so a client can say what happened in plain words:
+  //   trigger: where it came from: issue, pull, issue-comment, pull-comment, review-comment, review, ci or owner;
+  //   decision: accepted;
+  //   assignment: queued, started (the start entry), or ended, interrupted, failed, stopped or retried (the end
+  //     entry, at the Assignment's end);
+  //   report: the Report's state;
+  //   input: trigger (a message from no person), text, note, resumed, context (seen on a Thread the Ticket only
+  //     follows) or receipt (Athena's own acknowledgement on GitHub);
+  //   reply: owner (from the dashboard) or github;
+  //   approval: pending, approved, denied or expired.
+  // Empty from an older server.
+  string subkind = 5;
+  // subject is what the entry is about, short: an Approval's tool and command (Bash: npm test), an Assignment's
+  // model, a Report's pull request (PR #12), or the GitHub login of a reply.
+  string subject = 6;
+}
+
+// ReportView is one Report in full.
+message ReportView {
+  string assignment_id = 1;
+  // state is progress, waiting, ready, blocked, failed or dropped.
+  string state = 2;
+  // summary is the worker's text with its line breaks (Markdown), redacted, cut at 16 KiB.
+  string summary = 3;
+  // pull is the number of the pull request the Report named, 0 for none.
+  uint32 pull = 4;
+  // question is the Report's question for a person, if any.
+  string question = 5;
+  google.protobuf.Timestamp at = 6;
 }
 
 message ApprovalView {

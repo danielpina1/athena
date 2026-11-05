@@ -64,11 +64,13 @@ type TaskOptions struct {
 
 // ReportInput is a worker's report on its Ticket. A Question asks a person (an empty one keeps the current question);
 // AssignmentID, when set, names the Assignment the report is from, and a report from one that no longer runs is refused.
+// Pull is the pull request the report names, kept on the Report (binding it is the caller's).
 type ReportInput struct {
 	AssignmentID string
 	State        ReportState
 	Summary      string
 	Question     string
+	Pull         int
 }
 
 // Engine is the domain's single entry point. Each command runs in one transaction; the Executor calls and Events it
@@ -406,7 +408,7 @@ func (e *Engine) FileReport(ticketID string, r ReportInput) error {
 		if !hasReport(t) {
 			t.Stats.TimeToFirstReport = nonNegative(o.at.Sub(t.CreatedAt))
 		}
-		a.Report = &Report{State: r.State, Summary: r.Summary, At: o.at}
+		a.Report = &Report{State: r.State, Summary: r.Summary, Question: r.Question, Pull: r.Pull, At: o.at}
 		t.UpdatedAt = o.at
 		if r.State == ReportBlocked || r.State == ReportFailed {
 			t.Undelivered = slices.DeleteFunc(t.Undelivered, func(id string) bool { return automatic(findInput(t, id)) })

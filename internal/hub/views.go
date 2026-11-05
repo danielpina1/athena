@@ -4,6 +4,7 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -189,73 +190,227 @@ func nodeStatus(s node.Status) *athenav1.NodeStatus {
 		LiveTicketIds: slices.Clone(s.LiveTicketIDs), Queued: uint32(s.Queued), ClaudeVersion: s.ClaudeVersion}
 }
 
-// timelineEntry builds one entry; its text is redacted, flattened and cut.
-func timelineEntry(at time.Time, kind, text, ref string) *athenav1.TimelineEntry {
-	return &athenav1.TimelineEntry{At: ts(at), Kind: kind, Text: clip(oneLine(redact.String(text)), timelineRunes), RefId: ref}
+// athenaMarker matches Athena's hidden markers, such as the receipt line of a comment it posted on GitHub.
+var athenaMarker = regexp.MustCompile(`<!--\s*athena:[^>]*?-->`)
+
+// subjectRunes cuts an entry's subject; reportBytes cuts a Report's summary in the detail.
+const (
+	subjectRunes = 160
+	reportBytes  = 16 << 10
+	// reportsKept is how many Reports a detail carries, the newest.
+	reportsKept = 5
+	// echoWindow is how soon after the origin Trigger an Input with its text is the Trigger itself, recorded again.
+	echoWindow = time.Minute
+)
+
+// clean redacts s and drops Athena's markers.
+func clean(s string) string { return athenaMarker.ReplaceAllString(redact.String(s), "") }
+
+// timelineEntry builds one entry; its text and subject are redacted, rid of markers, flattened and cut.
+func timelineEntry(at time.Time, kind, subkind, subject, text, ref string) *athenav1.TimelineEntry {
+	return &athenav1.TimelineEntry{At: ts(at), Kind: kind, Subkind: subkind, Subject: clip(oneLine(clean(subject)), subjectRunes),
+		Text: clip(oneLine(clean(text)), timelineRunes), RefId: ref}
+}
+
+// firstLine is the first line of s with text on it.
+func firstLine(s string) string {
+	for _, l := range strings.Split(s, "\n") {
+		if strings.TrimSpace(l) != "" {
+			return l
+		}
+	}
+	return ""
+}
+
+// triggerSource says where a Trigger came from, for "Started from …".
+func triggerSource(tr *core.Trigger) string {
+	pull := tr.Meta["kind"] == "pull"
+	either := func(issue, pr string) string {
+		if pull {
+			return pr
+		}
+		return issue
+	}
+	switch {
+	case tr.Source == "owner":
+		return "owner"
+	case tr.Scope == "ci":
+		return "ci"
+	case strings.HasPrefix(tr.ID, "github:issue:"):
+		return either("issue", "pull")
+	case strings.HasPrefix(tr.ID, "github:issuecomment:"):
+		return either("issue-comment", "pull-comment")
+	case strings.HasPrefix(tr.ID, "github:reviewcomment:"):
+		return "review-comment"
+	case strings.HasPrefix(tr.ID, "github:review:"):
+		return "review"
+	}
+	return ""
+}
+
+// approvalWhat is what an Approval is for, the tool and its command (Bash: npm test): its summary is
+// "<why> — <tool>: <what>", or the tool alone.
+func approvalWhat(a *core.Approval) string {
+	what := a.Summary
+	if _, after, ok := strings.Cut(what, " — "); ok {
+		what = after
+	}
+	switch {
+	case what == "":
+		return a.Tool
+	case a.Tool == "" || strings.HasPrefix(what, a.Tool):
+		return what
+	}
+	return a.Tool + ": " + what
+}
+
+// approvalWhy is the reason part of an Approval's summary, if it has one.
+func approvalWhy(a *core.Approval) string {
+	if before, _, ok := strings.Cut(a.Summary, " — "); ok {
+		return before
+	}
+	return ""
+}
+
+// assignmentEnd is how an ended Assignment's end reads: its subkind and text. latest says it is the Ticket's last,
+// the one a Ticket's end stops.
+func assignmentEnd(t *core.Ticket, a *core.Assignment, latest bool) (string, string) {
+	reason := a.EndedReason
+	switch {
+	case reason == "retried":
+		return "retried", ""
+	case strings.Contains(reason, "restart"):
+		return "interrupted", reason
+	case a.Report != nil && a.Report.State == core.ReportFailed:
+		return "failed", firstLine(a.Report.Summary)
+	case latest && t.Ended != nil && t.Ended.By == core.EndByHuman:
+		return "stopped", t.Ended.Reason
+	}
+	return "ended", reason
 }
 
 // ticketTimeline lists what happened to a Ticket, oldest first, from the Ticket itself plus its origin Trigger and
 // its Approvals (the reads the caller makes: the pending one and the answered ones). A person's message that reached
-// the Ticket (the owner's reply or a person's on a Channel) is a reply; any other Input is an input.
-func ticketTimeline(t *core.Ticket, origin *core.Trigger, pending *core.Approval, answered []core.Approval) []*athenav1.TimelineEntry {
+// the Ticket (the owner's reply or a person's on a Channel) is a reply; any other Input is an input. actors names the
+// GitHub login of a reply's Trigger, by Trigger id, where the caller knows it.
+//
+// It reads as a story: an Assignment has a start entry and, once it ended, an end entry at its end; an Input that is
+// the origin Trigger recorded again is left out; an owner's own task has no router Decision.
+func ticketTimeline(t *core.Ticket, origin *core.Trigger, pending *core.Approval, answered []core.Approval,
+	actors map[string]string) []*athenav1.TimelineEntry {
 	var out []*athenav1.TimelineEntry
 	if origin != nil {
-		out = append(out, timelineEntry(origin.At, "trigger", origin.Text, origin.ID))
+		out = append(out, timelineEntry(origin.At, "trigger", triggerSource(origin), "", origin.Text, origin.ID))
 	}
-	if t.DecisionID != "" {
-		out = append(out, timelineEntry(t.CreatedAt, "decision", "accepted", t.DecisionID))
+	if t.DecisionID != "" && (origin == nil || origin.Source != "owner") {
+		out = append(out, timelineEntry(t.CreatedAt, "decision", "accepted", "", "", t.DecisionID))
 	}
-	for _, a := range t.Assignments {
-		text := string(a.State)
-		if a.EndedReason != "" {
-			text += ": " + a.EndedReason
+	for i := range t.Assignments {
+		a := &t.Assignments[i]
+		start, sub := a.CreatedAt, "started"
+		if a.StartedAt != nil {
+			start = *a.StartedAt
 		}
-		out = append(out, timelineEntry(a.CreatedAt, "assignment", text, a.ID))
-		if a.Report != nil {
-			out = append(out, timelineEntry(a.Report.At, "report", string(a.Report.State)+": "+a.Report.Summary, a.ID))
+		if a.State == core.AssignmentPending {
+			sub = "queued"
+		}
+		out = append(out, timelineEntry(start, "assignment", sub, a.Model, "", a.ID))
+		if r := a.Report; r != nil {
+			subject := ""
+			if r.Pull > 0 {
+				subject = "PR #" + strconv.Itoa(r.Pull)
+			}
+			out = append(out, timelineEntry(r.At, "report", string(r.State), subject, firstLine(clean(r.Summary)), a.ID))
+		}
+		if a.State == core.AssignmentEnded && a.EndedAt != nil {
+			sub, text := assignmentEnd(t, a, i == len(t.Assignments)-1)
+			out = append(out, timelineEntry(*a.EndedAt, "assignment", sub, "", text, a.ID))
 		}
 	}
 	for _, in := range t.Inputs {
+		if origin != nil && (in.TriggerID == origin.ID || in.Text != "" && in.Text == origin.Text && in.At.Sub(origin.At).Abs() <= echoWindow) {
+			continue
+		}
 		text := in.Text
 		if text == "" {
 			text = in.Note
 		}
-		if text == "" {
-			text = string(in.Kind)
+		kind, sub, subject := "input", string(in.Kind), ""
+		switch {
+		case athenaMarker.MatchString(text):
+			sub = "receipt"
+		case in.Context:
+			sub = "context"
+		case in.Human && in.Kind != core.InputNote && in.Kind != core.InputResumed:
+			kind, sub = "reply", "owner"
+			if login, ok := actors[in.TriggerID]; ok || strings.HasPrefix(in.TriggerID, "github:") {
+				sub, subject = "github", login
+			}
 		}
-		kind := "input"
-		if in.Human && !in.Context && in.Kind != core.InputNote && in.Kind != core.InputResumed {
-			kind = "reply"
-		}
-		out = append(out, timelineEntry(in.At, kind, text, in.ID))
+		out = append(out, timelineEntry(in.At, kind, sub, subject, text, in.ID))
 	}
 	for i := range answered {
 		a := &answered[i]
-		verdict := "Approved"
-		if a.State == core.ApprovalDenied {
-			verdict = "Denied"
-		} else if a.State != core.ApprovalApproved {
-			verdict = "Expired"
-		}
-		text := verdict + ": " + a.Tool
-		if a.Answer != "" {
-			text += " (" + a.Answer + ")"
+		sub := "expired"
+		switch a.State {
+		case core.ApprovalApproved:
+			sub = "approved"
+		case core.ApprovalDenied:
+			sub = "denied"
 		}
 		at := a.CreatedAt
 		if a.AnsweredAt != nil {
 			at = *a.AnsweredAt
 		}
-		out = append(out, timelineEntry(at, "approval", text, a.ID))
+		out = append(out, timelineEntry(at, "approval", sub, approvalWhat(a), a.Answer, a.ID))
 	}
 	if pending != nil {
-		out = append(out, timelineEntry(pending.CreatedAt, "approval", pending.Tool+": "+pending.Summary, pending.ID))
+		out = append(out, timelineEntry(pending.CreatedAt, "approval", "pending", approvalWhat(pending), approvalWhy(pending), pending.ID))
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].At.AsTime().Before(out[j].At.AsTime()) })
 	return out
 }
 
-func ticketDetail(t *core.Ticket, st core.Stage, origin *core.Trigger, pending *core.Approval, answered []core.Approval) *athenav1.TicketDetail {
-	d := &athenav1.TicketDetail{Summary: ticketSummary(t, st), Timeline: ticketTimeline(t, origin, pending, answered)}
+// clipBytes cuts s to at most n bytes on a rune boundary, with an ellipsis when it cut.
+func clipBytes(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	cut := n - len("…")
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "…"
+}
+
+// ticketReports are the Ticket's Reports in full, newest last, the last reportsKept of them. The latest one's question
+// is the Ticket's open question when the Report has none of its own (a Report stored before Reports kept it).
+func ticketReports(t *core.Ticket) []*athenav1.ReportView {
+	var out []*athenav1.ReportView
+	for i := range t.Assignments {
+		a := &t.Assignments[i]
+		r := a.Report
+		if r == nil {
+			continue
+		}
+		out = append(out, &athenav1.ReportView{AssignmentId: a.ID, State: string(r.State),
+			// Redact first, then cut: a cut must not split a secret into a piece redact no longer recognizes.
+			Summary: clipBytes(clean(r.Summary), reportBytes), Pull: uint32(max(r.Pull, 0)),
+			Question: clean(r.Question), At: ts(r.At)})
+	}
+	if len(out) > reportsKept {
+		out = out[len(out)-reportsKept:]
+	}
+	if n := len(out); n > 0 && out[n-1].Question == "" && t.Attention != nil {
+		out[n-1].Question = clean(t.Attention.Question)
+	}
+	return out
+}
+
+func ticketDetail(t *core.Ticket, st core.Stage, origin *core.Trigger, pending *core.Approval, answered []core.Approval,
+	actors map[string]string) *athenav1.TicketDetail {
+	d := &athenav1.TicketDetail{Summary: ticketSummary(t, st), Timeline: ticketTimeline(t, origin, pending, answered, actors),
+		Reports: ticketReports(t)}
 	for _, f := range t.Follows {
 		d.Threads = append(d.Threads, f.Thread)
 	}

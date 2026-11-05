@@ -368,6 +368,7 @@ func (n *Node) handleReport(req ReportRequest) Response {
 	}
 	err := n.engine().FileReport(req.Ticket, core.ReportInput{
 		AssignmentID: req.Assignment, State: core.ReportState(req.Status), Summary: req.Summary, Question: req.Question,
+		Pull: req.Pull,
 	})
 	if err != nil {
 		s.log.Warn("report refused", "state", req.Status, "error", err)

@@ -144,10 +144,17 @@ func TestReportQuestionSetsAttention(t *testing.T) {
 	if stored.Attention == nil || stored.Attention.Question != "Which color?" || stored.Attention.ID == "" {
 		t.Fatalf("attention: %#v", stored.Attention)
 	}
-	eq(t, "report", stored.Assignments[0].Report, &Report{State: ReportProgress, Summary: "need a call", At: base})
+	eq(t, "report", stored.Assignments[0].Report, &Report{State: ReportProgress, Summary: "need a call", Question: "Which color?", At: base})
 	eq(t, "stage", stageOf(stored), Stage{"person", "answer"})
 	types := h.events.types()
 	eq(t, "last event", types[len(types)-1], EventReportFiled)
+}
+
+func TestReportKeepsItsPull(t *testing.T) {
+	h := newHarness(t)
+	id := h.accepted()
+	h.must(h.eng.FileReport(id, ReportInput{State: ReportProgress, Summary: "opened it", Pull: 12}))
+	eq(t, "report", h.ticket(id).Assignments[0].Report, &Report{State: ReportProgress, Summary: "opened it", Pull: 12, At: base})
 }
 
 func TestPersonInputClearsAttentionAndDelivers(t *testing.T) {

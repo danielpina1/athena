@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"log/slog"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -753,5 +754,23 @@ func (h *Hub) detail(t *core.Ticket, st core.Stage) *athenav1.TicketDetail {
 	if err != nil {
 		h.log.Warn("hub: detail: answered approvals", "ticket", t.ID, "error", err)
 	}
-	return ticketDetail(t, st, origin, pending, answered)
+	return ticketDetail(t, st, origin, pending, answered, h.replyActors(t))
+}
+
+// replyActorsMax bounds the Trigger reads one detail makes to name who replied.
+const replyActorsMax = 50
+
+// replyActors are the GitHub logins of the people whose messages reached t, by Trigger id: the newest replyActorsMax.
+func (h *Hub) replyActors(t *core.Ticket) map[string]string {
+	out := map[string]string{}
+	for i := len(t.Inputs) - 1; i >= 0 && len(out) < replyActorsMax; i-- {
+		in := &t.Inputs[i]
+		if !in.Human || in.Context || !strings.HasPrefix(in.TriggerID, "github:") {
+			continue
+		}
+		if tr, err := h.src.Trigger(in.TriggerID); err == nil && tr.Actor.ID != "" {
+			out[in.TriggerID] = tr.Actor.ID
+		}
+	}
+	return out
 }

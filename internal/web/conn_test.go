@@ -1060,13 +1060,17 @@ func TestDetailTrimmedFlag(t *testing.T) {
 	if out, ok := fitDetail(small); !ok || out != small || out.TimelineTrimmed {
 		t.Fatalf("a detail that fits: ok %v, same message %v, trimmed %v", ok, out == small, out.GetTimelineTrimmed())
 	}
-	many := &athenav1.TicketDetail{Summary: &athenav1.TicketSummary{Id: "T-2"}}
+	many := &athenav1.TicketDetail{Summary: &athenav1.TicketSummary{Id: "T-2"},
+		Reports: []*athenav1.ReportView{{AssignmentId: "a1", State: "ready", Summary: "done"}}}
 	for i := 0; i < 600; i++ {
 		many.Timeline = append(many.Timeline, &athenav1.TimelineEntry{Kind: "input", Text: strings.Repeat("y", 4096)})
 	}
 	out, ok := fitDetail(many)
 	if !ok || !out.TimelineTrimmed {
 		t.Fatalf("a trimmed detail: ok %v, trimmed %v", ok, out.GetTimelineTrimmed())
+	}
+	if len(out.Reports) != 1 || out.Reports[0] != many.Reports[0] {
+		t.Fatalf("a trimmed detail keeps its reports: %v", out.Reports)
 	}
 	if many.TimelineTrimmed {
 		t.Fatal("the hub's shared detail must not be marked")
