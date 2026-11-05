@@ -1,0 +1,121 @@
+{
+  "codexVersion": "0.160.1",
+  "methods": {
+    "account/rateLimits/read": [],
+    "account/rateLimits/updated": [
+      "rateLimits"
+    ],
+    "account/read": [],
+    "config/batchWrite": [
+      "edits"
+    ],
+    "error": [
+      "error",
+      "threadId",
+      "turnId",
+      "willRetry"
+    ],
+    "hooks/list": [],
+    "initialize": [
+      "clientInfo"
+    ],
+    "initialized": [],
+    "item/agentMessage/delta": [
+      "delta",
+      "itemId",
+      "threadId",
+      "turnId"
+    ],
+    "item/commandExecution/requestApproval": [
+      "itemId",
+      "startedAtMs",
+      "threadId",
+      "turnId"
+    ],
+    "item/completed": [
+      "completedAtMs",
+      "item",
+      "threadId",
+      "turnId"
+    ],
+    "item/fileChange/requestApproval": [
+      "itemId",
+      "startedAtMs",
+      "threadId",
+      "turnId"
+    ],
+    "item/permissions/requestApproval": [
+      "cwd",
+      "itemId",
+      "permissions",
+      "startedAtMs",
+      "threadId",
+      "turnId"
+    ],
+    "item/started": [
+      "item",
+      "startedAtMs",
+      "threadId",
+      "turnId"
+    ],
+    "item/tool/call": [
+      "arguments",
+      "callId",
+      "threadId",
+      "tool",
+      "turnId"
+    ],
+    "item/tool/requestUserInput": [
+      "isBlocking",
+      "itemId",
+      "questions",
+      "threadId",
+      "turnId"
+    ],
+    "mcpServer/elicitation/request": [
+      "serverName",
+      "threadId"
+    ],
+    "serverRequest/resolved": [
+      "requestId",
+      "threadId"
+    ],
+    "thread/resume": [
+      "threadId"
+    ],
+    "thread/start": [],
+    "thread/started": [
+      "thread"
+    ],
+    "thread/status/changed": [
+      "status",
+      "threadId"
+    ],
+    "thread/tokenUsage/updated": [
+      "threadId",
+      "tokenUsage",
+      "turnId"
+    ],
+    "turn/completed": [
+      "threadId",
+      "turn"
+    ],
+    "turn/interrupt": [
+      "threadId",
+      "turnId"
+    ],
+    "turn/start": [
+      "input",
+      "threadId"
+    ],
+    "turn/started": [
+      "threadId",
+      "turn"
+    ],
+    "turn/steer": [
+      "expectedTurnId",
+      "input",
+      "threadId"
+    ]
+  }
+}
