@@ -18,6 +18,8 @@
 //	ATHENA_FAKE_LATER_FIXTURE      path of a .jsonl file replayed after every later user line (not the first)
 //	ATHENA_FAKE_LATER_EXIT_ONCE    path of a marker file: the first invocation that replays the later fixture and finds
 //	                               it missing creates it and exits 3 right after that replay
+//	ATHENA_FAKE_LATER_HOLD         path of a marker file ({ticket} is ATHENA_TICKET): while it exists, a later
+//	                               fixture's result line waits (a test files a real Report mid-turn, then removes it)
 //	ATHENA_FAKE_IGNORE_STDIN_CLOSE when set, keep running after stdin reaches EOF
 //	ATHENA_FAKE_NO_READ_STDIN      when set, never read stdin (a hung child)
 //
@@ -216,7 +218,16 @@ func replayLater(out *bufio.Writer) {
 	if err != nil {
 		os.Exit(6)
 	}
-	_, _ = out.Write(data)
+	hold := strings.ReplaceAll(os.Getenv("ATHENA_FAKE_LATER_HOLD"), "{ticket}", os.Getenv("ATHENA_TICKET"))
+	for _, l := range strings.SplitAfter(string(data), "\n") {
+		if hold != "" && strings.Contains(l, `"type":"result"`) {
+			_ = out.Flush()
+			for fileExists(hold) {
+				time.Sleep(10 * time.Millisecond)
+			}
+		}
+		_, _ = out.WriteString(l)
+	}
 	_ = out.Flush()
 	if p := os.Getenv("ATHENA_FAKE_LATER_EXIT_ONCE"); p != "" {
 		if f, err := os.OpenFile(p, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600); err == nil {

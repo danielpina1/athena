@@ -101,7 +101,7 @@ test("sign in, task, answer, approve, review, stop, graph, sign out", async ({ p
     await expect(page.getByRole("heading", { name: "Pick a database for the shop", level: 1 })).toBeVisible();
     await page.goto(`/tickets/${id}?tab=session`);
     const log = page.getByTestId("ticket-detail").getByRole("log", { name: "Session output" });
-    await expect(log).toContainText("model claude-");
+    await expect(log).toContainText("Session started");
     await expect(page.getByTestId("ticket-detail").getByText("live", { exact: true })).toBeVisible();
     await inBothThemes(page, testInfo, "3-live");
 

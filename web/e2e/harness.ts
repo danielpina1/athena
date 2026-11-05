@@ -13,11 +13,11 @@
 //   - session.requestApproval(ticket, tool, input) and session.report(ticket, state, text, question?): act as the
 //     Ticket's worker session through sessionctl (internal/testutil/sessionctl), on the real hook and MCP paths.
 //   - laterFixture(ticket, lines) and stdinLog(ticket): what the Ticket's fakeclaude prints after each later message
-//     (a reply), and what it has read on stdin.
+//     (a reply), and what it has read on stdin; holdLaterResult(ticket) holds that fixture's result line back.
 //
 // Every Ticket's session runs fakeclaude replaying the default fixture (global-setup.ts): a turn that never ends.
 import { execFile, spawn, type ChildProcess } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import AxeBuilder from "@axe-core/playwright";
@@ -55,6 +55,17 @@ export async function enrollLink(): Promise<string> {
  */
 export function laterFixture(ticket: string, lines: object[]): void {
   writeFileSync(join(env("ATHENA_E2E_STATE"), `later-${ticket}.jsonl`), lines.map((l) => JSON.stringify(l) + "\n").join(""));
+}
+
+/**
+ * Holds back the result line of the Ticket's later fixture until the returned release is called: the turn stays open,
+ * so a spec can file a real Report in it (a fixture's report tool call files none, and a turn that ends without one
+ * gets a nudge, which replays the later fixture again).
+ */
+export function holdLaterResult(ticket: string): () => void {
+  const file = join(env("ATHENA_E2E_STATE"), `hold-${ticket}`);
+  writeFileSync(file, "");
+  return () => rmSync(file, { force: true });
 }
 
 /** Every line the Ticket's fakeclaude has read on stdin so far ("" before the session started). */

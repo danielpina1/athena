@@ -2,7 +2,8 @@
 // dashboard counts at once, the owner's answer reaches the hook, and a Report with a question waits on the owner.
 // The Ticket is stopped at the end, so the shared server is back to no open Tickets for the specs after it.
 import type { Page } from "@playwright/test";
-import { athena, expect, expectAccessible, laterFixture, signedInPage, stdinLog, test } from "./harness";
+import { READABLE_SESSION } from "./fixtures/readable-session";
+import { athena, expect, expectAccessible, holdLaterResult, laterFixture, signedInPage, stdinLog, test } from "./harness";
 
 test("a session's approval and question reach the dashboard", async ({ page, session }) => {
   await signedInPage(page);
@@ -79,8 +80,8 @@ test("the live session streams tool calls in order and takes a reply", async ({ 
     await page.goto(`/tickets/${ticket}?tab=session&stage=working&q=session+tests${pin}`);
     await expect(page.getByRole("heading", { name: title, level: 1 })).toBeVisible();
     const log = page.getByTestId("ticket-detail").getByRole("log", { name: "Session output" });
-    // The default fixture's init line.
-    await expect(log).toContainText("model claude-");
+    // The default fixture's init line, as a divider.
+    await expect(log).toContainText("Session started · haiku 4.5");
     await expect(page.getByTestId("ticket-detail").getByText("live", { exact: true })).toBeVisible();
 
     const box = page.getByRole("textbox", { name: "Reply to the session" });
@@ -97,8 +98,8 @@ test("the live session streams tool calls in order and takes a reply", async ({ 
     const calls = log.getByTestId("tool-call");
     await expect(calls).toHaveCount(2);
     await expect(calls.nth(0)).toHaveAttribute("data-status", "ok");
-    await expect(calls.nth(0)).toContainText("ok · 1.2 s");
-    await expect(calls.nth(1)).toContainText("ok · 2.0 s");
+    await expect(calls.nth(0)).toContainText("1.2 s");
+    await expect(calls.nth(1)).toContainText("2.0 s");
     // The long ANSI result, opened: stripped, wrapped inside the column.
     await calls.nth(1).locator("summary").click();
     await expect(calls.nth(1)).toContainText("PASS acme/api/handlers");
@@ -109,7 +110,7 @@ test("the live session streams tool calls in order and takes a reply", async ({ 
       const strip = page.getByRole("region", { name: "Pinned sessions" });
       await expect(strip.getByRole("article")).toHaveCount(1);
       await expect(strip).toContainText("Tidy the changelog");
-      await expect(strip.getByRole("log")).toContainText("model claude-");
+      await expect(strip.getByRole("log")).toContainText("Session started");
       await expect(page.getByRole("button", { name: "Pin session" })).toHaveAttribute("aria-pressed", "false");
     }
     await expectAccessible(page);
@@ -136,5 +137,91 @@ test("the live session streams tool calls in order and takes a reply", async ({ 
     await expect(page).toHaveScreenshot("session-dark.png", { mask: unstable });
   } finally {
     for (const t of [ticket, pinned]) if (t) await athena("stop", t).catch(() => {});
+  }
+});
+
+// A realistic turn reads as a log of work: prose as Markdown, one compact row per tool call (a verb, a target relative
+// to the worktree, a check and its time or +N −M), errors inline, the plan as a checklist, the owner's reply as "You"
+// and a closing "Done". None of the session's bookkeeping lines show. Opened rows show a terminal, a diff and the plan.
+test("the session view reads as a log of the agent's work", async ({ page, session }) => {
+  await page.clock.setFixedTime(new Date("2026-11-04T10:00:00"));
+  await page.emulateMedia({ colorScheme: "light", reducedMotion: "reduce" });
+  await signedInPage(page);
+  const title = "Add rate limiting to the bookings API";
+  const ticket = await athena("task", title);
+  try {
+    const release = holdLaterResult(ticket);
+    laterFixture(ticket, [...READABLE_SESSION]);
+    // The list filtered to this Ticket: the shared server holds the other specs' Tickets.
+    await page.goto(`/tickets/${ticket}?tab=session&q=${ticket}`);
+    await expect(page.getByRole("heading", { name: title, level: 1 })).toBeVisible();
+    const log = page.getByTestId("ticket-detail").getByRole("log", { name: "Session output" });
+    await expect(log).toContainText("Session started");
+    const box = page.getByRole("textbox", { name: "Reply to the session" });
+    await box.fill("Go ahead, keep the limit per IP");
+    await box.press("Enter");
+    // The fixture's report call files nothing: the real Report goes in before the turn ends, so no nudge replays it.
+    await expect(log).toContainText("To try it locally");
+    expect(await session.report(ticket, "ready", "Added a per-IP rate limiter in front of the bookings API.")).toBe("Report filed (ready).");
+    release();
+    await expect(log.locator("[data-kind=result]")).toContainText("Done");
+
+    const text = await log.innerText();
+    for (const noise of ["task_progress", "thinking_tokens", "rate_limit", "system/", "Thinking", "ToolSearch", "/home/dev"]) {
+      expect(text, `the log shows ${noise}`).not.toContain(noise);
+    }
+    await expect(log.locator("[data-kind=user]")).toContainText("Go ahead, keep the limit per IP");
+    const rows = log.getByTestId("tool-call");
+    await expect(rows).toHaveCount(13);
+    const row = (label: string, n = 0) => rows.filter({ has: page.locator("summary", { hasText: label }) }).nth(n);
+    await expect(row("Read")).toContainText("internal/api/bookings.go");
+    await expect(row("Searched for")).toContainText("in internal");
+    await expect(row("Created")).toContainText("internal/api/ratelimit.go");
+    await expect(row("Created")).toContainText("+31");
+    await expect(row("Edited")).toContainText("+2−1");
+    await expect(row("Check the Go toolchain")).toContainText("1.3 s");
+    const failedTests = row("Run the API tests");
+    await expect(failedTests).toHaveAttribute("data-status", "error");
+    await expect(failedTests).toContainText("Exit code 1: --- FAIL: TestRateLimit (0.00s)");
+    await expect(row("Run the API tests", 1)).toHaveAttribute("data-status", "ok");
+    await expect(row("Check the GitHub login")).toContainText("Blocked: command gh auth is blocked");
+    await expect(row("Updated the plan", 1)).toContainText("3 of 4 done");
+    await expect(row("Reported ready")).toContainText("PR #42 · Added a per-IP rate limiter");
+    // The agent's Markdown: a numbered list, inline code and a code block.
+    await expect(log.locator("li[data-row=item] ol li code").first()).toHaveText("internal/api/ratelimit.go");
+    await expect(log.locator("pre[aria-label=Code]")).toHaveText("go test ./internal/api/... -run RateLimit -v");
+    await expect(log.locator("[data-kind=result]")).toContainText("18 turns · $0.38 · 6 m 12 s");
+
+    // Opened: the failed run's terminal, the router's diff and the plan.
+    for (const r of [failedTests, row("Edited"), row("Updated the plan", 1)]) await r.locator("summary").click();
+    await expect(failedTests.getByLabel("Terminal")).toContainText("$ go test ./internal/api/... -count=1");
+    await expect(row("Edited").locator("[data-line=add]")).toHaveCount(2);
+    await expect(row("Updated the plan", 1).locator("[data-todo=completed]")).toHaveCount(3);
+    await expectNoSideScroll(page);
+    await expectAccessible(page);
+
+    // The screenshots start at the Session heading, the log at its end (the summary and the Done block), nothing focused.
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+    await page.getByRole("heading", { name: "Session", level: 2 }).evaluate((h) => h.scrollIntoView({ block: "start" }));
+    await log.evaluate((el) => el.scrollTo({ top: el.scrollHeight }));
+    await expect(page.getByRole("button", { name: "Jump to latest" })).toHaveCount(0);
+    // What differs from run to run: times, the Ticket id (in the search box too), and the node's load and counts.
+    const unstable = [
+      page.locator("time"),
+      page.locator("aside .font-mono"),
+      page.getByRole("region", { name: "Today" }),
+      page.getByRole("region", { name: "Facts" }),
+      page.getByTestId("ticket-detail").locator("header .font-mono"),
+      page.locator("[data-ticket-row] .font-mono"),
+      page.getByPlaceholder("Search by title or id"),
+    ];
+    await page.evaluate(() => document.fonts.ready);
+    await expect(page).toHaveScreenshot("readable-light.png", { mask: unstable });
+    await page.emulateMedia({ colorScheme: "dark", reducedMotion: "reduce" });
+    await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+    await expectAccessible(page);
+    await expect(page).toHaveScreenshot("readable-dark.png", { mask: unstable });
+  } finally {
+    await athena("stop", ticket).catch(() => {});
   }
 });
