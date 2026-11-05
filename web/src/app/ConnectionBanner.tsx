@@ -87,6 +87,16 @@ function watch(link: LinkSource) {
 }
 
 /**
+ * The link's status as the shell shows it (Athena's mark): a drop shorter than BANNER_DELAY_MS, the banner's own
+ * delay, still shows open, so a reconnect blip flashes nothing.
+ */
+export function useShownLinkStatus(link: LinkSource): LinkStatus {
+  const w = watch(link);
+  const { status, late } = useSyncExternalStore(w.subscribe, w.get);
+  return isDown(status) && !late ? "open" : status;
+}
+
+/**
  * The live region is always in the document (empty while the link is fine), so showing the banner, and the flips of
  * a retrying link, never mount a new region to be announced again.
  */

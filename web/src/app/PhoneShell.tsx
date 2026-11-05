@@ -54,10 +54,9 @@ export function PhoneShell({
     <div className="flex min-h-dvh flex-col">
       <header className="sticky top-0 z-10 border-b border-line bg-bg pt-[env(safe-area-inset-top)]">
         <div className="flex h-12 items-center justify-between pr-[max(4px,env(safe-area-inset-right))] pl-[max(16px,env(safe-area-inset-left))]">
-          <span className="flex items-center gap-2 font-mono text-xs tracking-wider text-muted uppercase">
-            <AthenaMark link={link} />
+          <AthenaMark link={link} className="font-mono text-xs tracking-wider text-muted uppercase">
             Athena
-          </span>
+          </AthenaMark>
           <button
             type="button"
             onClick={onOpenPalette}

@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -428,5 +429,66 @@ func TestReportQuestionIsCutAndSecretsAtTheCutStayRedacted(t *testing.T) {
 	}
 	if n := len(r.Question); n > questionBytes+4 || n < questionBytes-4 {
 		t.Errorf("question is %d bytes, want it cut at %d", n, questionBytes)
+	}
+}
+
+// Only what the store answered is remembered: a login, or a Trigger it does not have. A store that failed is asked
+// again on the next detail.
+func TestReplyActorsDoNotCacheStoreErrors(t *testing.T) {
+	f := newFake()
+	tk := ticket("T-1")
+	tk.Inputs = []core.Input{
+		{ID: "i1", Kind: core.InputTrigger, At: epoch0, TriggerID: "github:issuecomment:1", Human: true, Text: "hi"},
+		{ID: "i2", Kind: core.InputTrigger, At: epoch0.Add(time.Minute), TriggerID: "github:issuecomment:2", Human: true, Text: "yo"},
+	}
+	f.put(tk)
+	f.triggers["github:issuecomment:1"] = core.Trigger{ID: "github:issuecomment:1", Actor: core.ActorRef{ID: "alice"}}
+	h := New(f, quiet())
+	f.triggerErr = errors.New("database is locked")
+	d, err := h.Detail("T-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Timeline[0].Subject == "alice" {
+		t.Fatal("named from a failed read")
+	}
+	f.triggerErr = nil
+	f.triggerReads = 0
+	if d, err = h.Detail("T-1"); err != nil {
+		t.Fatal(err)
+	}
+	if d.Timeline[0].Subject != "alice" || f.triggerReads != 2 {
+		t.Fatalf("after the store recovered: subject %q, %d reads (want alice, both read again)", d.Timeline[0].Subject, f.triggerReads)
+	}
+	// Trigger 2 is not stored: that answer is kept, and neither is read again.
+	if _, err = h.Detail("T-1"); err != nil {
+		t.Fatal(err)
+	}
+	if f.triggerReads != 2 {
+		t.Errorf("%d reads after both were answered, want none more", f.triggerReads-2)
+	}
+}
+
+// The first Input on the origin Trigger itself is its echo, whatever its text (the router may trim or quote it) and
+// even a moment before the Trigger (clocks of two writers); only that first one.
+func TestEchoOnTheOriginTriggerIsDroppedWhateverItsText(t *testing.T) {
+	f := newFake()
+	tk := ticket("T-1")
+	tk.Origin = core.Origin{TriggerID: "github:issue:7"}
+	at := func(d time.Duration) time.Time { return epoch0.Add(d) }
+	tk.Inputs = []core.Input{
+		{ID: "i1", Kind: core.InputTrigger, At: at(-300 * time.Millisecond), TriggerID: "github:issue:7", Human: true, Text: "Fix the login (trimmed)"},
+		{ID: "i2", Kind: core.InputTrigger, At: at(time.Minute), TriggerID: "github:issue:7", Human: true, Text: "Fix the login, edited"},
+	}
+	f.put(tk)
+	f.triggers["github:issue:7"] = core.Trigger{ID: "github:issue:7", Source: "github", Kind: "issue", Human: true, At: epoch0,
+		Actor: core.ActorRef{Source: "github", ID: "alice"}, Text: "Fix the login\n\nIt 500s."}
+	d, err := New(f, quiet()).Detail("T-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := entries(d.Timeline)
+	if strings.Contains(got, "(trimmed)") || !strings.Contains(got, "Fix the login, edited") || strings.Count(got, "|") != 1 {
+		t.Errorf("timeline: %q, want the origin and the later edit only", got)
 	}
 }

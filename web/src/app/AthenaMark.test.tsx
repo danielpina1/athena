@@ -1,12 +1,15 @@
 import { create, type MessageInitShape } from "@bufbuild/protobuf";
-import { act, render, screen } from "@testing-library/react";
+import { act, render } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
-import { afterEach, expect, test } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { afterEach, expect, test, vi } from "vitest";
 import { SnapshotSchema, type TicketSummarySchema } from "@/gen/athena/v1/state_pb";
 import { useAthena } from "@/lib/store/state";
 import { Shell } from "./Shell";
 import { fakeLink, stubWidth } from "./testkit";
 import { AthenaMark } from "./AthenaMark";
+import { BANNER_DELAY_MS } from "./ConnectionBanner";
 
 afterEach(() => useAthena.getState().reset());
 
@@ -24,18 +27,43 @@ test("the mark is idle, working or needs you", () => {
   expect(mark().getAttribute("data-state")).toBe("needs-you");
 });
 
-test("the mark carries the link's state, in words for screen readers", () => {
-  load([{ id: "T-1", stage: "working" }]);
-  const link = fakeLink("open");
-  const el = mark(link);
-  expect(el.getAttribute("data-link")).toBe("open");
-  expect(screen.getByText("Connected")).toBeTruthy();
-  act(() => link.set("connecting"));
-  expect(el.getAttribute("data-link")).toBe("connecting");
-  expect(screen.getByText("Connecting")).toBeTruthy();
-  act(() => link.set("offline"));
-  expect(el.getAttribute("data-link")).toBe("offline");
-  expect(screen.getByText("Offline")).toBeTruthy();
+test("the mark carries the link's state after the banner's delay, in words after Athena's name", () => {
+  vi.useFakeTimers();
+  try {
+    load([{ id: "T-1", stage: "working" }]);
+    const link = fakeLink("open");
+    const view = render(<AthenaMark link={link}>Athena</AthenaMark>);
+    const el = view.container.querySelector("[data-mark]")!;
+    const said = () => view.container.textContent;
+    expect(el.getAttribute("data-link")).toBe("open");
+    expect(said()).toBe("Athena, Connected");
+    // A reconnect blip shorter than the banner's delay does not show.
+    act(() => link.set("connecting"));
+    expect(el.getAttribute("data-link")).toBe("open");
+    expect(said()).toBe("Athena, Connected");
+    act(() => vi.advanceTimersByTime(BANNER_DELAY_MS - 1));
+    expect(el.getAttribute("data-link")).toBe("open");
+    act(() => vi.advanceTimersByTime(1));
+    expect(el.getAttribute("data-link")).toBe("connecting");
+    expect(said()).toBe("Athena, Connecting");
+    act(() => link.set("offline"));
+    expect(el.getAttribute("data-link")).toBe("offline");
+    expect(said()).toBe("Athena, Offline");
+    // Back open at once.
+    act(() => link.set("open"));
+    expect(el.getAttribute("data-link")).toBe("open");
+    act(() => link.set("offline"));
+    expect(el.getAttribute("data-link")).toBe("open");
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("offline has a cue besides its colour: a slash through a hollow mark", () => {
+  const css = readFileSync(join(import.meta.dirname, "..", "index.css"), "utf8");
+  const offline = /\.athena-mark\[data-link="offline"\]::before,\s*\.athena-mark\[data-link="signedOut"\]::before\s*\{([^}]*)\}/.exec(css)?.[1] ?? "";
+  expect(offline).toMatch(/transform:\s*rotate\(-45deg\)/);
+  expect(offline).toMatch(/height:\s*1\.5px/);
 });
 
 test.each([

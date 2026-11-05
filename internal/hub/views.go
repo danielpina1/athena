@@ -307,12 +307,18 @@ func headOf(s string) string {
 	return s[:cut]
 }
 
-// originEcho is the index of the Input that is the origin Trigger recorded again, or -1: the first person's Input at
-// or after the Trigger, on no other Trigger (none, or the origin's own), with the Trigger's text. Only that one: the
-// owner saying the same words again later is a message of its own.
+// originEcho is the index of the Input that is the origin Trigger recorded again, or -1: the first Input on the
+// origin Trigger itself, whatever its text or time (a writer's clock may be a moment off); else the first person's
+// Input at or after the Trigger, on no other Trigger, with the Trigger's text. Only that one: the owner saying the
+// same words again later is a message of its own.
 func originEcho(t *core.Ticket, origin *core.Trigger) int {
 	if origin == nil {
 		return -1
+	}
+	for i := range t.Inputs {
+		if t.Inputs[i].TriggerID == origin.ID {
+			return i
+		}
 	}
 	for i := range t.Inputs {
 		in := &t.Inputs[i]

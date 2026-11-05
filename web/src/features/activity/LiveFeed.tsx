@@ -93,11 +93,12 @@ export function LiveFeed({ limit, className }: { /** Shows this many until "Show
   // The items there when the feed first rendered are not new to the owner; any later one washes in.
   const [initial] = useState(() => new Set(items.map(version)));
   const shown = limit && !all ? items.slice(0, limit) : items;
+  const counts = needsYou > 0 ? `${working} working · ${needsYou} need you` : `${working} working`;
 
   return (
     <section data-live-feed aria-labelledby={heading} className={cn("grid min-w-0 content-start gap-1", className)}>
-      <div className="flex items-center justify-between gap-2">
-        <h2 id={heading} className="flex items-center gap-2 font-mono text-xs tracking-wider text-muted uppercase">
+      <div className="flex min-w-0 items-center justify-between gap-2">
+        <h2 id={heading} className="flex shrink-0 items-center gap-2 font-mono text-xs tracking-wider text-muted uppercase">
           {(working > 0 || needsYou > 0) && (
             <span data-live-pulse aria-hidden className={cn("size-1.5 animate-pulse rounded-full", needsYou > 0 ? "bg-accent" : "bg-success")} />
           )}
@@ -105,8 +106,9 @@ export function LiveFeed({ limit, className }: { /** Shows this many until "Show
         </h2>
         {synced && (
           // Both counts are the lengths of their lists (selectCounts): a Ticket waiting on the owner is not working.
-          <span data-working className="font-mono text-[11px] whitespace-nowrap text-muted tabular-nums">
-            {needsYou > 0 ? `${working} working · ${needsYou} need you` : `${working} working`}
+          // Truncated in a narrow sidebar (three-digit counts), the whole line in its tooltip.
+          <span data-working title={counts} className="min-w-0 truncate font-mono text-[11px] whitespace-nowrap text-muted tabular-nums">
+            {counts}
           </span>
         )}
       </div>

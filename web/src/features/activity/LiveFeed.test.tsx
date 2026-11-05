@@ -106,3 +106,19 @@ test("the header says how many work and how many need you, and pulses for either
   expect(header()).toBe("0 working");
   expect(view.container.querySelector("[data-live-pulse]")).toBeNull();
 });
+
+test("three-digit counts truncate inside the sidebar, the whole line in a tooltip", () => {
+  const tickets = [
+    ...Array.from({ length: 120 }, (_, i) => ({ id: `T-${i}`, stage: "working" })),
+    ...Array.from({ length: 150 }, (_, i) => ({ id: `T-n${i}`, stage: "person", action: "review" })),
+  ];
+  useAthena.getState().applySnapshot(create(SnapshotSchema, { cursor: 1n, tickets }), "e1");
+  const view = feed();
+  const count = view.container.querySelector("[data-working]")!;
+  expect(count.textContent).toBe("120 working · 150 need you");
+  expect(count.getAttribute("title")).toBe("120 working · 150 need you");
+  expect(["min-w-0", "truncate"].every((c) => count.classList.contains(c))).toBe(true);
+  const row = count.parentElement!;
+  expect(row.classList.contains("min-w-0")).toBe(true);
+  expect(view.container.querySelector("h2")!.classList.contains("shrink-0")).toBe(true);
+});

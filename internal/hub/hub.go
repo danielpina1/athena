@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"log/slog"
 	"sort"
 	"strings"
@@ -835,11 +836,14 @@ func (h *Hub) replyActors(t *core.Ticket) map[string]string {
 		h.actorMu.Unlock()
 		if !known {
 			reads++
-			// A Trigger the store cannot give is remembered with no login too: an Input's Trigger is stored before it,
-			// so a missing one stays missing, and asking again on every commit would only cost reads.
-			if tr, err := h.src.Trigger(id); err == nil {
-				login = tr.Actor.ID
+			// A Trigger the store does not have is remembered with no login too: an Input's Trigger is stored before
+			// it, so a missing one stays missing, and asking again on every commit would only cost reads. A store
+			// that failed is not an answer: nothing is remembered, and the next detail asks again.
+			tr, err := h.src.Trigger(id)
+			if err != nil && !errors.Is(err, core.ErrNotFound) {
+				continue
 			}
+			login = tr.Actor.ID
 			h.actorMu.Lock()
 			if len(h.actors) >= actorCacheMax {
 				clear(h.actors)

@@ -143,10 +143,9 @@ export function Sidebar({ link, onOpenPalette }: { link: LinkSource; onOpenPalet
   return (
     <aside className="flex h-dvh w-[240px] shrink-0 flex-col overflow-y-auto border-r border-line">
       <div className="flex h-14 items-center justify-between gap-2 border-b border-line px-4">
-        <span className="flex items-center gap-2 font-semibold">
-          <AthenaMark link={link} />
+        <AthenaMark link={link} className="font-semibold">
           Athena
-        </span>
+        </AthenaMark>
         <button
           type="button"
           onClick={onOpenPalette}

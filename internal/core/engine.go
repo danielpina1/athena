@@ -40,9 +40,19 @@ var OwnerActor = ActorRef{Source: ownerSource, ID: "owner"}
 
 // UserError is an invalid request: an unknown Ticket, a command its state does not allow, or a malformed input.
 // Commands return it as *UserError; match it with errors.As.
-type UserError struct{ Msg string }
+type UserError struct {
+	Msg string
+	// Err is what the error is, for errors.Is: ErrNotFound for a record that is not stored, else nil.
+	Err error
+}
 
 func (e *UserError) Error() string { return e.Msg }
+
+func (e *UserError) Unwrap() error { return e.Err }
+
+// ErrNotFound is in the UserError of a lookup whose record is not stored (Trigger): a real answer, unlike a store
+// that could not be read.
+var ErrNotFound = errors.New("not found")
 
 // ErrDuplicate is returned with the existing Ticket when a task is submitted again under the same request id.
 var ErrDuplicate = errors.New("duplicate request")
@@ -1058,7 +1068,7 @@ func (e *Engine) Trigger(id string) (Trigger, error) {
 		return Trigger{}, err
 	}
 	if t == nil {
-		return Trigger{}, userErrorf("trigger %s not found", id)
+		return Trigger{}, &UserError{Msg: fmt.Sprintf("trigger %s not found", id), Err: ErrNotFound}
 	}
 	return *t, nil
 }
