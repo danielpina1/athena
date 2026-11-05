@@ -519,6 +519,15 @@ func startDashboard(tb testing.TB) *dashboard {
 	if err := server.SetupWeb(dir, server.WebConfig{Listen: listen, Host: "localhost", TLS: "off"}); err != nil {
 		tb.Fatal(err)
 	}
+	// No local repository discovery: a scan of this machine's folders would only add noise to the measurements.
+	cfg, err := server.LoadConfig(dir)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	cfg.LocalRepoRoots = &[]string{}
+	if err := server.SaveConfig(dir, cfg); err != nil {
+		tb.Fatal(err)
+	}
 	// Every user line the session reads after the first is answered with one assistant line.
 	later := filepath.Join(dir, "later.jsonl")
 	line := `{"type":"assistant","message":{"model":"fake","id":"msg_bench","type":"message","role":"assistant",` +

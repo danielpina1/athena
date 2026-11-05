@@ -665,7 +665,7 @@ func (c *conn) sendDetail(td *athenav1.TicketDetail) {
 
 // fitDetail returns a detail that fits one frame: while it is too big, it drops the older half of the timeline (oldest
 // first, rounding up so one entry goes too), so the newest entries stay. The hub hands the same detail to every
-// watcher, so td is never modified: a trimmed detail is a new message sharing td's entries. It reports false when even
+// watcher, so td is never modified: a trimmed detail is a new message sharing td's entries, and the only one to carry timeline_trimmed. It reports false when even
 // an empty timeline does not fit.
 func fitDetail(td *athenav1.TicketDetail) (*athenav1.TicketDetail, bool) {
 	size := func(d *athenav1.TicketDetail) int {
@@ -675,7 +675,7 @@ func fitDetail(td *athenav1.TicketDetail) (*athenav1.TicketDetail, bool) {
 	if size(td) <= maxSnapshot {
 		return td, true
 	}
-	out := &athenav1.TicketDetail{Summary: td.GetSummary(), Timeline: td.GetTimeline(), Threads: td.GetThreads()}
+	out := &athenav1.TicketDetail{Summary: td.GetSummary(), Timeline: td.GetTimeline(), Threads: td.GetThreads(), TimelineTrimmed: true}
 	for size(out) > maxSnapshot {
 		n := len(out.Timeline)
 		if n == 0 {

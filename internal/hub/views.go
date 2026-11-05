@@ -69,6 +69,9 @@ func prURL(t *core.Ticket) string {
 	return ""
 }
 
+// defaultRuntime is the runtime of a Ticket whose Execution does not name one: Claude Code is the only one.
+const defaultRuntime = "claude"
+
 func ticketSummary(t *core.Ticket, st core.Stage) *athenav1.TicketSummary {
 	v := &athenav1.TicketSummary{
 		Id: t.ID, Title: t.Title, Stage: st.Stage, Action: st.Action, Repo: t.Repo,
@@ -76,9 +79,14 @@ func ticketSummary(t *core.Ticket, st core.Stage) *athenav1.TicketSummary {
 		NeedsYou: st.Stage == "person", CanRetry: core.CanRetry(t),
 		PendingApprovalId: t.PendingApproval, PrUrl: prURL(t),
 	}
+	v.Runtime = defaultRuntime
 	if t.Execution != nil {
 		v.Dir, v.Model = t.Execution.Directory, t.Execution.Model
+		if t.Execution.Runtime != "" {
+			v.Runtime = t.Execution.Runtime
+		}
 	}
+	v.Branch = node.WorktreeBranch(*t)
 	if a := t.LatestAssignment(); a != nil && a.Model != "" {
 		v.Model = a.Model
 	}
@@ -187,8 +195,9 @@ func timelineEntry(at time.Time, kind, text, ref string) *athenav1.TimelineEntry
 }
 
 // ticketTimeline lists what happened to a Ticket, oldest first, from the Ticket itself plus its origin Trigger and
-// its pending Approval (the two reads the caller makes). Replies are not in it: the Ticket does not hold them.
-func ticketTimeline(t *core.Ticket, origin *core.Trigger, pending *core.Approval) []*athenav1.TimelineEntry {
+// its Approvals (the reads the caller makes: the pending one and the answered ones). A person's message that reached
+// the Ticket (the owner's reply or a person's on a Channel) is a reply; any other Input is an input.
+func ticketTimeline(t *core.Ticket, origin *core.Trigger, pending *core.Approval, answered []core.Approval) []*athenav1.TimelineEntry {
 	var out []*athenav1.TimelineEntry
 	if origin != nil {
 		out = append(out, timelineEntry(origin.At, "trigger", origin.Text, origin.ID))
@@ -214,7 +223,29 @@ func ticketTimeline(t *core.Ticket, origin *core.Trigger, pending *core.Approval
 		if text == "" {
 			text = string(in.Kind)
 		}
-		out = append(out, timelineEntry(in.At, "input", text, in.ID))
+		kind := "input"
+		if in.Human && !in.Context && in.Kind != core.InputNote && in.Kind != core.InputResumed {
+			kind = "reply"
+		}
+		out = append(out, timelineEntry(in.At, kind, text, in.ID))
+	}
+	for i := range answered {
+		a := &answered[i]
+		verdict := "Approved"
+		if a.State == core.ApprovalDenied {
+			verdict = "Denied"
+		} else if a.State != core.ApprovalApproved {
+			verdict = "Expired"
+		}
+		text := verdict + ": " + a.Tool
+		if a.Answer != "" {
+			text += " (" + a.Answer + ")"
+		}
+		at := a.CreatedAt
+		if a.AnsweredAt != nil {
+			at = *a.AnsweredAt
+		}
+		out = append(out, timelineEntry(at, "approval", text, a.ID))
 	}
 	if pending != nil {
 		out = append(out, timelineEntry(pending.CreatedAt, "approval", pending.Tool+": "+pending.Summary, pending.ID))
@@ -223,8 +254,8 @@ func ticketTimeline(t *core.Ticket, origin *core.Trigger, pending *core.Approval
 	return out
 }
 
-func ticketDetail(t *core.Ticket, st core.Stage, origin *core.Trigger, pending *core.Approval) *athenav1.TicketDetail {
-	d := &athenav1.TicketDetail{Summary: ticketSummary(t, st), Timeline: ticketTimeline(t, origin, pending)}
+func ticketDetail(t *core.Ticket, st core.Stage, origin *core.Trigger, pending *core.Approval, answered []core.Approval) *athenav1.TicketDetail {
+	d := &athenav1.TicketDetail{Summary: ticketSummary(t, st), Timeline: ticketTimeline(t, origin, pending, answered)}
 	for _, f := range t.Follows {
 		d.Threads = append(d.Threads, f.Thread)
 	}

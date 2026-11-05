@@ -6,10 +6,11 @@
 //
 //	ATHENA_FAKE_FIXTURE            path of a .jsonl file replayed after the first stdin line
 //	ATHENA_FAKE_REPEAT             replay the fixture this many times (default 1)
-//	ATHENA_FAKE_STDIN_LOG          file every stdin line is appended to
+//	ATHENA_FAKE_STDIN_LOG          file every stdin line is appended to (it may name {ticket}, below)
 //	ATHENA_FAKE_ARGS_LOG           file receiving {"args":[...],"env":{ATHENA_*}} as JSON
 //	ATHENA_FAKE_ARGS_APPEND        file receiving the same record as one JSON line per invocation (appended)
-//	ATHENA_FAKE_ENV_LOG            file receiving the whole environment, one NAME=value per line
+//	ATHENA_FAKE_ENV_LOG            file receiving the whole environment, one NAME=value per line; {ticket} in the
+//	                               path is replaced by ATHENA_TICKET (one file per Ticket, the latest session's)
 //	ATHENA_FAKE_STDERR             text written to stderr at startup
 //	ATHENA_FAKE_EXIT_MID_TURN      when set, replay half of the fixture, then exit 3
 //	ATHENA_FAKE_EXIT_MID_TURN_ONCE path of a marker file: the first invocation that finds it missing creates it
@@ -19,6 +20,10 @@
 //	                               it missing creates it and exits 3 right after that replay
 //	ATHENA_FAKE_IGNORE_STDIN_CLOSE when set, keep running after stdin reaches EOF
 //	ATHENA_FAKE_NO_READ_STDIN      when set, never read stdin (a hung child)
+//
+// {ticket} in ATHENA_FAKE_FIXTURE or ATHENA_FAKE_LATER_FIXTURE gives each Ticket its own: it is replaced by
+// ATHENA_TICKET when the fixture is replayed (so a file written after the session started counts), and when that file
+// does not exist, by "default"; with neither there, nothing is replayed.
 //
 // With --replay-user-messages among its arguments it echoes each user line as the real CLI does when it takes the
 // message into a turn ({"type":"user",...,"isReplay":true}, with the line's uuid), before replaying for it.
@@ -60,7 +65,12 @@ func main() {
 		}
 	}
 	if p := os.Getenv("ATHENA_FAKE_ENV_LOG"); p != "" {
-		_ = os.WriteFile(p, []byte(strings.Join(os.Environ(), "\n")+"\n"), 0o600)
+		p = strings.ReplaceAll(p, "{ticket}", os.Getenv("ATHENA_TICKET"))
+		// Written whole and renamed, so a reader never sees half a file.
+		tmp := p + ".tmp"
+		if os.WriteFile(tmp, []byte(strings.Join(os.Environ(), "\n")+"\n"), 0o600) == nil {
+			_ = os.Rename(tmp, p)
+		}
 	}
 	if v := os.Getenv("ATHENA_FAKE_STDERR"); v != "" {
 		_, _ = os.Stderr.WriteString(v)
@@ -80,7 +90,7 @@ func main() {
 	}
 
 	var stdinLog *os.File
-	if p := os.Getenv("ATHENA_FAKE_STDIN_LOG"); p != "" {
+	if p := strings.ReplaceAll(os.Getenv("ATHENA_FAKE_STDIN_LOG"), "{ticket}", os.Getenv("ATHENA_TICKET")); p != "" {
 		f, err := os.OpenFile(p, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 		if err != nil {
 			os.Exit(4)
@@ -128,8 +138,30 @@ func main() {
 	}
 }
 
+// fixture is the path a fixture variable names, its {ticket} resolved; "" for none.
+func fixture(name string) string {
+	p := os.Getenv(name)
+	if !strings.Contains(p, "{ticket}") {
+		return p
+	}
+	for _, t := range []string{os.Getenv("ATHENA_TICKET"), "default"} {
+		if t == "" {
+			continue
+		}
+		if q := strings.ReplaceAll(p, "{ticket}", t); fileExists(q) {
+			return q
+		}
+	}
+	return ""
+}
+
+func fileExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
+}
+
 func replay(out *bufio.Writer, exitMidTurn bool) {
-	path := os.Getenv("ATHENA_FAKE_FIXTURE")
+	path := fixture("ATHENA_FAKE_FIXTURE")
 	if path == "" {
 		return
 	}
@@ -176,7 +208,7 @@ func holdResult(out *bufio.Writer, line string) {
 
 // replayLater replays ATHENA_FAKE_LATER_FIXTURE, then exits 3 once if ATHENA_FAKE_LATER_EXIT_ONCE says so.
 func replayLater(out *bufio.Writer) {
-	path := os.Getenv("ATHENA_FAKE_LATER_FIXTURE")
+	path := fixture("ATHENA_FAKE_LATER_FIXTURE")
 	if path == "" {
 		return
 	}

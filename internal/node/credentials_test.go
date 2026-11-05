@@ -337,6 +337,7 @@ func TestWorkerEnvHasNoToken(t *testing.T) {
 		"ATHENA_GITHUB_COMMIT_EMAIL": botEmail,
 		"ATHENA_GITHUB_NUMBER":       "7",
 		"ATHENA_GITHUB_PR_HEAD":      "fix-branch",
+		"ATHENA_GITHUB_KIND":         "pull",
 		"GIT_AUTHOR_NAME":            botLogin,
 		"GIT_AUTHOR_EMAIL":           botEmail,
 		"GIT_COMMITTER_NAME":         botLogin,

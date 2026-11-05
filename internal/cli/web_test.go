@@ -307,3 +307,58 @@ func TestWebRevokeThroughRunningServer(t *testing.T) {
 		t.Fatalf("status created the CA: %v", err)
 	}
 }
+
+// A passkey id is base64url, so about one in 64 starts with "-": revoke takes it as the id, not as a flag, with
+// --state-dir before or after it, and passkeys says so next to the list.
+func TestWebRevokeIDStartingWithDash(t *testing.T) {
+	dir, st := webState(t, "")
+	t0 := time.Date(2026, 11, 4, 9, 0, 0, 0, time.UTC)
+	for _, p := range []store.Passkey{
+		{ID: "-UaLIDzW5grOf1r9Ind", Name: "phone", Credential: []byte("{}"), CreatedAt: t0},
+		{ID: "--x2Kq", Name: "laptop", Credential: []byte("{}"), CreatedAt: t0.Add(time.Minute)},
+		{ID: "BBBBtablet", Name: "tablet", Credential: []byte("{}"), CreatedAt: t0.Add(2 * time.Minute)},
+	} {
+		if err := st.PutPasskey(p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	code, out, _ := runWeb(dir, "passkeys")
+	if code != 0 || !strings.Contains(out, `starts with "-"`) {
+		t.Fatalf("no hint for a dash id:\n%s", out)
+	}
+	// A "-" prefix of 8 characters or more is an id prefix.
+	if code, out, errs := runWeb(dir, "revoke", "-UaLIDzW"); code != 0 || !strings.Contains(out, `revoked "phone"`) {
+		t.Fatalf("revoke -prefix: %d %q %s", code, out, errs)
+	}
+	// A short "-" argument that is not an exact id is a flag, and an unknown one: usage, nothing revoked. An owner
+	// typing -y for "yes" must not revoke the one passkey whose id happens to start with "-y".
+	for _, arg := range []string{"--x2", "-y", "-"} {
+		if code, out, errs := runWeb(dir, "revoke", arg); code != 2 || !strings.Contains(strings.ToLower(errs), "usage") {
+			t.Fatalf("revoke %s: %d %q %s", arg, code, out, errs)
+		}
+	}
+	if list, _ := st.Passkeys(); len(list) != 2 {
+		t.Fatalf("%d passkeys after refused dash arguments", len(list))
+	}
+	// The exact id works however short, the flag after it (runWeb adds --state-dir at the end).
+	if code, out, errs := runWeb(dir, "revoke", "--x2Kq"); code != 0 || !strings.Contains(out, `revoked "laptop"`) {
+		t.Fatalf("revoke exact --id: %d %q %s", code, out, errs)
+	}
+	if list, _ := st.Passkeys(); len(list) != 1 || list[0].ID != "BBBBtablet" {
+		t.Fatalf("left %v", list)
+	}
+	// Without a dash id, no hint.
+	if _, out, _ := runWeb(dir, "passkeys"); strings.Contains(out, `starts with "-"`) {
+		t.Fatalf("hint without a dash id:\n%s", out)
+	}
+	// A real flag is still a flag: a bad one is a usage error, and --help is help.
+	if code, _, _ := runWeb(dir, "revoke", "--nope=1", "BBBBtablet"); code != 2 {
+		t.Fatalf("unknown flag: %d", code)
+	}
+	if code, _, errs := runWeb(dir, "revoke", "--help"); code != 0 || !strings.Contains(strings.ToLower(errs), "usage") {
+		t.Fatalf("--help: %d %s", code, errs)
+	}
+	if list, _ := st.Passkeys(); len(list) != 1 {
+		t.Fatalf("%d passkeys after --help", len(list))
+	}
+}

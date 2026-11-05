@@ -1,0 +1,509 @@
+import { act, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { IDBFactory } from "fake-indexeddb";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { createRuntime, type Runtime, SIGNED_OUT_NOTICE } from "@/app/boot";
+import { cancelReauth, requestReauth } from "@/features/auth/ReauthDialog";
+import { SessionGate } from "@/app/SessionGate";
+import { requestSignOut } from "@/lib/auth/session";
+import { ASSERTION, fakeCredentials, fakeFetch } from "@/lib/auth/testkit";
+import { Outbox } from "@/lib/commands/outbox";
+import { FakeServer } from "@/lib/link/fakeServer";
+import { useAthena } from "@/lib/store/state";
+
+const made: Runtime[] = [];
+beforeEach(() => useAthena.getState().reset());
+afterEach(() => {
+  for (const r of made.splice(0)) r.dispose();
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+});
+
+function setup(indexedDB: IDBFactory = new IDBFactory()) {
+  const server = new FakeServer();
+  const runtime = createRuntime({
+    url: "ws://athena.test/ws",
+    clientId: "abcdefghijklmnop",
+    WebSocketImpl: server.WebSocket,
+    indexedDB,
+  });
+  made.push(runtime);
+  return { server, runtime };
+}
+
+const signInRoutes = {
+  "POST /auth/login/begin": { json: ASSERTION },
+  "POST /auth/login/finish": { json: { authenticated: true } },
+};
+
+const gate = (runtime: ReturnType<typeof setup>["runtime"]) =>
+  render(
+    <SessionGate runtime={runtime}>
+      <p>the app</p>
+    </SessionGate>,
+  );
+
+test("close 4002 signs out and keeps the outbox", async () => {
+  const { server, runtime } = setup();
+  fakeFetch({ "GET /auth/session": { json: { authenticated: true } }, ...signInRoutes });
+  fakeCredentials();
+  const user = userEvent.setup();
+  gate(runtime);
+  await screen.findByText("the app");
+  server.welcome();
+  await waitFor(() => expect(runtime.client.status).toBe("open"));
+
+  // A command in flight when the session ends.
+  const result = runtime.outbox.submit({ case: "reply", value: { ticketId: "T-1", text: "hi" } });
+  await runtime.outbox.settled();
+  const sent = server.socket.sent("command");
+  expect(sent).toHaveLength(1);
+  const id = sent[0].id;
+
+  act(() => server.socket.serverClose(4002));
+  expect(await screen.findByText(SIGNED_OUT_NOTICE)).toBeTruthy();
+  expect(screen.queryByText("the app")).toBeNull();
+  // Nothing reconnects behind the sign-in page, and the command is still waiting, unresolved.
+  expect(server.sockets).toHaveLength(1);
+  expect(runtime.outbox.pending().map((c) => c.id)).toEqual([id]);
+
+  await user.click(screen.getByRole("button", { name: "Sign in with passkey" }));
+  await screen.findByText("the app");
+  expect(server.sockets).toHaveLength(2);
+  server.welcome();
+  await runtime.outbox.settled();
+  // The same command, by the same id, now that the owner is back.
+  expect(server.socket.sent("command").map((c) => c.id)).toEqual([id]);
+  void result;
+});
+
+test("signing out on 4002 leaves the next connect resuming from an empty store", async () => {
+  const { server, runtime } = setup();
+  fakeFetch({ "GET /auth/session": { json: { authenticated: true } }, ...signInRoutes });
+  fakeCredentials();
+  const user = userEvent.setup();
+  gate(runtime);
+  await screen.findByText("the app");
+  server.welcome("e1");
+  useAthena.setState({ epoch: "e1", cursor: 5n });
+
+  act(() => server.socket.serverClose(4002));
+  await screen.findByText(SIGNED_OUT_NOTICE);
+  expect(useAthena.getState().epoch).toBe("");
+  await user.click(screen.getByRole("button", { name: "Sign in with passkey" }));
+  await screen.findByText("the app");
+  server.welcome("e2");
+  const hello = server.socket.sent("hello")[0];
+  expect(hello.epoch).toBe("");
+  expect(hello.cursor).toBe(0n);
+});
+
+test("an explicit sign out clears the queue and resumes from an empty store", async () => {
+  const { server, runtime } = setup();
+  const { calls } = fakeFetch({
+    "GET /auth/session": { json: { authenticated: true } },
+    "POST /auth/logout": { json: { authenticated: false } },
+    ...signInRoutes,
+  });
+  fakeCredentials();
+  const user = userEvent.setup();
+  gate(runtime);
+  await screen.findByText("the app");
+  server.welcome("e1");
+  useAthena.setState({ epoch: "e1", cursor: 7n });
+  const waiting = runtime.outbox.submit({ case: "reply", value: { ticketId: "T-1", text: "hi" } });
+  await runtime.outbox.settled();
+
+  await act(() => runtime.signOut());
+  expect(calls.some((c) => c.path === "/auth/logout")).toBe(true);
+  expect((await waiting).code).toBe("unauthenticated");
+  expect(runtime.outbox.pending()).toEqual([]);
+  expect(await screen.findByRole("button", { name: "Sign in with passkey" })).toBeTruthy();
+  expect(screen.queryByText(SIGNED_OUT_NOTICE)).toBeNull();
+  expect(server.sockets).toHaveLength(1);
+
+  await user.click(screen.getByRole("button", { name: "Sign in with passkey" }));
+  await screen.findByText("the app");
+  server.welcome("e2");
+  const hello = server.socket.sent("hello")[0];
+  expect([hello.epoch, hello.cursor]).toEqual(["", 0n]);
+});
+
+test("an explicit sign out in another tab forgets this tab's queue too", async () => {
+  const here = setup();
+  const other = setup(); // another tab of the app, on the same device
+  fakeFetch({
+    "GET /auth/session": { json: { authenticated: true } },
+    "POST /auth/logout": { json: { authenticated: false } },
+  });
+  gate(here.runtime);
+  await screen.findByText("the app");
+  here.server.welcome();
+  await waitFor(() => expect(here.runtime.client.status).toBe("open"));
+  const rollback = vi.fn();
+  const waiting = here.runtime.outbox.submit({ case: "reply", value: { ticketId: "T-1", text: "hi" } }, { rollback });
+  await here.runtime.outbox.settled();
+
+  await other.runtime.checkSession();
+  await act(() => other.runtime.signOut());
+  // Nothing may be sent for this device again: not from this tab either, after its next sign-in.
+  expect((await waiting).code).toBe("unauthenticated");
+  expect(rollback).toHaveBeenCalledTimes(1);
+  expect(here.runtime.outbox.pending()).toEqual([]);
+});
+
+test("a session that expires in another tab leaves this tab's queue alone", async () => {
+  const here = setup();
+  const other = setup();
+  fakeFetch({ "GET /auth/session": { json: { authenticated: true } } });
+  gate(here.runtime);
+  await screen.findByText("the app");
+  here.server.welcome();
+  void here.runtime.outbox.submit({ case: "reply", value: { ticketId: "T-1", text: "hi" } });
+  await here.runtime.outbox.settled();
+
+  await other.runtime.checkSession();
+  other.server.welcome();
+  act(() => other.server.socket.serverClose(4002));
+  await other.runtime.outbox.settled();
+  await new Promise((r) => setTimeout(r, 10));
+  expect(here.runtime.outbox.pending().map((c) => c.action.case)).toEqual(["reply"]);
+});
+
+test("the owner's Sign out button goes through the runtime: link stopped, queue and state cleared", async () => {
+  const { server, runtime } = setup();
+  const { calls } = fakeFetch({
+    "GET /auth/session": { json: { authenticated: true } },
+    "POST /auth/logout": { json: { authenticated: false } },
+  });
+  gate(runtime);
+  await screen.findByText("the app");
+  server.welcome("e1");
+  useAthena.setState({ epoch: "e1", cursor: 3n });
+  const waiting = runtime.outbox.submit({ case: "reply", value: { ticketId: "T-1", text: "hi" } });
+  await runtime.outbox.settled();
+
+  await act(() => requestSignOut()); // what Settings › Devices calls
+  expect(calls.filter((c) => c.path === "/auth/logout")).toHaveLength(1);
+  expect((await waiting).code).toBe("unauthenticated");
+  expect(runtime.outbox.pending()).toEqual([]);
+  expect(useAthena.getState().epoch).toBe("");
+  expect(runtime.client.status).toBe("offline");
+  expect(await screen.findByRole("button", { name: "Sign in with passkey" })).toBeTruthy();
+});
+
+test("three failed connects check the session", async () => {
+  vi.useFakeTimers();
+  const { server, runtime } = setup();
+  let asked = 0;
+  const { calls } = fakeFetch({
+    // The first answer is the start-up check; after that the session is gone.
+    "GET /auth/session": () => ({ json: { authenticated: asked++ === 0 } }),
+  });
+  const checks = () => calls.filter((c) => c.path === "/auth/session").length;
+  gate(runtime);
+  await act(() => vi.advanceTimersByTimeAsync(0));
+  expect(screen.getByText("the app")).toBeTruthy();
+  expect(checks()).toBe(1);
+
+  // An upgrade refused with 401 reaches the page as a plain close, never a Welcome.
+  const fail = () => act(() => vi.advanceTimersByTimeAsync(20_000).then(() => server.socket.serverClose(1006)));
+  server.socket.serverClose(1006);
+  await fail();
+  expect(checks()).toBe(1);
+  expect(screen.getByText("the app")).toBeTruthy();
+  await fail();
+  await act(() => vi.advanceTimersByTimeAsync(0));
+  expect(checks()).toBe(2);
+  expect(screen.getByText(SIGNED_OUT_NOTICE)).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Sign in with passkey" })).toBeTruthy();
+  // And the link stops trying with a dead session.
+  const n = server.sockets.length;
+  await act(() => vi.advanceTimersByTimeAsync(60_000));
+  expect(server.sockets).toHaveLength(n);
+});
+
+test("the session is asked once per three failures, and a Welcome starts the count again", async () => {
+  vi.useFakeTimers();
+  const { server, runtime } = setup();
+  const { calls } = fakeFetch({ "GET /auth/session": { json: { authenticated: true } } });
+  const checks = () => calls.filter((c) => c.path === "/auth/session").length;
+  gate(runtime);
+  await act(() => vi.advanceTimersByTimeAsync(0));
+  const fail = () => act(() => vi.advanceTimersByTimeAsync(20_000).then(() => server.socket.serverClose(1006)));
+  server.socket.serverClose(1006);
+  await fail();
+  // A connection that did reach Welcome and then dropped is the network, not the session.
+  await act(() => vi.advanceTimersByTimeAsync(20_000));
+  server.welcome();
+  server.socket.serverClose(1006);
+  await fail();
+  await fail();
+  expect(checks()).toBe(1); // 2 failures after the Welcome: not yet
+  await fail();
+  await act(() => vi.advanceTimersByTimeAsync(0));
+  expect(checks()).toBe(2);
+  // Still signed in, so still connecting; the next check needs three more failures.
+  await fail();
+  await fail();
+  expect(checks()).toBe(2);
+  await fail();
+  await act(() => vi.advanceTimersByTimeAsync(0));
+  expect(checks()).toBe(3);
+  expect(screen.getByText("the app")).toBeTruthy();
+});
+
+test("close 4002 keeps a command held for a step-up and resends it after sign-in", async () => {
+  const { server, runtime } = setup();
+  fakeFetch({ "GET /auth/session": { json: { authenticated: true } }, ...signInRoutes });
+  fakeCredentials();
+  const user = userEvent.setup();
+  gate(runtime);
+  await screen.findByText("the app");
+  server.welcome();
+  await waitFor(() => expect(runtime.client.status).toBe("open"));
+  const result = runtime.outbox.submit({ case: "revokePasskey", value: { id: "P-1" } });
+  let settled = false;
+  void result.then(() => (settled = true));
+  await runtime.outbox.settled();
+  const id = server.socket.sent("command")[0].id;
+
+  // The server wants a step-up; the owner has the dialog open when the session ends.
+  act(() => {
+    server.socket.push({ body: { case: "commandResult", value: { id, ok: false, code: "reauth_required" } } }, { durable: true });
+  });
+  await screen.findByRole("dialog", { name: "Confirm it is you" });
+  act(() => server.socket.serverClose(4002));
+  await screen.findByText(SIGNED_OUT_NOTICE);
+  await runtime.outbox.settled();
+
+  // Not failed, and nothing left asking for a step-up.
+  expect(settled).toBe(false);
+  expect(runtime.outbox.pending().map((c) => c.id)).toEqual([id]);
+
+  await user.click(screen.getByRole("button", { name: "Sign in with passkey" }));
+  await screen.findByText("the app");
+  server.welcome();
+  await runtime.outbox.settled();
+  expect(server.socket.sent("command").map((c) => c.id)).toEqual([id]);
+  expect(settled).toBe(false);
+});
+
+test("close 4002 drops a revoke of this device, so it is never replayed after sign-in", async () => {
+  const { server, runtime } = setup();
+  fakeFetch({ "GET /auth/session": { json: { authenticated: true } }, ...signInRoutes });
+  fakeCredentials();
+  const user = userEvent.setup();
+  gate(runtime);
+  await screen.findByText("the app");
+  server.welcome();
+  await waitFor(() => expect(runtime.client.status).toBe("open"));
+  const result = runtime.outbox.submit({ case: "revokePasskey", value: { id: "P-me" } }, { endsSession: true });
+  await runtime.outbox.settled();
+  expect(server.socket.sent("command")).toHaveLength(1);
+
+  // The server ends the session before the result arrives.
+  act(() => server.socket.serverClose(4002));
+  await screen.findByText(SIGNED_OUT_NOTICE);
+  expect(await result).toMatchObject({ ok: false, code: "signed_out" });
+
+  await user.click(screen.getByRole("button", { name: "Sign in with passkey" }));
+  await screen.findByText("the app");
+  server.welcome();
+  await runtime.outbox.settled();
+  expect(server.socket.sent("command")).toHaveLength(0);
+});
+
+test("a page that starts signed out drops a revoke of this device a reload brought back", async () => {
+  // The revoke was queued offline and the page closed; the session ended meanwhile (expiry, or a sign-out elsewhere).
+  const idb = new IDBFactory();
+  const earlier = new Outbox(idb, () => false);
+  void earlier.submit({ case: "revokePasskey", value: { id: "P-me" } }, { endsSession: true });
+  void earlier.submit({ case: "reply", value: { ticketId: "T-1", text: "hi" } });
+  await earlier.settled();
+
+  const { server, runtime } = setup(idb);
+  fakeFetch({ "GET /auth/session": { json: { authenticated: false } }, ...signInRoutes });
+  fakeCredentials();
+  const user = userEvent.setup();
+  gate(runtime);
+  await user.click(await screen.findByRole("button", { name: "Sign in with passkey" }));
+  await screen.findByText("the app");
+  server.welcome();
+  await runtime.outbox.settled();
+  // The fresh sign-in gets the reply, never the revoke that would sign it straight out again.
+  expect(server.socket.sent("command").map((c) => c.action.case)).toEqual(["reply"]);
+});
+
+test("an explicit sign out leaves no step-up request behind", async () => {
+  const { server, runtime } = setup();
+  fakeFetch({
+    "GET /auth/session": { json: { authenticated: true } },
+    "POST /auth/logout": { json: { authenticated: false } },
+  });
+  gate(runtime);
+  await screen.findByText("the app");
+  server.welcome();
+  const asked = requestReauth();
+  await act(() => runtime.signOut());
+  expect(await asked).toBe(false);
+  cancelReauth();
+});
+
+test("a start-up check that could not reach the server runs again when the network is back", async () => {
+  const { runtime } = setup();
+  let n = 0;
+  const { calls } = fakeFetch({
+    "GET /auth/session": () => {
+      if (n++ === 0) throw new TypeError("network down");
+      return { json: { authenticated: true } };
+    },
+  });
+  gate(runtime);
+  expect(await screen.findByText("Could not reach Athena. Check your connection.")).toBeTruthy();
+  expect(calls).toHaveLength(1);
+
+  act(() => {
+    window.dispatchEvent(new Event("online"));
+  });
+  await screen.findByText("the app");
+  expect(calls).toHaveLength(2);
+});
+
+test("a hidden page does not retry the check, a shown one does", async () => {
+  const { runtime } = setup();
+  let n = 0;
+  const { calls } = fakeFetch({
+    "GET /auth/session": () => {
+      if (n++ === 0) throw new TypeError("network down");
+      return { json: { authenticated: true } };
+    },
+  });
+  gate(runtime);
+  await screen.findByText("Could not reach Athena. Check your connection.");
+  const vis = vi.spyOn(document, "visibilityState", "get");
+  vis.mockReturnValue("hidden");
+  act(() => {
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  expect(calls).toHaveLength(1);
+  vis.mockReturnValue("visible");
+  act(() => {
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await screen.findByText("the app");
+  vis.mockRestore();
+});
+
+test("the installed app started offline shows the shell, then checks the session when the network is back", async () => {
+  // The service worker served the cached shell: the owner sees the app (and the link's unreachable banner), not sign-in.
+  Object.defineProperty(navigator, "serviceWorker", { configurable: true, value: { controller: {} } });
+  try {
+    const { server, runtime } = setup();
+    let n = 0;
+    const { calls } = fakeFetch({
+      "GET /auth/session": () => {
+        if (n++ === 0) throw new TypeError("network down");
+        return { json: { authenticated: false } };
+      },
+    });
+    gate(runtime);
+    await screen.findByText("the app");
+    expect(screen.queryByText("Could not reach Athena. Check your connection.")).toBeNull();
+    expect(server.sockets).toHaveLength(1); // the link tries, and its banner says the server is unreachable
+
+    // Back online, and the session had ended meanwhile: sign-in, with the link stopped.
+    act(() => {
+      window.dispatchEvent(new Event("online"));
+    });
+    await screen.findByRole("button", { name: "Sign in with passkey" });
+    expect(calls).toHaveLength(2);
+    expect(runtime.client.status).toBe("offline");
+    expect(server.sockets.at(-1)!.readyState).toBe(3);
+  } finally {
+    delete (navigator as { serviceWorker?: unknown }).serviceWorker;
+  }
+});
+
+test("leaving the offline shell for sign-in cleans up as any sign-out does", async () => {
+  Object.defineProperty(navigator, "serviceWorker", { configurable: true, value: { controller: {} } });
+  try {
+    const { runtime } = setup();
+    let n = 0;
+    fakeFetch({
+      "GET /auth/session": () => {
+        if (n++ === 0) throw new TypeError("network down");
+        return { json: { authenticated: false } };
+      },
+    });
+    gate(runtime);
+    await screen.findByText("the app");
+    // A step-up asked for in the shell must not outlive it.
+    const asked = requestReauth();
+    act(() => {
+      window.dispatchEvent(new Event("online"));
+    });
+    expect(await screen.findByText(SIGNED_OUT_NOTICE)).toBeTruthy();
+    expect(await asked).toBe(false);
+  } finally {
+    delete (navigator as { serviceWorker?: unknown }).serviceWorker;
+  }
+});
+
+test("a server error on the start-up check is not taken for an offline start", async () => {
+  Object.defineProperty(navigator, "serviceWorker", { configurable: true, value: { controller: {} } });
+  try {
+    const { server, runtime } = setup();
+    let n = 0;
+    fakeFetch({
+      "GET /auth/session": () => (n++ === 0 ? { status: 502, json: { code: "internal" } } : { json: { authenticated: true } }),
+    });
+    gate(runtime);
+    expect(await screen.findByText("Athena's server had an error. Try again in a moment.")).toBeTruthy();
+    expect(screen.queryByText("the app")).toBeNull();
+    expect(server.sockets).toHaveLength(0);
+    // Asked again when the page is shown or the network comes back.
+    act(() => {
+      window.dispatchEvent(new Event("online"));
+    });
+    await screen.findByText("the app");
+  } finally {
+    delete (navigator as { serviceWorker?: unknown }).serviceWorker;
+  }
+});
+
+test("a server error while the offline shell is up keeps the shell; the link's next attempt checks again", async () => {
+  Object.defineProperty(navigator, "serviceWorker", { configurable: true, value: { controller: {} } });
+  try {
+    const { server, runtime } = setup();
+    let n = 0;
+    const { calls } = fakeFetch({
+      "GET /auth/session": () => {
+        n++;
+        if (n === 1) throw new TypeError("network down");
+        if (n === 2) return { status: 502, json: { code: "internal" } }; // a proxy while Athena restarts
+        return { json: { authenticated: true } };
+      },
+    });
+    gate(runtime);
+    await screen.findByText("the app");
+    act(() => {
+      window.dispatchEvent(new Event("online"));
+    });
+    await waitFor(() => expect(calls).toHaveLength(2));
+    await runtime.outbox.settled();
+    // Not a "signed out" answer: the shell and its link stay.
+    expect(screen.getByText("the app")).toBeTruthy();
+    expect(screen.queryByText("Athena's server had an error. Try again in a moment.")).toBeNull();
+    expect(runtime.client.status).not.toBe("signedOut");
+    const sockets = server.sockets.length;
+
+    // No online or visibility event comes (the device never went offline): the link's own next attempt asks again.
+    act(() => server.socket.serverClose(1006));
+    await waitFor(() => expect(calls).toHaveLength(3), { timeout: 5000 });
+    await waitFor(() => expect(server.sockets.length).toBeGreaterThan(sockets));
+    expect(screen.getByText("the app")).toBeTruthy();
+  } finally {
+    delete (navigator as { serviceWorker?: unknown }).serviceWorker;
+  }
+});

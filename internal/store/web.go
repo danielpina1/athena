@@ -9,14 +9,15 @@ import (
 )
 
 // Changes are the records one committed transaction wrote: the ids of the Tickets, Approvals, Triggers, Threads
-// (by key) and Decisions it put, each once, in the order first written, and whether it saved a Policy revision.
+// (by key) and Decisions it put, each once, in the order first written, and whether it saved a Policy revision, a
+// notification-preferences revision or a prompt revision.
 type Changes struct {
 	Tickets, Approvals, Triggers, Threads, Decisions []string
-	Policy                                           bool
+	Policy, Notifications, Prompts                   bool
 }
 
 func (c *Changes) empty() bool {
-	return !c.Policy && len(c.Tickets)+len(c.Approvals)+len(c.Triggers)+len(c.Threads)+len(c.Decisions) == 0
+	return !c.Policy && !c.Notifications && !c.Prompts && len(c.Tickets)+len(c.Approvals)+len(c.Triggers)+len(c.Threads)+len(c.Decisions) == 0
 }
 
 // addID appends id to ids unless it is already there.

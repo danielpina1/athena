@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/coder/websocket"
@@ -56,7 +57,7 @@ func TestSecurityHeaders(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, h := newServerHandler(t, func(c *ServerConfig) { c.VAPID, c.CA = v, ca })
-	for _, path := range []string{"/", "/enroll", "/app.js", "/healthz", "/auth/session", "/push/key", "/ca.pem", "/ca.mobileconfig", "/ws", "/nowhere"} {
+	for _, path := range []string{"/", "/enroll", "/nope.js", "/healthz", "/auth/session", "/push/key", "/ca.pem", "/ca.mobileconfig", "/ws", "/nowhere"} {
 		rec := get(t, h, path)
 		hd := rec.Header()
 		if got := hd.Get("Content-Security-Policy"); got != wantCSP {
@@ -71,20 +72,6 @@ func TestSecurityHeaders(t *testing.T) {
 		if got := hd.Get("Referrer-Policy"); got != "no-referrer" {
 			t.Errorf("%s: Referrer-Policy %q", path, got)
 		}
-	}
-	// The pages load their one script from the origin and run nothing inline, so the CSP holds them.
-	for _, path := range []string{"/", "/enroll"} {
-		rec := get(t, h, path)
-		body := rec.Body.String()
-		if rec.Code != http.StatusOK || !strings.HasPrefix(rec.Header().Get("Content-Type"), "text/html") {
-			t.Fatalf("%s = %d %s", path, rec.Code, rec.Header().Get("Content-Type"))
-		}
-		if !strings.Contains(body, `<script src="/app.js"`) || strings.Count(body, "<script") != 1 || strings.Contains(body, "style=") || strings.Contains(body, "onclick") {
-			t.Fatalf("%s: page is not CSP-clean:\n%s", path, body)
-		}
-	}
-	if rec := get(t, h, "/app.js"); rec.Code != http.StatusOK || !strings.HasPrefix(rec.Header().Get("Content-Type"), "text/javascript") {
-		t.Fatalf("app.js = %d %q", rec.Code, rec.Header().Get("Content-Type"))
 	}
 	if rec := get(t, h, "/push/key"); rec.Code != http.StatusOK || rec.Body.String() != v.PublicKey() {
 		t.Fatalf("push key = %d %q", rec.Code, rec.Body)
@@ -247,5 +234,92 @@ func TestServerErrorLogLevels(t *testing.T) {
 	}
 	if lv, ok := rl.recs["http: panic serving 10.0.0.9:5556: boom"]; !ok || lv != slog.LevelWarn {
 		t.Fatalf("panic logged at %v (%v): %v", lv, ok, rl.recs)
+	}
+}
+
+var spaFS = fstest.MapFS{
+	"index.html":           {Data: []byte(`<!doctype html><script type="module" src="/assets/index-abc.js"></script><div id="root"></div>`)},
+	"assets/index-abc.js":  {Data: []byte("console.log(1)")},
+	"assets/index-abc.css": {Data: []byte("a{}")},
+	".vite/manifest.json":  {Data: []byte("{}")},
+	".gitkeep":             {Data: []byte("")},
+	"sw.js":                {Data: []byte("self")},
+	"manifest.webmanifest": {Data: []byte("{}")},
+}
+
+func TestSPAServesAssetsImmutable(t *testing.T) {
+	_, h := newServerHandler(t, func(c *ServerConfig) { c.UI = spaFS })
+	for path, ct := range map[string]string{"/assets/index-abc.js": "text/javascript", "/assets/index-abc.css": "text/css"} {
+		rec := get(t, h, path)
+		if rec.Code != 200 || rec.Header().Get("Cache-Control") != "public, max-age=31536000, immutable" || !strings.HasPrefix(rec.Header().Get("Content-Type"), ct) {
+			t.Fatalf("%s = %d %v", path, rec.Code, rec.Header())
+		}
+	}
+	for path, ct := range map[string]string{"/sw.js": "text/javascript", "/manifest.webmanifest": "application/manifest+json"} {
+		rec := get(t, h, path)
+		if rec.Code != 200 || rec.Header().Get("Cache-Control") != "no-cache" || !strings.HasPrefix(rec.Header().Get("Content-Type"), ct) {
+			t.Fatalf("%s = %d %v", path, rec.Code, rec.Header())
+		}
+	}
+}
+
+func TestSPAFallbackServesIndexNoCache(t *testing.T) {
+	_, h := newServerHandler(t, func(c *ServerConfig) { c.UI = spaFS })
+	for _, path := range []string{"/", "/tickets/T-1", "/enroll"} {
+		rec := get(t, h, path)
+		if rec.Code != 200 || rec.Header().Get("Cache-Control") != "no-cache" || !strings.HasPrefix(rec.Header().Get("Content-Type"), "text/html") || !strings.Contains(rec.Body.String(), `id="root"`) {
+			t.Fatalf("%s = %d %v %q", path, rec.Code, rec.Header(), rec.Body)
+		}
+	}
+}
+
+func TestSPAUnknownFileIs404(t *testing.T) {
+	_, h := newServerHandler(t, func(c *ServerConfig) { c.UI = spaFS })
+	for _, path := range []string{"/nope.js", "/assets/missing.css", "/app.js"} {
+		if rec := get(t, h, path); rec.Code != 404 {
+			t.Fatalf("%s = %d", path, rec.Code)
+		}
+	}
+}
+
+func TestUnbuiltServesFallbackPage(t *testing.T) {
+	_, h := newServerHandler(t, nil)
+	for _, path := range []string{"/", "/enroll", "/tickets/T-1"} {
+		rec := get(t, h, path)
+		body := rec.Body.String()
+		if rec.Code != 200 || !strings.Contains(body, "Dashboard not built: run make web") || strings.Contains(body, "<script") {
+			t.Fatalf("%s = %d %q", path, rec.Code, body)
+		}
+	}
+}
+
+func TestCSPUnchanged(t *testing.T) {
+	if contentSecurityPolicy != wantCSP {
+		t.Fatalf("CSP changed: %q", contentSecurityPolicy)
+	}
+	_, h := newServerHandler(t, func(c *ServerConfig) { c.UI = spaFS })
+	if got := get(t, h, "/").Header().Get("Content-Security-Policy"); got != wantCSP {
+		t.Fatalf("CSP header %q", got)
+	}
+}
+
+func TestPlaceholderRoutesGone(t *testing.T) {
+	_, h := newServerHandler(t, func(c *ServerConfig) { c.UI = spaFS })
+	if rec := get(t, h, "/app.js"); rec.Code != 404 {
+		t.Fatalf("/app.js = %d", rec.Code)
+	}
+}
+
+func TestSPARefusesDotfilesDirectoriesAndTraversal(t *testing.T) {
+	_, h := newServerHandler(t, func(c *ServerConfig) { c.UI = spaFS })
+	for _, path := range []string{"/.gitkeep", "/.vite/manifest.json", "/.vite", "/assets/", "/assets", "/go.mod", "/assets/%2e%2e/%2e%2e/go.mod"} {
+		if rec := get(t, h, path); rec.Code != 404 {
+			t.Fatalf("%s = %d %q", path, rec.Code, rec.Body)
+		}
+	}
+	// The mux cleans a traversal into a redirect to the cleaned path, which is itself a 404.
+	rec := get(t, h, "/assets/../../go.mod")
+	if rec.Code != http.StatusTemporaryRedirect || rec.Header().Get("Location") != "/go.mod" {
+		t.Fatalf("traversal = %d %v", rec.Code, rec.Header())
 	}
 }

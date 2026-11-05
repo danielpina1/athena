@@ -3,6 +3,8 @@ package hub
 import (
 	"context"
 	"fmt"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 	"io"
 	"log/slog"
 	"sort"
@@ -30,27 +32,39 @@ type fakeSource struct {
 	revision  int
 	settings  string
 	node      node.Status
+	repos     []*athenav1.RepoView
+	repoReads int
+	kinds     []string
+	muted     []string
+	prompts   *athenav1.PromptsView
 }
 
 func newFake() *fakeSource {
 	return &fakeSource{tickets: map[string]core.Ticket{}, approvals: map[string]core.Approval{},
 		triggers: map[string]core.Trigger{}, threads: map[string]core.Thread{}, decisions: map[string]core.Decision{},
-		settings: "{}"}
+		settings: "{}", prompts: &athenav1.PromptsView{}}
 }
 
 var epoch0 = time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
 
 func (f *fakeSource) put(t core.Ticket) { f.mu.Lock(); f.tickets[t.ID] = t; f.mu.Unlock() }
 
-func (f *fakeSource) Tickets(includeEnded bool) ([]core.Ticket, error) {
+func (f *fakeSource) Tickets(endedLimit int) ([]core.Ticket, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	var out []core.Ticket
+	var out, ended []core.Ticket
 	for _, t := range f.tickets {
-		if includeEnded || t.Ended == nil {
+		if t.Ended == nil {
 			out = append(out, t)
+		} else {
+			ended = append(ended, t)
 		}
 	}
+	sort.Slice(ended, func(i, j int) bool { return ended[i].UpdatedAt.After(ended[j].UpdatedAt) })
+	if len(ended) > endedLimit {
+		ended = ended[:endedLimit]
+	}
+	out = append(out, ended...)
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out, nil
 }
@@ -92,6 +106,36 @@ func (f *fakeSource) AnsweredApprovals(limit int) ([]core.Approval, error) {
 	return sortedBy(f.approvals, func(a, b core.Approval) bool { return a.ID > b.ID },
 		func(a core.Approval) bool { return a.State != core.ApprovalPending }, limit), nil
 }
+
+func (f *fakeSource) TicketAnsweredApprovals(ticketID string) ([]core.Approval, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return sortedBy(f.approvals, func(a, b core.Approval) bool { return a.ID > b.ID },
+		func(a core.Approval) bool { return a.State != core.ApprovalPending && a.TicketID == ticketID }, 0), nil
+}
+
+func (f *fakeSource) Repos() ([]*athenav1.RepoView, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.repoReads++
+	return f.repos, nil
+}
+
+func (f *fakeSource) setRepos(r ...*athenav1.RepoView) { f.mu.Lock(); f.repos = r; f.mu.Unlock() }
+
+func (f *fakeSource) Notifications() ([]string, []string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.kinds, f.muted, nil
+}
+
+func (f *fakeSource) Prompts() (*athenav1.PromptsView, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return proto.Clone(f.prompts).(*athenav1.PromptsView), nil
+}
+
+func (f *fakeSource) setMuted(m ...string) { f.mu.Lock(); f.muted = m; f.mu.Unlock() }
 
 func (f *fakeSource) Approval(id string) (core.Approval, error) {
 	f.mu.Lock()
@@ -807,5 +851,139 @@ func TestWaitJoinsReadsInFlight(t *testing.T) {
 		case <-time.After(2 * time.Second):
 			t.Fatalf("%s: Wait did not return after the read", what)
 		}
+	}
+}
+
+func repoView(name, kind string) *athenav1.RepoView {
+	return &athenav1.RepoView{Name: name, Kind: kind}
+}
+
+func TestReposInSnapshotAndDeltaOnlyOnChange(t *testing.T) {
+	f := newFake()
+	f.setRepos(repoView("a/b", "github"))
+	h := start(t, f)
+	snap, err := h.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Repos) != 1 || snap.Repos[0].Name != "a/b" {
+		t.Fatalf("snapshot repos = %v", snap.Repos)
+	}
+	sub, _ := h.Subscribe(0, h.Epoch())
+	defer sub.Close()
+
+	// A Ticket commit that leaves the list as it was publishes the Ticket alone.
+	f.put(ticket("T-1"))
+	h.OnCommit(store.Changes{Tickets: []string{"T-1"}})
+	if d := next(t, sub); d.GetTicket() == nil {
+		t.Fatalf("first delta = %v", d)
+	}
+	none(t, sub)
+
+	// A change publishes the whole list, once.
+	f.setRepos(repoView("/tmp/x", "dir"), repoView("a/b", "github"))
+	placed := ticket("T-1")
+	placed.Execution = &core.Execution{Directory: "/tmp/x"}
+	f.put(placed)
+	h.OnCommit(store.Changes{Tickets: []string{"T-1"}})
+	next(t, sub) // the Ticket
+	d := next(t, sub)
+	if r := d.GetRepos().GetRepos(); len(r) != 2 || r[0].Name != "/tmp/x" || r[0].Kind != "dir" {
+		t.Fatalf("repos delta = %v", d)
+	}
+	h.OnCommit(store.Changes{Tickets: []string{"T-1"}})
+	next(t, sub)
+	none(t, sub)
+}
+
+// ReposChanged (a scan found other local repositories) publishes the list when it changed, and only then.
+func TestReposChangedPublishesOnlyAChange(t *testing.T) {
+	f := newFake()
+	f.setRepos(repoView("a/b", "github"))
+	h := start(t, f)
+	sub, _ := h.Subscribe(0, h.Epoch())
+	defer sub.Close()
+	h.ReposChanged()
+	none(t, sub)
+	f.setRepos(repoView("a/b", "github"), repoView("/src/x", "git"))
+	h.ReposChanged()
+	if r := next(t, sub).GetRepos().GetRepos(); len(r) != 2 || r[1].Name != "/src/x" || r[1].Kind != "git" {
+		t.Fatalf("repos delta = %v", r)
+	}
+	h.ReposChanged()
+	none(t, sub)
+}
+
+// A commit of a Ticket whose place is known and not newer than its last use does not even read the repos.
+func TestKnownPlacementSkipsReposRead(t *testing.T) {
+	f := newFake()
+	used := &athenav1.RepoView{Name: "o/r", Kind: "github", LastUsedAt: timestamppb.New(epoch0.Add(time.Hour))}
+	f.setRepos(used)
+	h := start(t, f)
+	sub, _ := h.Subscribe(0, h.Epoch())
+	defer sub.Close()
+	tk := ticket("T-1")
+	tk.Repo = "o/r"
+	f.put(tk)
+	f.mu.Lock()
+	before := f.repoReads
+	f.mu.Unlock()
+	h.OnCommit(store.Changes{Tickets: []string{"T-1"}})
+	next(t, sub)
+	f.mu.Lock()
+	after := f.repoReads
+	f.mu.Unlock()
+	if after != before {
+		t.Errorf("repos were read %d times for a progress commit", after-before)
+	}
+	// A newer Ticket on it moves it up the list: read.
+	tk.ID, tk.CreatedAt = "T-2", epoch0.Add(2*time.Hour)
+	f.put(tk)
+	h.OnCommit(store.Changes{Tickets: []string{"T-2"}})
+	next(t, sub)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.repoReads == after {
+		t.Error("a newer Ticket on a known repository did not re-read the repos")
+	}
+}
+
+func TestNotificationsInSnapshotAndDeltaOnChange(t *testing.T) {
+	f := newFake()
+	f.kinds = []string{"approval", "answer"}
+	h := start(t, f)
+	snap, _ := h.Snapshot()
+	if got := snap.Notifications; len(got.Kinds) != 2 || len(got.Muted) != 0 {
+		t.Fatalf("snapshot notifications = %v", got)
+	}
+	sub, _ := h.Subscribe(0, h.Epoch())
+	defer sub.Close()
+	h.OnCommit(store.Changes{Notifications: true}) // a save that changed nothing
+	none(t, sub)
+	f.setMuted("answer")
+	h.OnCommit(store.Changes{Notifications: true})
+	d := next(t, sub)
+	if n := d.GetNotifications(); len(n.GetMuted()) != 1 || n.Muted[0] != "answer" || len(n.Kinds) != 2 {
+		t.Fatalf("notifications delta = %v", d)
+	}
+}
+
+func (f *fakeSource) setPrompts(v *athenav1.PromptsView) { f.mu.Lock(); f.prompts = v; f.mu.Unlock() }
+
+func TestPromptsDeltaOnSave(t *testing.T) {
+	f := newFake()
+	f.setPrompts(&athenav1.PromptsView{Revision: 1, Parts: []*athenav1.PromptPartView{{Name: "worker", Overridden: true}}})
+	h := start(t, f)
+	snap, _ := h.Snapshot()
+	if got := snap.Prompts; got.GetRevision() != 1 || len(got.Parts) != 1 || !got.Parts[0].Overridden {
+		t.Fatalf("snapshot prompts = %v", got)
+	}
+	sub, _ := h.Subscribe(0, h.Epoch())
+	defer sub.Close()
+	f.setPrompts(&athenav1.PromptsView{Revision: 2, Parts: []*athenav1.PromptPartView{{Name: "worker", Overridden: true, DefaultUpdated: true}}})
+	h.OnCommit(store.Changes{Prompts: true})
+	d := next(t, sub)
+	if p := d.GetPrompts(); p.GetRevision() != 2 || !p.Parts[0].DefaultUpdated {
+		t.Fatalf("prompts delta = %v", d)
 	}
 }

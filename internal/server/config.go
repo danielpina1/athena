@@ -31,7 +31,8 @@ import (
 //	 "sandbox": {"enabled": true, "required": false, "allowedDomains": [], "allowWrite": [],
 //	             "weakerNetworkIsolation": true, "caFile": ""},
 //	 "web": {"enabled": false, "listen": ":8443", "host": "", "ips": [], "tls": "ca",
-//	         "acme": {"email", "provider", "resolvers": [], "directory", "agreeTos": false}}}
+//	         "acme": {"email", "provider", "resolvers": [], "directory", "agreeTos": false}},
+//	 "localRepoRoots": ["~/code"]}
 //
 // It holds the path of the GitHub App's private key, never the key. Without the file, or without its github part,
 // the server runs owner tasks only: no Source, no router. Without an enabled web part there is no dashboard endpoint.
@@ -54,6 +55,67 @@ type FileConfig struct {
 	Sandbox            SandboxConfig `json:"sandbox"`
 	// Web is the dashboard's HTTPS endpoint, written by `athena web setup`; nil (left out) is off.
 	Web *WebConfig `json:"web,omitempty"`
+	// LocalRepoRoots are the folders whose git repositories (the folder itself, its children and grandchildren) the
+	// dashboard lists for a new task; an entry is an absolute path or starts with "~/". Left out (nil), it is the
+	// existing ones of DefaultLocalRepoRoots; an empty list turns the listing off. A pointer, so that a saved
+	// configuration keeps an explicit empty list.
+	LocalRepoRoots *[]string `json:"localRepoRoots,omitempty"`
+}
+
+// DefaultLocalRepoRoots are the folders searched for local git repositories when localRepoRoots is left out; only
+// the ones that exist are used.
+var DefaultLocalRepoRoots = []string{"~/Developer", "~/code", "~/src", "~/repos", "~/Projects", "~/Desktop"}
+
+// validateLocalRepoRoots checks that each entry is an absolute path or starts with "~/", once.
+func validateLocalRepoRoots(roots []string) error {
+	seen := map[string]bool{}
+	for _, r := range roots {
+		if !filepath.IsAbs(r) && !strings.HasPrefix(r, "~/") {
+			return fmt.Errorf("localRepoRoots entry %q must be an absolute path or start with ~/", r)
+		}
+		clean := filepath.Clean(r)
+		if seen[clean] {
+			return fmt.Errorf("localRepoRoots entry %q is listed twice", r)
+		}
+		seen[clean] = true
+	}
+	return nil
+}
+
+// expandHome makes "~/x" home/x, cleaned; it returns false for a "~/" entry without a home directory.
+func expandHome(p, home string) (string, bool) {
+	if rest, ok := strings.CutPrefix(p, "~/"); ok {
+		if home == "" {
+			return "", false
+		}
+		return filepath.Join(home, rest), true
+	}
+	return filepath.Clean(p), true
+}
+
+// localRepoRoots is the folders to search for local git repositories, "~/" expanded against home: the configured
+// ones, or the default ones that are directories when none are configured. An empty result turns the listing off.
+func (c FileConfig) localRepoRoots(home string) []string {
+	if c.LocalRepoRoots != nil {
+		var out []string
+		for _, r := range *c.LocalRepoRoots {
+			if p, ok := expandHome(r, home); ok {
+				out = append(out, p)
+			}
+		}
+		return out
+	}
+	var out []string
+	for _, r := range DefaultLocalRepoRoots {
+		p, ok := expandHome(r, home)
+		if !ok {
+			continue
+		}
+		if st, err := os.Stat(p); err == nil && st.IsDir() {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // WebOn reports whether the server serves the dashboard.
@@ -197,6 +259,11 @@ func LoadConfig(stateDir string) (FileConfig, error) {
 			return FileConfig{}, fmt.Errorf("config: %s: %w", path, err)
 		}
 	}
+	if c.LocalRepoRoots != nil {
+		if err := validateLocalRepoRoots(*c.LocalRepoRoots); err != nil {
+			return FileConfig{}, fmt.Errorf("config: %s: %w", path, err)
+		}
+	}
 	return c.withDefaults(), nil
 }
 
@@ -219,6 +286,13 @@ func (c FileConfig) withDefaults() FileConfig {
 	if c.Web != nil {
 		w := c.Web.withDefaults()
 		c.Web = &w
+	}
+	if c.LocalRepoRoots != nil {
+		roots := slices.Clone(*c.LocalRepoRoots)
+		if roots == nil {
+			roots = []string{}
+		}
+		c.LocalRepoRoots = &roots
 	}
 	return c
 }

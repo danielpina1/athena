@@ -82,6 +82,9 @@ type Config struct {
 	// CredentialRetry is the first pause before a launch that could not get its GitHub credentials yet tries again
 	// (default 5 s, doubling to 5 min).
 	CredentialRetry time.Duration
+	// WorkerPrompt returns the system prompt a new worker session starts with (the owner's overrides applied); nil
+	// gives prompts.Worker. A resumed session keeps the prompt it started with (see sessionPrompt).
+	WorkerPrompt func() string
 	// Sandbox, when set, turns on Claude Code's sandbox for worker sessions (sandbox.go); nil leaves it off.
 	Sandbox *SandboxConfig
 	// Logger receives the node's log lines (default slog.Default()).
@@ -449,6 +452,7 @@ func (n *Node) onStop(st *loopState, t core.Ticket, a core.Assignment, reason st
 	ended := t.Ended != nil
 	if ended {
 		n.streams.end(t.ID)
+		n.dropPrompt(t.ID)
 	}
 	st.queue = slices.DeleteFunc(st.queue, func(q *session) bool {
 		return q.a.ID == a.ID || (ended && q.t.ID == t.ID)
@@ -923,6 +927,7 @@ func (r *runner) run() {
 	adir := filepath.Join(s.place.workDir, ".athena")
 	env := append([]string{"ATHENA_ASSIGNMENT=" + s.a.ID}, n.variables(s)...)
 	env = append(env, n.githubEnv(s)...)
+	systemPrompt := n.sessionPrompt(s.t.ID, resumeID != "")
 	for crashes := 0; ; {
 		spawnStart := time.Now()
 		sess, err := claude.Start(n.ctx, claude.Options{
@@ -932,7 +937,7 @@ func (r *runner) run() {
 			ResumeID:           resumeID,
 			SettingsPath:       filepath.Join(adir, "settings.json"),
 			MCPConfigPath:      filepath.Join(adir, "mcp.json"),
-			AppendSystemPrompt: prompts.Worker,
+			AppendSystemPrompt: systemPrompt,
 			Env:                env,
 			TranscriptPath:     n.transcriptPath(s.t.ID),
 			OnLine:             func(off int64, line []byte) { n.streams.add(s.t.ID, off, line) },
@@ -1479,10 +1484,11 @@ func renderInputs(t core.Ticket, ids []string, trigger func(id string) (core.Tri
 					continue
 				}
 			}
-			// Only the owner's own Inputs say so: a Trigger of the owner Source, or a person Input without a Trigger.
+			// Only the owner's own Inputs say so: a Trigger of the owner Source, or a person Input without a Trigger. They
+			// come from the dashboard or `athena reply`, carry no trigger_id and are answered in the session's output.
 			from := "message"
 			if in.Human && (in.TriggerID == "" || (found && tr.Source == core.OwnerActor.Source)) {
-				from = "message from the owner"
+				from = "message from the owner (not on GitHub)"
 			}
 			fmt.Fprintf(&b, "[input %s: %s]\n%s\n\n", in.ID, from, in.Text)
 		}
@@ -1497,6 +1503,55 @@ func renderInputs(t core.Ticket, ids []string, trigger func(id string) (core.Tri
 // worktree, and in the state directory, which sessions may not read.
 func TranscriptPath(stateDir, ticketID string) string {
 	return filepath.Join(stateDir, "transcripts", ticketID+".jsonl")
+}
+
+// PromptPath returns the file that keeps the system prompt a Ticket's session started with: <stateDir>/prompts/<ticket
+// id>.md. Next to the transcript, it lives in the state directory, outside every path the sandbox lets a session write
+// (with the sandbox off, or an owner allowWrite that covers the state directory, a worker could rewrite its kept
+// prompt). It is removed when the Ticket ends.
+func PromptPath(stateDir, ticketID string) string {
+	return filepath.Join(stateDir, "prompts", ticketID+".md")
+}
+
+// dropPrompt removes the prompt kept for an ended Ticket's sessions.
+func (n *Node) dropPrompt(ticketID string) {
+	if n.cfg.StateDir != "" {
+		if err := os.Remove(PromptPath(n.cfg.StateDir, ticketID)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			n.log.Warn("remove the kept session prompt", "ticket", ticketID, "error", err)
+		}
+	}
+}
+
+// sessionPrompt is the system prompt of the Ticket's next session. A new session gets the current worker prompt
+// (overrides applied) and the node keeps it; a resumed one keeps the prompt it started with, so an override saved
+// meanwhile reaches only sessions that start after it. A resume with no kept prompt (a reopened ended Ticket, whose
+// prompt went with it, or a session from before prompts were kept) gets the current effective prompt.
+func (n *Node) sessionPrompt(ticketID string, resumed bool) string {
+	path := ""
+	if n.cfg.StateDir != "" {
+		path = PromptPath(n.cfg.StateDir, ticketID)
+	}
+	if resumed && path != "" {
+		if b, err := os.ReadFile(path); err == nil {
+			return string(b)
+		}
+	}
+	// A new session, or a resume with no kept prompt (the Ticket ended and was reopened, or the session predates kept
+	// prompts): the current effective prompt, which is kept from here on.
+	p := prompts.Worker
+	if n.cfg.WorkerPrompt != nil {
+		p = n.cfg.WorkerPrompt()
+	}
+	if path != "" {
+		err := os.MkdirAll(filepath.Dir(path), 0o700)
+		if err == nil {
+			err = os.WriteFile(path, []byte(p), 0o600)
+		}
+		if err != nil {
+			n.log.Warn("keep the session prompt: a resume will use the current one", "ticket", ticketID, "error", err)
+		}
+	}
+	return p
 }
 
 // transcriptPath is the Ticket's TranscriptPath, or "" (the session's own default) without a state directory.
@@ -1602,6 +1657,27 @@ func place(workRoot string, t core.Ticket) (placement, error) {
 }
 
 func branchName(t core.Ticket) string { return branchPrefix + strings.ToLower(t.ID) }
+
+// WorktreeBranch is the branch of the Ticket's worktree (athena/<lowercased id>) in the cases a view can tell without
+// running git: the Ticket names a GitHub repository and no directory, or its directory has a .git entry (a repository's
+// top level). A repository with a plain-folder directory (place uses the folder itself) and a subdirectory of a
+// repository (place asks git) give "".
+func WorktreeBranch(t core.Ticket) string {
+	dir := ""
+	if t.Execution != nil {
+		dir = t.Execution.Directory
+	}
+	if dir == "" {
+		if t.Repo != "" {
+			return branchName(t)
+		}
+		return ""
+	}
+	if _, err := os.Lstat(filepath.Join(dir, ".git")); err == nil {
+		return branchName(t)
+	}
+	return ""
+}
 
 // prepare makes the session's directory and writes its settings and MCP config.
 func (n *Node) prepare(s *session) error {

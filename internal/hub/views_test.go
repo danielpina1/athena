@@ -1,6 +1,8 @@
 package hub
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -92,5 +94,66 @@ func TestDetailTimeline(t *testing.T) {
 	}
 	if _, err := New(f, quiet()).Detail("nope"); err == nil {
 		t.Error("detail of a missing Ticket must fail")
+	}
+}
+
+func TestTicketSummaryBranchAndRuntime(t *testing.T) {
+	gitDir, plainDir := t.TempDir(), t.TempDir()
+	if err := os.Mkdir(filepath.Join(gitDir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		name   string
+		mod    func(*core.Ticket)
+		branch string
+		rt     string
+	}{
+		{"a GitHub repository", func(tk *core.Ticket) { tk.Repo = "o/r" }, "athena/t-0042", "claude"},
+		{"a git directory", func(tk *core.Ticket) { tk.Execution = &core.Execution{Directory: gitDir} }, "athena/t-0042", "claude"},
+		{"a repository with a plain folder", func(tk *core.Ticket) { tk.Repo, tk.Execution = "o/r", &core.Execution{Directory: plainDir} }, "", "claude"},
+		{"a subdirectory of a repository", func(tk *core.Ticket) { tk.Execution = &core.Execution{Directory: filepath.Join(gitDir, "pkg")} }, "", "claude"},
+		{"a plain folder", func(tk *core.Ticket) { tk.Execution = &core.Execution{Directory: plainDir, Runtime: "claude"} }, "", "claude"},
+		{"no placement", func(*core.Ticket) {}, "", "claude"},
+		{"another runtime", func(tk *core.Ticket) { tk.Repo, tk.Execution = "o/r", &core.Execution{Runtime: "codex"} }, "athena/t-0042", "codex"},
+	} {
+		tk := ticket("T-0042")
+		c.mod(&tk)
+		v := ticketSummary(&tk, core.TicketStage(&tk))
+		if v.Branch != c.branch || v.Runtime != c.rt {
+			t.Errorf("%s: branch %q runtime %q, want %q %q", c.name, v.Branch, v.Runtime, c.branch, c.rt)
+		}
+	}
+}
+
+func TestTimelineHasRepliesAndAnsweredApprovals(t *testing.T) {
+	f := newFake()
+	tk := ticket("T-1")
+	tk.Inputs = []core.Input{
+		{ID: "i1", Kind: core.InputTrigger, At: epoch0.Add(time.Minute), Human: true, Text: "use the other branch"},
+		{ID: "i2", Kind: core.InputTrigger, At: epoch0.Add(2 * time.Minute), Human: true, Context: true, Text: "overheard"},
+		{ID: "i3", Kind: core.InputText, At: epoch0.Add(3 * time.Minute), Text: "system note"},
+		{ID: "i4", Kind: core.InputTrigger, At: epoch0.Add(4 * time.Minute), Text: "a bot said"},
+	}
+	f.put(tk)
+	answered := func(id, state, note string, at time.Duration) core.Approval {
+		when := epoch0.Add(at)
+		return core.Approval{ID: id, TicketID: "T-1", Tool: "Bash", State: state, Answer: note, CreatedAt: epoch0, AnsweredAt: &when}
+	}
+	f.mu.Lock()
+	f.approvals["A-1"] = answered("A-1", core.ApprovalApproved, "", 5*time.Minute)
+	f.approvals["A-2"] = answered("A-2", core.ApprovalDenied, "too risky", 6*time.Minute)
+	f.approvals["A-3"] = core.Approval{ID: "A-3", TicketID: "other", Tool: "Edit", State: core.ApprovalApproved, CreatedAt: epoch0}
+	f.mu.Unlock()
+	d, err := New(f, quiet()).Detail("T-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, e := range d.Timeline {
+		got = append(got, e.Kind+" "+e.Text)
+	}
+	want := "reply use the other branch|input overheard|input system note|input a bot said|approval Approved: Bash|approval Denied: Bash (too risky)"
+	if strings.Join(got, "|") != want {
+		t.Errorf("timeline:\n got %q\nwant %q", strings.Join(got, "|"), want)
 	}
 }

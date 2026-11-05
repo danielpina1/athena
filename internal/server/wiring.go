@@ -24,6 +24,7 @@ import (
 	"github.com/danielpina1/athena/internal/sources/github"
 	"github.com/danielpina1/athena/internal/store"
 	"github.com/danielpina1/athena/internal/web"
+	"github.com/danielpina1/athena/internal/web/ui"
 )
 
 // The parts `athena server` wires between the store and the node: the GitHub App and Source, the Policy, the node's
@@ -592,6 +593,8 @@ type webHooks struct {
 	now func() time.Time
 	// ready, when set, is called with the endpoint once it serves.
 	ready func(*webEndpoint)
+	// home is the home directory localRepoRoots expands "~/" against (default os.UserHomeDir()).
+	home string
 }
 
 func newWebEndpoint(stateDir string, cfg WebConfig, st *store.Store, eng *core.Engine, fx *effects.Runner, hooks webHooks,
@@ -662,6 +665,23 @@ func (w *webEndpoint) start(d *Dispatcher, n *node.Node, fx *effects.Runner, ver
 		defer w.wg.Done()
 		w.tls.Run(ctx)
 	}()
+	if d.facts != nil {
+		// What the used folders are (a repository, where they resolve) is found off the hub's loop too, beside the
+		// scans and as often; a finding that differs reaches the dashboards the same way.
+		w.wg.Add(1)
+		go func() {
+			defer w.wg.Done()
+			d.facts.run(ctx, localScanEvery, w.hub.ReposChanged)
+		}()
+	}
+	if d.local != nil {
+		// The scans run off the hub's loop; a result that differs reaches the dashboards through ReposChanged.
+		w.wg.Add(1)
+		go func() {
+			defer w.wg.Done()
+			d.local.run(ctx, w.hub.ReposChanged)
+		}()
+	}
 	if w.vapid != nil {
 		notifier := web.NewNotifier(web.NotifierConfig{Feed: w.hub, Store: w.st, Visible: w.presence.Visible, Wake: fx.Wake, Log: w.log})
 		w.wg.Add(1)
@@ -670,7 +690,7 @@ func (w *webEndpoint) start(d *Dispatcher, n *node.Node, fx *effects.Runner, ver
 			notifier.Run(ctx, nil)
 		}()
 	}
-	w.srv = web.NewServer(web.ServerConfig{Auth: auth, Dashboard: w.dash, VAPID: w.vapid, CA: w.tls.CA(), TLS: w.tls.Config(), Log: w.log})
+	w.srv = web.NewServer(web.ServerConfig{Auth: auth, Dashboard: w.dash, VAPID: w.vapid, CA: w.tls.CA(), TLS: w.tls.Config(), UI: ui.FS(), Artifacts: n, Log: w.log})
 	w.wg.Add(1)
 	go func() {
 		defer w.wg.Done()

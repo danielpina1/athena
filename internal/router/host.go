@@ -29,6 +29,8 @@ import (
 )
 
 const (
+	// promptKey is the kv key of the system prompt the router session in sessionKey started with.
+	promptKey = "router.prompt"
 	// sessionKey is the kv key of the router session's id, resumed on the next start.
 	sessionKey   = "router.session"
 	defaultModel = "haiku"
@@ -93,6 +95,9 @@ type Config struct {
 	ClaudeBinary string
 	// KV keeps the session id (kv router.session); required.
 	KV KV
+	// Prompt returns the system prompt a new router session starts with (the owner's overrides applied); nil gives
+	// prompts.Router. A resumed session keeps the prompt it started with.
+	Prompt func() string
 	// Policy returns the current Policy settings, whose enabled rules an assessment judges; nil gives none.
 	Policy func() (policy.Settings, error)
 }
@@ -320,6 +325,10 @@ func (h *Host) runOnce(ctx context.Context, crashes *int) string {
 	if err != nil {
 		return "read session id: " + err.Error()
 	}
+	systemPrompt, err := h.sessionPrompt(resume != "")
+	if err != nil {
+		return "router prompt: " + err.Error()
+	}
 	noTools := ""
 	h.mu.Lock()
 	if h.stopped {
@@ -335,7 +344,7 @@ func (h *Host) runOnce(ctx context.Context, crashes *int) string {
 		ResumeID:           resume,
 		SettingsPath:       settings,
 		MCPConfigPath:      mcpConfig,
-		AppendSystemPrompt: prompts.Router,
+		AppendSystemPrompt: systemPrompt,
 		Tools:              &noTools,
 		Env: []string{"ATHENA_ROLE=" + node.RoleRouter, "ATHENA_ROUTER_TOKEN=" + token,
 			"ATHENA_SOCKET=" + h.cfg.Socket},
@@ -554,4 +563,28 @@ func privateDir(dir string) error {
 		return fmt.Errorf("router: chmod %s: %w", dir, err)
 	}
 	return nil
+}
+
+// sessionPrompt is the system prompt of the router's next session. A new session gets the current router prompt
+// (overrides applied) and the Host keeps it; a resumed one keeps the prompt it started with. A session without a kept
+// prompt started with the default.
+func (h *Host) sessionPrompt(resumed bool) (string, error) {
+	if resumed {
+		p, ok, err := h.cfg.KV.KVGet(promptKey)
+		if err != nil {
+			return "", err
+		}
+		if ok {
+			return p, nil
+		}
+	}
+	// A new session, or a resume with no kept prompt: the current effective prompt, kept from here on.
+	p := prompts.Router
+	if h.cfg.Prompt != nil {
+		p = h.cfg.Prompt()
+	}
+	if err := h.cfg.KV.KVSet(promptKey, p); err != nil {
+		return "", err
+	}
+	return p, nil
 }

@@ -70,7 +70,7 @@ func TestSubmitOwnerTaskStartsAssignment(t *testing.T) {
 	if trig == nil {
 		t.Fatal("origin trigger not stored")
 	}
-	eq(t, "trigger", *trig, Trigger{ID: trig.ID, Source: "owner", Actor: OwnerActor, Human: true, At: base, Text: "Fix the login bug\nIt 500s on submit."})
+	eq(t, "trigger", *trig, Trigger{ID: trig.ID, Source: "owner", Actor: OwnerActor, Human: true, At: base, Text: "Fix the login bug\nIt 500s on submit.", Disposition: Disposition{Reached: []string{got.ID}}})
 	eq(t, "origin", got.Origin, Origin{TriggerID: trig.ID, TriggerIDs: []string{trig.ID}})
 	decisions := h.repos.decisionList()
 	if len(decisions) != 1 {
@@ -166,7 +166,7 @@ func TestPersonInputClearsAttentionAndDelivers(t *testing.T) {
 	if trig == nil {
 		t.Fatal("person trigger not stored")
 	}
-	eq(t, "trigger", *trig, Trigger{ID: in.TriggerID, Source: "owner", Actor: OwnerActor, Human: true, At: base.Add(1e9), Text: "Blue"})
+	eq(t, "trigger", *trig, Trigger{ID: in.TriggerID, Source: "owner", Actor: OwnerActor, Human: true, At: base.Add(1e9), Text: "Blue", Disposition: Disposition{Reached: []string{id}}})
 	eq(t, "input", in, Input{ID: in.ID, Kind: InputTrigger, At: base.Add(1e9), TriggerID: trig.ID, Text: "Blue", Human: true})
 	eq(t, "undelivered", stored.Undelivered, []string{in.ID})
 	eq(t, "deliver called", h.exec.count("deliver"), delivers+1)
@@ -923,4 +923,22 @@ func TestPersonInputSameIDOnce(t *testing.T) {
 
 	h.must(h.eng.AddPersonInput(id, "Red"))
 	eq(t, "wrapper still adds", h.ticket(id).Stats.PersonMessages, 2)
+}
+
+func TestOwnerMessagesRecordTheTicketTheyReached(t *testing.T) {
+	h := newHarness(t)
+	id := h.accepted()
+	first := h.repos.trigger(h.ticket(id).Origin.TriggerID)
+	eq(t, "new task trigger reached", first.Disposition.Reached, []string{id})
+
+	h.tick(1)
+	h.must(h.eng.AddPersonInput(id, "I can do that"))
+	stored := h.ticket(id)
+	reply := h.repos.trigger(stored.Inputs[len(stored.Inputs)-1].TriggerID)
+	eq(t, "reply trigger reached", reply.Disposition, Disposition{Reached: []string{id}})
+
+	// Ending the Ticket does not take the record away (a Trigger without a Thread was never fanned out).
+	h.must(h.eng.StopTicket(id, "done"))
+	eq(t, "reply still reached after the end", h.repos.trigger(reply.ID).Disposition.Reached, []string{id})
+	eq(t, "first still reached after the end", h.repos.trigger(first.ID).Disposition.Reached, []string{id})
 }

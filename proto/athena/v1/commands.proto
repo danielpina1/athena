@@ -29,6 +29,9 @@ message Command {
     Visibility visibility = 25;
     ListPasskeys list_passkeys = 26;
     RevokePasskey revoke_passkey = 27;
+    GetPrompt get_prompt = 28;
+    SetPrompt set_prompt = 29;
+    ResetPrompt reset_prompt = 30;
   }
 }
 
@@ -112,6 +115,24 @@ message RevokePasskey {
   string id = 1;
 }
 
+// GetPrompt asks for one prompt part with the assembled prompts and the part's history.
+message GetPrompt {
+  string part = 1;
+}
+
+// SetPrompt overrides a prompt part. base_revision is the PromptsView revision the owner edited from.
+message SetPrompt {
+  string part = 1;
+  uint32 base_revision = 2;
+  string text = 3;
+}
+
+// ResetPrompt returns a prompt part to its default.
+message ResetPrompt {
+  string part = 1;
+  uint32 base_revision = 2;
+}
+
 // CommandResult answers a Command. code is one of the stable error codes when ok is false.
 message CommandResult {
   string id = 1;
@@ -122,6 +143,7 @@ message CommandResult {
     string ticket_id = 10;
     PasskeyList passkeys = 11;
     uint32 policy_revision = 12;
+    PromptDetail prompt = 13;
   }
 }
 
@@ -134,4 +156,26 @@ message Passkey {
   string name = 2;
   google.protobuf.Timestamp created_at = 3;
   google.protobuf.Timestamp last_used_at = 4;
+}
+
+// PromptDetail is one prompt part: its default, the owner's text, and the full prompts a new session would get.
+message PromptDetail {
+  string name = 1;
+  string default_text = 2;
+  // text is the override, empty when the part is not overridden.
+  string text = 3;
+  // previous_default_text is the default the override was saved against, set only when the default has since changed.
+  string previous_default_text = 4;
+  string full_worker = 5;
+  string full_router = 6;
+  // history holds the last 20 revisions of the part, newest first.
+  repeated PromptRevision history = 7;
+}
+
+message PromptRevision {
+  uint32 revision = 1;
+  google.protobuf.Timestamp at = 2;
+  string origin = 3;
+  // reset is true when the revision returned the part to its default.
+  bool reset = 4;
 }

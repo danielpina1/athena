@@ -1,0 +1,116 @@
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  .gw { font-family:'IBM Plex Sans',system-ui,sans-serif; border:1px solid #111; background:#fff; color:#0A0A0A; text-align:left; box-shadow:0 30px 70px -30px rgba(0,0,0,.35); }
+  .gh { display:flex; justify-content:space-between; align-items:center; padding:12px 18px; border-bottom:1px solid #111; }
+  .gh h4 { margin:0; font-size:18px; font-weight:600; letter-spacing:-.01em; }
+  .ch { display:flex; gap:6px; font-size:11.5px; }
+  .ch span { border:1px solid #E4E4E4; padding:2px 8px; color:#6B6B6B; }
+  .ch span.on { border-color:#111; color:#111; }
+  .gb { display:grid; grid-template-columns:1fr 230px; }
+  .lg { border-left:1px solid #111; padding:14px 16px; font-size:12px; }
+  .lg .t { font-size:10.5px; letter-spacing:.08em; text-transform:uppercase; color:#6B6B6B; margin:4px 0 8px; }
+  .lg .r { display:flex; align-items:center; gap:8px; margin-bottom:8px; }
+  .sw { width:22px; height:12px; border:1px solid #111; flex:none; }
+  .ln { width:22px; height:0; border-top:1.5px solid #111; flex:none; }
+  .sel { margin-top:16px; border-top:1px solid #E4E4E4; padding-top:12px; }
+  .sel .h { font-weight:600; font-size:13px; margin:3px 0; }
+  .mono { font-family:'IBM Plex Mono',monospace; }
+  .scrub { display:flex; align-items:center; gap:10px; padding:10px 18px; border-top:1px solid #111; font-size:11px; color:#6B6B6B; }
+  .scrub .bar { flex:1; height:4px; background:#E4E4E4; position:relative; }
+  .scrub .bar i { position:absolute; left:0; top:0; bottom:0; width:100%; background:#111; }
+  .scrub .bar b { position:absolute; right:-5px; top:-4px; width:10px; height:12px; background:#FF5A1F; }
+</style>
+
+<h2>Task graph: how work connects</h2>
+<p class="subtitle">Lanes per repository (any host, or none). Edges show hand-offs, dependencies, agent conversations, and orange warnings where parallel tasks touch the same files. Scrub time to replay. Sample data.</p>
+
+<div class="gw">
+  <div class="gh"><h4>Graph</h4><div class="ch"><span class="on">By repository</span><span>By machine</span><span>Needs you only</span><span class="mono">⌘K</span></div></div>
+  <div class="gb">
+    <svg viewBox="0 0 860 520" width="100%" style="display:block">
+      <defs>
+        <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#111" stroke-width="1.5"/></marker>
+        <marker id="ahg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#6B6B6B" stroke-width="1.5"/></marker>
+      </defs>
+      <g font-family="IBM Plex Mono, monospace" font-size="10.5" fill="#6B6B6B" letter-spacing=".04em">
+        <rect x="0" y="0" width="860" height="200" fill="#FAFAFA"/><text x="14" y="20">GITHUB · DANIELPINA1/API</text>
+        <line x1="0" y1="200" x2="860" y2="200" stroke="#E4E4E4"/>
+        <rect x="0" y="200" width="860" height="150" fill="#fff"/><text x="14" y="220">GITLAB · OPS/WEB-APP</text>
+        <line x1="0" y1="350" x2="860" y2="350" stroke="#E4E4E4"/>
+        <rect x="0" y="350" width="860" height="170" fill="#FAFAFA"/><text x="14" y="370">NO REPOSITORY</text>
+      </g>
+
+      <path d="M290 74 C 330 40, 360 40, 398 64" fill="none" stroke="#111" stroke-width="1.2" stroke-dasharray="5 4" marker-end="url(#ah)"/>
+      <text x="318" y="38" font-family="IBM Plex Mono" font-size="10" fill="#111">ask · 2 msgs</text>
+      <line x1="290" y1="98" x2="398" y2="98" stroke="#FF5A1F" stroke-width="2" stroke-dasharray="2 3"/>
+      <text x="300" y="118" font-family="IBM Plex Mono" font-size="10" fill="#FF5A1F">⚠ both edit src/auth/client.ts</text>
+      <path d="M205 112 L205 160 L398 160" fill="none" stroke="#111" stroke-width="1.5" marker-end="url(#ah)"/>
+      <text x="212" y="152" font-family="IBM Plex Mono" font-size="10" fill="#111">hand-off</text>
+      <path d="M570 86 L640 86" fill="none" stroke="#111" stroke-width="1.5" marker-end="url(#ah)"/>
+      <text x="580" y="78" font-family="IBM Plex Mono" font-size="10" fill="#111">hand-off</text>
+      <line x1="290" y1="276" x2="398" y2="276" stroke="#6B6B6B" stroke-width="1.5" stroke-dasharray="1 4" stroke-linecap="round" marker-end="url(#ahg)"/>
+      <text x="300" y="268" font-family="IBM Plex Mono" font-size="10" fill="#6B6B6B">waits for</text>
+      <path d="M484 252 C 484 190, 230 220, 214 116" fill="none" stroke="#111" stroke-width="1.2" stroke-dasharray="5 4" marker-end="url(#ah)"/>
+      <text x="360" y="215" font-family="IBM Plex Mono" font-size="10" fill="#111">ask · 1 msg</text>
+      <path d="M290 434 L398 434" fill="none" stroke="#111" stroke-width="1.5" marker-end="url(#ah)"/>
+      <text x="306" y="426" font-family="IBM Plex Mono" font-size="10" fill="#111">hand-off</text>
+
+      <g font-family="IBM Plex Sans" font-size="12.5">
+        <rect x="120" y="60" width="170" height="52" fill="#fff" stroke="#111" stroke-width="2"/>
+        <circle cx="278" cy="72" r="4" fill="#111"/>
+        <text x="132" y="80" font-weight="600">Refactor auth client</text>
+        <text x="132" y="100" font-family="IBM Plex Mono" font-size="10" fill="#6B6B6B">T-0139 · claude · mac-studio</text>
+
+        <rect x="400" y="60" width="170" height="52" fill="#FF5A1F" stroke="#FF5A1F"/>
+        <text x="412" y="80" font-weight="600" fill="#fff">Fix flaky auth test</text>
+        <text x="412" y="100" font-family="IBM Plex Mono" font-size="10" fill="#fff">T-0142 · question · 11m</text>
+
+        <rect x="642" y="60" width="170" height="52" fill="#fff" stroke="#9E9E9E" stroke-dasharray="4 3"/>
+        <text x="654" y="80" font-weight="500" fill="#444">Add token metrics</text>
+        <text x="654" y="100" font-family="IBM Plex Mono" font-size="10" fill="#6B6B6B">T-0150 · queued</text>
+
+        <rect x="400" y="136" width="170" height="52" fill="#0A0A0A"/>
+        <text x="412" y="156" font-weight="600" fill="#fff">Rate-limit webhook</text>
+        <text x="412" y="176" font-family="IBM Plex Mono" font-size="10" fill="#BDBDBD">T-0128 · ready · PR #128</text>
+
+        <rect x="120" y="252" width="170" height="52" fill="#fff" stroke="#111" stroke-width="2"/>
+        <circle cx="278" cy="264" r="4" fill="#111"/>
+        <text x="132" y="272" font-weight="600">Upgrade Vite to v7</text>
+        <text x="132" y="292" font-family="IBM Plex Mono" font-size="10" fill="#6B6B6B">T-0146 · codex · macbook</text>
+
+        <rect x="400" y="252" width="170" height="52" fill="#fff" stroke="#9E9E9E" stroke-dasharray="4 3"/>
+        <text x="412" y="272" font-weight="500" fill="#444">Fix build after upgrade</text>
+        <text x="412" y="292" font-family="IBM Plex Mono" font-size="10" fill="#6B6B6B">T-0147 · waiting</text>
+
+        <rect x="120" y="410" width="170" height="52" fill="#fff" stroke="#111" stroke-width="2"/>
+        <circle cx="278" cy="422" r="4" fill="#111"/>
+        <text x="132" y="430" font-weight="600">Summarize incidents</text>
+        <text x="132" y="450" font-family="IBM Plex Mono" font-size="10" fill="#6B6B6B">T-0151 · local · linux-gpu</text>
+
+        <rect x="400" y="410" width="170" height="52" fill="#fff" stroke="#9E9E9E" stroke-dasharray="4 3"/>
+        <text x="412" y="430" font-weight="500" fill="#444">Draft postmortem</text>
+        <text x="412" y="450" font-family="IBM Plex Mono" font-size="10" fill="#6B6B6B">T-0152 · queued</text>
+      </g>
+    </svg>
+
+    <div class="lg">
+      <div class="t">Tasks</div>
+      <div class="r"><span class="sw" style="border-width:2px"></span>Running</div>
+      <div class="r"><span class="sw" style="background:#FF5A1F;border-color:#FF5A1F"></span>Needs you</div>
+      <div class="r"><span class="sw" style="background:#0A0A0A"></span>Ready for review</div>
+      <div class="r"><span class="sw" style="border:1px dashed #9E9E9E"></span>Queued · waiting</div>
+      <div class="t" style="margin-top:14px">Links</div>
+      <div class="r"><span class="ln"></span>Hand-off</div>
+      <div class="r"><span class="ln" style="border-top:1.5px dotted #6B6B6B"></span>Waits for</div>
+      <div class="r"><span class="ln" style="border-top:1.5px dashed #111"></span>Agents talking</div>
+      <div class="r"><span class="ln" style="border-top:2px dotted #FF5A1F"></span>Same files touched</div>
+      <div class="sel">
+        <div class="t">Selected</div>
+        <div class="mono" style="font-size:10.5px;color:#6B6B6B">T-0142 · danielpina1/api</div>
+        <div class="h">Fix flaky auth test</div>
+        <div style="color:#6B6B6B">Asked: retry in client or test helper? Overlaps T-0139 on src/auth/client.ts.</div>
+      </div>
+    </div>
+  </div>
+  <div class="scrub mono"><span>09:00</span><span class="bar"><i></i><b></b></span><span>now 14:03</span><span style="color:#111">▶ replay</span></div>
+</div>

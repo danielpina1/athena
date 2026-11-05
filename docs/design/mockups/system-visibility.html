@@ -1,0 +1,127 @@
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  .sy { --bd:#111; --hl:#E4E4E4; --tx:#0A0A0A; --mu:#6B6B6B; --ac:#FF5A1F; --sf2:#F6F6F6; font-family:'IBM Plex Sans',system-ui,sans-serif; color:var(--tx); background:#fff; border:1px solid var(--bd); font-size:13px; line-height:1.45; text-align:left; box-shadow:0 30px 70px -30px rgba(0,0,0,.35); }
+  .sy * { box-sizing:border-box; }
+  .mono { font-family:'IBM Plex Mono',ui-monospace,monospace; }
+  .hd { display:flex; justify-content:space-between; align-items:baseline; padding:14px 20px; border-bottom:1px solid var(--bd); }
+  .hd h4 { margin:0; font-size:18px; font-weight:600; letter-spacing:-.01em; }
+  .chips { display:flex; gap:6px; font-size:11.5px; }
+  .chips span { border:1px solid var(--hl); padding:2px 8px; color:var(--mu); }
+  .chips span.on { border-color:var(--tx); color:var(--tx); }
+  .kpi { display:grid; grid-template-columns:repeat(6,1fr); border-bottom:1px solid var(--bd); }
+  .kpi > div { padding:14px 20px; border-right:1px solid var(--hl); }
+  .kpi > div:last-child { border-right:0; }
+  .lb { font-size:10.5px; letter-spacing:.08em; text-transform:uppercase; color:var(--mu); }
+  .v { font-size:26px; font-weight:600; letter-spacing:-.02em; margin-top:2px; }
+  .v small { font-size:12px; color:var(--mu); font-weight:400; margin-left:4px; letter-spacing:0; }
+  .v.ac { color:var(--ac); }
+  .sp { display:block; margin-top:6px; }
+  .grid { display:grid; grid-template-columns:1.55fr 1fr; }
+  .pn { border-bottom:1px solid var(--bd); }
+  .grid > .pn:nth-child(odd) { border-right:1px solid var(--bd); }
+  .ph { display:flex; justify-content:space-between; align-items:center; padding:10px 20px; border-bottom:1px solid var(--hl); }
+  .ph b { font-weight:600; }
+  table { width:100%; border-collapse:collapse; font-size:12px; }
+  th { text-align:left; font-weight:500; color:var(--mu); font-size:10.5px; letter-spacing:.06em; text-transform:uppercase; padding:8px 20px 6px; }
+  td { padding:8px 20px; border-top:1px solid var(--hl); }
+  td.r, th.r { text-align:right; }
+  .sq { width:6px; height:6px; background:var(--ac); display:inline-block; margin-right:7px; vertical-align:middle; }
+  .sq.off { background:#BDBDBD; }
+  .mb { display:inline-block; width:54px; height:4px; background:var(--hl); vertical-align:middle; margin-right:6px; }
+  .mb i { display:block; height:100%; background:var(--tx); }
+  .mb i.w { background:var(--ac); }
+  .bars { padding:12px 20px 16px; display:flex; flex-direction:column; gap:11px; }
+  .br { display:grid; grid-template-columns:130px 1fr 64px; gap:10px; align-items:center; font-size:12px; }
+  .br .t { height:10px; background:var(--sf2); }
+  .br .t i { display:block; height:100%; background:var(--tx); }
+  .br .t i.l { background:repeating-linear-gradient(90deg,var(--tx) 0 2px,transparent 2px 5px); }
+  .ev { font-size:11.5px; line-height:1.75; padding:8px 20px 12px; }
+  .ev div { display:grid; grid-template-columns:62px 92px 1fr; gap:8px; border-bottom:1px dashed var(--hl); padding:2px 0; }
+  .ev .k { color:var(--mu); }
+  .ev .e { color:var(--ac); font-weight:500; }
+  .hc { font-size:12px; }
+  .hc div { display:flex; justify-content:space-between; padding:7px 20px; border-top:1px solid var(--hl); }
+  .ok { font-family:'IBM Plex Mono',monospace; font-size:11px; }
+  .warn { font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--ac); font-weight:600; }
+  .hk { padding:12px 20px 16px; display:grid; grid-template-columns:repeat(3,1fr); gap:10px; }
+  .hk > div { border:1px solid var(--hl); padding:10px 12px; }
+  .hk .n { font-size:20px; font-weight:600; letter-spacing:-.02em; }
+</style>
+
+<h2>System view: what you can see while Athena runs</h2>
+<p class="subtitle">Desktop "System" page (sample data). Every number is live over the same connection, with no refresh. Phone gets the same tiles stacked.</p>
+
+<div class="sy">
+  <div class="hd"><h4>System</h4><div class="chips"><span>1h</span><span class="on">24h</span><span>7d</span><span class="mono" style="border-color:var(--ac);color:var(--ac)">● live</span></div></div>
+
+  <div class="kpi">
+    <div><div class="lb">Sessions</div><div class="v">6<small>/ 14 slots</small></div>
+      <svg class="sp" width="120" height="22" viewBox="0 0 120 22"><polyline fill="none" stroke="#0A0A0A" stroke-width="1.25" points="0,18 12,16 24,17 36,12 48,13 60,9 72,11 84,7 96,8 108,6 120,8"/></svg></div>
+    <div><div class="lb">Queue</div><div class="v">1<small>waiting slot</small></div>
+      <svg class="sp" width="120" height="22" viewBox="0 0 120 22"><polyline fill="none" stroke="#0A0A0A" stroke-width="1.25" points="0,20 12,20 24,14 36,20 48,20 60,16 72,20 84,20 96,18 108,20 120,17"/></svg></div>
+    <div><div class="lb">Needs you</div><div class="v ac">3<small>oldest 11m</small></div>
+      <svg class="sp" width="120" height="22" viewBox="0 0 120 22"><polyline fill="none" stroke="#FF5A1F" stroke-width="1.25" points="0,19 12,19 24,15 36,17 48,13 60,15 72,11 84,13 96,11 108,9 120,10"/></svg></div>
+    <div><div class="lb">Spend today</div><div class="v">$18.40<small>4.2M tok</small></div>
+      <svg class="sp" width="120" height="22" viewBox="0 0 120 22"><polyline fill="none" stroke="#0A0A0A" stroke-width="1.25" points="0,20 12,19 24,17 36,16 48,14 60,13 72,11 84,9 96,8 108,6 120,4"/></svg></div>
+    <div><div class="lb">Link p95</div><div class="v">38<small>ms</small></div>
+      <svg class="sp" width="120" height="22" viewBox="0 0 120 22"><polyline fill="none" stroke="#0A0A0A" stroke-width="1.25" points="0,12 12,13 24,11 36,12 48,10 60,14 72,12 84,11 96,13 108,12 120,11"/></svg></div>
+    <div><div class="lb">Errors 24h</div><div class="v">2<small>1 open</small></div>
+      <svg class="sp" width="120" height="22" viewBox="0 0 120 22"><polyline fill="none" stroke="#0A0A0A" stroke-width="1.25" points="0,20 12,20 24,20 36,20 48,8 60,20 72,20 84,20 96,20 108,12 120,20"/></svg></div>
+  </div>
+
+  <div class="grid">
+    <div class="pn">
+      <div class="ph"><b>Nodes</b><span class="mono" style="color:var(--mu);font-size:11px">heartbeat 2s</span></div>
+      <table>
+        <tr><th>Node</th><th class="r">Sessions</th><th>CPU</th><th>Mem</th><th>GPU</th><th class="r">Link</th><th>Runtimes</th></tr>
+        <tr><td><span class="sq"></span>mac-studio</td><td class="r mono">3/4</td><td><span class="mb"><i style="width:44%"></i></span><span class="mono">44%</span></td><td><span class="mb"><i style="width:58%"></i></span><span class="mono">58%</span></td><td class="mono" style="color:var(--mu)">—</td><td class="r mono">4 ms</td><td class="mono">claude · codex</td></tr>
+        <tr><td><span class="sq"></span>linux-gpu</td><td class="r mono">2/6</td><td><span class="mb"><i style="width:21%"></i></span><span class="mono">21%</span></td><td><span class="mb"><i style="width:36%"></i></span><span class="mono">36%</span></td><td><span class="mb"><i class="w" style="width:61%"></i></span><span class="mono">61%</span></td><td class="r mono">31 ms</td><td class="mono">claude · codex · ollama</td></tr>
+        <tr><td><span class="sq"></span>macbook</td><td class="r mono">1/2</td><td><span class="mb"><i style="width:63%"></i></span><span class="mono">63%</span></td><td><span class="mb"><i class="w" style="width:82%"></i></span><span class="mono">82%</span></td><td class="mono" style="color:var(--mu)">—</td><td class="r mono">52 ms</td><td class="mono">codex</td></tr>
+        <tr><td style="color:var(--mu)"><span class="sq off"></span>pi-lab</td><td class="r mono" style="color:var(--mu)">—</td><td colspan="4" class="mono" style="color:var(--mu)">offline 2h 14m · 0 events buffered</td><td class="mono" style="color:var(--mu)">claude</td></tr>
+      </table>
+    </div>
+    <div class="pn">
+      <div class="ph"><b>Spend by model</b><span class="mono" style="color:var(--mu);font-size:11px">today · budget $40</span></div>
+      <div class="bars">
+        <div class="br"><span>Claude · Sonnet</span><span class="t"><i style="width:68%"></i></span><span class="mono" style="text-align:right">$12.10</span></div>
+        <div class="br"><span>Codex</span><span class="t"><i style="width:31%"></i></span><span class="mono" style="text-align:right">$5.60</span></div>
+        <div class="br"><span>Claude · Haiku <span style="color:var(--mu)">router</span></span><span class="t"><i style="width:5%"></i></span><span class="mono" style="text-align:right">$0.70</span></div>
+        <div class="br"><span>Local · qwen3-coder</span><span class="t"><i class="l" style="width:44%"></i></span><span class="mono" style="text-align:right">$0.00</span></div>
+        <div class="mono" style="font-size:11px;color:var(--mu)">Hatched = local tokens (1.9M), no spend. Click a bar for spend per task.</div>
+      </div>
+    </div>
+
+    <div class="pn">
+      <div class="ph"><b>Live events</b><div class="chips"><span class="on">All</span><span>Decisions</span><span>Hooks</span><span>GitHub</span><span>Agents</span><span>Errors</span></div></div>
+      <div class="ev mono">
+        <div><span class="k">14:03:05</span><span>T-0142</span><span>report · question → <span class="e">needs you</span></span></div>
+        <div><span class="k">14:02:58</span><span>hook</span><span>PreToolUse allow · Bash pnpm vitest · linux-gpu</span></div>
+        <div><span class="k">14:02:40</span><span>T-0139</span><span>ask_agent → T-0142 "which auth helper?" · answered 9s</span></div>
+        <div><span class="k">14:02:12</span><span>hook</span><span>PermissionRequest <span class="e">escalated</span> · pnpm db:migrate --env staging</span></div>
+        <div><span class="k">14:01:47</span><span>github</span><span>PR #128 checks passed · danielpina1/api</span></div>
+        <div><span class="k">14:01:30</span><span>router</span><span>decide accept · issue #311 → T-0142 · haiku · 1.1k tok</span></div>
+        <div><span class="k">14:00:02</span><span>node</span><span>pi-lab reconnect failed · retry in 30s</span></div>
+      </div>
+    </div>
+    <div class="pn">
+      <div class="ph"><b>Health checks</b><span class="mono" style="color:var(--mu);font-size:11px">7 ok · 1 warn</span></div>
+      <div class="hc">
+        <div><span>GitHub App token</span><span class="ok">ok · refreshed 4m ago</span></div>
+        <div><span>GitHub API rate limit</span><span class="ok">4,812 / 5,000</span></div>
+        <div><span>Claude Code version</span><span class="ok">supported on 3/3</span></div>
+        <div><span>Codex version</span><span class="ok">supported on 3/3</span></div>
+        <div><span>Ollama · linux-gpu</span><span class="ok">ok · 2 models loaded</span></div>
+        <div><span>TLS certificate</span><span class="ok">expires in 62 days</span></div>
+        <div><span>Disk · macbook work root</span><span class="warn">87% · clean up</span></div>
+        <div><span>Store backup</span><span class="ok">last 03:00 · 41 MB</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="ph" style="border-bottom:1px solid var(--hl)"><b>Guardrails, last 24h</b><span class="mono" style="color:var(--mu);font-size:11px">every hook decision is in the audit log</span></div>
+  <div class="hk">
+    <div><div class="lb">Allowed automatically</div><div class="n">1,284</div></div>
+    <div><div class="lb">Escalated to you</div><div class="n" style="color:var(--ac)">37<span class="mono" style="font-size:11px;color:var(--mu);font-weight:400"> · median answer 2m</span></div></div>
+    <div><div class="lb">Denied by rule</div><div class="n">9<span class="mono" style="font-size:11px;color:var(--mu);font-weight:400"> · 6 credential reads</span></div></div>
+  </div>
+</div>

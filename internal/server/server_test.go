@@ -164,6 +164,8 @@ func testConfig(t *testing.T, stateDir string) Config {
 			ApprovalTimeout: 5 * time.Second,
 		},
 		Stderr: io.Discard,
+		// An empty home: none of the default localRepoRoots exists, so no test lists this machine's repositories.
+		web: webHooks{home: t.TempDir()},
 	}
 }
 

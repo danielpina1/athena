@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -153,11 +154,55 @@ func (c *command) webPasskeys(args []string) int {
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", p.ID, safeText(p.Name), p.CreatedAt.Local().Format("2006-01-02 15:04"), used)
 	}
 	w.Flush()
+	for _, p := range list {
+		if strings.HasPrefix(p.ID, "-") {
+			fmt.Fprintln(c.stdout, `An id that starts with "-" is fine: give it to athena web revoke as it is.`)
+			break
+		}
+	}
 	return 0
 }
 
+// dashPositionals lets a positional argument start with "-" (a base64url passkey id does about one time in 64): an
+// argument that is not one of fs's flags, nor -h/-help, moves after a "--", where the flag parser leaves it alone. A
+// defined flag keeps its value (the next argument, unless it is boolean or written --flag=value); so does anything
+// after the caller's own "--". A mistyped flag becomes a positional, which webRevoke refuses as a flag when short.
+func dashPositionals(fs *flag.FlagSet, args []string) []string {
+	var flags, pos []string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--" {
+			pos = append(pos, args[i+1:]...)
+			break
+		}
+		name, _, hasValue := strings.Cut(strings.TrimLeft(a, "-"), "=")
+		f := fs.Lookup(name)
+		switch {
+		case !strings.HasPrefix(a, "-") || a == "-":
+			pos = append(pos, a)
+		case name == "h" || name == "help":
+			flags = append(flags, a)
+		case f == nil:
+			pos = append(pos, a)
+		default:
+			flags = append(flags, a)
+			if b, ok := f.Value.(interface{ IsBoolFlag() bool }); !hasValue && !(ok && b.IsBoolFlag()) && i+1 < len(args) {
+				i++
+				flags = append(flags, args[i])
+			}
+		}
+	}
+	if len(pos) == 0 {
+		return flags
+	}
+	return append(append(flags, "--"), pos...)
+}
+
+// minDashPrefix is the shortest prefix of a passkey id that starts with "-" which revoke takes as an id.
+const minDashPrefix = 8
+
 func (c *command) webRevoke(args []string) int {
-	pos, code, ok := c.parse(args, 1, 1)
+	pos, code, ok := c.parse(dashPositionals(c.fs, args), 1, 1)
 	if !ok {
 		return code
 	}
@@ -169,6 +214,13 @@ func (c *command) webRevoke(args []string) int {
 	list, err := st.Passkeys()
 	if err != nil {
 		return c.fail(err)
+	}
+	// An argument that starts with "-" is an id only if it is one exactly, or a prefix of at least 8 characters
+	// (dashPositionals let it through as a positional): anything shorter is an unknown flag, like -y.
+	if arg := pos[0]; strings.HasPrefix(arg, "-") && len(arg) < minDashPrefix && !slices.ContainsFunc(list, func(p store.Passkey) bool { return p.ID == arg }) {
+		fmt.Fprintf(c.stderr, "athena web revoke: unknown flag %q (a passkey id that starts with \"-\" is given whole, or at least %d characters of it)\n", arg, minDashPrefix)
+		c.fs.Usage()
+		return 2
 	}
 	// The id is long: a prefix that names one passkey is enough.
 	var match []store.Passkey

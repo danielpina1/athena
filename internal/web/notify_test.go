@@ -151,7 +151,7 @@ func TestOneNotificationPerStageEntry(t *testing.T) {
 		t.Fatalf("%d notifications for one entry", len(got))
 	}
 	m := message(t, got[0])
-	if m["title"] != "Athena" || m["body"] != "Fix login needs your answer" || m["url"] != "/t/T-1" || m["tag"] != "T-1" {
+	if m["title"] != "Athena" || m["body"] != "Fix login needs your answer" || m["url"] != "/tickets/T-1" || m["tag"] != "T-1" {
 		t.Errorf("message %v", m)
 	}
 	if got[0].Urgency != "normal" {

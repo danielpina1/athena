@@ -70,7 +70,9 @@ func (n *Node) sandboxFor(workDir string) (*claude.Sandbox, []string) {
 	// repository.
 	if gitDir, common := gitDirs(workDir); common != "" {
 		sb.AllowWrite = append(sb.AllowWrite, common)
-		sb.DenyWrite = append(sb.DenyWrite, filepath.Join(common, "config"), filepath.Join(common, "hooks"))
+		// The common directory's config.worktree is read by the main worktree too, when the repository has
+		// extensions.worktreeConfig: it can name a promisor remote or a program git runs outside the sandbox.
+		sb.DenyWrite = append(sb.DenyWrite, filepath.Join(common, "config"), filepath.Join(common, "config.worktree"), filepath.Join(common, "hooks"))
 		if gitDir != common {
 			sb.DenyWrite = append(sb.DenyWrite, filepath.Join(gitDir, "config.worktree"))
 		}

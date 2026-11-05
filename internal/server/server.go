@@ -175,6 +175,7 @@ func Run(ctx context.Context, cfg Config) (err error) {
 		ncfg.Credentials = gh.creds
 	}
 	ncfg.StateDir = stateDir
+	ncfg.WorkerPrompt = func() string { return currentPrompt(st, logger, true) }
 	ncfg.SocketPath = filepath.Join(stateDir, NodeSocket)
 	if ncfg.Sandbox == nil {
 		ncfg.Sandbox = fileCfg.nodeSandbox()
@@ -249,7 +250,8 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	var host *router.Host
 	if routerOn {
 		host = router.New(router.Config{Bin: ncfg.AthenaBin, StateDir: stateDir, Model: fileCfg.Router.Model,
-			Socket: ncfg.SocketPath, ClaudeBinary: ncfg.ClaudeBinary, KV: st, Policy: pc.settings}, eng, fx, sourceReg, logger)
+			Socket: ncfg.SocketPath, ClaudeBinary: ncfg.ClaudeBinary, KV: st, Policy: pc.settings,
+			Prompt: func() string { return currentPrompt(st, logger, false) }}, eng, fx, sourceReg, logger)
 		n.SetRouter(host)
 	}
 	var webEP *webEndpoint
@@ -355,6 +357,13 @@ func Run(ctx context.Context, cfg Config) (err error) {
 		logger.Error("startup: tell the pending policy change", "error", err)
 	}
 	if webEP != nil {
+		// The dashboard lists the local git repositories under localRepoRoots, never the state directory's own.
+		home := cfg.web.home
+		if home == "" {
+			home, _ = os.UserHomeDir()
+		}
+		c.local = newLocalRepos(fileCfg.localRepoRoots(home), []string{stateDir, ncfg.WorkRoot}, logger)
+		c.facts = newPlaceFacts()
 		if err := webEP.start(c, n, fx, version, &hubRef); err != nil {
 			return err
 		}

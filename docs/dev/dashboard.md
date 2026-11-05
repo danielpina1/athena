@@ -1,12 +1,27 @@
 # Dashboard setup
 
-`athena server` can serve the dashboard over HTTPS for your phone and laptop: you sign in with a passkey, and the page
-follows your Tickets live over one WebSocket. Plan 3 ships the endpoint, the login and push; the page itself is a
-placeholder that signs in and shows a live count of open Tickets, which is enough to prove the whole path from a
-phone. The full dashboard arrives in plan 4.
+`athena server` serves the dashboard over HTTPS for your phone and laptop: you sign in with a passkey, and the app
+follows your Tickets live over one WebSocket. It is a PWA (the React app in `web/`, embedded in the binary), so on
+an iPhone it installs from Safari's **Add to Home Screen** and can send push notifications.
 
 The endpoint is meant for a private network: your home LAN or, better, the VPN your devices use to reach the server.
 It is off until you run `athena web setup`.
+
+## What the dashboard shows
+
+| View | What it is for |
+| --- | --- |
+| **Needs you** | Everything waiting on you, one tap each: answer a question inline, approve or deny an Approval (with a note), review finished work, retry or stop a stalled Ticket. Approvals come first. |
+| **Tickets** | The Tickets, filtered by stage, repository and model, with a search. A Ticket opens to its live session (streamed output, tool calls paired with their results, a reply box), its timeline, and its Changes (the diff) or Files. On a wide screen up to three sessions can be pinned side by side. |
+| **New task** | A task in free text, an optional repository (a known one, a local git repository, or `owner/name`) and a model. |
+| **Graph** | The Tickets as nodes in lanes by repository, orange where you are needed, with a list fallback and a time scrubber. |
+| **Routing** | The Triggers, Threads and Decisions behind the Tickets. |
+| **Nodes** | The nodes, their slots and load. |
+| **Settings** | The Policy (with conflict handling when two screens edit it), Prompts, the Devices (passkeys, add a device, sign out), Notifications and the execution environment. |
+
+Keyboard (desktop): `⌘K` command palette, `j`/`k` move, `⏎` open, `a` approve, `d` deny, `r` reply, `/` search,
+`g n`, `g t`, `g g` go to Needs you, Tickets, Graph, `?` the list. The app works offline from its last state and sends
+what you did once the link is back, exactly once.
 
 ## 1. Choose the host
 
@@ -120,11 +135,12 @@ On the server:
 It prints a single-use link, good for 15 minutes (`--ttl` up to 24h), and the same link as a QR code. Scan it with the
 phone's camera (or open the link on the laptop) and create the passkey; the device's passkey manager keeps it
 (iCloud Keychain, Google Password Manager, a security key). The token travels in the link's fragment, which the
-browser never sends to the server or writes to its history, and it is spent the moment the page starts enrolling: a
-failed attempt needs a new link.
+browser never sends to the server; the page replaces the address in place (dropping the fragment) before it makes any
+request, and the token is spent the moment the page starts enrolling: a failed attempt needs a new link.
 
-Then open `https://athena.home.arpa:8443/` and sign in with the passkey. The page says **Signed in. The dashboard
-arrives in plan 4.** and counts your open Tickets live: submit a task with `athena task` and watch the count change.
+Then open the dashboard's address (for example `https://athena.home.arpa:8443/`) and sign in with the passkey: the
+app opens on **Needs you**, and a Ticket you start with `athena task` shows up in **Tickets** at once. A link that was
+already used or has expired says so and shows `athena web enroll` to run for a new one.
 
 `athena web passkeys` lists the enrolled passkeys.
 
@@ -132,8 +148,26 @@ arrives in plan 4.** and counts your open Tickets live: submit a task with `athe
 
 In Safari, **Share** > **Add to Home Screen** opens the dashboard as its own app. iOS delivers web push only to a site
 added to the home screen, and only over a certificate it trusts: in mode `ca`, install and fully trust the CA first
-(step 3a). Push subscription lives in plan 4's dashboard; the server side (stage-entry notifications for Tickets
-waiting on you and for Approvals) runs already.
+(step 3a). Then open the app from the home screen and choose **On** under **Settings** > **Notifications**:
+stage-entry notifications for Tickets waiting on you and for Approvals arrive as push.
+
+## 6. Local repositories for New task
+
+New task lists your local git repositories under **Local repositories**, besides the ones Tickets already used. The
+server looks for them in the folders of `localRepoRoots` in `~/.athena/config.json` (restart the server after a
+change):
+
+```json
+{
+  "localRepoRoots": ["~/code", "/srv/git"]
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `localRepoRoots` | Absolute paths, or paths starting with `~/`. Each folder, its children and its grandchildren are searched for a git repository (a `.git` directory or file), not below a repository found, skipping hidden folders, `node_modules`, `vendor`, symbolic links and Athena's state directory. A root that is itself a symbolic link is resolved once, and the repositories are listed by their resolved paths. Left out, it is the existing ones of `~/Developer`, `~/code`, `~/src`, `~/repos`, `~/Projects` and `~/Desktop`; `[]` turns the listing off. At most 200 repositories, in at most 5 seconds a scan; a scan cut short by the time keeps the last complete list (the server log says so once). The server searches in the background at start and every 3 minutes. |
+
+The dashboard shows these paths only to the signed-in owner. Typing any absolute path in New task still works.
 
 ## Safety notes
 
@@ -143,7 +177,7 @@ waiting on you and for Approvals) runs already.
 - **Passkeys only.** There are no passwords: a session starts with a passkey assertion with user verification (Face
   ID, Touch ID, a PIN), lasts 30 days unused and 90 days at most, and lives in an `HttpOnly`, `Secure`,
   `SameSite=Strict` cookie. Every login request and the WebSocket must come from the configured origin.
-- **Step-up for sensitive changes.** Changing the Policy, revoking a passkey and changing push settings need a passkey
+- **Step-up for sensitive changes.** Changing the Policy, changing or resetting a prompt part, revoking a passkey and changing push settings need a passkey
   assertion within the last 5 minutes (signing in counts); otherwise the dashboard answers `reauth_required` and asks
   for the passkey again. Approving a tool call is not sensitive.
 - **A lost device:** `athena web passkeys`, then `athena web revoke <id>` (a prefix of the id is enough). With the
@@ -158,12 +192,41 @@ waiting on you and for Approvals) runs already.
   push key (`push/vapid.key`) are 0600 in the 0700 state directory. Back the state directory up as a whole, and treat
   the backup as secret.
 
+## Phone check
+
+Run it once after a release that changes the dashboard. The owner's setup is the primary path: the server is reached
+at a public name, `app.athena-ops.com`, whose DNS points at the server's VPN address, with a Let's Encrypt
+certificate obtained by Cloudflare DNS-01 (mode `acme`, section 3b). The phone reaches it over the UniFi VPN, so no CA
+profile is needed on it.
+
+    athena web setup --host app.athena-ops.com --listen <vpn-ip>:8443 --tls acme \
+        --acme-provider cloudflare --acme-email <you@example.com> --acme-agree-tos
+
+The server reads the Cloudflare token from the file `CLOUDFLARE_DNS_API_TOKEN_FILE` names (a file with mode 0600
+that holds the token; never paste the token into a command line, a shell history, a config file or the repository).
+
+Checklist, on the iPhone with the VPN on:
+
+- [ ] 1. `make build`, then run the setup above (once), then restart the server. `athena web status` shows a valid
+  Let's Encrypt certificate, and `https://app.athena-ops.com:8443/healthz` answers `ok` in Safari.
+- [ ] 2. On the Mac run `athena web enroll`, scan the QR code with the phone's camera and create the passkey with
+  Face ID.
+- [ ] 3. In Safari, **Share** > **Add to Home Screen**, then open Athena from the home screen icon and sign in.
+- [ ] 4. **Settings** > **Notifications**, choose **On**, and allow notifications when iOS asks.
+- [ ] 5. Start a task from the phone, watch it live, reply to it, then approve an Approval from the lock-screen push.
+- [ ] 6. On the Mac open the same dashboard: an action on one screen shows on the other in under a second.
+- [ ] 7. Turn on Airplane mode in the middle of an approve, then turn it off: the approval happens exactly once.
+
+**Alternative: Athena's own CA.** Without a public name, use `athena web setup --host <vpn-name> --ip <vpn-ip>
+--listen <vpn-ip>:8443` (mode `ca`), restart the server, and before step 2 install the CA profile on the phone and turn
+on full trust for it (section 3a). The other steps are the same.
+
 ## For developers: the client contract
 
-Plan 4's dashboard (and any other client) talks to `/ws` with subprotocol `athena.v1`: one protobuf `Frame`
+The dashboard (and any other client) talks to `/ws` with subprotocol `athena.v1`: one protobuf `Frame`
 (`proto/athena/v1`) per binary WebSocket message, at most 1 MiB, `permessage-deflate` without context takeover.
-Unknown fields and a `Hello.protocol` other than 1 are refused with error code `invalid`. The placeholder in
-`internal/web/assets/app.js` is a minimal working client.
+Unknown fields and a `Hello.protocol` other than 1 are refused with error code `invalid`. The dashboard in `web/`
+is the reference client.
 
 - **Link sessions are per connection.** Each WebSocket is a fresh link session: durable frames are numbered from 1
   in each direction and acked cumulatively (`Frame.ack`; a `Ping` with `at_unix_ms` 0 is a standalone ack). The
@@ -192,6 +255,20 @@ Unknown fields and a `Hello.protocol` other than 1 are refused with error code `
 - **Auth is HTTP.** `POST /auth/register/begin|finish`, `/auth/login/begin|finish`, `/auth/reauth/begin|finish`,
   `/auth/logout` and `GET /auth/session` take and return the WebAuthn JSON (base64url fields); every POST and the
   upgrade must carry `Origin` equal to the configured origin, or get 403.
+- **Ticket diffs and files are HTTP.** Three `GET` routes need a session (else 401 `{"code":"unauthenticated"}`) and
+  answer with `Cache-Control: no-store`. A Ticket that is unknown, not placed, or of the other kind, and a file that
+  is not there or may not be read, give 404 `{"code":"not_found"}`; any other failure gives 500 `{"code":"internal"}`.
+  - `/api/tickets/{id}/diff` (a Ticket in a git repository): `{"base","branch","files":[{"path","oldPath"?,"status",
+    "added","deleted","binary"}],"patch","truncated"}`. `branch` is `athena/<lowercased id>`; `base` is the
+    merge-base with `origin/HEAD`, else with the repository's `HEAD`. `status` is `A`, `M`, `D`, `R`, `C` or `T`.
+    `patch` is cut at 2 MiB. `truncated` is set when the patch was cut, and also when the file list was (git's
+    file-list output passed 4 MiB: the files listed carry real counts, the rest are missing).
+  - `/api/tickets/{id}/files` (a Ticket without a repository): `{"files":[{"path","size","modTime"}],"truncated"}`,
+    at most 1000 regular files in at most 2000 directories (and 10 s of walking), breadth-first, sorted by path;
+    `truncated` says a cap was hit. `.athena/` (any letter case), symlinks and hard-linked files are left out.
+  - `/api/tickets/{id}/files/{path...}`: the file as an attachment (`Content-Type: application/octet-stream`,
+    `X-Content-Type-Options: nosniff`). Paths outside the Ticket's directory, under `.athena/` (any letter case), through a symlink, or to a
+    hard-linked file are 404.
 - **Close codes.** The server closes a connection with one of these:
 
   | Code | Meaning | Client action |
@@ -202,6 +279,30 @@ Unknown fields and a `Hello.protocol` other than 1 are refused with error code `
   | 4000 | The peer was silent for 45 s (no frame, no `Pong`). | Reconnect. |
   | 4001 | Protocol violation: a bad or late `Hello`, an undecodable frame (an `invalid` Error is sent first, best effort) or a sequence gap. | Fix the client; do not retry blindly. |
   | 4002 | The login behind the connection ended (revoked, logged out, expired). | Sign in again, then reconnect and resend commands without a result. |
+- **Prompts.** Prompt overrides: `GetPrompt` (a read, not stored) returns a `PromptDetail`; `SetPrompt` and `ResetPrompt` (sensitive) carry the `PromptsView.revision` as `base_revision`, which is one counter for all parts (stale: `conflict`; empty or over 64 KiB text: `invalid`; unknown part: `not_found`). A new session starts with the effective prompt, and a session resumed while its Ticket is open keeps the prompt it started with, and a reopened ended Ticket gets the current effective prompt (kept in the state directory, outside the sandbox's write set; with the sandbox off, or an owner `allowWrite` that covers the state directory, a worker could rewrite its kept prompt).
 - **Push.** `GET /push/key` is the VAPID public key for `pushManager.subscribe`; `PushSubscribe`,
   `PushUnsubscribe` and `SetNotificationPrefs` are commands (sensitive). Report `Visibility{visible}` while the
   dashboard is on screen: no push is sent while a client reported visible in the last 30 s.
+
+## Working on the UI
+
+The dashboard is a Vite + React app in `web/`; `make web` builds it into `internal/web/ui/dist/`, which the Go binary
+embeds (the directory is git-ignored; without a build the server shows "Dashboard not built: run make web").
+
+1. `make web` installs the packages (`npm ci`, only when `web/node_modules` is missing) and builds.
+2. For fast iteration, run a server with TLS off on loopback (`athena web setup --tls off --host localhost --listen
+   127.0.0.1:8443`, then `athena server`), and in another terminal `npm --prefix web run dev`. Vite serves the app
+   with hot reload and proxies `/ws`, `/auth`, `/push` and `/api` to `ATHENA_DEV_SERVER` (default
+   `http://localhost:8443`), rewriting `Origin` to that server's. Passkey ceremonies are bound to the server's origin, so sign in once at
+   `http://localhost:8443` (the built app), then open the Vite dev server at `http://localhost:5173`: the session
+   cookie is not port-scoped, so the proxy reuses it.
+3. `make web-check` runs typecheck, lint, unit tests, the build and the bundle budget; `make check` includes it.
+   `make e2e` runs the browser tests (Playwright against a real server built into `bin/e2e/`, never `bin/athena`, with a
+   fake runtime), including `full-flow.spec.ts`, the whole path from sign-in to sign-out on a phone and a desktop viewport.
+
+Browser enrollment is the dashboard's `/enroll` page: it reads the token from the link's fragment, removes the
+fragment from the address, asks for a device name, creates the passkey (`/auth/register/begin|finish`) and signs in. A
+spent or expired link shows "This link was already used or has expired" and has no retry; run `athena web enroll` again.
+
+The TypeScript types in `web/src/gen/` are generated from `proto/` by `make proto` together with the Go code; commit
+both. Mockups of the design are in `docs/design/mockups/`.

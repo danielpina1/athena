@@ -74,6 +74,7 @@ These were decided in conversation and are not open:
 - **Go** for the backend.
 - **UniFi VPN** (WireGuard) for inter-device networking.
 - Local model inference on one of the nodes.
+- **vLLM** (not Ollama) serves local models (owner, 2026-11-04), and **macOS on Apple silicon is the primary local-inference target, tuned for the best performance possible** (owner, 2026-11-04). Linux/NVIDIA uses the same vLLM API.
 - Code lives in `danielpina1/athena`.
 
 Everything else in this document is the designer's call unless marked otherwise; §15 lists the main ones.
@@ -236,13 +237,43 @@ Agent messages are routed through the control server (single place for authoriza
 
 Large artifacts between nodes go directly node-to-node (git, or `blob` stream relayed by the control server only if a direct connection is unavailable).
 
+### 8.5 Splitting work: up front and mid-work (owner, 2026-11-04)
+
+The owner asked for both ways of splitting a task, built "as modular and efficient as possible".
+
+- **Mid-work split**: the lead session calls `hand_off` (§8.4) for a separable piece it discovers while working. Children are child Tickets whose Mandate is bounded by the parent's, each in its own worktree branched from the parent's branch; the lead `wait_for`s them and merges their branches back.
+- **Up-front split (plan first)**: before any work starts, a **planning step** turns one request into a **breakdown**: sub-tasks, each with a title, the instructions, the files or areas it expects to touch, dependencies between sub-tasks (a DAG), and an optional runtime/node/model hint. The original Ticket becomes the **lead** (it owns the branch, merges, and delivers the result); each sub-task becomes a child Ticket started when its dependencies are done.
+  - **When**: the owner ticks "Plan first" in New task, a Policy rule asks for it (e.g. for requests the router classifies as large), or the router proposes it. Small requests never pay for a planning step.
+  - **Approval**: the breakdown is shown as a draft (list and graph); the owner edits, approves or rejects it. A Policy setting may auto-approve breakdowns up to N sub-tasks with no new Mandate scope. Children never get more authority than the lead.
+  - **Efficiency**: planning runs on a cheap or local model with a short, fixed prompt (prompt cache reused); fan-out is capped (default 5 sub-tasks, configurable) and children count against the WIP brake (§18.1) and slots like any Ticket; sub-tasks whose expected files overlap are flagged in the draft (and as overlap warnings in the graph) so the owner can merge them before they run.
+  - **Failure**: a failed child raises an Attention on the lead; the owner can retry it, drop it, or let the lead continue without it.
+- **Modularity**: both modes produce the same thing — child Tickets with dependency edges — through one Engine command (`SpawnChildren(lead, []ChildSpec)`), so the dashboard, graph, dispatcher and merge logic do not care which mode created them. The planner is an interface (`planner.Strategy`: `Plan(ctx, Request) (Breakdown, error)`) with one default implementation (an LLM planning session); other strategies (e.g. a template per repository, or one sub-task per failing CI job) plug in without touching the rest.
+
 ## 9. Local model inference
 
-- The GPU node runs **Ollama** (default; macOS Metal or Linux CUDA). **vLLM** is an optional backend on a Linux NVIDIA node when throughput matters. The node program detects the backend, lists models and VRAM, and advertises them.
+- **Pluggable inference backend** (owner, 2026-11-04: "take into account the modularity in the backend we use for inference"). Nothing outside one node package knows which engine runs. Each engine is an adapter behind one Go interface, `inference.Backend`:
+  - `Detect(ctx) (Info, error)`: is the engine installed or running here; version; platform facts.
+  - `Start(ctx, ModelSpec) error` / `Stop(ctx) error`: for engines the node manages (a `launchd` agent on macOS, a user service on Linux); a no-op for an engine the owner runs.
+  - `Endpoint() string`: the localhost base URL of its OpenAI-compatible API, the one wire format every backend must speak (chat completions; `responses` when the engine has it).
+  - `Models(ctx) ([]Model, error)`, `Health(ctx) error`, `Telemetry(ctx) (Usage, error)` (GPU load, memory, loaded models).
+  - `Capabilities() Caps`: native Anthropic Messages, tool calling, prefix caching, continuous batching, max context.
+  
+  Everything else is built on those: the authenticated proxy (§9 below) forwards to `Endpoint()`, translates Anthropic Messages ↔ chat completions only when `Caps` says the engine lacks them, and the dashboard shows `Info`/`Telemetry` without engine-specific code. A node's config names its backend (`inference.backend`, default `auto`, which picks by platform), so adding an engine — mlx-lm, llama.cpp, Ollama or a future one — is one new adapter with its contract tests, and switching is a config change. Contract tests run every adapter against the same suite (detect, serve a request, stream, tool call when supported, health, telemetry), with a fake engine for CI.
+- **Engine: vLLM everywhere** (the default adapters). On a Mac (Apple silicon, the primary target) the node runs **vLLM with the `vllm-metal` plugin** (vllm-project's Apple silicon backend: MLX compute, paged attention, continuous batching, concurrent serving). On Linux with NVIDIA GPUs it runs stock vLLM (CUDA). Both expose the same OpenAI-compatible API, so the node, the proxy and the dashboard treat them as one backend. Ollama is not used. The builder verifies vllm-metal's current release on the installed macOS before building (it is young; pin a version).
+- **macOS tuning** (the owner asked for the most optimized setup):
+  - **Models in MLX format** (`mlx-community` 4-bit or 8-bit quantizations), sized to leave headroom in unified memory; the node refuses a model that would not fit with the session load it expects.
+  - **Resident and warm**: the model loads at node start and stays loaded (no idle unload); a warm-up request runs before the node advertises it.
+  - **Prefix caching on**, so the router's and chores' fixed system prompts are computed once and reused across requests (matches §12's prompt-cache reuse).
+  - **Concurrency through continuous batching**: the router, chores and any local-model sessions share one engine instead of queueing whole requests.
+  - **GPU memory ceiling**: `athena node` setup documents raising macOS's GPU wired-memory limit (`sysctl iogpu.wired_limit_mb`) for large models. It is an owner action needing `sudo`; Athena never changes system settings itself.
+  - **No sleep while serving**: the node holds a power assertion while requests are in flight, and only then.
+  - **Telemetry without root**: GPU utilization from IOKit's accelerator statistics, unified memory pressure from the VM stats, the chip and GPU core count from `sysctl`/`system_profiler`; no `powermetrics`.
+  - **Service**: vLLM runs as a `launchd` user agent the node manages (start, health check, restart with backoff), bound to localhost.
+- The node program detects the running engine, lists its served models, memory and GPU facts, and advertises them. A machine with neither Apple silicon nor an NVIDIA GPU serves no local models.
 - The inference server binds to localhost only. Other nodes reach it **through the GPU node's Athena program** (authenticated proxy on the link), never directly.
 - Uses:
   1. **Codex on a local model**: Codex custom provider (`[model_providers.athena_local]`, a non-reserved id, `base_url` pointing at the node's local proxy). The builder verifies the wire API (`responses` vs `chat`) for the installed Codex version.
-  2. **Claude Code on a local model**: Ollama's Anthropic-compatible Messages API (Ollama ≥ 0.14) via `ANTHROPIC_BASE_URL`. **Experimental**: there are reports of Claude Code hanging against Ollama (anthropics/claude-code#51239); keep behind a feature flag until verified.
+  2. **Claude Code on a local model**: via `ANTHROPIC_BASE_URL` pointing at the node's proxy, which speaks the Anthropic Messages API. The builder verifies whether the installed vLLM (with vllm-metal on macOS) serves `/v1/messages` itself; if not, the node's proxy translates Messages ↔ chat completions, streaming and tool use included. **Experimental**: keep behind a feature flag until verified with tool use and streaming.
   3. **Router and chores on a local model** (classification, summaries, log digestion) — the main cost saving.
   4. `local_model` MCP tool for any session on any node.
 - Dashboard: "Local · <model> on <node>" is a choice when starting a Ticket; node card shows GPU load and loaded models.
@@ -295,7 +326,7 @@ Owner asked for concrete visibility. Mockup: `system-visibility.html` (desktop "
 | Guardrail decisions (allow / escalate / deny, with rule) | PreToolUse / PermissionRequest hooks |
 | Tokens and spend per session, Ticket, model, node | Runtime result events (usage fields); both CLIs' native OpenTelemetry export (Claude Code `CLAUDE_CODE_ENABLE_TELEMETRY`, Codex `[otel]`) pointed at the node's built-in OTLP receiver |
 | Node health (CPU, memory, GPU, disk of work root, link RTT, buffered events, CLI versions) | Node program, sent with heartbeats |
-| Integrations (GitHub App token, API rate limit, Ollama, certificate expiry, store backups) | Health checks run by server/nodes on a schedule |
+| Integrations (GitHub App token, API rate limit, vLLM, certificate expiry, store backups) | Health checks run by server/nodes on a schedule |
 
 **Storage**: events and metrics go to the control server's SQLite (separate database file from domain state), downsampled after 7 days (1-minute → 1-hour buckets), raw events kept 30 days (configurable). Audit records (every command run by a session, every hook decision, every Approval, every GitHub write) are append-only and kept 1 year.
 
@@ -371,7 +402,7 @@ Measured from plan 1 onward by an in-process metrics core (`internal/metrics`: c
 | MCP | `github.com/modelcontextprotocol/go-sdk` |
 | Workers | `claude` CLI (stream-json), `codex app-server` |
 | GitHub | GitHub App over the REST API (server); workers use `gh` and git through Athena's credential helper with a short-lived, repository-scoped App token (§11) |
-| Local inference | Ollama (default), vLLM (optional) |
+| Local inference | vLLM: `vllm-metal` (MLX) on Apple silicon Macs, the primary target; CUDA on Linux/NVIDIA (owner) |
 | Network | UniFi WireGuard VPN |
 | Dashboard | React 19, Vite, TypeScript, Tailwind v4, shadcn/ui, PWA + Web Push |
 | Tests | Go `testing` (+ race detector), Vitest for the dashboard, Playwright for key dashboard flows on mobile + desktop viewports |
@@ -404,7 +435,7 @@ athena/
 - Agent-to-agent messages routed via the control server; artifacts node-to-node.
 - Work moves between nodes via git; no automatic migration in v1.
 - Protobuf over WebSocket; SQLite outbox on every device for resumable delivery.
-- Ollama default for local inference; Claude Code-on-local behind a flag.
+- Claude Code-on-local behind a flag (vLLM is the owner's choice, §3).
 - Passkey login; Athena's own CA + mTLS for nodes.
 - GitHub App identity with short-lived, per-Ticket tokens minted by the control server.
 - Workers run as the owner's OS user by default; dedicated restricted user is opt-in.
@@ -422,14 +453,14 @@ The owner has not answered these yet. The design adopts the defaults below (desi
 2. **No-repo "ops" Tickets**: run in a scratch directory. Host-level actions (restart services, edit system configs, install software) are possible only through Approvals under rule 1; there is no blanket host Mandate. Only owner-originated (dashboard) Tickets may request host actions.
 3. **Claude/Codex accounts**: both subscriptions and API keys are supported (whatever each node's `claude`/`codex` login uses). The dispatcher enforces a configurable **per-account concurrency limit** across all nodes, in addition to per-node slots, so shared subscription rate limits aren't exceeded; rate-limit errors back off and requeue rather than fail.
 4. **TLS**: both paths are built. Setup asks: with a domain, ACME DNS-01 (via `go-acme/lego`, which supports most DNS providers) for a private hostname resolving to the control server's VPN address; without one, Athena's CA plus a one-tap install profile (iOS `.mobileconfig`, macOS/Linux instructions). The dashboard warns that iOS home-screen push needs a trusted certificate.
-5. **Machines**: setup asks which machine is the control server. Design assumes it may sleep: nodes keep working and buffer (§8.2), dashboards show "control server unreachable" and reconnect automatically, and Sources catch up on wake. Recommended: an always-on desktop. Local inference supports Ollama on macOS (Metal) and Linux (CUDA) in v1; vLLM is optional on Linux/NVIDIA.
+5. **Machines**: setup asks which machine is the control server. Design assumes it may sleep: nodes keep working and buffer (§8.2), dashboards show "control server unreachable" and reconnect automatically, and Sources catch up on wake. Recommended: an always-on desktop. Local inference uses vLLM, with vllm-metal on Apple silicon Macs as the primary target and CUDA on Linux/NVIDIA (owner, §3).
 6. **VPN**: confirmed Ubiquiti **UniFi** (WireGuard VPN server / Teleport).
 
 ### 16.2 For the builder to verify
 
 - Exact `claude` stream-json input/output schema, resume and interrupt semantics, and hook payloads for the installed version.
 - `codex app-server` methods for start/resume/input/interrupt, and how its approval requests interact with Codex `PermissionRequest` hooks; hook trust requirements when hooks come from `CODEX_HOME`.
-- Codex custom-provider wire API for Ollama; Claude Code ↔ Ollama stability.
+- vllm-metal's current release on the installed macOS: model coverage, tool calling, prefix caching and concurrent serving; codex custom-provider wire API (`responses` vs `chat`) against vLLM; Claude Code ↔ vLLM (Messages API or proxy translation) stability with tool use.
 - Web Push on iOS PWA under the chosen certificate approach.
 
 ## 17. Left to the builder

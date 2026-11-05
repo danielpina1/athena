@@ -1,0 +1,132 @@
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  .dk { --bg:#FFFFFF; --sf2:#F6F6F6; --bd:#111; --hl:#E4E4E4; --tx:#0A0A0A; --mu:#6B6B6B; --ac:#FF5A1F; font-family:'IBM Plex Sans',system-ui,sans-serif; color:var(--tx); background:var(--bg); border:1px solid var(--bd); font-size:13px; line-height:1.45; display:grid; grid-template-columns:208px 340px 1fr; min-height:640px; text-align:left; box-shadow:0 30px 70px -30px rgba(0,0,0,.35); }
+  .dk * { box-sizing:border-box; }
+  .mono { font-family:'IBM Plex Mono',ui-monospace,monospace; }
+  .sd { border-right:1px solid var(--bd); display:flex; flex-direction:column; }
+  .logo { padding:16px 16px 14px; border-bottom:1px solid var(--bd); font-weight:600; letter-spacing:-.01em; display:flex; justify-content:space-between; align-items:center; }
+  .logo .k { font-size:10.5px; color:var(--mu); border:1px solid var(--hl); padding:1px 5px; font-weight:500; }
+  .nv { padding:10px 8px; display:flex; flex-direction:column; gap:1px; }
+  .nv a { display:flex; justify-content:space-between; padding:7px 8px; color:var(--tx); text-decoration:none; }
+  .nv a.on { background:var(--tx); color:#fff; }
+  .nv .n { font-size:11px; background:var(--ac); color:#fff; padding:0 6px; font-weight:600; }
+  .lbl { font-size:10.5px; letter-spacing:.08em; text-transform:uppercase; color:var(--mu); padding:14px 16px 6px; }
+  .nd { padding:6px 16px; display:grid; grid-template-columns:1fr auto; gap:2px 8px; font-size:12px; }
+  .nd .s { font-size:11px; color:var(--mu); grid-column:1/-1; }
+  .bar { height:3px; background:var(--hl); grid-column:1/-1; margin-top:3px; }
+  .bar i { display:block; height:100%; background:var(--tx); }
+  .sq { width:6px; height:6px; background:var(--ac); display:inline-block; margin-right:6px; vertical-align:middle; }
+  .sq.off { background:#BDBDBD; }
+  .ls { border-right:1px solid var(--bd); display:flex; flex-direction:column; }
+  .top { padding:14px 16px; border-bottom:1px solid var(--bd); display:flex; justify-content:space-between; align-items:baseline; }
+  .top h4 { margin:0; font-size:18px; font-weight:600; letter-spacing:-.01em; }
+  .flt { display:flex; gap:6px; padding:10px 16px; border-bottom:1px solid var(--hl); font-size:11.5px; }
+  .flt span { border:1px solid var(--hl); padding:2px 8px; color:var(--mu); }
+  .flt span.on { border-color:var(--tx); color:var(--tx); }
+  .it { padding:12px 16px; border-bottom:1px solid var(--hl); }
+  .it.sel { background:var(--sf2); box-shadow:inset 3px 0 0 var(--ac); }
+  .mt { font-size:11px; color:var(--mu); display:flex; gap:6px; align-items:center; }
+  .tg { font-family:'IBM Plex Sans'; font-weight:600; font-size:10.5px; color:#fff; background:var(--ac); padding:0 6px; }
+  .tg.k { background:var(--tx); }
+  .tg.g { background:transparent; color:var(--mu); border:1px solid var(--hl); font-weight:500; }
+  .it .h { font-weight:600; margin:5px 0 2px; }
+  .it .p { color:var(--mu); font-size:12px; }
+  .dt { display:flex; flex-direction:column; }
+  .dh { padding:14px 20px; border-bottom:1px solid var(--bd); display:flex; justify-content:space-between; align-items:center; gap:12px; }
+  .dh h4 { margin:0; font-size:18px; font-weight:600; letter-spacing:-.01em; }
+  .btn { border:1px solid var(--bd); padding:6px 12px; font-weight:600; font-size:12px; background:#fff; }
+  .btn.pri { background:var(--ac); border-color:var(--ac); color:#fff; }
+  .kv { display:grid; grid-template-columns:repeat(4,1fr); border-bottom:1px solid var(--hl); }
+  .kv div { padding:10px 20px; border-right:1px solid var(--hl); font-size:12px; }
+  .kv div:last-child { border-right:0; }
+  .kv b { display:block; font-size:10.5px; letter-spacing:.08em; text-transform:uppercase; color:var(--mu); font-weight:500; margin-bottom:2px; }
+  .q { margin:16px 20px 0; border:1px solid var(--bd); border-left:3px solid var(--ac); padding:12px 14px; }
+  .q .p { color:var(--mu); margin-top:3px; }
+  .q .r { display:flex; gap:8px; margin-top:10px; }
+  .q .in { flex:1; border:1px solid var(--hl); padding:6px 10px; color:var(--mu); }
+  .lv { margin:16px 20px 20px; border:1px solid var(--bd); flex:1; display:flex; flex-direction:column; min-height:250px; }
+  .lvh { display:flex; justify-content:space-between; padding:8px 12px; border-bottom:1px solid var(--bd); font-size:11.5px; }
+  .live { color:var(--ac); font-weight:600; }
+  .log { padding:10px 12px; font-size:11.5px; line-height:1.7; flex:1; background:var(--sf2); }
+  .log .t { color:var(--mu); }
+  .log .tool { border:1px solid var(--hl); background:#fff; padding:4px 8px; margin:4px 0; display:flex; justify-content:space-between; }
+  .log .ok { color:var(--tx); font-weight:500; }
+  .cmp { border-top:1px solid var(--bd); padding:8px 12px; display:flex; justify-content:space-between; color:var(--mu); font-size:12px; }
+</style>
+
+<h2>Desktop dashboard, in the Precision style</h2>
+<p class="subtitle">Three panes: navigation and machines · what needs you · the selected task with its live session. ⌘K opens a command palette; j/k moves through the list. Tell me what you'd change.</p>
+
+<div class="dk">
+  <div class="sd">
+    <div class="logo">Athena <span class="k mono">⌘K</span></div>
+    <div class="nv">
+      <a class="on" href="#">Needs you <span class="n">3</span></a>
+      <a href="#">Tickets <span class="mono" style="color:var(--mu)">14</span></a>
+      <a href="#">New task</a>
+      <a href="#">Agents</a>
+      <a href="#">Nodes</a>
+      <a href="#">Settings</a>
+    </div>
+    <div class="lbl">Nodes</div>
+    <div class="nd"><span><span class="sq"></span>mac-studio</span><span class="mono">3/4</span><div class="bar"><i style="width:75%"></i></div></div>
+    <div class="nd"><span><span class="sq"></span>linux-gpu</span><span class="mono">2/6</span><div class="s mono">ollama · qwen3-coder · GPU 61%</div><div class="bar"><i style="width:33%"></i></div></div>
+    <div class="nd"><span><span class="sq"></span>macbook</span><span class="mono">1/2</span><div class="bar"><i style="width:50%"></i></div></div>
+    <div class="nd"><span><span class="sq off"></span>pi-lab</span><span class="mono" style="color:var(--mu)">offline</span></div>
+    <div style="flex:1"></div>
+    <div class="lbl" style="border-top:1px solid var(--hl)">Today</div>
+    <div class="nd mono" style="padding-bottom:16px;color:var(--mu)"><span>6 merged · 2 open PRs</span></div>
+  </div>
+
+  <div class="ls">
+    <div class="top"><h4>Needs you</h4><span class="mono" style="color:var(--mu);font-size:11px">live</span></div>
+    <div class="flt"><span class="on">All 3</span><span>Approvals 1</span><span>Questions 1</span><span>Review 1</span></div>
+    <div class="it">
+      <div class="mt"><span class="tg">Approval</span><span class="mono">codex · mac-studio</span></div>
+      <div class="h">Run the staging migration?</div>
+      <div class="p mono">pnpm db:migrate --env staging</div>
+    </div>
+    <div class="it sel">
+      <div class="mt"><span class="tg">Question</span><span class="mono">claude · linux-gpu</span></div>
+      <div class="h">Fix flaky auth test</div>
+      <div class="p">Retry in the client or in the test helper?</div>
+    </div>
+    <div class="it">
+      <div class="mt"><span class="tg k">Ready</span><span class="mono">PR #128 · checks passing</span></div>
+      <div class="h">Rate-limit webhook intake</div>
+      <div class="p mono">+184 −22 · 6 files</div>
+    </div>
+    <div class="lbl" style="padding-top:18px">Working</div>
+    <div class="it"><div class="mt"><span class="tg g">Working</span><span class="mono">codex · macbook · 4m</span></div><div class="h" style="font-weight:500">Upgrade Vite to v7</div></div>
+    <div class="it"><div class="mt"><span class="tg g">Working</span><span class="mono">claude · mac-studio · 12m</span></div><div class="h" style="font-weight:500">Summarize last week's incidents</div></div>
+  </div>
+
+  <div class="dt">
+    <div class="dh">
+      <div><div class="mt mono">T-0142 · danielpina1/api · branch athena/fix-flaky-auth</div><h4>Fix flaky auth test</h4></div>
+      <div style="display:flex;gap:8px"><span class="btn">Move</span><span class="btn">Stop</span></div>
+    </div>
+    <div class="kv">
+      <div><b>Runtime</b>Claude Code</div>
+      <div><b>Node</b>linux-gpu</div>
+      <div><b>Stage</b><span style="color:var(--ac);font-weight:600">Awaiting answer</span></div>
+      <div><b>Asked by</b>GitHub #311</div>
+    </div>
+    <div class="q">
+      <div class="h" style="font-weight:600">Should the retry live in the client or in the test helper?</div>
+      <div class="p">The flake comes from token refresh racing the first request. A client retry fixes it for real users too; a helper retry only hides it in tests.</div>
+      <div class="r"><span class="in">Answer…</span><span class="btn">Client</span><span class="btn pri">Send</span></div>
+    </div>
+    <div class="lv">
+      <div class="lvh mono"><span>Session · claude-code 2.x · sonnet</span><span class="live">● live</span></div>
+      <div class="log mono">
+        <div><span class="t">14:02:11</span> Reproduced: 3 of 50 runs fail in auth.spec.ts</div>
+        <div class="tool"><span>Bash · pnpm vitest run auth --repeat 50</span><span class="ok">exit 1 · 38s</span></div>
+        <div><span class="t">14:02:52</span> Failure trace points at refreshToken() racing login()</div>
+        <div class="tool"><span>Read · src/auth/client.ts</span><span class="ok">ok</span></div>
+        <div><span class="t">14:03:05</span> Two fixes possible; asking before changing behavior.</div>
+      </div>
+      <div class="cmp"><span>Message the session…</span><span class="mono">⏎ send · ⌘⏎ interrupt</span></div>
+    </div>
+  </div>
+</div>

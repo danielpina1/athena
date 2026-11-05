@@ -141,7 +141,8 @@ func TestServerGitHubFlowWithFakes(t *testing.T) {
 	envs := fake.invocationEnvs(t)
 	worker := envs[len(envs)-1]
 	if worker["ATHENA_TICKET"] != "T-0001" || worker["ATHENA_GITHUB_REPOSITORY"] != fakeRepo || worker["ATHENA_GITHUB_ACCOUNT"] != fakeBot ||
-		worker["ATHENA_GITHUB_COMMIT_EMAIL"] != fmt.Sprintf("%d+%s@users.noreply.github.com", fakeBotID, fakeBot) || worker["ATHENA_GITHUB_NUMBER"] != "3" {
+		worker["ATHENA_GITHUB_COMMIT_EMAIL"] != fmt.Sprintf("%d+%s@users.noreply.github.com", fakeBotID, fakeBot) || worker["ATHENA_GITHUB_NUMBER"] != "3" ||
+		worker["ATHENA_GITHUB_KIND"] != "issue" {
 		t.Fatalf("worker env = %v", worker)
 	}
 	for k, v := range worker {

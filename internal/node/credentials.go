@@ -317,8 +317,8 @@ func samePath(path, repo string) bool {
 }
 
 // githubVariables are a GitHub Ticket's ATHENA_GITHUB_* execution variables: its repository, the bot account and its
-// commit email, and the Issue or pull request its origin Trigger came from, with the pull request's head ref. None
-// holds a credential.
+// commit email, and the Issue or pull request its origin Trigger came from (its number and kind, issue or pull), with the
+// pull request's head ref. None holds a credential.
 func (n *Node) githubVariables(s *session) []string {
 	repo := s.t.Repo
 	if repo == "" || n.cfg.Credentials == nil {
@@ -333,6 +333,9 @@ func (n *Node) githubVariables(s *session) []string {
 			s.log.Warn("read origin trigger", "trigger", id, "error", err)
 		case strings.EqualFold(tr.Meta["repo"], repo) && tr.Meta["number"] != "":
 			vars = append(vars, "ATHENA_GITHUB_NUMBER="+tr.Meta["number"])
+			if k := tr.Meta["kind"]; k == "issue" || k == "pull" {
+				vars = append(vars, "ATHENA_GITHUB_KIND="+k)
+			}
 			if tr.Meta["kind"] == "pull" && tr.Meta["head"] != "" {
 				vars = append(vars, "ATHENA_GITHUB_PR_HEAD="+tr.Meta["head"])
 			}

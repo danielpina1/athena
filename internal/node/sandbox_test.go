@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -76,7 +77,7 @@ func TestWorkerSettingsCarrySandbox(t *testing.T) {
 		}
 	}
 	for _, p := range []string{
-		filepath.Join(common, "config"), filepath.Join(common, "hooks"),
+		filepath.Join(common, "config"), filepath.Join(common, "config.worktree"), filepath.Join(common, "hooks"),
 		filepath.Join(common, "worktrees", filepath.Base(dir), "config.worktree"),
 		filepath.Join(dir, ".athena", "settings.json"), filepath.Join(dir, ".athena", "mcp.json"), filepath.Join(dir, ".athena", ".gitignore"),
 	} {
@@ -158,4 +159,34 @@ func TestGitDirs(t *testing.T) {
 	if g, c := gitDirs(t.TempDir()); g != "" || c != "" {
 		t.Errorf("no git: %q %q", g, c)
 	}
+}
+
+// The kept prompt lives in the state directory, outside every path a sandboxed session may write.
+func TestKeptPromptIsOutsideTheSandboxWriteSet(t *testing.T) {
+	base := t.TempDir()
+	n := New(Config{StateDir: filepath.Join(base, "state"), SocketPath: filepath.Join(base, "n.sock"), Sandbox: &SandboxConfig{}}, nil)
+	sb, _ := n.sandboxFor(filepath.Join(base, "work", "t-1"))
+	if sb == nil {
+		t.Fatal("no sandbox")
+	}
+	kept := PromptPath(n.cfg.StateDir, "T-0001")
+	for _, w := range sb.AllowWrite {
+		if kept == w || strings.HasPrefix(kept, w+string(filepath.Separator)) {
+			t.Fatalf("%s is inside the write set %s", kept, w)
+		}
+	}
+}
+
+func TestEndedTicketDropsItsKeptPrompt(t *testing.T) {
+	n := New(Config{StateDir: t.TempDir()}, nil)
+	n.sessionPrompt("T-0001", false)
+	path := PromptPath(n.cfg.StateDir, "T-0001")
+	if _, err := os.Stat(path); err != nil {
+		t.Fatal(err)
+	}
+	n.dropPrompt("T-0001")
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("kept prompt still there: %v", err)
+	}
+	n.dropPrompt("T-0001") // already gone: no error
 }

@@ -128,6 +128,29 @@ var migrations = []string{
 		session_hash BLOB NOT NULL REFERENCES web_sessions(hash) ON DELETE CASCADE
 	);
 	CREATE INDEX push_subscriptions_session ON push_subscriptions (session_hash);`,
+	// 6: the snapshot's reads are bounded in SQL. The answer time of an Approval (its creation time while it has none)
+	// becomes a column, backfilled from the document in the stored layout (UTC, nine fraction digits; the backfill has
+	// millisecond precision), and the indexes let "the newest N" read N rows.
+	`ALTER TABLE approvals ADD COLUMN answered_at TEXT NOT NULL DEFAULT '';
+	UPDATE approvals SET answered_at = strftime('%Y-%m-%dT%H:%M:%f', COALESCE(json_extract(doc, '$.answeredAt'), json_extract(doc, '$.createdAt'))) || '000000Z'
+		WHERE COALESCE(json_extract(doc, '$.answeredAt'), json_extract(doc, '$.createdAt')) IS NOT NULL;
+	CREATE INDEX approvals_answered ON approvals (answered_at, id);
+	CREATE INDEX approvals_ticket ON approvals (ticket_id);
+	CREATE INDEX tickets_ended_updated ON tickets (ended, updated_at, id);
+	CREATE INDEX tickets_updated ON tickets (updated_at, id);`,
+	// 7: the owner's prompt overrides. Each save is a revision (one counter for all parts); a NULL text is a reset to
+	// the compiled-in default. default_hash and default_text record the default the owner saw, so a release that
+	// changes it is noticed.
+	`CREATE TABLE prompt_revisions (
+		revision INTEGER PRIMARY KEY,
+		part TEXT NOT NULL,
+		text TEXT,
+		default_hash TEXT NOT NULL,
+		default_text TEXT NOT NULL,
+		origin TEXT NOT NULL,
+		at INTEGER NOT NULL
+	);
+	CREATE INDEX prompt_revisions_part ON prompt_revisions (part, revision);`,
 }
 
 const schemaKey = "schema"

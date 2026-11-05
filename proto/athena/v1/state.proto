@@ -18,6 +18,10 @@ message Snapshot {
   NodeStatus node = 7;
   Health health = 8;
   PolicyView policy = 9;
+  // repos are the repositories and folders a task can be placed in, the last used first.
+  repeated RepoView repos = 10;
+  NotificationPrefsView notifications = 11;
+  PromptsView prompts = 12;
 }
 
 message Delta {
@@ -32,6 +36,10 @@ message Delta {
     NodeStatus node = 16;
     Health health = 17;
     PolicyView policy = 18;
+    // repos carries the whole list, sent only when it changed.
+    RepoList repos = 19;
+    NotificationPrefsView notifications = 20;
+    PromptsView prompts = 21;
   }
 }
 
@@ -52,12 +60,18 @@ message TicketSummary {
   string pending_approval_id = 14;
   string pr_url = 15;
   string attention_question = 16;
+  // branch is the worktree branch, athena/<lowercased id>; empty when the Ticket has no repository.
+  string branch = 17;
+  // runtime is the agent runtime that works the Ticket: claude.
+  string runtime = 18;
 }
 
 message TicketDetail {
   TicketSummary summary = 1;
   repeated TimelineEntry timeline = 2;
   repeated string threads = 3;
+  // timeline_trimmed is set when the oldest timeline entries were dropped to fit one frame.
+  bool timeline_trimmed = 4;
 }
 
 message TimelineEntry {
@@ -157,4 +171,37 @@ message PolicyView {
   uint32 revision = 1;
   string version = 2;
   string settings_json = 3;
+}
+
+// RepoView is a place a task can run: a GitHub repository, a local git repository or a plain folder.
+message RepoView {
+  // name is owner/name for github, else an absolute path.
+  string name = 1;
+  // kind is github, git or dir.
+  string kind = 2;
+  // last_used_at is unset for a configured repository no Ticket has used.
+  google.protobuf.Timestamp last_used_at = 3;
+}
+
+message RepoList {
+  repeated RepoView repos = 1;
+}
+
+// NotificationPrefsView says which push notification kinds exist and which the owner muted.
+message NotificationPrefsView {
+  repeated string kinds = 1;
+  repeated string muted = 2;
+}
+
+// PromptsView says which prompt parts the owner overrode. Its revision is the base for SetPrompt and ResetPrompt.
+message PromptsView {
+  uint32 revision = 1;
+  repeated PromptPartView parts = 2;
+}
+
+message PromptPartView {
+  string name = 1;
+  bool overridden = 2;
+  // default_updated is true when the override was saved against a default that has since changed.
+  bool default_updated = 3;
 }
