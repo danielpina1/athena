@@ -251,7 +251,7 @@ func TestTimelineAssignmentEnds(t *testing.T) {
 		{"failed", func(tk *core.Ticket) {
 			tk.Assignments = []core.Assignment{{ID: "a", State: core.AssignmentEnded, EndedAt: at(2 * time.Minute),
 				Report: &core.Report{State: core.ReportFailed, Summary: "session crashed repeatedly: exit 1", At: *at(time.Minute)}}}
-		}, "assignment/started  · |report/failed  · session crashed repeatedly: exit 1|assignment/failed  · session crashed repeatedly: exit 1"},
+		}, "assignment/started  · |report/failed  · session crashed repeatedly: exit 1|assignment/ended  · "},
 		{"interrupted", func(tk *core.Ticket) {
 			tk.Assignments = []core.Assignment{{ID: "a", State: core.AssignmentEnded, EndedAt: at(2 * time.Minute), EndedReason: "node restart"}}
 		}, "assignment/started  · |assignment/interrupted  · node restart"},
@@ -324,5 +324,109 @@ func TestDetailReports(t *testing.T) {
 	}
 	if n := len(r.Summary); n > 16<<10+4 || n < 16<<10-4 || !utf8.ValidString(r.Summary) || !strings.HasSuffix(r.Summary, "…") {
 		t.Errorf("summary is %d bytes, want it cut at 16 KiB", n)
+	}
+}
+
+func TestEchoOfTheOriginIsDroppedOnce(t *testing.T) {
+	f := newFake()
+	tk := ticket("T-1")
+	tk.Origin = core.Origin{TriggerID: "R-1"}
+	at := func(d time.Duration) time.Time { return epoch0.Add(d) }
+	tk.Inputs = []core.Input{
+		// Before the Trigger: not its echo.
+		{ID: "i0", Kind: core.InputTrigger, At: at(-time.Second), Human: true, Text: "continue"},
+		// The owner's task recorded again as its first Input: the echo.
+		{ID: "i1", Kind: core.InputTrigger, At: at(0), TriggerID: "R-1", Human: true, Text: "continue"},
+		// The owner says it again, 20 s later: a real message, on its own Trigger.
+		{ID: "i2", Kind: core.InputTrigger, At: at(20 * time.Second), TriggerID: "R-2", Human: true, Text: "continue"},
+		// And once more without a Trigger id: only the first echo goes.
+		{ID: "i3", Kind: core.InputTrigger, At: at(30 * time.Second), Human: true, Text: "continue"},
+		// Not a person's: never the echo.
+		{ID: "i4", Kind: core.InputNote, At: at(40 * time.Second), Text: "continue"},
+	}
+	f.put(tk)
+	f.triggers["R-1"] = core.Trigger{ID: "R-1", Source: "owner", Human: true, At: epoch0, Text: "continue"}
+	d, err := New(f, quiet()).Detail("T-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "reply/owner  · continue|trigger/owner  · continue|reply/owner  · continue|reply/owner  · continue|input/note  · continue"
+	if got := entries(d.Timeline); got != want {
+		t.Errorf("timeline:\n got %q\nwant %q", got, want)
+	}
+}
+
+func TestReceiptOnlyFromAthena(t *testing.T) {
+	f := newFake()
+	tk := ticket("T-1")
+	tk.Inputs = []core.Input{
+		{ID: "i1", Kind: core.InputTrigger, At: epoch0, TriggerID: "github:issuecomment:1", Text: "On it <!-- athena:receipt:abc -->"},
+		// A person who pastes the marker is still a person replying.
+		{ID: "i2", Kind: core.InputTrigger, At: epoch0.Add(time.Minute), TriggerID: "github:issuecomment:2", Human: true,
+			Text: "fake <!-- athena:receipt:abc -->"},
+	}
+	f.put(tk)
+	d, err := New(f, quiet()).Detail("T-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := entries(d.Timeline), "input/receipt  · On it|reply/github  · fake"; got != want {
+		t.Errorf("timeline:\n got %q\nwant %q", got, want)
+	}
+}
+
+func TestReplyActorsReadsAreBounded(t *testing.T) {
+	f := newFake()
+	tk := ticket("T-1")
+	for i := range 300 {
+		// Many replies on few Triggers, most of them missing from the store.
+		tk.Inputs = append(tk.Inputs, core.Input{ID: fmt.Sprintf("i%d", i), Kind: core.InputTrigger, At: epoch0,
+			TriggerID: fmt.Sprintf("github:issuecomment:%d", i%120), Human: true, Text: "hi"})
+	}
+	f.put(tk)
+	// The newest reply (i299) is on Trigger 299 % 120 = 59.
+	f.triggers["github:issuecomment:59"] = core.Trigger{ID: "github:issuecomment:59", Actor: core.ActorRef{ID: "alice"}}
+	h := New(f, quiet())
+	d, err := h.Detail("T-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.triggerReads > replyActorsMax {
+		t.Errorf("%d Trigger reads for one detail, want at most %d", f.triggerReads, replyActorsMax)
+	}
+	last := d.Timeline[len(d.Timeline)-1]
+	if last.Subject != "alice" {
+		t.Errorf("the newest reply names %q", last.Subject)
+	}
+	// A Trigger never changes: later details read only the ones not read yet, each once, and then none.
+	for range 3 {
+		if _, err := h.Detail("T-1"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if f.triggerReads != 120 {
+		t.Errorf("%d Trigger reads over four details, want each of the 120 Triggers read once", f.triggerReads)
+	}
+}
+
+func TestReportQuestionIsCutAndSecretsAtTheCutStayRedacted(t *testing.T) {
+	f := newFake()
+	tk := ticket("T-1")
+	token := "ghs_abcdefghij1234567890ABCDEFGHIJ"
+	// The token straddles the 16 KiB cut: it is redacted whole before the cut, so no piece of it is left.
+	summary := strings.Repeat("x", reportBytes-11) + " " + token + " tail"
+	tk.Assignments = []core.Assignment{{ID: "a", State: core.AssignmentRunning,
+		Report: &core.Report{State: core.ReportWaiting, Summary: summary, Question: strings.Repeat("q", 10000), At: epoch0}}}
+	f.put(tk)
+	d, err := New(f, quiet()).Detail("T-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := d.Reports[0]
+	if strings.Contains(r.Summary, "ghs_") || strings.Contains(r.Summary, "abcdefghij") {
+		t.Errorf("a piece of the token survived the cut: …%q", r.Summary[len(r.Summary)-40:])
+	}
+	if n := len(r.Question); n > questionBytes+4 || n < questionBytes-4 {
+		t.Errorf("question is %d bytes, want it cut at %d", n, questionBytes)
 	}
 }

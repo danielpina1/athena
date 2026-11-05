@@ -363,7 +363,7 @@ export type TimelineEntry = Message<"athena.v1.TimelineEntry"> & {
    * subkind refines kind, so a client can say what happened in plain words:
    *   trigger: where it came from: issue, pull, issue-comment, pull-comment, review-comment, review, ci or owner;
    *   decision: accepted;
-   *   assignment: queued, started (the start entry), or ended, interrupted, failed, stopped or retried (the end
+   *   assignment: queued, started (the start entry), or ended, interrupted, stopped or retried (the end
    *     entry, at the Assignment's end);
    *   report: the Report's state;
    *   input: trigger (a message from no person), text, note, resumed, context (seen on a Thread the Ticket only

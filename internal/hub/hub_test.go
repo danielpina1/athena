@@ -38,6 +38,8 @@ type fakeSource struct {
 	kinds     []string
 	muted     []string
 	prompts   *athenav1.PromptsView
+	// triggerReads counts Trigger calls.
+	triggerReads int
 }
 
 func newFake() *fakeSource {
@@ -168,6 +170,7 @@ func (f *fakeSource) RecentTriggers(limit int) ([]core.Trigger, error) {
 func (f *fakeSource) Trigger(id string) (core.Trigger, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.triggerReads++
 	t, ok := f.triggers[id]
 	if !ok {
 		return t, fmt.Errorf("trigger %s not found", id)

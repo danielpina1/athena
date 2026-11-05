@@ -198,10 +198,10 @@ var athenaMarker = regexp.MustCompile(`<!--\s*athena:[^>]*?-->`)
 const (
 	subjectRunes = 160
 	reportBytes  = 16 << 10
+	// questionBytes cuts a Report's question in the detail.
+	questionBytes = 4 << 10
 	// reportsKept is how many Reports a detail carries, the newest.
 	reportsKept = 5
-	// echoWindow is how soon after the origin Trigger an Input with its text is the Trigger itself, recorded again.
-	echoWindow = time.Minute
 )
 
 // clean redacts s and drops Athena's markers.
@@ -283,11 +283,48 @@ func assignmentEnd(t *core.Ticket, a *core.Assignment, latest bool) (string, str
 	case strings.Contains(reason, "restart"):
 		return "interrupted", reason
 	case a.Report != nil && a.Report.State == core.ReportFailed:
-		return "failed", firstLine(a.Report.Summary)
+		// The failed Report says why on its own row: the end is only the end.
+		return "ended", ""
 	case latest && t.Ended != nil && t.Ended.By == core.EndByHuman:
 		return "stopped", t.Ended.Reason
 	}
 	return "ended", reason
+}
+
+// headBytes is how much of a Report's summary the timeline reads for its first line: enough for any line it shows.
+const headBytes = 8 << 10
+
+// headOf is the start of s, cut on a rune boundary; the timeline's first line comes from it, so a long summary is not
+// redacted whole once per detail. A secret the cut splits lies past the first line's 500 runes, which the entry drops.
+func headOf(s string) string {
+	if len(s) <= headBytes {
+		return s
+	}
+	cut := headBytes
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
+}
+
+// originEcho is the index of the Input that is the origin Trigger recorded again, or -1: the first person's Input at
+// or after the Trigger, on no other Trigger (none, or the origin's own), with the Trigger's text. Only that one: the
+// owner saying the same words again later is a message of its own.
+func originEcho(t *core.Ticket, origin *core.Trigger) int {
+	if origin == nil {
+		return -1
+	}
+	for i := range t.Inputs {
+		in := &t.Inputs[i]
+		if !in.Human || in.At.Before(origin.At) || (in.TriggerID != "" && in.TriggerID != origin.ID) {
+			continue
+		}
+		if in.Text == origin.Text {
+			return i
+		}
+		return -1
+	}
+	return -1
 }
 
 // ticketTimeline lists what happened to a Ticket, oldest first, from the Ticket itself plus its origin Trigger and
@@ -321,15 +358,16 @@ func ticketTimeline(t *core.Ticket, origin *core.Trigger, pending *core.Approval
 			if r.Pull > 0 {
 				subject = "PR #" + strconv.Itoa(r.Pull)
 			}
-			out = append(out, timelineEntry(r.At, "report", string(r.State), subject, firstLine(clean(r.Summary)), a.ID))
+			out = append(out, timelineEntry(r.At, "report", string(r.State), subject, firstLine(clean(headOf(r.Summary))), a.ID))
 		}
 		if a.State == core.AssignmentEnded && a.EndedAt != nil {
 			sub, text := assignmentEnd(t, a, i == len(t.Assignments)-1)
 			out = append(out, timelineEntry(*a.EndedAt, "assignment", sub, "", text, a.ID))
 		}
 	}
-	for _, in := range t.Inputs {
-		if origin != nil && (in.TriggerID == origin.ID || in.Text != "" && in.Text == origin.Text && in.At.Sub(origin.At).Abs() <= echoWindow) {
+	echo := originEcho(t, origin)
+	for i, in := range t.Inputs {
+		if i == echo {
 			continue
 		}
 		text := in.Text
@@ -338,7 +376,8 @@ func ticketTimeline(t *core.Ticket, origin *core.Trigger, pending *core.Approval
 		}
 		kind, sub, subject := "input", string(in.Kind), ""
 		switch {
-		case athenaMarker.MatchString(text):
+		case !in.Human && athenaMarker.MatchString(text):
+			// Athena's own comment, read back from GitHub; a person who pastes the marker is still a person.
 			sub = "receipt"
 		case in.Context:
 			sub = "context"
@@ -387,23 +426,26 @@ func clipBytes(s string, n int) string {
 // ticketReports are the Ticket's Reports in full, newest last, the last reportsKept of them. The latest one's question
 // is the Ticket's open question when the Report has none of its own (a Report stored before Reports kept it).
 func ticketReports(t *core.Ticket) []*athenav1.ReportView {
-	var out []*athenav1.ReportView
+	// The last reportsKept first, so only those are redacted.
+	var with []*core.Assignment
 	for i := range t.Assignments {
-		a := &t.Assignments[i]
-		r := a.Report
-		if r == nil {
-			continue
+		if t.Assignments[i].Report != nil {
+			with = append(with, &t.Assignments[i])
 		}
+	}
+	if len(with) > reportsKept {
+		with = with[len(with)-reportsKept:]
+	}
+	out := make([]*athenav1.ReportView, 0, len(with))
+	for _, a := range with {
+		r := a.Report
 		out = append(out, &athenav1.ReportView{AssignmentId: a.ID, State: string(r.State),
 			// Redact first, then cut: a cut must not split a secret into a piece redact no longer recognizes.
 			Summary: clipBytes(clean(r.Summary), reportBytes), Pull: uint32(max(r.Pull, 0)),
-			Question: clean(r.Question), At: ts(r.At)})
-	}
-	if len(out) > reportsKept {
-		out = out[len(out)-reportsKept:]
+			Question: clipBytes(clean(r.Question), questionBytes), At: ts(r.At)})
 	}
 	if n := len(out); n > 0 && out[n-1].Question == "" && t.Attention != nil {
-		out[n-1].Question = clean(t.Attention.Question)
+		out[n-1].Question = clipBytes(clean(t.Attention.Question), questionBytes)
 	}
 	return out
 }
