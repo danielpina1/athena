@@ -96,6 +96,10 @@ export function describeEntry(e: Entry): EntryView {
           return { title: e.subject ? `Started work · ${modelName(e.subject)}` : "Started work", subtitle: "", tone: "ok" };
         case "interrupted":
           return { title: "Interrupted by a server restart", subtitle: "Resumes on your next message", tone: "warn" };
+        case "restart":
+          return { title: "Interrupted by a server restart", subtitle: "", tone: "warn" };
+        case "resumed":
+          return { title: "Resumed automatically", subtitle: "", tone: "ok" };
         case "failed":
           return { title: "Failed", subtitle: text, tone: "danger" };
         case "stopped":

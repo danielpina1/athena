@@ -54,6 +54,28 @@ type Assignment struct {
 	// Model is the model the Executor runs the Assignment with: the Ticket's, or the Executor's default when it names
 	// none.
 	Model string `json:"model,omitempty"`
+	// Interruptions are the times the Assignment's session was cut short from outside, such as by a server restart,
+	// oldest first; the last one is open until the session starts again.
+	Interruptions []Interruption `json:"interruptions,omitempty"`
+}
+
+// InterruptRestart is the reason of an Interruption a server restart caused.
+const InterruptRestart = "server restart"
+
+// Interruption is a time an Assignment's session was cut short while it worked. ResumedAt is when the session started
+// again, nil while the Interruption is open.
+type Interruption struct {
+	At        time.Time  `json:"at"`
+	Reason    string     `json:"reason"`
+	ResumedAt *time.Time `json:"resumedAt,omitempty"`
+}
+
+// OpenInterruption returns the Assignment's last Interruption when its session has not started again since, else nil.
+func (a *Assignment) OpenInterruption() *Interruption {
+	if n := len(a.Interruptions); n > 0 && a.Interruptions[n-1].ResumedAt == nil {
+		return &a.Interruptions[n-1]
+	}
+	return nil
 }
 
 // InputKind says what an Input carries.

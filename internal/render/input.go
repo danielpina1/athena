@@ -31,6 +31,7 @@ const (
 	nudgeText      = "Your turn ended without a report."
 	recoveryNote   = "Your previous process ended unexpectedly"
 	resumeNote     = "Your session was paused while it waited"
+	restartNote    = "Athena restarted while you were working"
 )
 
 var (
@@ -68,6 +69,8 @@ func inputItems(text string) []*athenav1.StreamItem {
 		return out
 	case strings.HasPrefix(trimmed, recoveryNote):
 		add("athena", "Athena restarted the session after its process ended", "")
+	case strings.HasPrefix(trimmed, restartNote):
+		add("athena", "Athena restarted and resumed the session", "")
 	case strings.HasPrefix(trimmed, resumeNote):
 		add("athena", "Athena resumed the paused session", "")
 	}

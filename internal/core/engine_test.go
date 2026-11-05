@@ -949,3 +949,67 @@ func TestOwnerMessagesRecordTheTicketTheyReached(t *testing.T) {
 	eq(t, "reply still reached after the end", h.repos.trigger(reply.ID).Disposition.Reached, []string{id})
 	eq(t, "first still reached after the end", h.repos.trigger(first.ID).Disposition.Reached, []string{id})
 }
+
+// --- Interruptions ---
+
+func TestAssignmentInterruptedOpensOnce(t *testing.T) {
+	h := newHarness(t)
+	id := h.accepted()
+	a := h.ticket(id).Assignments[0].ID
+	h.tick(1)
+	h.must(h.eng.AssignmentStarted(id, a, "sess", ""))
+	h.tick(1)
+	h.must(h.eng.AssignmentInterrupted(id, a, InterruptRestart))
+	at := base.Add(2e9)
+	got := h.ticket(id).Assignments[0]
+	eq(t, "interruptions", got.Interruptions, []Interruption{{At: at, Reason: InterruptRestart}})
+	eq(t, "open", got.OpenInterruption(), &got.Interruptions[0])
+	eq(t, "state unchanged", got.State, AssignmentRunning)
+	h.tick(1)
+	h.must(h.eng.AssignmentInterrupted(id, a, InterruptRestart))
+	eq(t, "still one", len(h.ticket(id).Assignments[0].Interruptions), 1)
+	eq(t, "kept the first time", h.ticket(id).Assignments[0].Interruptions[0].At, at)
+}
+
+func TestStartClosesOpenInterruption(t *testing.T) {
+	h := newHarness(t)
+	id := h.accepted()
+	a := h.ticket(id).Assignments[0].ID
+	h.tick(1)
+	h.must(h.eng.AssignmentStarted(id, a, "sess", ""))
+	h.tick(1)
+	h.must(h.eng.AssignmentInterrupted(id, a, InterruptRestart))
+	h.tick(1)
+	h.must(h.eng.AssignmentStarted(id, a, "sess", ""))
+	resumed := base.Add(3e9)
+	got := h.ticket(id).Assignments[0]
+	eq(t, "resumed", got.Interruptions[0].ResumedAt, &resumed)
+	eq(t, "no open one", got.OpenInterruption(), (*Interruption)(nil))
+	// A later interruption is a new one.
+	h.tick(1)
+	h.must(h.eng.AssignmentInterrupted(id, a, InterruptRestart))
+	eq(t, "second", len(h.ticket(id).Assignments[0].Interruptions), 2)
+	// The stored copy is not shared with what the engine returns.
+	tk, _, err := h.eng.Ticket(id)
+	h.must(err)
+	*tk.Assignments[0].Interruptions[0].ResumedAt = base
+	eq(t, "clone", h.ticket(id).Assignments[0].Interruptions[0].ResumedAt, &resumed)
+}
+
+func TestInterruptIgnoresEndedOrIdleTargets(t *testing.T) {
+	h := newHarness(t)
+	// An Assignment that has not started is no running one.
+	pending := h.submit("Not started yet")
+	h.must(h.eng.AssignmentInterrupted(pending.ID, pending.Assignments[0].ID, InterruptRestart))
+	eq(t, "pending", len(h.ticket(pending.ID).Assignments[0].Interruptions), 0)
+	id := h.accepted()
+	a := h.ticket(id).Assignments[0].ID
+	// Another Assignment's ID, and an unknown Ticket's.
+	h.must(h.eng.AssignmentInterrupted(id, "another", InterruptRestart))
+	eq(t, "other assignment", len(h.ticket(id).Assignments[0].Interruptions), 0)
+	wantUserError(t, "unknown ticket", h.eng.AssignmentInterrupted("T-9999", a, InterruptRestart))
+	// An ended Ticket's Assignment.
+	h.must(h.eng.StopTicket(id, ""))
+	h.must(h.eng.AssignmentInterrupted(id, a, InterruptRestart))
+	eq(t, "ended", len(h.ticket(id).Assignments[0].Interruptions), 0)
+}

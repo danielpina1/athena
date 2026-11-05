@@ -38,6 +38,8 @@ const (
 	// recoveryNote opens the first message of a session resumed after its process ended without a Stop.
 	recoveryNote   = "Your previous process ended unexpectedly; continue the task."
 	recoveryAdvice = " Check your directory and git history before repeating any outside action."
+	// restartNote opens the first message of a session resumed after a server restart cut its turn short.
+	restartNote = "Athena restarted while you were working; continue the task."
 	// resumeNote opens the first message of a session resumed after it was paused with nothing to do: a handoff (a
 	// ready report that waits for its pull request), or a turn that ended idle before a node restart.
 	resumeNote   = "Your session was paused while it waited; it resumes for the input that follows."
@@ -94,6 +96,9 @@ type Config struct {
 	// OnStatus is called, from the node's loop goroutine, whenever the sessions in use or the launches queued change
 	// (see Status). It must not block or call back into the node.
 	OnStatus func()
+	// CloseGrace is how long a session's process gets to end after its stdin closes before it is killed (default
+	// 10 s).
+	CloseGrace time.Duration
 }
 
 // EngineCallbacks is the part of *core.Engine the node calls: the Executor callbacks, the Ticket query and Approvals.
@@ -103,6 +108,8 @@ type EngineCallbacks interface {
 	DeliveryFailed(ticketID, assignmentID, errMsg string) error
 	InputsRead(ticketID string, inputIDs []string) error
 	TurnEnded(ticketID, assignmentID string) error
+	// AssignmentInterrupted records that the session of a busy Assignment is cut short from outside (a shutdown).
+	AssignmentInterrupted(ticketID, assignmentID, reason string) error
 	FileReport(ticketID string, r core.ReportInput) error
 	Ticket(id string) (core.Ticket, core.Stage, error)
 	RequestApproval(a core.Approval) (core.Approval, error)
@@ -228,6 +235,7 @@ func New(cfg Config, eng EngineCallbacks) *Node {
 			log.Error("write the gh shim", "error", err)
 		}
 	}
+	reapOrphans(cfg.StateDir, log)
 	go n.loop()
 	return n
 }
@@ -520,7 +528,7 @@ func (n *Node) onShutdown(st *loopState) {
 	}
 	n.mu.Unlock()
 	for _, s := range live {
-		s.stop("node shutting down", false)
+		s.stopForShutdown()
 	}
 }
 
@@ -582,6 +590,7 @@ type session struct {
 	mu          sync.Mutex
 	stopped     bool
 	stopReason  string
+	shutdown    bool
 	ticketEnded bool
 	sessionID   string
 	// unseenFailure is set when a tool call failed and the model has not taken a step since: it may have filed a
@@ -702,6 +711,23 @@ func (s *session) stop(reason string, ticketEnded bool) {
 	s.stopped = true
 	s.stopReason = reason
 	close(s.stopCh)
+}
+
+// stopForShutdown stops the session because the node closes: its Assignment stays running for the next node, and its
+// runner records an interruption if the session was busy.
+func (s *session) stopForShutdown() {
+	s.mu.Lock()
+	s.shutdown = !s.stopped
+	s.mu.Unlock()
+	s.stop("node shutting down", false)
+}
+
+// stoppedByShutdown reports whether the node's shutdown stopped the session. The CLI's Stop hook may still fire while
+// the process closes; that is no turn end.
+func (s *session) stoppedByShutdown() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.shutdown
 }
 
 func (s *session) isStopped() bool {
@@ -850,6 +876,8 @@ type runner struct {
 	idle   bool
 	park   bool
 	paused bool
+	// restarted is set when the first process resumes a session a server restart cut short.
+	restarted bool
 
 	// usage is what the session did since the last RecordUsage; tools maps the ids of tool calls in flight to their
 	// tool; firstSent and firstOutput time the Ticket's time to first output.
@@ -916,6 +944,7 @@ func (r *runner) run() {
 	// A session whose last turn ended idle, with nothing delivered since (a handoff, or an idle Assignment after a node
 	// restart), was paused, not interrupted: it resumes with the resume note instead of the crash note.
 	r.paused = recovering && pausedAt(s.a)
+	r.restarted = recovering && !r.paused && restartInterrupted(s.a)
 	if recovering {
 		r.seedUnread()
 	}
@@ -932,6 +961,7 @@ func (r *runner) run() {
 		spawnStart := time.Now()
 		sess, err := claude.Start(n.ctx, claude.Options{
 			Binary:             n.cfg.ClaudeBinary,
+			CloseGrace:         n.cfg.CloseGrace,
 			Dir:                s.place.workDir,
 			Model:              model,
 			ResumeID:           resumeID,
@@ -951,12 +981,13 @@ func (r *runner) run() {
 		}
 		r.spawned = time.Now()
 		n.spawnHist.Observe(r.spawned.Sub(spawnStart))
+		n.recordProcess(s.t.ID, sess.Pid())
 		r.log.Info("session started", "resume", resumeID != "", "recovering", recovering)
 		crashed, cause := r.drive(sess, recovering)
 		if !crashed {
 			return
 		}
-		r.paused = false
+		r.paused, r.restarted = false, false
 		r.usage.Crashes++
 		r.flushUsage()
 		crashes++
@@ -969,6 +1000,7 @@ func (r *runner) run() {
 		}
 		recovering = true
 		if !r.sleep(n.restartDelay(crashes)) {
+			r.interruptBusy()
 			return
 		}
 	}
@@ -1002,6 +1034,7 @@ loop:
 		case <-s.stopCh:
 			crashed = false
 			r.log.Info("session stopped", "reason", s.reason())
+			r.interruptBusy()
 			_ = sess.Close()
 			for ev := range events {
 				r.account(ev) // a last Result still counts
@@ -1022,6 +1055,7 @@ loop:
 	}
 	_ = sess.Close()
 	err := sess.Wait()
+	r.n.forgetProcess(s.t.ID, sess.Pid())
 	r.flushUsage()
 	if s.isStopped() || r.park {
 		return false, ""
@@ -1074,6 +1108,8 @@ func (r *runner) sendFirst(sess *claude.Session, recovering bool) {
 	var b strings.Builder
 	if recovering && r.paused {
 		b.WriteString(resumeNote + "\n")
+	} else if recovering && r.restarted {
+		b.WriteString(restartNote + recoveryAdvice + "\n")
 	} else if recovering {
 		b.WriteString(recoveryNote + recoveryAdvice + "\n")
 	} else {
@@ -1319,6 +1355,30 @@ func (r *runner) parkIfHandedOff() {
 	}
 	s.markParked()
 	r.park = true
+}
+
+// restartInterrupted reports whether a server restart cut the Assignment's session short and it has not resumed since.
+func restartInterrupted(a core.Assignment) bool {
+	i := a.OpenInterruption()
+	return i != nil && i.Reason == core.InterruptRestart
+}
+
+// interruptBusy records, on a node shutdown, that the session was busy when it was cut short: the next node resumes
+// it on its own. A session is busy from its first message until a turn ends well, and again after each Input or nudge
+// sent since. It runs on the runner goroutine, before the process is closed.
+func (r *runner) interruptBusy() {
+	if !r.s.stoppedByShutdown() || r.idle {
+		return
+	}
+	// A turn end the Engine knows (the CLI's Stop hook) that this runner has not read yet: the session is idle.
+	if t, _, err := r.eng.Ticket(r.s.t.ID); err == nil {
+		if l := t.LatestAssignment(); l != nil && l.ID == r.s.a.ID && pausedAt(*l) && len(t.Undelivered) == 0 {
+			return
+		}
+	}
+	if err := r.eng.AssignmentInterrupted(r.s.t.ID, r.s.a.ID, core.InterruptRestart); err != nil {
+		r.log.Error("record interruption", "error", err)
+	}
 }
 
 // pausedAt reports whether a running Assignment's last turn ended idle with nothing delivered since.
@@ -1832,4 +1892,20 @@ func gitIn(dir string, env []string, args ...string) (string, error) {
 		return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// recordProcess notes a session process in the run directory, for the next node to stop if this one dies first.
+func (n *Node) recordProcess(ticketID string, pid int) {
+	if n.cfg.StateDir == "" {
+		return
+	}
+	if err := recordProcess(n.cfg.StateDir, ticketID, pid, runtimeClaude); err != nil {
+		n.log.Warn("record session process", "ticket", ticketID, "error", err)
+	}
+}
+
+func (n *Node) forgetProcess(ticketID string, pid int) {
+	if n.cfg.StateDir != "" {
+		forgetProcess(n.cfg.StateDir, ticketID, pid)
+	}
 }

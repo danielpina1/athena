@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -400,5 +401,48 @@ func TestMetricsCommand(t *testing.T) {
 	_, o, _ := athena(ctx, "status", "--state-dir", dir, id)
 	if !strings.Contains(o, "stats:") || !strings.Contains(o, "queue wait") {
 		t.Errorf("status lacks stats:\n%s", o)
+	}
+}
+
+// TestServerHelperProcess is the body of the subprocess TestServerStopsOnSIGHUP runs; it does nothing in a normal run.
+func TestServerHelperProcess(t *testing.T) {
+	dir := os.Getenv("ATHENA_TEST_SERVER_DIR")
+	if dir == "" {
+		t.Skip("helper process")
+	}
+	os.Exit(Run(context.Background(), "server", []string{"--state-dir", dir, "--claude", os.Getenv("ATHENA_TEST_CLAUDE")}, io.Discard, os.Stderr))
+}
+
+// A closed terminal sends SIGHUP; the server stops gracefully on it, as on SIGINT and SIGTERM, instead of dying with
+// its sessions still running.
+func TestServerStopsOnSIGHUP(t *testing.T) {
+	dir := newStateDir(t)
+	cmd := exec.Command(os.Args[0], "-test.run=^TestServerHelperProcess$")
+	cmd.Env = append(os.Environ(), "ATHENA_TEST_SERVER_DIR="+dir, "ATHENA_TEST_CLAUDE="+fakeClaude(t))
+	var stderr bytes.Buffer
+	cmd.Stderr = &lockedWriter{w: &stderr}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
+	t.Cleanup(func() { _ = cmd.Process.Kill() })
+	eventually(t, "server answers", func() bool {
+		code, _, _ := athena(context.Background(), "approvals", "--state-dir", dir)
+		return code == 0
+	})
+	if err := cmd.Process.Signal(syscall.SIGHUP); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-exited:
+		if err != nil {
+			t.Fatalf("server exited with %v after SIGHUP, want a clean exit 0\n%s", err, stderr.String())
+		}
+	case <-time.After(waitTimeout):
+		t.Fatalf("server still running after SIGHUP\n%s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "athena server stopping") {
+		t.Fatalf("log = %q, want it to say the server stops", stderr.String())
 	}
 }

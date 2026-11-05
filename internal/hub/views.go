@@ -338,7 +338,8 @@ func originEcho(t *core.Ticket, origin *core.Trigger) int {
 // the Ticket (the owner's reply or a person's on a Channel) is a reply; any other Input is an input. actors names the
 // GitHub login of a reply's Trigger, by Trigger id, where the caller knows it.
 //
-// It reads as a story: an Assignment has a start entry and, once it ended, an end entry at its end; an Input that is
+// It reads as a story: an Assignment has a start entry, a restart entry for each time its session was cut short (and a
+// resumed one when it started again) and, once it ended, an end entry at its end; an Input that is
 // the origin Trigger recorded again is left out; an owner's own task has no router Decision.
 func ticketTimeline(t *core.Ticket, origin *core.Trigger, pending *core.Approval, answered []core.Approval,
 	actors map[string]string) []*athenav1.TimelineEntry {
@@ -365,6 +366,12 @@ func ticketTimeline(t *core.Ticket, origin *core.Trigger, pending *core.Approval
 				subject = "PR #" + strconv.Itoa(r.Pull)
 			}
 			out = append(out, timelineEntry(r.At, "report", string(r.State), subject, firstLine(clean(headOf(r.Summary))), a.ID))
+		}
+		for _, in := range a.Interruptions {
+			out = append(out, timelineEntry(in.At, "assignment", "restart", "", "", a.ID))
+			if in.ResumedAt != nil {
+				out = append(out, timelineEntry(*in.ResumedAt, "assignment", "resumed", "", "", a.ID))
+			}
 		}
 		if a.State == core.AssignmentEnded && a.EndedAt != nil {
 			sub, text := assignmentEnd(t, a, i == len(t.Assignments)-1)

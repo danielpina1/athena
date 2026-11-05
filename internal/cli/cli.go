@@ -175,7 +175,9 @@ func (c *command) server(ctx context.Context, args []string) int {
 			list = append(list, b)
 		}
 	}
-	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	// A closed terminal sends SIGHUP: it stops the server gracefully, like Ctrl-C, so its sessions end and resume on
+	// the next start instead of being orphaned.
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	defer stop()
 	err := server.Run(ctx, server.Config{
 		StateDir: c.stateDir,

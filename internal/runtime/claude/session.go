@@ -559,3 +559,6 @@ func (t *tailBuffer) String() string {
 	defer t.mu.Unlock()
 	return string(t.b)
 }
+
+// Pid returns the process id of the session's process, which leads its own process group.
+func (s *Session) Pid() int { return s.cmd.Process.Pid }

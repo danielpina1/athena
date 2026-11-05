@@ -256,11 +256,34 @@ func (e *Engine) AssignmentStarted(ticketID, assignmentID, sessionID, model stri
 		if model != "" {
 			a.Model = model
 		}
+		if open := a.OpenInterruption(); open != nil {
+			open.ResumedAt = o.timestamp()
+		}
 		t.UpdatedAt = o.at
 		if t.Ended == nil && len(t.Undelivered) > 0 {
 			o.deliver(t, a.ID)
 		}
 		o.event(EventAssignmentStarted, t, a.ID, map[string]any{"sessionId": sessionID})
+		return o.tx.PutTicket(t)
+	})
+}
+
+// AssignmentInterrupted is the Executor's fact that the session of the Assignment that runs the open Ticket is being
+// cut short from outside, such as by a server restart, with reason. It records an Interruption unless one is already
+// open, so repeating it changes nothing; the Assignment's state stays, and the Ticket resumes the session on its own.
+// A fact about any other Assignment changes nothing.
+func (e *Engine) AssignmentInterrupted(ticketID, assignmentID, reason string) error {
+	return e.command(cmdAssignmentInterrupted, func(o *op) error {
+		t, err := o.running(ticketID, assignmentID)
+		if t == nil || err != nil {
+			return err
+		}
+		a := runningAssignment(t)
+		if a.OpenInterruption() != nil {
+			return nil
+		}
+		a.Interruptions = append(a.Interruptions, Interruption{At: o.at, Reason: reason})
+		t.UpdatedAt = o.at
 		return o.tx.PutTicket(t)
 	})
 }
@@ -1029,6 +1052,12 @@ func cloneTicket(t *Ticket) Ticket {
 			a.DeliveredAt = clonePtr(a.DeliveredAt)
 			a.IdleAt = clonePtr(a.IdleAt)
 			a.Report = clonePtr(a.Report)
+			if a.Interruptions != nil {
+				a.Interruptions = slices.Clone(a.Interruptions)
+				for j := range a.Interruptions {
+					a.Interruptions[j].ResumedAt = clonePtr(a.Interruptions[j].ResumedAt)
+				}
+			}
 			c.Assignments[i] = a
 		}
 	}

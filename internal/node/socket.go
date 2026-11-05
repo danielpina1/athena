@@ -170,7 +170,9 @@ func (n *Node) handleHook(ctx context.Context, req HookRequest) HookResponse {
 	s := n.lookup(req.Ticket, req.Assignment)
 	if req.Event == EventStop {
 		// Never block a Stop: a blocking answer would loop the session.
-		if s != nil {
+		// A Stop that comes while a shutdown closes the session is no turn end: the turn was cut short, and recording
+		// it would make the session look idle, never resumed.
+		if s != nil && !s.stoppedByShutdown() {
 			if err := n.engine().TurnEnded(req.Ticket, req.Assignment); err != nil {
 				s.log.Error("record turn end", "error", err)
 			}

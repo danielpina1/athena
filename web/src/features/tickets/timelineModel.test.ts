@@ -48,6 +48,17 @@ test("a Decision and an Assignment read as what happened", () => {
   expect(titleOf("assignment", "", "", "ended: retried")).toBe("Session ended");
 });
 
+test("timeline says interrupted and resumed", () => {
+  expect(describeEntry(e("assignment", "restart"))).toMatchObject({ title: "Interrupted by a server restart", subtitle: "", tone: "warn" });
+  expect(describeEntry(e("assignment", "resumed"))).toMatchObject({ title: "Resumed automatically", subtitle: "", tone: "ok" });
+  // The legacy end entry of an Assignment a restart ended is unchanged.
+  expect(describeEntry(e("assignment", "interrupted", "", "node restart"))).toMatchObject({
+    title: "Interrupted by a server restart",
+    subtitle: "Resumes on your next message",
+    tone: "warn",
+  });
+});
+
 test("a Report is one line: its state, the summary's first line and its pull request", () => {
   const ready = describeEntry(e("report", "ready", "PR #12", "## Review done"));
   expect(ready).toMatchObject({ title: "Ready for review", subtitle: "Review done", badge: "PR #12", tone: "ok", report: true });

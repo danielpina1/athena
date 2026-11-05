@@ -1243,7 +1243,11 @@ func (b blockingEngine) InputsDelivered(string, string, []string) error { b.wait
 func (b blockingEngine) DeliveryFailed(string, string, string) error    { b.wait(); return nil }
 func (b blockingEngine) InputsRead(string, []string) error              { b.wait(); return nil }
 func (b blockingEngine) TurnEnded(string, string) error                 { b.wait(); return nil }
-func (b blockingEngine) FileReport(string, core.ReportInput) error      { b.wait(); return nil }
+func (b blockingEngine) AssignmentInterrupted(string, string, string) error {
+	b.wait()
+	return nil
+}
+func (b blockingEngine) FileReport(string, core.ReportInput) error { b.wait(); return nil }
 func (b blockingEngine) Ticket(string) (core.Ticket, core.Stage, error) {
 	b.wait()
 	return core.Ticket{}, core.Stage{}, fmt.Errorf("released")
@@ -1675,4 +1679,137 @@ func TestReopenedTicketResumesWithEffectivePrompt(t *testing.T) {
 	if b, err := os.ReadFile(path); err != nil || string(b) != "OVERRIDE TWO" {
 		t.Fatalf("kept prompt = %q, %v", b, err)
 	}
+}
+
+// interruptRecorder is the Engine the node reports to, noting the interruptions it is told of.
+type interruptRecorder struct {
+	*core.Engine
+	mu    sync.Mutex
+	calls []string
+}
+
+func (r *interruptRecorder) AssignmentInterrupted(ticketID, assignmentID, reason string) error {
+	r.mu.Lock()
+	r.calls = append(r.calls, ticketID+"/"+assignmentID+"/"+reason)
+	r.mu.Unlock()
+	return r.Engine.AssignmentInterrupted(ticketID, assignmentID, reason)
+}
+
+func (r *interruptRecorder) seen() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Clone(r.calls)
+}
+
+// A shutdown marks the sessions that were busy as interrupted, and only those: a session whose last turn ended well and
+// that was sent nothing since is idle.
+func TestShutdownMarksBusySessionsInterrupted(t *testing.T) {
+	hold := filepath.Join(t.TempDir(), "turn-may-end")
+	t.Setenv("ATHENA_FAKE_HOLD_RESULT", hold)
+	h := newHarness(t, func(c *Config) { c.Slots, c.CloseGrace = 2, 300*time.Millisecond })
+	rec := &interruptRecorder{Engine: h.eng}
+	h.n.SetEngine(rec)
+	busy, idle := h.submit("Busy one", t.TempDir()), h.submit("Idle one", t.TempDir())
+	_, busyA := h.running(busy.ID)
+	_, idleA := h.running(idle.ID)
+	for _, p := range [][2]string{{busy.ID, busyA.ID}, {idle.ID, idleA.ID}} {
+		if r := h.report(p[0], p[1], core.ReportProgress, "going"); !r.OK {
+			t.Fatalf("report = %+v", r)
+		}
+	}
+	if err := os.WriteFile(hold, nil, 0o600); err != nil { // both turns end well, with a report each
+		t.Fatal(err)
+	}
+	h.eventually("both turns ended", func() bool {
+		for _, id := range []string{busy.ID, idle.ID} {
+			if b, _ := os.ReadFile(h.n.transcriptPath(id)); !strings.Contains(string(b), `"type":"result"`) {
+				return false
+			}
+		}
+		return true
+	})
+	if err := os.Remove(hold); err != nil { // the next turn holds again
+		t.Fatal(err)
+	}
+	if err := h.eng.AddPersonInput(busy.ID, "one more thing"); err != nil {
+		t.Fatal(err)
+	}
+	h.eventually("the input sent", func() bool { return strings.Contains(h.stdin(), "one more thing") })
+	if got := rec.seen(); len(got) != 0 {
+		t.Fatalf("interruptions before the shutdown: %v", got)
+	}
+	h.n.Close()
+	if got, want := rec.seen(), []string{busy.ID + "/" + busyA.ID + "/" + core.InterruptRestart}; !slices.Equal(got, want) {
+		t.Fatalf("interruptions = %v, want %v", got, want)
+	}
+	tk, _ := h.ticket(busy.ID)
+	if tk.LatestAssignment().OpenInterruption() == nil || tk.LatestAssignment().State != core.AssignmentRunning {
+		t.Fatalf("busy assignment = %+v, want running with an open interruption", tk.LatestAssignment())
+	}
+	if tk, _ := h.ticket(idle.ID); len(tk.LatestAssignment().Interruptions) != 0 {
+		t.Fatalf("idle assignment interrupted: %+v", tk.LatestAssignment().Interruptions)
+	}
+}
+
+// The CLI's Stop hook fires while a closing session winds down; it is no turn end, or the Assignment would look idle
+// and never resume.
+func TestStopHookDuringShutdownIsIgnored(t *testing.T) {
+	hold := filepath.Join(t.TempDir(), "turn-may-end")
+	t.Setenv("ATHENA_FAKE_HOLD_RESULT", hold)
+	h := newHarness(t, func(c *Config) { c.CloseGrace = 300 * time.Millisecond })
+	tk := h.submit("Busy one", t.TempDir())
+	_, a := h.running(tk.ID)
+	s := h.n.lookup(tk.ID, a.ID)
+	if s == nil {
+		t.Fatal("no live session")
+	}
+	s.mu.Lock()
+	s.shutdown = true
+	s.mu.Unlock()
+	h.hook(EventStop, tk.ID, a.ID, map[string]any{})
+	if got, _ := h.ticket(tk.ID); got.LatestAssignment().IdleAt != nil {
+		t.Fatalf("a Stop during shutdown recorded a turn end: %+v", got.LatestAssignment())
+	}
+	s.mu.Lock()
+	s.shutdown = false
+	s.mu.Unlock()
+	h.hook(EventStop, tk.ID, a.ID, map[string]any{})
+	if got, _ := h.ticket(tk.ID); got.LatestAssignment().IdleAt == nil {
+		t.Fatal("a Stop outside a shutdown records no turn end")
+	}
+}
+
+// A session a restart cut short resumes with the restart note, not the crash note, and closes the interruption.
+func TestRestartResumeUsesRestartNote(t *testing.T) {
+	hold := filepath.Join(t.TempDir(), "turn-may-end")
+	t.Setenv("ATHENA_FAKE_HOLD_RESULT", hold)
+	h := newHarness(t, func(c *Config) { c.CloseGrace = 300 * time.Millisecond })
+	tk := h.submit("Busy one", t.TempDir())
+	h.running(tk.ID)
+	h.n.Close()
+	got, _ := h.ticket(tk.ID)
+	a := *got.LatestAssignment()
+	if a.OpenInterruption() == nil || a.SessionID != fixtureSessionID {
+		t.Fatalf("assignment after the shutdown = %+v, want an open interruption and its session", a)
+	}
+	if entries, _ := os.ReadDir(filepath.Join(h.cfg.StateDir, runDir)); len(entries) != 0 {
+		t.Fatalf("run files left after the shutdown: %v", entries)
+	}
+	n2 := New(h.cfg, h.eng)
+	n2.restartDelay = func(int) time.Duration { return 0 }
+	t.Cleanup(func() { n2.Close() })
+	n2.Start(got, a)
+	h.eventually("the restart note sent", func() bool { return strings.Contains(h.stdin(), restartNote+recoveryAdvice) })
+	if strings.Contains(h.stdin(), recoveryNote) {
+		t.Fatalf("stdin = %q, want no crash note", h.stdin())
+	}
+	_, args := h.starts(tk.ID)
+	if id, ok := argValue(args, "--resume"); !ok || id != fixtureSessionID {
+		t.Fatalf("resumed with %v, want --resume %s", args, fixtureSessionID)
+	}
+	h.eventually("the interruption closed", func() bool {
+		got, _ := h.ticket(tk.ID)
+		l := got.LatestAssignment()
+		return len(l.Interruptions) == 1 && l.Interruptions[0].ResumedAt != nil
+	})
 }

@@ -442,9 +442,11 @@ func expirePendingApprovals(eng *core.Engine, log *slog.Logger) {
 }
 
 // recoverAssignments starts again, of every open Ticket, a pending latest Assignment and a running one that was
-// interrupted: mid-work (no turn of its worker ended idle), sent an Input after its turn last ended, or with Inputs
-// still waiting, unless it waits for a person after a failed or blocked report. The node resumes a running one's
-// session with a recovery note and sends it the Inputs that still wait (Ticket.Undelivered). A running Assignment idle
+// interrupted: mid-work (no turn of its worker ended idle), sent an Input after its turn last ended, with Inputs
+// still waiting, or recorded as interrupted by a shutdown that no start has resumed since, unless it waits for a person
+// after a failed or blocked report. One that was cut short without a shutdown (a crash) gets its interruption recorded
+// first. The node resumes a running one's session with a restart or recovery note and sends it the Inputs that still
+// wait (Ticket.Undelivered). A running Assignment idle
 // since its last turn (one whose worker handed off included) keeps its Session without a process: the node resumes
 // it, with the resume note, when its next Input arrives.
 func recoverAssignments(eng *core.Engine, n *node.Node, log *slog.Logger) {
@@ -462,20 +464,39 @@ func recoverAssignments(eng *core.Engine, n *node.Node, log *slog.Logger) {
 			log.Info("idle assignment resumes on its next input", "ticket", t.ID, "assignment", a.ID)
 			continue
 		}
+		if a.State == core.AssignmentRunning && a.OpenInterruption() == nil && busyMidWork(a) {
+			// The server died without a shutdown (a crash, a kill): nobody recorded that the session was cut short.
+			// Record it now, so the Ticket shows it and the node resumes the session with the restart note.
+			if err := eng.AssignmentInterrupted(t.ID, a.ID, core.InterruptRestart); err != nil {
+				log.Error("recovery: record interruption", "ticket", t.ID, "assignment", a.ID, "error", err)
+			} else if fresh, _, err := eng.Ticket(t.ID); err == nil && fresh.LatestAssignment() != nil && fresh.LatestAssignment().ID == a.ID {
+				t, a = fresh, fresh.LatestAssignment()
+			}
+		}
 		log.Info("recovering assignment", "ticket", t.ID, "assignment", a.ID, "state", a.State, "undelivered", len(t.Undelivered))
 		n.Start(t, *a)
 	}
 }
 
 // interrupted reports whether a running Assignment was busy when the server stopped: no turn of its worker ended
-// since it started, an Input (or the nudge to report) reached it after its turn last ended, or Inputs wait for it.
+// since it started, an Input (or the nudge to report) reached it after its turn last ended, Inputs wait for it, or a
+// shutdown recorded an interruption that no start has closed and no turn ended after.
 // A Ticket whose latest Report is failed or blocked, with no person's message since, waits for a person instead: a
 // failed turn may skip the Stop hook, but nothing is to run until someone answers (plan 1 R34).
 func interrupted(t *core.Ticket, a *core.Assignment) bool {
 	if t.WaitsForPerson() {
 		return false
 	}
-	return a.IdleAt == nil || (a.DeliveredAt != nil && a.DeliveredAt.After(*a.IdleAt)) || len(t.Undelivered) > 0
+	if i := a.OpenInterruption(); i != nil && (a.IdleAt == nil || !a.IdleAt.After(i.At)) {
+		return true
+	}
+	return busyMidWork(a) || len(t.Undelivered) > 0
+}
+
+// busyMidWork reports whether a running Assignment's worker had a turn going: none ended since it started, or an Input
+// (or the nudge to report) reached it after its turn last ended.
+func busyMidWork(a *core.Assignment) bool {
+	return a.IdleAt == nil || (a.DeliveredAt != nil && a.DeliveredAt.After(*a.IdleAt))
 }
 
 // ensurePrivateDir creates dir 0700, or tightens an existing one that others may enter.

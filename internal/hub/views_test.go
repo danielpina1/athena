@@ -157,6 +157,26 @@ func TestTimelineHasRepliesAndAnsweredApprovals(t *testing.T) {
 	}
 }
 
+func TestTimelineShowsInterruptionsAndResumes(t *testing.T) {
+	f := newFake()
+	tk := ticket("T-1")
+	started, resumed := epoch0.Add(time.Minute), epoch0.Add(3*time.Minute)
+	tk.Assignments = []core.Assignment{{ID: "a1", State: core.AssignmentRunning, CreatedAt: epoch0, StartedAt: &started, Model: "sonnet",
+		Interruptions: []core.Interruption{
+			{At: epoch0.Add(2 * time.Minute), Reason: core.InterruptRestart, ResumedAt: &resumed},
+			{At: epoch0.Add(4 * time.Minute), Reason: core.InterruptRestart},
+		}}}
+	f.put(tk)
+	d, err := New(f, quiet()).Detail("T-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "assignment/started sonnet · |assignment/restart  · |assignment/resumed  · |assignment/restart  · "
+	if got := entries(d.Timeline); got != want {
+		t.Errorf("timeline:\n got %q\nwant %q", got, want)
+	}
+}
+
 // entries is a timeline as kind/subkind subject · text, one entry per |.
 func entries(tl []*athenav1.TimelineEntry) string {
 	var got []string

@@ -29,6 +29,7 @@ const (
 	fixtureSessionID = "27abadfa-c58f-4e97-aaf3-64a8fdaff179"
 	waitTimeout      = 10 * time.Second
 	recoveryText     = "previous process ended unexpectedly"
+	restartText      = "Athena restarted while you were working; continue the task."
 	resumeText       = "session was paused while it waited"
 )
 
@@ -563,10 +564,10 @@ func TestRestartResumesRunningAssignment(t *testing.T) {
 	nodeCall(t, dir, node.HookRequest{Op: node.OpHook, Event: node.EventStop, Ticket: id, Assignment: a.ID, Input: json.RawMessage(`{}`)}, &hr)
 	s.stop()
 	in := fake.stdin(t)
-	second := in[strings.Index(in, recoveryText):]
-	note, task, follow := strings.Index(second, recoveryText), strings.Index(second, "body-a1b2"), strings.Index(second, "follow-up-c3d4")
+	second := in[strings.Index(in, restartText):]
+	note, task, follow := strings.Index(second, restartText), strings.Index(second, "body-a1b2"), strings.Index(second, "follow-up-c3d4")
 	if !(note >= 0 && note < task && task < follow) {
-		t.Fatalf("resumed first message = %q, want the recovery note, then the unread task, then the follow-up", second)
+		t.Fatalf("resumed first message = %q, want the restart note, then the unread task, then the follow-up", second)
 	}
 
 	// A further restart starts nothing: the idle Assignment waits, running, for its next Input.
@@ -907,4 +908,170 @@ func deliveredAfterInput(t *testing.T, dir, id string) bool {
 		ok = a.DeliveredAt != nil && len(tk.Inputs) == 1 && tk.Inputs[0].DeliveredAt != nil && a.DeliveredAt.After(*tk.Inputs[0].DeliveredAt)
 	})
 	return ok
+}
+
+// fastClose shortens the grace a closing session gets, so a stop with a session that ignores its stdin closing is quick.
+func fastClose(c *Config) { c.Node.CloseGrace = 300 * time.Millisecond }
+
+// interruptions returns the Ticket's latest Assignment's interruptions, read from the store (a server may or may not run).
+func (s *testServer) interruptions(id string) []core.Interruption {
+	s.t.Helper()
+	var out []core.Interruption
+	offline(s.t, s.stateDir, func(e *core.Engine) {
+		tk, _, err := e.Ticket(id)
+		if err != nil {
+			s.t.Fatal(err)
+		}
+		out = tk.LatestAssignment().Interruptions
+	})
+	return out
+}
+
+// A server that stops mid-turn resumes the session by itself on its next start: the Ticket shows the interruption and
+// then the resume, and the session gets the restart note.
+func TestRestartResumesInterruptedSession(t *testing.T) {
+	fake := newFakeEnv(t, openTurnFixture(t))
+	dir := newStateDir(t)
+	s := startServerWith(t, dir, fastClose)
+	id := s.submit("Long task\nbody-a1b2")
+	a := s.running(id)
+	s.stop()
+	if got := s.interruptions(id); len(got) != 1 || got[0].Reason != core.InterruptRestart || got[0].ResumedAt != nil {
+		t.Fatalf("after the stop: interruptions %+v, want one open restart", got)
+	}
+
+	s = startServerWith(t, dir, fastClose)
+	eventually(t, "a second claude start", func() bool { return len(fake.invocations(t)) == 2 })
+	if rid, ok := argValue(fake.invocations(t)[1], "--resume"); !ok || rid != fixtureSessionID {
+		t.Fatalf("second start args = %v, want --resume %s", fake.invocations(t)[1], fixtureSessionID)
+	}
+	eventually(t, "the interruption resumed", func() bool {
+		got := s.interruptions(id)
+		return len(got) == 1 && got[0].ResumedAt != nil && !got[0].ResumedAt.Before(got[0].At)
+	})
+	lines := strings.Split(strings.TrimSpace(fake.stdin(t)), "\n")
+	if len(lines) < 2 || !strings.Contains(lines[1], `"`+restartText) || strings.Contains(fake.stdin(t), recoveryText) {
+		t.Fatalf("stdin = %q, want the resumed session's first line to open with the restart note, and no crash note", lines)
+	}
+	if d := s.detail(id); len(d.Assignments) != 1 || d.Assignments[0].ID != a.ID || d.Stage != "working" {
+		t.Fatalf("after the restart: stage %q, assignments %+v, want the same Assignment working", d.Stage, d.Assignments)
+	}
+}
+
+// A server killed mid-turn never records the interruption: recovery does, before it resumes the session.
+func TestCrashRecoveryRecordsInterruption(t *testing.T) {
+	fake := newFakeEnv(t, openTurnFixture(t))
+	dir := newStateDir(t)
+	var id string
+	offline(t, dir, func(e *core.Engine) {
+		tk, err := e.SubmitOwnerTask("Long task\nbody-c0de", core.TaskOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		id = tk.ID
+		if err := e.AssignmentStarted(id, tk.Assignments[0].ID, fixtureSessionID, ""); err != nil {
+			t.Fatal(err)
+		}
+		if got, _, _ := e.Ticket(id); len(got.LatestAssignment().Interruptions) != 0 {
+			t.Fatalf("interruptions before recovery: %+v", got.LatestAssignment().Interruptions)
+		}
+	})
+	s := startServerWith(t, dir, fastClose)
+	eventually(t, "the session resumed", func() bool { return len(fake.invocations(t)) == 1 })
+	if rid, ok := argValue(fake.invocations(t)[0], "--resume"); !ok || rid != fixtureSessionID {
+		t.Fatalf("start args = %v, want --resume %s", fake.invocations(t)[0], fixtureSessionID)
+	}
+	eventually(t, "the interruption recorded and resumed", func() bool {
+		got := s.interruptions(id)
+		return len(got) == 1 && got[0].Reason == core.InterruptRestart && got[0].ResumedAt != nil
+	})
+	if in := fake.stdin(t); !strings.Contains(in, `"`+restartText) || strings.Contains(in, recoveryText) {
+		t.Fatalf("stdin = %q, want the restart note and no crash note", in)
+	}
+}
+
+// A running Assignment whose turn ended idle waits for its next Input: recovery neither starts it nor records an
+// interruption.
+func TestIdleAssignmentStillWaits(t *testing.T) {
+	fake := newFakeEnv(t, openTurnFixture(t))
+	dir := newStateDir(t)
+	var id string
+	offline(t, dir, func(e *core.Engine) {
+		tk, err := e.SubmitOwnerTask("Quiet task", core.TaskOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		id = tk.ID
+		a := tk.Assignments[0].ID
+		for _, err := range []error{e.AssignmentStarted(id, a, fixtureSessionID, ""), e.InputsDelivered(id, a, []string{tk.Inputs[0].ID}), e.TurnEnded(id, a)} {
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+	s := startServerWith(t, dir, fastClose)
+	time.Sleep(300 * time.Millisecond)
+	if n := len(fake.invocations(t)); n != 0 {
+		t.Fatalf("claude started %d times for an idle assignment, want 0", n)
+	}
+	if got := s.interruptions(id); len(got) != 0 {
+		t.Fatalf("interruptions = %+v, want none", got)
+	}
+	s.stop()
+	if got := s.interruptions(id); len(got) != 0 {
+		t.Fatalf("after the stop: interruptions = %+v, want none: nothing was running", got)
+	}
+}
+
+// Each restart that cuts a turn short is an interruption of its own, once the session has started again (its Init). A
+// restart before that, while the first is still open, adds none.
+func TestTwoRestartsRecordTwoInterruptions(t *testing.T) {
+	fake := newFakeEnv(t, openTurnFixture(t))
+	dir := newStateDir(t)
+	resumed := func(s *testServer, id string, n int) {
+		t.Helper()
+		eventually(t, "interruptions resumed", func() bool {
+			got := s.interruptions(id)
+			if len(got) != n {
+				return false
+			}
+			for _, i := range got {
+				if i.ResumedAt == nil {
+					return false
+				}
+			}
+			return true
+		})
+	}
+
+	s := startServerWith(t, dir, fastClose)
+	id := s.submit("Long task\nbody-d00d")
+	s.running(id)
+	s.stop()
+	if got := s.interruptions(id); len(got) != 1 {
+		t.Fatalf("after the first restart: %+v, want one", got)
+	}
+
+	// The next process never gets to its Init (a hung child); the server stops again with the interruption still open.
+	t.Setenv("ATHENA_FAKE_NO_READ_STDIN", "1")
+	s = startServerWith(t, dir, fastClose)
+	eventually(t, "a second claude start", func() bool { return len(fake.invocations(t)) == 2 })
+	s.stop()
+	if got := s.interruptions(id); len(got) != 1 || got[0].ResumedAt != nil {
+		t.Fatalf("a restart before the resume's Init: %+v, want still the one open interruption", got)
+	}
+
+	// A resumed session that did start (Init) and is then cut short again is a second interruption.
+	t.Setenv("ATHENA_FAKE_NO_READ_STDIN", "")
+	s = startServerWith(t, dir, fastClose)
+	resumed(s, id, 1)
+	s.stop()
+	if got := s.interruptions(id); len(got) != 2 || got[0].ResumedAt == nil || got[1].ResumedAt != nil || !got[1].At.After(got[0].At) {
+		t.Fatalf("after the second restart: %+v, want two, the first resumed and the second open", got)
+	}
+	s = startServerWith(t, dir, fastClose)
+	resumed(s, id, 2)
+	if n := len(fake.invocations(t)); n != 4 {
+		t.Fatalf("claude started %d times, want 4", n)
+	}
 }
