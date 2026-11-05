@@ -148,6 +148,7 @@
   --animate-pop-out: athena-fade-out var(--motion-fast) var(--ease);
   --animate-rise-in: athena-rise-in var(--motion-slow) var(--ease);
   --animate-rise-out: athena-rise-out var(--motion) var(--ease);
+  --animate-slide-in: athena-slide-in var(--motion) var(--ease);
   --animate-pulse: athena-pulse 1.6s ease-in-out infinite;
 }
 
@@ -175,6 +176,12 @@
 @keyframes athena-rise-out {
   to {
     transform: translateY(100%);
+  }
+}
+@keyframes athena-slide-in {
+  from {
+    opacity: 0;
+    transform: translateX(24px);
   }
 }
 @keyframes athena-pulse {

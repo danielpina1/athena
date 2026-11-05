@@ -1,6 +1,6 @@
 // Fails when the initial route loads more than 200 KB of JS or 30 KB of CSS, gzipped: the entry chunk and its static
 // imports, from the Vite manifest. Lazy chunks (dynamic imports) do not count. It also fails when a chunk that must stay
-// lazy (the session view, the diff viewer: their sentinels) is in the initial route.
+// lazy (the session view, the diff viewer, the file viewer: their sentinels) is in the initial route.
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -37,7 +37,7 @@ let failed = false;
 // session view (about 9 KB) would still fit the budget, so a stray static import of it would pass unseen without this.
 // Each sentinel must be in the build (in a lazy chunk), and none in the initial route.
 const SENTINEL = "athena-lazy-chunk:";
-const sentinels = ["athena-lazy-chunk:session-view", "athena-lazy-chunk:diff-view"];
+const sentinels = ["athena-lazy-chunk:session-view", "athena-lazy-chunk:diff-view", "athena-lazy-chunk:doc-viewer"];
 for (const key of seen) {
   const code = readFileSync(join(dist, manifest[key].file), "utf8");
   if (code.includes(SENTINEL)) {

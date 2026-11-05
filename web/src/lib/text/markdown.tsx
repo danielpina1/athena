@@ -1,6 +1,7 @@
 // A safe subset of Markdown, rendered to React elements: what an agent writes in its prose. Paragraphs, # to ###
-// headings (small: they are emphasis in a log, not document headings), - * + and 1. lists with one level of nesting,
-// fenced code, > quotes, --- rules, pipe tables, and inline `code`, **bold**, *italic* and [links](url).
+// headings (small: they are emphasis in a log, not document headings; a document has all six, as headings), - * +
+// and 1. lists with one level of nesting and [ ] / [x] task items, fenced code, > quotes, --- rules, pipe tables, and
+// inline `code`, **bold**, *italic* and [links](url).
 //
 // Input is hostile. Nothing here makes HTML from it: every piece of text reaches the page as a React text node, so a
 // <script> stays the characters "<script>". Links open only for http, https and mailto, in a new tab with no opener;
@@ -8,6 +9,7 @@
 // block. Parsing is linear: a marker with no closer anywhere after it is remembered, so it is not searched for again,
 // headings and table rows are read by hand, not by backtracking regexes, and a link's URL is looked for in at most
 // 2 KiB.
+import { CheckIcon } from "lucide-react";
 import { type ReactNode, useMemo } from "react";
 import { cn } from "@/ui/cn";
 
@@ -39,7 +41,7 @@ function heading(line: string): { level: number; text: string } | null {
   let j = text.length;
   while (j > 0 && text[j - 1] === "#") j--;
   if (j < text.length && (j === 0 || text[j - 1] === " " || text[j - 1] === "\t")) text = text.slice(0, j).trimEnd();
-  return { level: Math.min(m[1].length, 3), text };
+  return { level: m[1].length, text };
 }
 
 /** Whether a line is a table's separator row (| --- | :-: |): split and checked cell by cell, in one pass. */
@@ -277,14 +279,47 @@ function inline(text: string, depth = 0, links = true): ReactNode[] {
 }
 
 const HEAD = ["", "text-[15px] font-semibold", "text-[14px] font-semibold", "text-[14px] font-semibold text-muted"];
+/** A document's headings, # to ######: under the viewer's own h2, so # is an h3. */
+const DOC_HEAD = [
+  "",
+  "pt-3 text-[22px] leading-snug font-semibold",
+  "pt-3 text-lg leading-snug font-semibold",
+  "pt-2 text-base font-semibold",
+  "pt-1 text-[15px] font-semibold",
+  "pt-1 text-sm font-semibold",
+  "pt-1 text-sm font-semibold text-muted",
+];
+const DOC_TAG: readonly ("h3" | "h4" | "h5" | "h6")[] = ["h3", "h3", "h4", "h5", "h6", "h6", "h6"];
 
-function List({ list }: { list: ListBlock }) {
-  const items = list.items.map((it, k) => (
-    <li key={k} className="pl-1 whitespace-pre-wrap wrap-anywhere">
-      {inline(it.text)}
-      {it.sub && <List list={it.sub} />}
-    </li>
-  ));
+/** A task list item's box: "[x] " or "[ ] " at the start of its text. */
+const TASK = /^\[([ xX])\][ \t]+/;
+
+function Task({ done }: { done: boolean }) {
+  return (
+    <span
+      data-task={done ? "done" : "open"}
+      className={cn(
+        "mr-2 -ml-5 inline-flex size-3.5 translate-y-0.5 items-center justify-center rounded-xs border",
+        done ? "border-text bg-text text-bg" : "border-muted",
+      )}
+    >
+      {done && <CheckIcon aria-hidden className="size-3" strokeWidth={3} />}
+      <span className="sr-only">{done ? "Done: " : "Not done: "}</span>
+    </span>
+  );
+}
+
+function List({ list, doc }: { list: ListBlock; doc: boolean }) {
+  const items = list.items.map((it, k) => {
+    const task = TASK.exec(it.text);
+    return (
+      <li key={k} className={cn("pl-1 wrap-anywhere", doc ? "whitespace-normal" : "whitespace-pre-wrap", task && "list-none")}>
+        {task && <Task done={task[1] !== " "} />}
+        {inline(task ? it.text.slice(task[0].length) : it.text)}
+        {it.sub && <List list={it.sub} doc={doc} />}
+      </li>
+    );
+  });
   const cls = cn("grid gap-1 pl-5 marker:text-muted", list.ordered ? "list-decimal" : "list-disc");
   return list.ordered ? (
     <ol dir="auto" start={list.start === 1 ? undefined : list.start} className={cls}>
@@ -297,37 +332,50 @@ function List({ list }: { list: ListBlock }) {
   );
 }
 
-function BlockView({ block }: { block: Block }): ReactNode {
+function BlockView({ block, doc }: { block: Block; doc: boolean }): ReactNode {
   switch (block.t) {
     case "p":
       return (
-        <p dir="auto" className="whitespace-pre-wrap wrap-anywhere">
+        <p dir="auto" className={cn("wrap-anywhere", doc ? "whitespace-normal" : "whitespace-pre-wrap")}>
           {inline(block.text)}
         </p>
       );
-    case "h":
+    case "h": {
+      if (doc) {
+        const Tag = DOC_TAG[block.level];
+        return (
+          <Tag dir="auto" className={cn("wrap-anywhere", DOC_HEAD[block.level])}>
+            {inline(block.text)}
+          </Tag>
+        );
+      }
       return (
-        <p dir="auto" data-md="heading" className={cn("pt-1 wrap-anywhere", HEAD[block.level])}>
+        <p dir="auto" data-md="heading" className={cn("pt-1 wrap-anywhere", HEAD[Math.min(block.level, 3)])}>
           {inline(block.text)}
         </p>
       );
+    }
     case "code":
+      // A document's code wraps (a narrow panel never scrolls sideways); a log's scrolls inside its block.
       return (
         <pre
           tabIndex={0}
           aria-label="Code"
-          className="max-w-full overflow-x-auto rounded-md border border-line-soft bg-surface-2 px-3 py-2 font-mono text-xs leading-[1.6] [tab-size:4]"
+          className={cn(
+            "max-w-full rounded-md border border-line-soft bg-surface-2 px-3 py-2 font-mono text-xs leading-[1.6] [tab-size:4]",
+            doc ? "whitespace-pre-wrap wrap-anywhere" : "overflow-x-auto",
+          )}
         >
           {block.text}
         </pre>
       );
     case "list":
-      return <List list={block} />;
+      return <List list={block} doc={doc} />;
     case "quote":
       return (
         <blockquote dir="auto" className="grid gap-2 border-l-2 border-line-soft pl-3 text-muted">
           {block.blocks.map((b, k) => (
-            <BlockView key={k} block={b} />
+            <BlockView key={k} block={b} doc={doc} />
           ))}
         </blockquote>
       );
@@ -363,13 +411,16 @@ function BlockView({ block }: { block: Block }): ReactNode {
   }
 }
 
-/** text as Markdown: the safe subset above, in the session's prose type (sans, line-height 1.6). */
-export function Markdown({ text, className }: { text: string; className?: string }) {
+/**
+ * text as Markdown: the safe subset above, in the session's prose type (sans, line-height 1.6). A document (the file
+ * viewer's) has real headings (# is an h3, under the viewer's h2) and joins a paragraph's lines, as Markdown does.
+ */
+export function Markdown({ text, className, document = false }: { text: string; className?: string; document?: boolean }) {
   const blocks = useMemo(() => parseBlocks(text), [text]);
   return (
-    <div className={cn("grid min-w-0 gap-2 leading-[1.6]", className)}>
+    <div className={cn("grid min-w-0 leading-[1.6]", document ? "gap-3" : "gap-2", className)}>
       {blocks.map((b, k) => (
-        <BlockView key={k} block={b} />
+        <BlockView key={k} block={b} doc={document} />
       ))}
     </div>
   );

@@ -1,5 +1,6 @@
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { MemoryRouter } from "react-router";
 import { expect, test } from "vitest";
 import { item } from "@/lib/stream/testkit";
 import { ToolCall } from "./ToolCall";
@@ -187,4 +188,30 @@ test("success reads in the success colour", () => {
   const { summary } = row(call("Write", { file_path: WT + "a.go", content: "a\n" }), ok("ok"));
   expect(summary.querySelector("svg.text-success")).toBeTruthy();
   expect(summary.querySelector("[data-counts] .text-success")?.textContent).toBe("+1");
+});
+
+test("a Write or Edit of a document has an Open link to the viewer", () => {
+  const show = (c: ReturnType<typeof call>, ticketId?: string, at = "/tickets/T-4?tab=session") =>
+    render(
+      <MemoryRouter initialEntries={[at]}>
+        <ToolCall call={c} result={ok("ok")} active ticketId={ticketId} />
+      </MemoryRouter>,
+    );
+  const { unmount } = show(call("Write", { file_path: `${WT}docs/REPORT.md`, content: "# R\n" }), "T-4");
+  const open = screen.getByRole("link", { name: "Open docs/REPORT.md" });
+  // On the Ticket's page the tab stays; the path is the worktree's.
+  expect(open.getAttribute("href")).toBe("/tickets/T-4?tab=session&file=docs%2FREPORT.md");
+  // Not inside the row's summary (a link in a button is not allowed).
+  expect(open.closest("summary")).toBeNull();
+  unmount();
+  // Elsewhere (a pinned session), it goes to the Ticket's page; a path outside a worktree is passed whole.
+  const second = show(call("Edit", { file_path: "/srv/notes/plan.md", old_string: "a", new_string: "b" }), "T-4", "/needs-you");
+  expect(screen.getByRole("link", { name: "Open /srv/notes/plan.md" }).getAttribute("href")).toBe("/tickets/T-4?file=%2Fsrv%2Fnotes%2Fplan.md");
+  second.unmount();
+  // Code is not a document, and without a Ticket there is nowhere to open.
+  const third = show(call("Write", { file_path: `${WT}main.go`, content: "package main\n" }), "T-4");
+  expect(screen.queryByRole("link", { name: /^Open/ })).toBeNull();
+  third.unmount();
+  show(call("Write", { file_path: `${WT}REPORT.md`, content: "# R\n" }));
+  expect(screen.queryByRole("link", { name: /^Open/ })).toBeNull();
 });

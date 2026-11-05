@@ -1,10 +1,11 @@
 // One Ticket: its header with the actions, what it waits on (the Needs you cards, inline), its latest Report (the
-// report card), its facts and its tabs:
-// Session (the live session and its composer), Timeline, and Changes (a Ticket with a branch) or Files (one without a
-// repository). The Ticket's detail Deltas come from useWatch for as long as the page is open. The header's Reply (and
+// report card), its facts, the Markdown documents it made (the Documents strip) and its tabs:
+// Session (the live session and its composer), Timeline, Changes (a Ticket with a branch) and Files (what its directory
+// holds, or what its worktree added or changed). ?file=<path> opens a file in the viewer, over the page. The Ticket's detail Deltas come from useWatch for as long as the page is open. The header's Reply (and
 // r) opens the Session tab and puts the cursor in the composer; replying is the composer's.
 import { ArrowLeftIcon } from "lucide-react";
 import { lazy, Suspense, useCallback, useState } from "react";
+import type { ReportView } from "@/gen/athena/v1/state_pb";
 import { Link, useLocation, useSearchParams } from "react-router";
 import type { ApprovalView, TicketSummary } from "@/gen/athena/v1/state_pb";
 import { AnswerCard } from "@/features/needs-you/AnswerCard";
@@ -15,6 +16,7 @@ import { Composer, interruptSession } from "@/features/session/Composer";
 import { PinToggle } from "@/features/session/PinnedSessions";
 import { LazySessionView } from "@/features/session/SessionFrame";
 import { errorMessage, retry } from "@/lib/commands/actions";
+import { type Artifact, type TicketFiles, useArtifact } from "@/lib/artifacts/api";
 import { useWatch } from "@/lib/commands/useWatch";
 import { selectSynced } from "@/lib/store/selectors";
 import { useAthena } from "@/lib/store/state";
@@ -27,6 +29,7 @@ import { Skeleton } from "@/ui/primitives/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/ui/primitives/tabs";
 import { toast } from "@/ui/primitives/toast";
 import { ListSkeleton } from "./ArtifactFailure";
+import { DocumentsStrip } from "./DocumentsStrip";
 import { Facts } from "./Facts";
 import { filterSearch } from "./Filters";
 import { FilesView } from "./FilesView";
@@ -36,6 +39,23 @@ const DiffView = lazy(() => import("./DiffView"));
 // The report card renders Markdown, which shares its chunk with the session view. The timeline is a chunk of its own.
 const ReportCard = lazy(() => import("./ReportCard"));
 const Timeline = lazy(() => import("./Timeline").then((m) => ({ default: m.Timeline })));
+// The file viewer, a chunk of its own; it shares the Markdown renderer's.
+const DocViewer = lazy(() => import("./DocViewer"));
+
+/** Whether a Ticket has files to list: a Ticket without a repository, or one with a branch (its worktree). */
+const hasFiles = (t: TicketSummary) => !!t.branch || t.repo === "";
+
+/**
+ * A number that grows when a Report arrives while the page is open: the files are read again then (a report is when
+ * a worker has written its documents). The first Reports seen, when the detail loads, do not count.
+ */
+function useReportsSeen(reports: readonly ReportView[] | undefined): number {
+  const last = reports?.at(-1);
+  const key = last ? `${last.assignmentId}:${last.state}:${last.at?.seconds ?? 0}` : reports ? "none" : undefined;
+  const [seen, setSeen] = useState<{ key?: string; bumps: number }>({ key, bumps: 0 });
+  if (key !== undefined && key !== seen.key) setSeen({ key, bumps: seen.key === undefined ? seen.bumps : seen.bumps + 1 });
+  return seen.bumps;
+}
 
 /** Brings an Assignment's Report into view: the card's, or an earlier one's, opened. */
 function revealReport(assignmentId: string) {
@@ -148,19 +168,23 @@ function DetailSkeleton() {
 
 function TicketTabs({
   ticket,
+  files,
   focusComposer,
   onComposerFocused,
 }: {
   ticket: TicketSummary;
+  files: Artifact<TicketFiles>;
   focusComposer: boolean;
   onComposerFocused(): void;
 }) {
   const [params, setParams] = useSearchParams();
   const { hash } = useLocation();
   const detail = useAthena((s) => s.details.get(ticket.id));
-  // Changes for a Ticket with a branch, Files for one without a repository; a repository not placed yet has neither.
-  const third = ticket.branch ? "changes" : ticket.repo === "" ? "files" : undefined;
-  const tabs = ["session", "timeline", ...(third ? [third] : [])];
+  // Changes for a Ticket with a branch, Files for one with a branch or without a repository; a repository not placed
+  // yet has neither.
+  const changes = !!ticket.branch;
+  const listed = hasFiles(ticket);
+  const tabs = ["session", "timeline", ...(changes ? ["changes"] : []), ...(listed ? ["files"] : [])];
   const requested = params.get("tab") ?? (hash === "#diff" ? "changes" : "timeline");
   const tab = tabs.includes(requested) ? requested : "timeline";
   return (
@@ -180,8 +204,8 @@ function TicketTabs({
       <TabsList aria-label="Ticket">
         <TabsTrigger value="session">Session</TabsTrigger>
         <TabsTrigger value="timeline">Timeline</TabsTrigger>
-        {third === "changes" && <TabsTrigger value="changes">Changes</TabsTrigger>}
-        {third === "files" && <TabsTrigger value="files">Files</TabsTrigger>}
+        {changes && <TabsTrigger value="changes">Changes</TabsTrigger>}
+        {listed && <TabsTrigger value="files">Files</TabsTrigger>}
       </TabsList>
       <TabsContent value="session" className="grid min-w-0 gap-3">
         <LazySessionView ticketId={ticket.id} />
@@ -201,16 +225,16 @@ function TicketTabs({
           <ListSkeleton />
         )}
       </TabsContent>
-      {third === "changes" && (
+      {changes && (
         <TabsContent value="changes" className="min-w-0">
           <Suspense fallback={<ListSkeleton />}>
             <DiffView ticketId={ticket.id} />
           </Suspense>
         </TabsContent>
       )}
-      {third === "files" && (
+      {listed && (
         <TabsContent value="files" className="min-w-0">
-          <FilesView ticketId={ticket.id} />
+          <FilesView ticketId={ticket.id} files={files} repository={!!ticket.branch} />
         </TabsContent>
       )}
     </Tabs>
@@ -227,6 +251,24 @@ export function TicketDetail({ id }: { id: string }) {
   const loaded = useAthena(selectSynced);
   const approval = useApprovalOf(summary);
   const back = `/tickets${filterSearch(params)}`;
+  // The Ticket's files, read once for the Documents strip, the Files tab and the viewer, and again after a new Report.
+  const listed = !!summary && hasFiles(summary);
+  const files = useArtifact<TicketFiles>(listed ? `/api/tickets/${encodeURIComponent(id)}/files` : "", useReportsSeen(detail?.reports));
+  const file = listed ? params.get("file") : null;
+  const setFile = useCallback(
+    (path: string | null) =>
+      setParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          if (path === null) next.delete("file");
+          else next.set("file", path);
+          return next;
+        },
+        { replace: true },
+      ),
+    [setParams],
+  );
+  const closeFile = useCallback(() => setFile(null), [setFile]);
 
   if (!summary) {
     if (!loaded) return <DetailSkeleton />;
@@ -285,7 +327,13 @@ export function TicketDetail({ id }: { id: string }) {
         </Suspense>
       )}
       <Facts ticket={summary} threads={detail?.threads ?? []} />
-      <TicketTabs ticket={summary} focusComposer={focusComposer} onComposerFocused={onComposerFocused} />
+      {listed && <DocumentsStrip files={files} />}
+      <TicketTabs ticket={summary} files={files} focusComposer={focusComposer} onComposerFocused={onComposerFocused} />
+      {file && (
+        <Suspense fallback={null}>
+          <DocViewer ticketId={summary.id} file={file} files={files} dir={summary.dir} onClose={closeFile} onResolve={setFile} />
+        </Suspense>
+      )}
     </article>
   );
 }

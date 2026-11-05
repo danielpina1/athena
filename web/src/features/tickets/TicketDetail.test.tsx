@@ -194,7 +194,7 @@ test("a pull request link that is not GitHub is not linked", () => {
   expect(screen.queryByRole("link", { name: /javascript/ })).toBeNull();
 });
 
-test("tabs follow the Ticket: Changes with a branch, Files without a repository", async () => {
+test("tabs follow the Ticket: Changes and Files with a branch, Files without a repository", async () => {
   load({
     tickets: [
       working,
@@ -206,7 +206,7 @@ test("tabs follow the Ticket: Changes with a branch, Files without a repository"
   expect(screen.getByRole("tab", { name: "Session" })).toBeTruthy();
   expect(screen.getByRole("tab", { name: "Timeline" })).toBeTruthy();
   expect(screen.getByRole("tab", { name: "Changes" })).toBeTruthy();
-  expect(screen.queryByRole("tab", { name: "Files" })).toBeNull();
+  expect(screen.getByRole("tab", { name: "Files" })).toBeTruthy();
   a.unmount();
   const b = renderDetail("/tickets/T-2");
   expect(screen.getByRole("tab", { name: "Files" })).toBeTruthy();
@@ -227,7 +227,7 @@ test("the Changes tab loads the diff lazily", async () => {
   );
   vi.stubGlobal("fetch", fetchMock);
   renderDetail();
-  expect(fetchMock).not.toHaveBeenCalled();
+  expect(fetchMock).not.toHaveBeenCalledWith("/api/tickets/T-1/diff", expect.anything());
   await user.click(screen.getByRole("tab", { name: "Changes" }));
   expect(await screen.findByText("No changes yet.")).toBeTruthy();
   expect(fetchMock).toHaveBeenCalledWith("/api/tickets/T-1/diff", expect.anything());
@@ -308,4 +308,45 @@ test("the Report is above the tabs: View report brings it into view, and its que
   await user.click(within(within(card).getByRole("note", { name: "Question" })).getByRole("button", { name: "Reply" }));
   const box = await screen.findByRole("textbox", { name: "Reply to the session" });
   await waitFor(() => expect(document.activeElement).toBe(box));
+});
+
+/** fetch answering the files listing with files, and any file viewed with its path as text. */
+function serveFiles(files: { path: string; size?: number; status?: string; modTime?: string }[]) {
+  const fetchMock = vi.fn((url: string) => {
+    if (url.endsWith("/files")) {
+      const body = { files: files.map((f) => ({ size: 10, modTime: "2026-11-05T09:00:00Z", ...f })), truncated: false };
+      return Promise.resolve(new Response(JSON.stringify(body), { status: 200 }));
+    }
+    return Promise.resolve(new Response(`# ${decodeURIComponent(url)}`, { status: 200, headers: { "X-Athena-Size": "10" } }));
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  return fetchMock;
+}
+
+test("the Ticket's Markdown documents are a strip above the tabs, read from its files once", async () => {
+  load({ tickets: [working] });
+  const fetchMock = serveFiles([{ path: "REPORT.md", status: "?" }, { path: "main.go", status: "A" }]);
+  renderDetail("/tickets/T-1?tab=timeline");
+  const strip = await screen.findByRole("region", { name: "Documents" });
+  expect(within(strip).getByRole("link", { name: "REPORT.md" }).getAttribute("href")).toBe("/tickets/T-1?tab=timeline&file=REPORT.md");
+  await userEvent.click(screen.getByRole("tab", { name: "Files" }));
+  expect(await screen.findByRole("list", { name: "Documents" })).toBeTruthy();
+  // The strip and the tab share one read of the listing.
+  expect(fetchMock.mock.calls.filter(([u]) => u === "/api/tickets/T-1/files")).toHaveLength(1);
+});
+
+test("?file= opens the viewer over the Ticket, and closing it gives focus back to the file", async () => {
+  load({ tickets: [working] });
+  serveFiles([{ path: "REPORT.md", status: "?" }]);
+  renderDetail("/tickets/T-1?tab=files");
+  const list = await screen.findByRole("list", { name: "Documents" });
+  const row = within(list).getByRole("link", { name: "REPORT.md" });
+  row.focus();
+  await userEvent.click(row);
+  const viewer = await screen.findByRole("dialog");
+  expect(await within(viewer).findByRole("heading", { level: 2, name: "REPORT.md" })).toBeTruthy();
+  expect(await within(viewer).findByRole("heading", { level: 3 })).toBeTruthy();
+  await userEvent.click(within(viewer).getAllByRole("button", { name: /^(Close|Back)$/ })[0]);
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(document.activeElement).toBe(within(list).getByRole("link", { name: "REPORT.md" }));
 });

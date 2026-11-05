@@ -246,7 +246,7 @@ function Item({ item }: { item: StreamItem }) {
 }
 
 const RowView = memo(
-  function RowView({ row, active }: { row: Row; active: boolean }) {
+  function RowView({ row, active, ticketId }: { row: Row; active: boolean; ticketId: string }) {
     switch (row.kind) {
       case "gap":
         return (
@@ -255,13 +255,14 @@ const RowView = memo(
           </p>
         );
       case "tool":
-        return <ToolCall call={row.call} result={row.result} active={active} />;
+        return <ToolCall call={row.call} result={row.result} active={active} ticketId={ticketId} />;
       default:
         return <Item item={row.item} />;
     }
   },
   // buildRows makes new row objects on every batch: compare what they show, so the rows already there stay put.
-  ({ row: a, active: wasActive }, { row: b, active }) => {
+  ({ row: a, active: wasActive, ticketId: was }, { row: b, active, ticketId }) => {
+    if (was !== ticketId) return false;
     if (a.kind === "item" && b.kind === "item") return a.item === b.item;
     if (a.kind === "tool" && b.kind === "tool") return a.call === b.call && a.result === b.result && wasActive === active;
     if (a.kind === "gap" && b.kind === "gap") return a.bytes === b.bytes;
@@ -316,7 +317,7 @@ export function SessionView({ ticketId, compact = false, title, actions }: Sessi
           <ol className="flex min-w-0 flex-col [&>li+li]:mt-4 [&>li[data-row=tool]+li[data-row=tool]]:mt-0.5">
             {rows.map((row) => (
               <li key={row.key} data-row={row.kind} className="min-w-0">
-                <RowView row={row} active={active} />
+                <RowView row={row} active={active} ticketId={ticketId} />
               </li>
             ))}
           </ol>

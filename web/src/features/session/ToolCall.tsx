@@ -25,6 +25,9 @@ import {
   XIcon,
 } from "lucide-react";
 import { type ReactNode, useState } from "react";
+import { Link, useInRouterContext, useLocation } from "react-router";
+import { fileLinkTo } from "@/features/tickets/fileLink";
+import { isDocument } from "@/lib/artifacts/files";
 import type { StreamItem } from "@/gen/athena/v1/stream_pb";
 import { itemText } from "@/lib/stream/ansi";
 import { Markdown } from "@/lib/text/markdown";
@@ -308,11 +311,32 @@ function Body({ view, input, call, result, active }: { view: ToolView; input: To
   }
 }
 
+// A Ticket's worktree in a path: …/.athena/work/<slug>/.
+const IN_WORKTREE = /\/\.athena\/work\/[^/]+\/(.+)$/;
+
+/** Open, beside a Write or Edit row of a document: the file in the Ticket's viewer (its path in the worktree, if it is). */
+function OpenFile({ ticketId, path }: { ticketId: string; path: string }) {
+  const here = useLocation();
+  const file = IN_WORKTREE.exec(path)?.[1] ?? path;
+  return (
+    <Link
+      to={fileLinkTo(here, file, `/tickets/${encodeURIComponent(ticketId)}`)}
+      aria-label={`Open ${file}`}
+      className="inline-flex min-h-11 shrink-0 items-center px-2 text-xs font-medium text-text underline decoration-line-soft underline-offset-4 hover:decoration-text lg:min-h-8"
+    >
+      Open
+    </Link>
+  );
+}
+
 /**
  * call is missing when it fell out of the kept items; result is missing while the tool runs. active says the Ticket
  * has not ended: a call without a result is running until then (waiting for an Approval too), and has none after.
+ * With ticketId, a Write or Edit of a document has an Open link to the Ticket's file viewer, beside the row (a link
+ * inside its summary would be a control inside a control).
  */
-export function ToolCall({ call, result, active }: { call?: StreamItem; result?: StreamItem; active: boolean }) {
+export function ToolCall({ call, result, active, ticketId }: { call?: StreamItem; result?: StreamItem; active: boolean; ticketId?: string }) {
+  const routed = useInRouterContext();
   const status: ToolStatus = result ? (result.isError ? "error" : "ok") : active ? "running" : "none";
   const took = call?.at && result?.at ? formatDuration(timestampMs(result.at) - timestampMs(call.at)) : undefined;
   const input = toolInput(call);
@@ -321,7 +345,8 @@ export function ToolCall({ call, result, active }: { call?: StreamItem; result?:
   const error = status === "error" && result ? errorLine(itemText(result)) : "";
   // The body is built on the first open, not for every closed row: a long session has hundreds of them.
   const [opened, setOpened] = useState(false);
-  return (
+  const written = (view.kind === "write" || view.kind === "edit") && call?.tool !== "NotebookEdit" ? str(input, "file_path") : "";
+  const row = (
     <details
       data-testid="tool-call"
       data-status={status}
@@ -360,5 +385,12 @@ export function ToolCall({ call, result, active }: { call?: StreamItem; result?:
         </div>
       )}
     </details>
+  );
+  if (!ticketId || !routed || !written || status === "error" || !isDocument(written)) return row;
+  return (
+    <div className="flex min-w-0 items-start">
+      <div className="min-w-0 flex-1">{row}</div>
+      <OpenFile ticketId={ticketId} path={written} />
+    </div>
   );
 }

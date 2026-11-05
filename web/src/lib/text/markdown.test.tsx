@@ -127,3 +127,24 @@ test("a number in a paragraph does not start a list", () => {
   expect(md("Steps:\n1. one").querySelector("ol")).toBeTruthy();
   expect(md("3.14 is pi").querySelector("ol")).toBeNull();
 });
+
+test("a document's headings are real headings, at every level, under the viewer's own", () => {
+  const c = render(<Markdown text={"# Report\n\n## Findings\n\n#### Detail\n\n###### Small"} document />).container;
+  const heads = [...c.querySelectorAll("h3, h4, h5, h6")];
+  expect(heads.map((h) => [h.tagName, h.textContent])).toEqual([
+    ["H3", "Report"],
+    ["H4", "Findings"],
+    ["H6", "Detail"],
+    ["H6", "Small"],
+  ]);
+  expect(c.querySelector("[data-md=heading]")).toBeNull();
+});
+
+test("task list items show a box that says whether they are done", () => {
+  const c = md("- [x] write the report\n- [ ] send it\n- plain item");
+  const items = [...c.querySelectorAll("li")];
+  expect(items.map((li) => li.querySelector("[data-task]")?.getAttribute("data-task") ?? null)).toEqual(["done", "open", null]);
+  expect(items[0].textContent).toBe("Done: write the report");
+  expect(items[1].textContent).toBe("Not done: send it");
+  expect(items[2].textContent).toBe("plain item");
+});

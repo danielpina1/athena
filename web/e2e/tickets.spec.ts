@@ -1,6 +1,6 @@
 // Tickets, end to end: the list with its filters, the detail's live timeline and inline question, the Changes of a
 // Ticket in a temp git repository (the worker's edit is made here, as the fake session does not write), the Files of
-// one without a repository, and hostile content (a 2,000-character title, RTL, ANSI, a 3,000-character diff line)
+// one without a repository (docs.spec.ts has the viewer), and hostile content (a 2,000-character title, RTL, ANSI, a 3,000-character diff line)
 // that must never move the page sideways. Every Ticket a test opens is stopped at its end (R37).
 import { execFile } from "node:child_process";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -160,13 +160,16 @@ test("Files lists what a Ticket without a repository holds", async ({ page }) =>
     writeFileSync(join(dir, "docs", "a b.txt"), "spaced\n");
 
     await page.goto(`/tickets/${ticket}?tab=files`);
-    const files = page.getByRole("list", { name: "Files" });
+    const files = page.getByRole("list", { name: "Documents" });
     await expect(files).toContainText("notes.md");
     await expectAccessible(page);
     const download = page.waitForEvent("download");
-    await files.getByRole("link", { name: "docs/a b.txt" }).click();
+    await files.getByRole("link", { name: "Download docs/a b.txt" }).click();
     const d = await download;
     expect(d.suggestedFilename()).toBe("a b.txt");
+    // A file opens in the viewer.
+    await files.getByRole("link", { name: "notes.md", exact: true }).click();
+    await expect(page.getByRole("dialog").getByRole("heading", { level: 3, name: "Notes" })).toBeVisible();
   } finally {
     await finish(ticket);
   }
