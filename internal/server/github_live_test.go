@@ -170,7 +170,7 @@ func TestLiveGitHubMention(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		c.Sandbox.CAFile, c.Sandbox.WeakerNetworkIsolation = ca, true
+		c.Sandbox.CAFile, c.Sandbox.WeakerNetworkIsolation = ca, new(true)
 		if err := SaveConfig(stateDir, c); err != nil {
 			t.Fatal(err)
 		}

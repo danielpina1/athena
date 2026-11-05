@@ -145,6 +145,7 @@ describe("useAthena", () => {
     }
     st().applySnapshot(snap({ cursor: 0n, tickets }), "e1");
     // Per Delta: apply it, then derive what a screen shows from it (the Needs you list, the counts, a Tickets list).
+    // Rendering the list is timed too, in TicketList.test.tsx.
     const now = Date.now();
     const start = performance.now();
     for (const d of deltas) {

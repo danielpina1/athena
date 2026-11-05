@@ -813,14 +813,14 @@ func (e *Engine) Handback(ticketID, triggerID, reason string) (bool, error) {
 			return err
 		}
 		if tr == nil {
-			return userErrorf("trigger %s not found", triggerID)
+			return o.unknownTrigger(t, triggerID)
 		}
 		// An owner Trigger has no Thread to queue it on: handed back, nobody would ever decide it.
 		if tr.Source == ownerSource {
 			return userErrorf("messages from the owner can't be handed back; say in your session output that it is out of scope")
 		}
 		if !slices.ContainsFunc(t.Inputs, func(in Input) bool { return in.Kind == InputTrigger && in.TriggerID == triggerID }) {
-			return userErrorf("trigger %s did not reach ticket %s", triggerID, ticketID)
+			return userErrorf("trigger %s did not reach ticket %s; %s", triggerID, ticketID, o.triggerChoices(t))
 		}
 		if _, back := tr.Disposition.HandedBack[ticketID]; back {
 			return userErrorf("ticket %s handed trigger %s back already", ticketID, triggerID)

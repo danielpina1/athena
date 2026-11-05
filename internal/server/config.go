@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -28,7 +29,7 @@ import (
 //	{"github": {"appId", "slug", "keyFile", "installationId", "repos": [], "intervalSeconds": 30, "receiveAll": []},
 //	 "router": {"model": "haiku"}, "evalTimeoutSeconds": 600,
 //	 "sandbox": {"enabled": true, "required": false, "allowedDomains": [], "allowWrite": [],
-//	             "weakerNetworkIsolation": false, "caFile": ""},
+//	             "weakerNetworkIsolation": true, "caFile": ""},
 //	 "web": {"enabled": false, "listen": ":8443", "host": "", "ips": [], "tls": "ca",
 //	         "acme": {"email", "provider", "resolvers": [], "directory", "agreeTos": false}},
 //	 "localRepoRoots": ["~/code"]}
@@ -130,8 +131,9 @@ type SandboxConfig struct {
 	AllowedDomains []string `json:"allowedDomains,omitempty"`
 	// AllowWrite are absolute paths workers' commands may write besides the Ticket's directory.
 	AllowWrite []string `json:"allowWrite,omitempty"`
-	// WeakerNetworkIsolation (macOS) opens the trustd service, which gh needs behind a TLS-inspecting proxy.
-	WeakerNetworkIsolation bool `json:"weakerNetworkIsolation,omitempty"`
+	// WeakerNetworkIsolation (macOS) lets workers' commands reach the trustd service, which gh and other Go programs
+	// verify every TLS certificate through. Unset means on for macOS (WeakerNetworkIsolationOn); false turns it off.
+	WeakerNetworkIsolation *bool `json:"weakerNetworkIsolation,omitempty"`
 	// CAFile is an absolute path to a PEM bundle workers' git and curl verify TLS with.
 	CAFile string `json:"caFile,omitempty"`
 }
@@ -142,6 +144,17 @@ func (c SandboxConfig) On() bool {
 		return *c.Enabled
 	}
 	return node.SandboxSupported()
+}
+
+// WeakerNetworkIsolationOn reports whether workers' commands may reach trustd: WeakerNetworkIsolation, or unset on
+// macOS, where without it `gh` fails every TLS handshake (x509: OSStatus -26276).
+func (c SandboxConfig) WeakerNetworkIsolationOn() bool { return c.weakerNetworkIsolationOn(runtime.GOOS) }
+
+func (c SandboxConfig) weakerNetworkIsolationOn(goos string) bool {
+	if c.WeakerNetworkIsolation != nil {
+		return *c.WeakerNetworkIsolation
+	}
+	return goos == "darwin"
 }
 
 // nodeSandbox is the node's sandbox configuration, nil when it is off. The GitHub App's private key is denied to
@@ -160,7 +173,7 @@ func (c FileConfig) nodeSandbox() *node.SandboxConfig {
 		AllowedDomains:         slices.Clone(sb.AllowedDomains),
 		AllowWrite:             slices.Clone(sb.AllowWrite),
 		DenyRead:               denyRead,
-		WeakerNetworkIsolation: sb.WeakerNetworkIsolation,
+		WeakerNetworkIsolation: sb.WeakerNetworkIsolationOn(),
 		CAFile:                 sb.CAFile,
 	}
 }

@@ -599,14 +599,49 @@ func TestWorkerToolsReachEngine(t *testing.T) {
 	if out, isErr := call("ack", map[string]any{"trigger_id": "github:issuecomment:1", "text": "On it: fixing the README typo."}); isErr || !strings.Contains(out, `"queued":true`) {
 		t.Fatalf("ack: %s", out)
 	}
-	if out, isErr := call("ack", map[string]any{"trigger_id": "github:issuecomment:404", "text": "On it."}); !isErr || !strings.Contains(out, "ack refused") {
+	// A repeat ack, in other words, succeeds and posts nothing.
+	if out, isErr := call("ack", map[string]any{"trigger_id": "github:issuecomment:1", "text": "Working on it."}); isErr ||
+		!strings.Contains(out, `"queued":false`) || !strings.Contains(out, "Already acknowledged") {
+		t.Fatalf("repeat ack: %s", out)
+	}
+	if out, isErr := call("ack", map[string]any{"trigger_id": "github:issuecomment:404", "text": "On it."}); !isErr ||
+		!strings.Contains(out, "ack refused: trigger github:issuecomment:404 not found") || !strings.Contains(out, "trigger_ids: github:issuecomment:1 (acknowledged already)") {
 		t.Fatalf("ack of a stranger trigger: %s", out)
+	}
+	// The input id given for the trigger_id: the refusal names the trigger_id to use.
+	tkNow, _ := h.ticket(tk.ID)
+	if out, isErr := call("ack", map[string]any{"trigger_id": tkNow.Inputs[0].ID, "text": "On it."}); !isErr ||
+		!strings.Contains(out, "is an input id, not a trigger_id: that input's trigger_id is github:issuecomment:1") {
+		t.Fatalf("ack by input id: %s", out)
+	}
+	if out, isErr := call("ack", map[string]any{"text": "On it."}); !isErr || !strings.Contains(out, "name the trigger_id line") {
+		t.Fatalf("ack without a trigger_id: %s", out)
 	}
 	if out, isErr := call("reply", map[string]any{"purpose": "answer", "text": "It is the README.", "trigger_id": "github:issuecomment:1"}); isErr {
 		t.Fatalf("reply answer: %s", out)
 	}
-	if out, isErr := call("reply", map[string]any{"purpose": "result", "text": "Done."}); !isErr {
-		t.Fatalf("a result without a ready report was sent: %s", out)
+	if out, isErr := call("reply", map[string]any{"text": "It is the README file.", "trigger_id": "github:issuecomment:1"}); isErr {
+		t.Fatalf("reply without a purpose: %s", out)
+	}
+	// A worker sends no result or question by reply: each refusal says which report to file instead.
+	if out, isErr := call("reply", map[string]any{"purpose": "result", "text": "Done."}); !isErr ||
+		!strings.Contains(out, "file report {status: ready, summary, pull}") {
+		t.Fatalf("a result reply: %s", out)
+	}
+	if out, isErr := call("reply", map[string]any{"purpose": "attention", "text": "Which page?"}); !isErr ||
+		!strings.Contains(out, "file report {status: waiting (or blocked), summary, question}") {
+		t.Fatalf("an attention reply: %s", out)
+	}
+	if out, isErr := call("reply", map[string]any{"text": "Yes."}); !isErr || !strings.Contains(out, "trigger_id is required") {
+		t.Fatalf("an answer without a trigger_id: %s", out)
+	}
+	// A ready report with a question is refused with what to do instead; the report tool says what Athena does next.
+	if out, isErr := call("report", map[string]any{"status": "ready", "summary": "x", "question": "More?"}); !isErr ||
+		!strings.Contains(out, "report waiting with question instead") {
+		t.Fatalf("a ready report with a question: %s", out)
+	}
+	if out, isErr := call("report", map[string]any{"status": "progress", "summary": "halfway"}); isErr || out != "Report filed (progress)." {
+		t.Fatalf("progress report: %s", out)
 	}
 
 	if out, isErr := call("follow_thread", map[string]any{"thread": "https://github.com/O/R/pull/31"}); isErr || !strings.Contains(out, "github:o/r#31") {
@@ -881,4 +916,18 @@ func TestLaunchWaitingForCredentialsHoldsNoSlot(t *testing.T) {
 	}
 	creds.noIdentity.Store(false)
 	h.running(id)
+}
+
+// The report tool's result says what Athena does with a final report: it posts the result itself.
+func TestReportFiledSaysWhatFollows(t *testing.T) {
+	if got := reportFiled("ready"); !strings.Contains(got, "Athena posts the result to people from this summary") ||
+		!strings.Contains(got, "do not send it again with reply") {
+		t.Errorf("ready: %q", got)
+	}
+	if got := reportFiled("dropped"); !strings.Contains(got, "send nothing more") {
+		t.Errorf("dropped: %q", got)
+	}
+	if got := reportFiled("waiting"); got != "Report filed (waiting)." {
+		t.Errorf("waiting: %q", got)
+	}
 }

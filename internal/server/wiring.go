@@ -667,11 +667,12 @@ func (w *webEndpoint) start(d *Dispatcher, n *node.Node, fx *effects.Runner, ver
 	}()
 	if d.facts != nil {
 		// What the used folders are (a repository, where they resolve) is found off the hub's loop too, beside the
-		// scans and as often; a finding that differs reaches the dashboards the same way.
+		// scans and as often; a finding that differs reaches the dashboards with the repositories and the summaries
+		// of the Tickets in those folders (their branch).
 		w.wg.Add(1)
 		go func() {
 			defer w.wg.Done()
-			d.facts.run(ctx, localScanEvery, w.hub.ReposChanged)
+			d.facts.run(ctx, localScanEvery, w.hub.FoldersChanged)
 		}()
 	}
 	if d.local != nil {

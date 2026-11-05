@@ -9,9 +9,10 @@ const ESCAPES = /\u001b\[[0-?]*[ -/]*[@-~]|\u001b\][^\u0007\u001b]*(?:\u0007|\u0
 // C0 and C1 controls except tab and newline (a carriage return goes too, so a line cannot be overwritten).
 const CONTROLS = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g;
 
-// The embeddings and overrides (U+202A–U+202E), the isolates (U+2066–U+2069) and the marks (U+200E, U+200F).
-const BIDI = /[\u202a-\u202e\u2066-\u2069\u200e\u200f]/g;
-const HAS_BIDI = /[\u202a-\u202e\u2066-\u2069\u200e\u200f]/;
+// The embeddings and overrides (U+202A–U+202E), the isolates (U+2066–U+2069) and the marks (U+200E, U+200F and the
+// Arabic letter mark, U+061C).
+const BIDI = /[\u202a-\u202e\u2066-\u2069\u200e\u200f\u061c]/g;
+const HAS_BIDI = /[\u202a-\u202e\u2066-\u2069\u200e\u200f\u061c]/;
 
 /** text without ANSI escape sequences and control characters, bidirectional ones included; tabs and newlines stay. */
 export function stripAnsi(text: string): string {

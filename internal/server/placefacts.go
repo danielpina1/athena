@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -19,9 +18,12 @@ type placeFact struct {
 
 // placeFacts finds the placeFacts of the folders the hub's Repos reads, off the hub's loop: Repos must not block on
 // I/O beyond the store, and a folder on a dead network mount or an unplugged volume would stall every dashboard.
-// Repos reads only what the last pass found (lookup); a folder it has not seen is guessed a plain folder resolving to
-// itself and wakes a pass at once, whose finding reaches the dashboards through the change callback when it differs.
-// A periodic pass probes every folder read since the one before again, and forgets the others.
+// Repos and the Tickets' summaries read only what the last pass found (lookup); a folder it has not seen is guessed a
+// plain folder resolving to itself and wakes a pass at once, whose finding reaches the dashboards through the change
+// callback when it differs. A periodic pass probes every folder read since the one before again. A folder nobody read
+// meanwhile keeps its fact: forgetting it would turn the next read (a dashboard's Snapshot after a quiet spell) back
+// into the guess, and the hub, whose last published list still holds the fact, would see no change to publish. The
+// facts are a few bytes per folder a Ticket ever used.
 type placeFacts struct {
 	// probe finds one folder's facts (the filesystem by default; tests replace it).
 	probe func(dir string) placeFact
@@ -66,8 +68,8 @@ func (f *placeFacts) lookup(dir string) placeFact {
 }
 
 // refresh probes the folders read and not known yet, or, when periodic, every folder read since the last periodic
-// pass (and forgets the rest). It reports whether a fact differs from what lookup returned for it before.
-func (f *placeFacts) refresh(periodic bool) bool {
+// pass. It returns the folders whose fact differs from what lookup returned for them before, sorted.
+func (f *placeFacts) refresh(periodic bool) []string {
 	f.mu.Lock()
 	var dirs []string
 	for dir := range f.asked {
@@ -88,28 +90,26 @@ func (f *placeFacts) refresh(periodic bool) bool {
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	changed := false
-	for dir, fact := range found {
+	var changed []string
+	for _, dir := range dirs {
+		fact := found[dir]
 		before, ok := f.known[dir]
 		if !ok {
 			before = guessPlace(dir)
 		}
-		changed = changed || before != fact
+		if before != fact {
+			changed = append(changed, dir)
+		}
 		f.known[dir] = fact
-	}
-	if periodic {
-		maps.DeleteFunc(f.known, func(dir string, _ placeFact) bool {
-			_, probed := found[dir]
-			return !probed && !f.asked[dir]
-		})
 	}
 	return changed
 }
 
-// run passes over the folders when lookup wakes it and every every, until ctx is done, calling changed after a pass
-// that found something new. Each pass runs on a goroutine of its own, so one stuck in a filesystem call never holds up
-// the shutdown: once ctx is done run returns, and that pass's result, whenever it comes, is still kept.
-func (f *placeFacts) run(ctx context.Context, every time.Duration, changed func()) {
+// run passes over the folders when lookup wakes it and every every, until ctx is done, calling changed with the
+// folders after a pass that found something new. Each pass runs on a goroutine of its own, so one stuck in a
+// filesystem call never holds up the shutdown: once ctx is done run returns, and that pass's result, whenever it
+// comes, is still kept.
+func (f *placeFacts) run(ctx context.Context, every time.Duration, changed func(dirs []string)) {
 	tick := time.NewTicker(every)
 	defer tick.Stop()
 	for {
@@ -121,14 +121,14 @@ func (f *placeFacts) run(ctx context.Context, every time.Duration, changed func(
 		case <-tick.C:
 			periodic = true
 		}
-		res := make(chan bool, 1)
+		res := make(chan []string, 1)
 		go func() { res <- f.refresh(periodic) }()
 		select {
 		case <-ctx.Done():
 			return
 		case c := <-res:
-			if c && changed != nil && ctx.Err() == nil {
-				changed()
+			if len(c) > 0 && changed != nil && ctx.Err() == nil {
+				changed(c)
 			}
 		}
 	}

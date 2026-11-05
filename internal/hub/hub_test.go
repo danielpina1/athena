@@ -34,6 +34,7 @@ type fakeSource struct {
 	node      node.Status
 	repos     []*athenav1.RepoView
 	repoReads int
+	git       map[string]bool
 	kinds     []string
 	muted     []string
 	prompts   *athenav1.PromptsView
@@ -122,6 +123,17 @@ func (f *fakeSource) Repos() ([]*athenav1.RepoView, error) {
 }
 
 func (f *fakeSource) setRepos(r ...*athenav1.RepoView) { f.mu.Lock(); f.repos = r; f.mu.Unlock() }
+
+func (f *fakeSource) GitFolder(dir string) bool { f.mu.Lock(); defer f.mu.Unlock(); return f.git[dir] }
+
+func (f *fakeSource) setGit(dir string, git bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.git == nil {
+		f.git = map[string]bool{}
+	}
+	f.git[dir] = git
+}
 
 func (f *fakeSource) Notifications() ([]string, []string, error) {
 	f.mu.Lock()
@@ -910,6 +922,33 @@ func TestReposChangedPublishesOnlyAChange(t *testing.T) {
 	if r := next(t, sub).GetRepos().GetRepos(); len(r) != 2 || r[1].Name != "/src/x" || r[1].Kind != "git" {
 		t.Fatalf("repos delta = %v", r)
 	}
+	h.ReposChanged()
+	none(t, sub)
+}
+
+// FoldersChanged (the pass over the placement folders found a .git entry) republishes the summaries of the Tickets in
+// those folders, with their branch, and to a watcher the detail; other Tickets are not sent again.
+func TestFoldersChangedRepublishesTheirTickets(t *testing.T) {
+	f := newFake()
+	in, other := ticket("T-1"), ticket("T-2")
+	in.Execution = &core.Execution{Directory: "/src/x"}
+	other.Execution = &core.Execution{Directory: "/src/y"}
+	f.put(in)
+	f.put(other)
+	h := start(t, f)
+	sub, _ := h.Subscribe(0, h.Epoch())
+	defer sub.Close()
+	sub.Watch("T-1")
+	f.setGit("/src/x", true)
+	h.FoldersChanged([]string{"/src/x"})
+	if d := next(t, sub).GetTicket(); d.GetId() != "T-1" || d.GetBranch() != "athena/t-1" {
+		t.Fatalf("ticket delta = %v", d)
+	}
+	if d := next(t, sub).GetTicketDetail(); d.GetSummary().GetBranch() != "athena/t-1" {
+		t.Fatalf("detail delta = %v", d)
+	}
+	none(t, sub)
+	// Nothing changed since: a wake for the local scans sends no Ticket.
 	h.ReposChanged()
 	none(t, sub)
 }

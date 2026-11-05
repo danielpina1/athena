@@ -111,8 +111,9 @@ func TestReplyIdempotent(t *testing.T) {
 }
 
 // Reference replies.md and 003: an acknowledgement goes out at most once per Trigger per Ticket, ≤ 100 words, only for
-// a person's message that reached the Ticket other than for context.
-func TestSecondAckRefused(t *testing.T) {
+// a person's message that reached the Ticket other than for context. A second one, in any wording, is a repeat that
+// queues nothing, not a refusal.
+func TestSecondAckIsARepeat(t *testing.T) {
 	h := newEvals(t)
 	a := h.sourced("c:1")
 	h.receive(channelled(h.message("c:2", issue)))
@@ -123,8 +124,9 @@ func TestSecondAckRefused(t *testing.T) {
 	eq(t, "conversation", h.receipt(id).Conversation, issue)
 	eq(t, "identical again: same id", h.reply(ReplyRequest{TicketID: a, TriggerID: "c:2", Purpose: PurposeAcknowledgement,
 		Text: "On it: the login button."}), id)
-	_, err := h.eng.Reply(ReplyRequest{TicketID: a, TriggerID: "c:2", Purpose: PurposeAcknowledgement, Text: "Working on it."})
-	wantUserError(t, "second acknowledgement", err)
+	out, err := h.eng.ReplyOnce(ReplyRequest{TicketID: a, TriggerID: "c:2", Purpose: PurposeAcknowledgement, Text: "Working on it."})
+	h.must(err)
+	eq(t, "other words: the first receipt, a repeat", out, ReplyOutcome{ReceiptID: id, Repeat: true})
 	eq(t, "one ack queued", len(h.replyEffects()), 1)
 	eq(t, "recorded once", h.disposition("c:2").Acknowledged, []string{a})
 
@@ -165,8 +167,11 @@ func TestAcceptQueuesAck(t *testing.T) {
 	eq(t, "purpose", rc.Purpose, PurposeAcknowledgement)
 	eq(t, "to the trigger's channel", rc.Channel.Address["comment"], "c:1")
 	eq(t, "acknowledged", h.disposition("c:1").Acknowledged, []string{r.Ticket.ID})
-	_, err := h.eng.Reply(ReplyRequest{TicketID: r.Ticket.ID, TriggerID: "c:1", Purpose: PurposeAcknowledgement, Text: "Again."})
-	wantUserError(t, "the worker cannot acknowledge it again", err)
+	// The worker, not knowing, acknowledges it again: the router's receipt, and nothing new goes out.
+	out, err := h.eng.ReplyOnce(ReplyRequest{TicketID: r.Ticket.ID, TriggerID: "c:1", Purpose: PurposeAcknowledgement, Text: "Again."})
+	h.must(err)
+	eq(t, "the worker's repeat", out, ReplyOutcome{ReceiptID: id, Repeat: true})
+	eq(t, "still one reply", len(h.replyEffects()), 1)
 
 	// An acknowledgement over 100 words refuses the accept, which records nothing.
 	h.receive(channelled(h.request("c:2", other)))
@@ -346,4 +351,56 @@ func TestOwnerMessageCannotBeHandedBack(t *testing.T) {
 	if _, back := tr.Disposition.HandedBack[a]; back {
 		t.Error("the refused hand-back was recorded")
 	}
+}
+
+// A refused trigger_id says what to use instead: an Input's id names its Trigger, the owner's Input says it has none,
+// and every refusal lists the Ticket's trigger_ids, marked when acknowledged already or reached only for context.
+func TestTriggerRefusalsNameTheChoices(t *testing.T) {
+	h := newEvals(t)
+	h.receive(channelled(h.request("c:1", issue)))
+	h.due()
+	r := h.decide(DecisionInput{TriggerID: "c:1", Kind: "accept", Title: "Fix it", Ack: "On it: fixing the login page."})
+	if r.Ticket == nil {
+		t.Fatalf("accept: %+v", r)
+	}
+	a := r.Ticket.ID
+	h.settle(true)
+	h.receive(channelled(h.message("c:2", issue)))
+	h.must(h.eng.FollowForContext(a, other))
+	h.receive(channelled(h.message("c:3", other)))
+	h.receive(channelled(h.botMessage("b:1", issue)))
+	h.must(h.eng.AddPersonInput(a, "Also rename the button."))
+	tk := h.ticket(a)
+	first, owner := tk.Inputs[0], tk.Inputs[len(tk.Inputs)-1]
+	choices := "ticket " + a + "'s trigger_ids: c:1 (acknowledged already), c:2, c:3 (context only)"
+	refused := func(what string, err error, parts ...string) {
+		t.Helper()
+		wantUserError(t, what, err)
+		for _, p := range append(parts, choices) {
+			if err != nil && !strings.Contains(err.Error(), p) {
+				t.Errorf("%s: %q lacks %q", what, err, p)
+			}
+		}
+	}
+	_, err := h.eng.Reply(ReplyRequest{TicketID: a, TriggerID: first.ID, Purpose: PurposeAnswer, Text: "Yes."})
+	refused("an input id", err, first.ID+" is an input id, not a trigger_id: that input's trigger_id is c:1")
+	_, err = h.eng.Reply(ReplyRequest{TicketID: a, TriggerID: owner.ID, Purpose: PurposeAcknowledgement, Text: "On it."})
+	refused("the owner's input id", err, "message from the owner, which has no trigger_id", "answer in your session output")
+	_, err = h.eng.Reply(ReplyRequest{TicketID: a, TriggerID: "c:404", Purpose: PurposeAnswer, Text: "Yes."})
+	refused("an unknown trigger", err, "trigger c:404 not found: use a trigger_id from an input card")
+	_, err = h.eng.Reply(ReplyRequest{TicketID: a, TriggerID: owner.TriggerID, Purpose: PurposeAnswer, Text: "Yes."})
+	refused("the owner's trigger", err, "messages from the owner need no answer")
+	_, err = h.eng.Reply(ReplyRequest{TicketID: a, TriggerID: "c:3", Purpose: PurposeAcknowledgement, Text: "On it."})
+	refused("an ack of a context message", err, "other than for context, so it needs no acknowledgement")
+	_, err = h.eng.Reply(ReplyRequest{TicketID: a, TriggerID: "b:1", Purpose: PurposeAcknowledgement, Text: "On it."})
+	refused("an ack of a bot", err, "not a person's message")
+	_, err = h.eng.Handback(a, first.ID, "another ticket's")
+	refused("a hand-back by input id", err, "that input's trigger_id is c:1")
+	_, err = h.eng.Reply(ReplyRequest{TicketID: a, Purpose: PurposeResult, Text: "Fixed."})
+	wantUserError(t, "result before ready", err)
+	if err != nil && !strings.Contains(err.Error(), "the result follows the worker's ready or dropped report") {
+		t.Errorf("result before ready: %q", err)
+	}
+	// The context message answered: still context only. Every refused request queued nothing.
+	eq(t, "only the accept's ack queued", len(h.replyEffects()), 1)
 }

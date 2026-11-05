@@ -411,6 +411,60 @@ func (p *Pusher) send(ctx context.Context, s store.PushSubscription, job pushJob
 	}
 }
 
+// ValidPushEndpoint reports whether endpoint is one a push service can serve: an https URL of at most 2048 bytes.
+func ValidPushEndpoint(endpoint string) bool {
+	u, err := url.Parse(endpoint)
+	return err == nil && u.Scheme == "https" && u.Host != "" && len(endpoint) <= 2048
+}
+
+// RenewPush answers POST /push/renew, which the service worker sends when the push service rotated this device's
+// subscription (pushsubscriptionchange), with no page open: {oldEndpoint, subscription: PushSubscription.toJSON()}.
+// It needs the session's cookie and Origin but no step-up (a background worker cannot ask for the passkey): the
+// session must hold oldEndpoint, so the request only moves a subscription it already has to the push service's new
+// endpoint, and a stolen cookie alone cannot register another one. 204 when renewed, 404 when the session holds no
+// subscription for oldEndpoint (the next sign-in sends this device's subscription again).
+func (a *Auth) RenewPush(w http.ResponseWriter, r *http.Request) {
+	if !a.checkOrigin(w, r) {
+		return
+	}
+	_, ws, ok := a.session(r)
+	if !ok {
+		fail(w, http.StatusUnauthorized, "unauthenticated", "sign in first")
+		return
+	}
+	var req struct {
+		OldEndpoint  string `json:"oldEndpoint"`
+		Subscription struct {
+			Endpoint string `json:"endpoint"`
+			Keys     struct {
+				P256dh string `json:"p256dh"`
+				Auth   string `json:"auth"`
+			} `json:"keys"`
+		} `json:"subscription"`
+	}
+	if !readJSON(w, r, &req) {
+		return
+	}
+	next := req.Subscription
+	if req.OldEndpoint == "" || !ValidPushEndpoint(next.Endpoint) || !ValidSubscriptionKeys(next.Keys.P256dh, next.Keys.Auth) {
+		fail(w, http.StatusBadRequest, "invalid", "invalid push subscription")
+		return
+	}
+	renewed, err := a.st.RenewPushSubscription(ws.Hash, req.OldEndpoint, store.PushSubscription{Endpoint: next.Endpoint,
+		P256dh: next.Keys.P256dh, Auth: next.Keys.Auth, CreatedAt: a.now()})
+	if err != nil {
+		slog.Error("web: renew push subscription", "err", err)
+		fail(w, http.StatusInternalServerError, "internal", "internal error")
+		return
+	}
+	if !renewed {
+		fail(w, http.StatusNotFound, "not_found", "no such subscription")
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // ValidSubscriptionKeys reports whether p256dh is a base64url P-256 point and auth a base64url 16-byte secret.
 func ValidSubscriptionKeys(p256dh, auth string) bool {
 	raw, err := pushB64.DecodeString(p256dh)

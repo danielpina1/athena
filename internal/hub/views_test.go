@@ -2,7 +2,6 @@ package hub
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -20,7 +19,7 @@ func TestTicketSummaryFlags(t *testing.T) {
 	tk.Follows = []core.Follow{{Thread: "github:o/other#9"}, {Thread: "github:o/r#12", Own: true}}
 	tk.Execution = &core.Execution{Directory: "/work/T-1", Model: "sonnet"}
 	st := core.TicketStage(&tk)
-	v := ticketSummary(&tk, st)
+	v := ticketSummary(&tk, st, nil)
 	if !v.NeedsYou || v.Stage != "person" || v.Action != "answer" || v.AttentionQuestion != "which branch?" {
 		t.Errorf("summary = %v", v)
 	}
@@ -39,11 +38,11 @@ func TestTicketSummaryFlags(t *testing.T) {
 	// A working Ticket does not need you; an ended one carries its outcome.
 	w := ticket("T-2")
 	w.Assignments = []core.Assignment{{ID: "a", State: core.AssignmentRunning, Model: "opus"}}
-	if v := ticketSummary(&w, core.TicketStage(&w)); v.NeedsYou || v.Model != "opus" {
+	if v := ticketSummary(&w, core.TicketStage(&w), nil); v.NeedsYou || v.Model != "opus" {
 		t.Errorf("working summary = %v", v)
 	}
 	e := ended("T-3", 1)
-	if v := ticketSummary(&e, core.TicketStage(&e)); v.Outcome != "completed" || v.EndedAt == nil || v.CanRetry {
+	if v := ticketSummary(&e, core.TicketStage(&e), nil); v.Outcome != "completed" || v.EndedAt == nil || v.CanRetry {
 		t.Errorf("ended summary = %v", v)
 	}
 }
@@ -51,7 +50,7 @@ func TestTicketSummaryFlags(t *testing.T) {
 func TestCanRetryOnDeliveryFailure(t *testing.T) {
 	tk := ticket("T-1")
 	tk.Delivery = &core.DeliveryFailure{Error: "boom", At: epoch0}
-	if v := ticketSummary(&tk, core.TicketStage(&tk)); !v.CanRetry || v.Action != "delivery" {
+	if v := ticketSummary(&tk, core.TicketStage(&tk), nil); !v.CanRetry || v.Action != "delivery" {
 		t.Errorf("summary = %v", v)
 	}
 }
@@ -101,10 +100,9 @@ func TestDetailTimeline(t *testing.T) {
 }
 
 func TestTicketSummaryBranchAndRuntime(t *testing.T) {
-	gitDir, plainDir := t.TempDir(), t.TempDir()
-	if err := os.Mkdir(filepath.Join(gitDir, ".git"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	// What the facts pass found: only gitDir has a .git entry. The summary asks it, never the filesystem.
+	gitDir, plainDir := "/src/repo", "/src/plain"
+	gitFolder := func(dir string) bool { return dir == gitDir }
 	for _, c := range []struct {
 		name   string
 		mod    func(*core.Ticket)
@@ -121,7 +119,7 @@ func TestTicketSummaryBranchAndRuntime(t *testing.T) {
 	} {
 		tk := ticket("T-0042")
 		c.mod(&tk)
-		v := ticketSummary(&tk, core.TicketStage(&tk))
+		v := ticketSummary(&tk, core.TicketStage(&tk), gitFolder)
 		if v.Branch != c.branch || v.Runtime != c.rt {
 			t.Errorf("%s: branch %q runtime %q, want %q %q", c.name, v.Branch, v.Runtime, c.branch, c.rt)
 		}

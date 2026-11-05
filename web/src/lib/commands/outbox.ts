@@ -4,6 +4,12 @@
 // (kept 24 h) without acting twice, and a repeated result is ignored here. Commands live in IndexedDB `athena`, store
 // `outbox`, so they also survive a reload. The rules are docs/dev/dashboard.md's client contract.
 //
+// Each tab sends only its own commands and the orphans: a stored command names the tab that made it, and another tab
+// adopts it (sends it, and owns it from then on) only once that tab is gone (a reload, a closed tab). Otherwise a second
+// tab would send the first one's pending commands too, and a sensitive one would ask for the passkey in a tab where the
+// owner did nothing. Which tabs are open comes from TabPresence (Web Locks by default); orphans are looked for when
+// the outbox loads and on every open.
+//
 // Watching a Ticket and reporting visibility belong to the connection: the server keeps no result for them and a new
 // connection starts with neither, so they are kept in memory only, and the tracked watches and the last visibility
 // are sent again on every open.
@@ -46,7 +52,45 @@ export type OutboxOptions = {
   notify?: (title: string, description: string) => void;
   /** Hears an unexpected error (IndexedDB, a throwing callback); console.error by default. */
   reportError?: (e: unknown) => void;
+  /** Which tabs are open, to adopt only orphaned commands; lockPresence() by default. */
+  presence?: TabPresence;
 };
+
+/** This tab and the others of this origin, as the outbox needs them. */
+export type TabPresence = {
+  /** This tab's id: unique per page load, held while the page lives. */
+  readonly id: string;
+  /** The ids of the tabs open now, or undefined when the browser cannot tell (then every stored command is adopted). */
+  alive(): Promise<Set<string> | undefined>;
+  /** Runs fn while no other tab runs one, so two tabs never adopt the same orphan. */
+  exclusive(fn: () => Promise<void>): Promise<void>;
+};
+
+const TAB_LOCK = "athena-outbox-tab:";
+const ADOPT_LOCK = "athena-outbox-adopt";
+
+/**
+ * The tabs from Web Locks: each holds a lock named after its id until the page goes (a closed or crashed tab releases
+ * it too). Without Web Locks it cannot tell, and every stored command is adopted, as before tabs had owners.
+ */
+export function lockPresence(locks: LockManager | undefined = globalThis.navigator?.locks): TabPresence {
+  const id = newCommandId();
+  if (!locks) return { id, alive: async () => undefined, exclusive: (fn) => fn() };
+  void locks.request(TAB_LOCK + id, () => new Promise<never>(() => {})).catch(() => {});
+  return {
+    id,
+    async alive() {
+      try {
+        const { held = [] } = await locks.query();
+        const ids = held.flatMap((l) => (l.name?.startsWith(TAB_LOCK) ? [l.name.slice(TAB_LOCK.length)] : []));
+        return new Set([id, ...ids]);
+      } catch {
+        return undefined;
+      }
+    },
+    exclusive: (fn) => locks.request(ADOPT_LOCK, fn),
+  };
+}
 
 /** The server keeps a result 24 h; a command older than this may be acted on twice if resent, so it is dropped. */
 export const EXPIRE_AFTER_MS = 23 * 3600_000;
@@ -59,9 +103,10 @@ const STORE = "outbox";
 
 /**
  * One stored command, as IndexedDB holds it. endsSession goes with it, so a reload or another tab that loads it still
- * drops it when the session ends (absent in records written before it was kept: false).
+ * drops it when the session ends (absent in records written before it was kept: false). owner is the tab that sends
+ * it (TabPresence.id; absent in records written before tabs had owners: an orphan).
  */
-type Stored = { id: string; bytes: Uint8Array; createdAt: number; endsSession?: boolean };
+type Stored = { id: string; bytes: Uint8Array; createdAt: number; endsSession?: boolean; owner?: string };
 
 /** The commands that belong to the connection: never stored, re-sent on every open from what is tracked. */
 const CONNECTION_ACTIONS = new Set<Command["action"]["case"]>(["watchTicket", "unwatchTicket", "visibility"]);
@@ -104,6 +149,7 @@ export class Outbox {
   private readonly now: () => number;
   private readonly notify: (title: string, description: string) => void;
   private readonly reportError: (e: unknown) => void;
+  private readonly presence: TabPresence;
 
   private readonly entries = new Map<string, Entry>();
   /** The open connection's number, from 1: onOpen counts them. 0 until the first, when nothing is sent. */
@@ -139,21 +185,37 @@ export class Outbox {
     this.now = opts.now ?? (() => Date.now());
     this.notify = opts.notify ?? (() => {});
     this.reportError = opts.reportError ?? ((e) => console.error("outbox:", e));
+    this.presence = opts.presence ?? lockPresence();
     this.db = openDb(db).catch((e: unknown) => {
       // Private browsing or storage turned off: the outbox still works, in memory, until the page goes.
       this.reportError(e);
       return null;
     });
     this.loaded = this.work = this.write(async (db) => {
-      const stored = (await all(db)).sort((a, b) => cmpId(a.id, b.id));
-      let order = -stored.length;
-      for (const rec of stored) {
+      await this.adopt(db);
+      this.isLoaded = true;
+      this.expire();
+    });
+  }
+
+  /**
+   * Takes over the stored commands of the tabs that are gone (a reload's included), in id order and before every
+   * command already here, and records this tab as their owner. The commands of open tabs are theirs to send.
+   */
+  private adopt(db: IDBDatabase): Promise<void> {
+    return this.presence.exclusive(async () => {
+      const alive = await this.presence.alive();
+      const orphans = (await all(db))
+        .filter((rec) => !this.entries.has(rec.id) && rec.owner !== this.presence.id)
+        .filter((rec) => !alive || !rec.owner || !alive.has(rec.owner))
+        .sort((a, b) => cmpId(a.id, b.id));
+      let order = Math.min(0, ...[...this.entries.values()].map((e) => e.order)) - orphans.length;
+      for (const rec of orphans) {
         order++;
-        if (this.entries.has(rec.id)) continue;
-        // An explicit sign-out came first (its clear removes the records next), or the session ended first: as if
-        // they had been here.
-        if (this.clearedBeforeLoad) continue;
-        if (this.endedBeforeLoad && rec.endsSession) {
+        // On the load: an explicit sign-out came first (its clear removes the records next), or the session ended
+        // first: as if they had been here.
+        if (!this.isLoaded && this.clearedBeforeLoad) continue;
+        if (!this.isLoaded && this.endedBeforeLoad && rec.endsSession) {
           await del(db, rec.id);
           continue;
         }
@@ -165,6 +227,7 @@ export class Outbox {
           await del(db, rec.id);
           continue;
         }
+        await put(db, { ...rec, owner: this.presence.id });
         this.entries.set(rec.id, {
           cmd,
           order: order - 1,
@@ -178,8 +241,6 @@ export class Outbox {
           mayHaveRun: true,
         });
       }
-      this.isLoaded = true;
-      this.expire();
     });
   }
 
@@ -226,10 +287,14 @@ export class Outbox {
     return () => this.watchLost.delete(cb);
   }
 
-  /** The link is open (after Welcome): sends every command without a result, in order, then the watches. */
+  /**
+   * The link is open (after Welcome): adopts the commands of tabs gone since the last look, then sends every command
+   * without a result, in order, then the watches.
+   */
   onOpen(): void {
     const connection = ++this.connection;
-    void this.loaded.then(() => {
+    const adopted = (this.work = this.write((db) => this.adopt(db)));
+    void adopted.then(() => {
       if (connection !== this.connection) return; // a newer connection does it
       this.expire();
       this.flush();
@@ -347,7 +412,7 @@ export class Outbox {
     // Persist, then send; a command of the connection waits only for the reload's commands, to go after them.
     let persisted = this.loaded;
     if (stored) {
-      const rec: Stored = { id: cmd.id, bytes: toBinary(CommandSchema, cmd), createdAt: e.createdAt };
+      const rec: Stored = { id: cmd.id, bytes: toBinary(CommandSchema, cmd), createdAt: e.createdAt, owner: this.presence.id };
       if (opts.endsSession) rec.endsSession = true;
       persisted = this.work = this.write((db) => put(db, rec));
     }

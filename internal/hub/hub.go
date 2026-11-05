@@ -83,6 +83,9 @@ type Source interface {
 	// Repos returns the known repositories and folders, the last used first, then the local git repositories found on
 	// disk. It must not block on I/O beyond the store: the hub reads it on its loop.
 	Repos() ([]*athenav1.RepoView, error)
+	// GitFolder reports whether dir has a .git entry, as a pass off the hub's loop last found it (false before one has
+	// probed it). It must not touch the filesystem: the hub reads it on its loop, for each Ticket summary's branch.
+	GitFolder(dir string) bool
 	// Notifications returns the notification kinds that exist and the ones the owner muted.
 	Notifications() (kinds, muted []string, err error)
 	// Prompts returns the prompt revision and which parts the owner overrode.
@@ -123,6 +126,8 @@ type Hub struct {
 	repos       *athenav1.RepoList
 	notifs      *athenav1.NotificationPrefsView
 	closed      bool // the hub has stopped: Subscribe returns closed feeds
+	// folders are the placement folders whose facts changed since the loop last republished their Tickets.
+	folders map[string]bool
 
 	// running counts the loop and the health probe; Wait waits for both after ctx is done.
 	running sync.WaitGroup
@@ -145,6 +150,7 @@ func New(src Source, log *slog.Logger) *Hub {
 		src: src, log: log, epoch: hex.EncodeToString(b[:]), now: time.Now,
 		in: make(chan store.Changes, changeBuffer), wake: make(chan struct{}, 1), nodeWake: make(chan struct{}, 1),
 		reposWake: make(chan struct{}, 1), healthTick: healthEvery, subs: map[*Sub]struct{}{}, healthSince: map[string]healthState{},
+		folders: map[string]bool{},
 	}
 }
 
@@ -170,6 +176,18 @@ func (h *Hub) NodeChanged() { h.signal(h.nodeWake) }
 // ReposChanged tells the hub the Source's repositories may have changed outside a commit (a scan of the local
 // repositories found others); the loop reads them and publishes the list when it differs from the last published.
 func (h *Hub) ReposChanged() { h.signal(h.reposWake) }
+
+// FoldersChanged tells the hub a pass over the placement folders found other facts about dirs (a .git entry, where
+// they resolve): the loop publishes the repositories when they differ, and the summaries of the Tickets placed in
+// those folders, whose branch follows the .git entry.
+func (h *Hub) FoldersChanged(dirs []string) {
+	h.mu.Lock()
+	for _, d := range dirs {
+		h.folders[d] = true
+	}
+	h.mu.Unlock()
+	h.signal(h.reposWake)
+}
 
 func (h *Hub) signal(ch chan struct{}) {
 	select {
@@ -220,7 +238,9 @@ func (h *Hub) run(ctx context.Context) {
 		case <-h.nodeWake:
 			h.publishNode()
 		case <-h.reposWake:
-			h.publishRepos()
+			if h.publishRepos() {
+				h.publishFolders()
+			}
 		case next := <-probed:
 			h.publishHealth(next)
 		}
@@ -286,7 +306,7 @@ func (h *Hub) apply(c store.Changes) {
 			return
 		}
 		reposStale = reposStale || h.placementNew(&t)
-		h.publish(&athenav1.Delta{Change: &athenav1.Delta_Ticket{Ticket: ticketSummary(&t, st)}})
+		h.publish(&athenav1.Delta{Change: &athenav1.Delta_Ticket{Ticket: ticketSummary(&t, st, h.src.GitFolder)}})
 		if h.watched(id) {
 			h.sendDetail(id, h.detail(&t, st))
 		}
@@ -410,6 +430,35 @@ func (h *Hub) publishRepos() bool {
 		h.publish(&athenav1.Delta{Change: &athenav1.Delta_Repos{Repos: next}})
 	}
 	return true
+}
+
+// publishFolders publishes the summary (and the detail, to its watchers) of each bounded Ticket placed in a folder
+// FoldersChanged named since the last call.
+func (h *Hub) publishFolders() {
+	h.mu.Lock()
+	dirs := h.folders
+	if len(dirs) > 0 {
+		h.folders = map[string]bool{}
+	}
+	h.mu.Unlock()
+	if len(dirs) == 0 {
+		return
+	}
+	tickets, err := h.src.Tickets(endedTickets)
+	if err != nil {
+		h.lost("read tickets", "error", err)
+		return
+	}
+	for _, t := range boundTickets(tickets) {
+		if t.Execution == nil || !dirs[t.Execution.Directory] {
+			continue
+		}
+		st := core.TicketStage(&t)
+		h.publish(&athenav1.Delta{Change: &athenav1.Delta_Ticket{Ticket: ticketSummary(&t, st, h.src.GitFolder)}})
+		if h.watched(t.ID) {
+			h.sendDetail(t.ID, h.detail(&t, st))
+		}
+	}
 }
 
 func (h *Hub) notificationsView() (*athenav1.NotificationPrefsView, error) {
@@ -638,7 +687,7 @@ func (h *Hub) Snapshot() (*athenav1.Snapshot, error) {
 		return nil, err
 	}
 	for _, t := range boundTickets(tickets) {
-		s.Tickets = append(s.Tickets, ticketSummary(&t, core.TicketStage(&t)))
+		s.Tickets = append(s.Tickets, ticketSummary(&t, core.TicketStage(&t), h.src.GitFolder))
 	}
 
 	pending, err := h.src.PendingApprovals()
@@ -754,7 +803,7 @@ func (h *Hub) detail(t *core.Ticket, st core.Stage) *athenav1.TicketDetail {
 	if err != nil {
 		h.log.Warn("hub: detail: answered approvals", "ticket", t.ID, "error", err)
 	}
-	return ticketDetail(t, st, origin, pending, answered, h.replyActors(t))
+	return ticketDetail(t, st, h.src.GitFolder, origin, pending, answered, h.replyActors(t))
 }
 
 // replyActorsMax bounds the Trigger reads one detail makes to name who replied.

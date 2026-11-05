@@ -357,7 +357,8 @@ func (e *Engine) FileReport(ticketID string, r ReportInput) error {
 		return userErrorf("unknown report state %q", r.State)
 	}
 	if r.Question != "" && r.State == ReportReady {
-		return userErrorf("a ready report cannot ask a question")
+		return userErrorf("a ready report cannot ask a question: mention optional follow-ups in summary and report ready " +
+			"without question, or, when a person must decide before the work is done, report waiting with question instead")
 	}
 	return e.command(cmdFileReport, func(o *op) error {
 		t, err := o.require(ticketID)

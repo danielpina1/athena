@@ -26,8 +26,9 @@ type SandboxConfig struct {
 	AllowWrite []string
 	// DenyRead are absolute paths sandboxed commands cannot read (the server puts the GitHub App key here).
 	DenyRead []string
-	// WeakerNetworkIsolation (macOS) lets commands reach the trustd service, which Go programs such as gh need behind
-	// a TLS-inspecting proxy whose CA is in the keychain. It opens a path out of the sandbox through that service.
+	// WeakerNetworkIsolation (macOS) lets commands reach the trustd service, which Go programs such as gh verify every
+	// TLS certificate through: without it gh cannot reach GitHub. It opens a path out of the sandbox through that
+	// service.
 	WeakerNetworkIsolation bool
 	// CAFile, when set, is a PEM bundle the worker's commands use to verify TLS (SSL_CERT_FILE, GIT_SSL_CAINFO,
 	// CURL_CA_BUNDLE): git and curl cannot reach the keychain from inside the sandbox.

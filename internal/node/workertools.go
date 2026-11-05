@@ -44,20 +44,23 @@ type WorkerResponse struct {
 var workerTools = []routerTool{
 	{"ack", "Acknowledge a person's request that reached your ticket, before substantial work on it: one brief sentence, " +
 		"at most 100 words, naming the concrete object and the intended result (\"On it: renaming the Save changes button " +
-		"to Save.\"). It is posted as a reply to their message, once per message. Do not acknowledge bots, CI, thanks, " +
-		"ordinary discussion or messages you hand back, and do not repeat or quote the message.",
+		"to Save.\"). It is posted as a reply to their message, once per message. Check the input card's acknowledged line " +
+		"first: when Athena acknowledged the message already (it often does when it accepts a ticket), do not ack it; a " +
+		"repeat ack posts nothing. Name the card's trigger_id, never the input id. Do not acknowledge bots, CI, thanks, " +
+		"ordinary discussion, messages you hand back or the owner's messages (they have no trigger_id), and do not repeat " +
+		"or quote the message.",
 		obj([]string{"trigger_id", "text"}, map[string]any{
-			"trigger_id": sprop("The trigger_id of the person's message, from its input card."),
+			"trigger_id": sprop("The trigger_id line of the person's input card (not the input id)."),
 			"text":       sprop("The acknowledgement, at most 100 words."),
 		})},
-	{"reply", "Send a message to your ticket's conversation. Use purpose answer to answer a person's explicit question " +
-		"(naming its trigger_id); Athena delivers results and questions for people from your reports, so result and " +
-		"attention are rarely yours to send. Never use it for progress or to announce an unfinished pull request. At most " +
-		"4,000 characters; GitHub comments support Markdown.",
-		obj([]string{"purpose", "text"}, map[string]any{
-			"purpose":    enum("answer, result or attention.", core.PurposeAnswer, core.PurposeResult, core.PurposeAttention),
-			"text":       sprop("The message."),
-			"trigger_id": sprop("answer: the person's message it answers; otherwise optionally a message that reached the ticket, to reply where it was written."),
+	{"reply", "Answer a person's explicit question that reached your ticket, naming the trigger_id of its input card; " +
+		"a quick question needs no acknowledgement first. Only answers: never use it for progress, results or questions. " +
+		"Athena delivers the result to people from your ready (or dropped) report, and asks your question from the " +
+		"question of a waiting or blocked report. At most 4,000 characters; GitHub comments support Markdown.",
+		obj([]string{"trigger_id", "text"}, map[string]any{
+			"trigger_id": sprop("The trigger_id line of the question's input card (not the input id)."),
+			"text":       sprop("The answer."),
+			"purpose":    enum("answer, the only purpose a worker sends; it may be omitted.", core.PurposeAnswer),
 		})},
 	{"follow_thread", "Subscribe your ticket to a related thread for context: its messages reach you but are not requests " +
 		"to you and do not resume the ticket. Name the thread by its key (github:owner/name#12), as owner/name#12, as #12 " +
@@ -167,13 +170,18 @@ func (n *Node) workerTool(s *session, tool string, raw json.RawMessage) (any, er
 			return nil, err
 		}
 		if in.TriggerID == "" {
-			return nil, errors.New("trigger_id is required")
+			return nil, errors.New("trigger_id is required: name the trigger_id line of the person's input card; the " +
+				"owner's messages have none and need no acknowledgement")
 		}
-		id, err := eng.Reply(core.ReplyRequest{TicketID: s.t.ID, TriggerID: in.TriggerID, Purpose: core.PurposeAcknowledgement, Text: in.Text})
+		out, err := eng.ReplyOnce(core.ReplyRequest{TicketID: s.t.ID, TriggerID: in.TriggerID, Purpose: core.PurposeAcknowledgement, Text: in.Text})
 		if err != nil {
 			return nil, err
 		}
-		return map[string]any{"queued": true, "receipt": id}, nil
+		if out.Repeat {
+			return map[string]any{"queued": false, "receipt": out.ReceiptID, "note": "Already acknowledged (Athena or you " +
+				"posted an acknowledgement of this message before), so nothing new was posted. Go on with the work."}, nil
+		}
+		return map[string]any{"queued": true, "receipt": out.ReceiptID}, nil
 	case "reply":
 		var in struct {
 			Purpose   string `json:"purpose"`
@@ -183,14 +191,32 @@ func (n *Node) workerTool(s *session, tool string, raw json.RawMessage) (any, er
 		if err := decodeArgs(raw, &in); err != nil {
 			return nil, err
 		}
-		if in.Purpose == core.PurposeAcknowledgement {
+		switch in.Purpose {
+		case "", core.PurposeAnswer:
+		case core.PurposeAcknowledgement:
 			return nil, errors.New("acknowledge with the ack tool")
+		case core.PurposeResult:
+			return nil, errors.New("a worker sends no result: Athena posts the result to people from your report. When the " +
+				"work is done and verified, file report {status: ready, summary, pull} in a step of its own (pull when there is " +
+				"a pull request; no question); a ready report filed already needs nothing more")
+		case core.PurposeAttention:
+			return nil, errors.New("a worker sends no question by reply: file report {status: waiting (or blocked), summary, " +
+				"question}, and Athena asks the person")
+		default:
+			return nil, fmt.Errorf("unknown purpose %q: a worker's reply is an answer", in.Purpose)
 		}
-		id, err := eng.Reply(core.ReplyRequest{TicketID: s.t.ID, TriggerID: in.TriggerID, Purpose: in.Purpose, Text: in.Text})
+		if in.TriggerID == "" {
+			return nil, errors.New("trigger_id is required: name the trigger_id line of the question's input card; answer " +
+				"the owner's messages, which have none, in your session output")
+		}
+		out, err := eng.ReplyOnce(core.ReplyRequest{TicketID: s.t.ID, TriggerID: in.TriggerID, Purpose: core.PurposeAnswer, Text: in.Text})
 		if err != nil {
 			return nil, err
 		}
-		return map[string]any{"queued": true, "receipt": id}, nil
+		if out.Repeat {
+			return map[string]any{"queued": false, "receipt": out.ReceiptID, "note": "This answer was queued before; nothing new was sent."}, nil
+		}
+		return map[string]any{"queued": true, "receipt": out.ReceiptID}, nil
 	case "follow_thread":
 		var in struct {
 			Thread string `json:"thread"`
@@ -294,9 +320,10 @@ func githubIssueKey(repo, num string) (string, error) {
 // cardTextMaxRunes bounds the text of a Trigger card (reference 007 "Messages delivered to Sessions").
 const cardTextMaxRunes = 600
 
-// inputCard renders an Input whose Trigger came from a Source's Thread: who wrote it and when, its Thread, its URL,
-// what it replies to and its text, cut at cardTextMaxRunes with a pointer to the rest.
-func inputCard(in core.Input, tr core.Trigger) string {
+// inputCard renders an Input of Ticket ticketID whose Trigger came from a Source's Thread: who wrote it and when,
+// whether it is acknowledged, its Thread, its URL, what it replies to and its text, cut at cardTextMaxRunes with a
+// pointer to the rest.
+func inputCard(ticketID string, in core.Input, tr core.Trigger) string {
 	var b strings.Builder
 	what := "message"
 	if tr.Kind != "" && tr.Kind != core.KindMessage {
@@ -307,6 +334,9 @@ func inputCard(in core.Input, tr core.Trigger) string {
 	}
 	fmt.Fprintf(&b, "[input %s: %s]\n", in.ID, what)
 	fmt.Fprintf(&b, "trigger_id: %s\n", tr.ID)
+	if line := ackLine(ticketID, in, tr); line != "" {
+		b.WriteString(line + "\n")
+	}
 	from := tr.Actor.ID
 	if tr.Bot {
 		from += " (bot)"
@@ -340,6 +370,18 @@ func inputCard(in core.Input, tr core.Trigger) string {
 	}
 	b.WriteString(text + "\n\n")
 	return b.String()
+}
+
+// ackLine tells the worker whether a person's message still waits for its acknowledgement: Athena may have posted one
+// when it accepted the Ticket. A bot's message, or one that reached the Ticket only for context, gets none.
+func ackLine(ticketID string, in core.Input, tr core.Trigger) string {
+	switch {
+	case !tr.Human || in.Context:
+		return ""
+	case slices.Contains(tr.Disposition.Acknowledged, ticketID):
+		return "acknowledged: yes, already on its thread; do not ack it again"
+	}
+	return "acknowledged: no; ack it before substantial work if it is a request you take up"
 }
 
 // threadLabel names a Trigger's primary Thread for a person: owner/name#N for a GitHub Issue or pull request, else

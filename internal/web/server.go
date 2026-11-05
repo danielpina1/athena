@@ -67,6 +67,7 @@ type Server struct {
 //	GET /api/tickets/{id}/diff, /files, /files/{path...}   a Ticket's diff and files (mountArtifacts)
 //	/auth/*                   the login (Auth.Mount)
 //	GET /push/key             the VAPID public key
+//	POST /push/renew          a rotated push subscription, from the service worker (Auth.RenewPush)
 //	GET /ca.pem, /ca.mobileconfig   the CA and its Apple profile (mode ca only)
 //	GET /healthz              "ok", for a monitor: nothing else, no session needed
 //	GET /                     everything else: the built single-page app (serveUI)
@@ -88,6 +89,7 @@ func NewServer(cfg ServerConfig) *Server {
 	}
 	if cfg.VAPID != nil {
 		mux.Handle("GET /push/key", cfg.VAPID.Handler())
+		mux.HandleFunc("POST /push/renew", cfg.Auth.RenewPush)
 	}
 	if ca := cfg.CA; ca != nil {
 		caPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: ca.DER()})

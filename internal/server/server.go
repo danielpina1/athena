@@ -184,6 +184,7 @@ func Run(ctx context.Context, cfg Config) (err error) {
 		logger.Warn("claude code sandbox is off for workers: their commands can write anywhere this user can")
 	} else {
 		logger.Info("claude code sandbox is on for workers", "required", ncfg.Sandbox.Required,
+			"weakerNetworkIsolation", ncfg.Sandbox.WeakerNetworkIsolation,
 			"allowedDomains", append(slices.Clone(node.GitHubDomains), ncfg.Sandbox.AllowedDomains...))
 	}
 	if ncfg.WorkRoot == "" {
