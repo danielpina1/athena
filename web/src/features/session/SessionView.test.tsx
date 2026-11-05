@@ -41,9 +41,6 @@ test("tool call and result pair by id", async () => {
   expect(within(bash).getByText("go test ./...")).toBeTruthy();
   expect(bash.getAttribute("data-status")).toBe("ok");
   expect(within(bash).getByText("1.2 s")).toBeTruthy();
-  // The result is inside its call, not a row of its own.
-  expect(screen.getAllByText(/ok acme\/api 0.2s/)).toHaveLength(1);
-  expect(bash.textContent).toContain("ok acme/api 0.2s");
   expect(read.getAttribute("data-status")).toBe("running");
   expect(within(read).getByText("running")).toBeTruthy();
   expect(edit.getAttribute("data-status")).toBe("error");
@@ -54,6 +51,9 @@ test("tool call and result pair by id", async () => {
   expect(bash.hasAttribute("open")).toBe(false);
   await userEvent.click(summary);
   expect(bash.hasAttribute("open")).toBe(true);
+  // The result is inside its call, not a row of its own (a body is built when its row first opens).
+  expect(screen.getAllByText(/ok acme\/api 0.2s/)).toHaveLength(1);
+  expect(bash.textContent).toContain("ok acme/api 0.2s");
   // The order of the log is the order of the stream.
   const log = screen.getByRole("log");
   expect(log.textContent!.indexOf("go test")).toBeLessThan(log.textContent!.indexOf("Checking the tests"));
@@ -210,4 +210,49 @@ test("auto-scroll yields when scrolled up and offers jump", async () => {
 test("an empty session says so", () => {
   render(<SessionView ticketId="T-1" />);
   expect(screen.getByText("No session output yet.")).toBeTruthy();
+});
+
+test("what the worker was sent reads as who sent it", async () => {
+  render(<SessionView ticketId="T-1" />);
+  const long = "Add rate limiting to the bookings API.\n\n" + Array.from({ length: 20 }, (_, i) => `- requirement ${i + 1}`).join("\n");
+  act(() =>
+    link.items("T-1", [
+      item({ offset: 0n, kind: "user", tool: "task", text: long }),
+      item({ offset: 10n, kind: "init", text: "session s model claude-sonnet-5" }),
+      item({ offset: 20n, kind: "user", tool: "owner", text: "Keep it per IP" }),
+      item({
+        offset: 30n,
+        kind: "user",
+        tool: "github",
+        text: "Please also cover the **429** path.",
+        detail: JSON.stringify({ from: "octocat", kind: "message", url: "https://github.com/acme/api/issues/7#issuecomment-1" }),
+      }),
+      item({ offset: 35n, kind: "user", tool: "github", text: "x", detail: JSON.stringify({ from: "mallory", url: "javascript:alert(1)" }) }),
+      item({ offset: 40n, kind: "user", tool: "athena", text: "Athena asked for a status report" }),
+      item({ offset: 50n, kind: "user", text: "An old echo" }),
+    ]),
+  );
+  const task = screen.getByRole("log").querySelector("[data-kind=task]")!;
+  expect(within(task as HTMLElement).getByText("Task")).toBeTruthy();
+  expect(task.querySelectorAll("li").length).toBe(20);
+  expect(task.querySelector("[data-clamped]")).toBeTruthy();
+  await userEvent.click(within(task as HTMLElement).getByRole("button", { name: "Show more" }));
+  expect(task.querySelector("[data-clamped]")).toBeNull();
+  expect(within(task as HTMLElement).getByRole("button", { name: "Show less" })).toBeTruthy();
+
+  const you = screen.getAllByText("You").map((y) => y.closest("[data-kind=user]")!.textContent);
+  expect(you).toEqual(["YouKeep it per IP", "YouAn old echo"]);
+
+  const [gh, bad] = [...document.querySelectorAll("[data-kind=github]")] as HTMLElement[];
+  const who = within(gh).getByRole("link", { name: "octocat on GitHub" });
+  expect(who.getAttribute("href")).toBe("https://github.com/acme/api/issues/7#issuecomment-1");
+  expect(who.getAttribute("rel")).toBe("noopener noreferrer");
+  expect(gh.querySelector("strong")?.textContent).toBe("429");
+  // An unsafe URL is no link.
+  expect(within(bad).queryByRole("link")).toBeNull();
+  expect(bad.textContent).toContain("mallory on GitHub");
+
+  const athena = document.querySelector("[data-kind=athena]") as HTMLElement;
+  expect(athena.textContent).toBe("Athena asked for a status report");
+  expect(hasClasses(athena, "text-muted", "text-xs")).toBe(true);
 });

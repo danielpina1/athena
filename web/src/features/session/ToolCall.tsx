@@ -1,7 +1,8 @@
 // One tool call of a session with its result, paired by tool_use_id: a compact row that says what the agent did (a
 // verb and a target, such as "Edited  api/handler.go") and how it went (a check and the time it took, or +N −M for a
 // file change, a ✕ and the error's first line, or a pulsing dot while it runs). Opened, a body made for the tool: a
-// terminal block for Bash, a diff for Edit, a checklist for TodoWrite, the summary for a Report. Rows start closed.
+// terminal block for Bash, a diff for Edit, a checklist for TodoWrite, the summary for a Report. Rows start closed, and
+// a body is built on its row's first open.
 // Hostile text (a 1 MiB result, escapes, RTL) wraps inside its block, which scrolls on its own and takes focus so a
 // keyboard can scroll it.
 import { timestampMs } from "@bufbuild/protobuf/wkt";
@@ -23,12 +24,14 @@ import {
   WrenchIcon,
   XIcon,
 } from "lucide-react";
-import type { ReactNode } from "react";
+import { type ReactNode, useState } from "react";
 import type { StreamItem } from "@/gen/athena/v1/stream_pb";
 import { itemText } from "@/lib/stream/ansi";
 import { Markdown } from "@/lib/text/markdown";
 import { cn } from "@/ui/cn";
 import {
+  clipped,
+  type Counts,
   describeTool,
   editDiff,
   editsOf,
@@ -75,10 +78,11 @@ function Block({ label, children, className }: { label: string; children: ReactN
   );
 }
 
-function Counts({ counts }: { counts: { add: number; del: number } }) {
+function LineCounts({ counts }: { counts: Counts }) {
   return (
-    <span className="font-mono">
-      <span className="text-text">+{counts.add}</span>
+    <span data-counts className="font-mono" title={counts.about ? "About: the edit is longer than the dashboard was sent" : undefined}>
+      {counts.about && "~"}
+      <span className="text-success">+{counts.add}</span>
       {counts.del > 0 && <span className="ml-1.5 text-danger">−{counts.del}</span>}
     </span>
   );
@@ -89,9 +93,9 @@ function Status({ status, took, counts }: { status: ToolStatus; took?: string; c
     case "ok":
       return (
         <span className="inline-flex items-center gap-1.5 text-xs text-muted tabular-nums">
-          <CheckIcon aria-hidden className="size-3.5 text-ok" />
+          <CheckIcon aria-hidden className="size-3.5 text-success" />
           <span className="sr-only">Succeeded</span>
-          {counts ? <Counts counts={counts} /> : took}
+          {counts ? <LineCounts counts={counts} /> : took}
         </span>
       );
     case "error":
@@ -113,16 +117,17 @@ function Status({ status, took, counts }: { status: ToolStatus; took?: string; c
   }
 }
 
-function Diff({ input }: { input: ToolInput }) {
+function Diff({ input, target }: { input: ToolInput; target: string }) {
   return (
     <>
       {editsOf(input).map(({ edit, path }, i) => (
-        <div key={i} role="group" aria-label="Changes" className={cn(BLOCK, "grid content-start whitespace-normal")}>
+        // A scroll region of its own: focusable, so a keyboard can scroll a long diff.
+        <div key={i} role="group" tabIndex={0} aria-label={`Changes in ${target}`} className={cn(BLOCK, "grid content-start whitespace-normal")}>
           {editDiff(str(edit, "old_string"), str(edit, "new_string") || str(edit, "new_source")).map((l, k) => (
             <div
               key={k}
               data-line={l.sign === "+" ? "add" : l.sign === "−" ? "del" : "ctx"}
-              className={cn("flex min-w-0", l.sign === "−" && "text-danger", l.sign === " " && "text-muted")}
+              className={cn("flex min-w-0", l.sign === "+" && "text-success", l.sign === "−" && "text-danger", l.sign === " " && "text-muted")}
             >
               <span aria-hidden={l.sign === " "} className="w-4 shrink-0 select-none">
                 {l.sign}
@@ -180,6 +185,20 @@ function InputList({ input, summary }: { input: ToolInput; summary: string }) {
   );
 }
 
+/** A note under a value the dashboard was sent shortened. */
+function Shortened({ children }: { children: ReactNode }) {
+  return <p className="text-xs text-muted">{children}</p>;
+}
+
+/** Scrolls to the Ticket's latest Report card (TicketDetail, above the tabs) and focuses it. */
+function revealLatestReport() {
+  const el = document.querySelector<HTMLElement>("[data-report]");
+  if (!el) return;
+  const still = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? true;
+  el.scrollIntoView?.({ block: "start", behavior: still ? "auto" : "smooth" });
+  el.focus({ preventScroll: true });
+}
+
 /** The part of a body every tool shares: the result, or why there is none. */
 function Output({ result, active, label = "Output" }: { result?: StreamItem; active: boolean; label?: string }) {
   if (!result) return <p className="text-xs text-muted">{active ? "Waiting for the result." : "No result was recorded."}</p>;
@@ -204,6 +223,7 @@ function Body({ view, input, call, result, active }: { view: ToolView; input: To
             {out && "\n"}
             {out}
           </Block>
+          {clipped(input, "command") && <Shortened>Shortened: the command is longer than shown.</Shortened>}
           {!result && <Output active={active} />}
         </>
       );
@@ -223,7 +243,7 @@ function Body({ view, input, call, result, active }: { view: ToolView; input: To
     case "edit":
       return (
         <>
-          <Diff input={input} />
+          <Diff input={input} target={view.target} />
           {failure}
         </>
       );
@@ -239,6 +259,19 @@ function Body({ view, input, call, result, active }: { view: ToolView; input: To
       return (
         <>
           <Markdown text={str(input, "summary") || summary} />
+          {(clipped(input, "summary") || clipped(input, "question")) && (
+            <Shortened>
+              Shortened. The full report is on the Ticket.
+              {document.querySelector("[data-report]") && (
+                <>
+                  {" "}
+                  <button type="button" onClick={revealLatestReport} className="font-medium text-text underline decoration-line-soft underline-offset-4 hover:decoration-text">
+                    Show the full report
+                  </button>
+                </>
+              )}
+            </Shortened>
+          )}
           {question && <Markdown text={`**Question:** ${question}`} />}
           {failure}
         </>
@@ -257,6 +290,7 @@ function Body({ view, input, call, result, active }: { view: ToolView; input: To
       return (
         <>
           <Markdown text={str(input, "prompt") || summary} className="rounded-md border border-line-soft px-3 py-2 text-[13px]" />
+          {clipped(input, "prompt") && <Shortened>Shortened: the prompt is longer than shown.</Shortened>}
           {result && !result.isError ? <Markdown text={itemText(result)} className="text-[13px]" /> : <Output result={result} active={active} />}
         </>
       );
@@ -285,8 +319,16 @@ export function ToolCall({ call, result, active }: { call?: StreamItem; result?:
   const view = describeTool(call?.tool ?? "", input, call ? itemText(call) : "");
   const Icon = ICONS[view.kind];
   const error = status === "error" && result ? errorLine(itemText(result)) : "";
+  // The body is built on the first open, not for every closed row: a long session has hundreds of them.
+  const [opened, setOpened] = useState(false);
   return (
-    <details data-testid="tool-call" data-status={status} data-tool={view.kind} className="group -mx-2 min-w-0">
+    <details
+      data-testid="tool-call"
+      data-status={status}
+      data-tool={view.kind}
+      onToggle={(e) => e.currentTarget.open && setOpened(true)}
+      className="group -mx-2 min-w-0"
+    >
       <summary
         className={cn(
           "grid min-h-11 cursor-pointer list-none grid-cols-[16px_16px_minmax(0,1fr)_auto] items-center gap-x-2 rounded-md px-2 py-1.5",
@@ -312,9 +354,11 @@ export function ToolCall({ call, result, active }: { call?: StreamItem; result?:
           </span>
         )}
       </summary>
-      <div className="grid min-w-0 gap-2 pt-2 pr-2 pb-3 pl-2 sm:pl-14">
-        <Body view={view} input={input} call={call} result={result} active={active} />
-      </div>
+      {opened && (
+        <div className="grid min-w-0 gap-2 pt-2 pr-2 pb-3 pl-2 sm:pl-14">
+          <Body view={view} input={input} call={call} result={result} active={active} />
+        </div>
+      )}
     </details>
   );
 }

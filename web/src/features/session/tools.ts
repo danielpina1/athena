@@ -22,7 +22,10 @@ export type ToolKind =
   | "other"
   | "hidden";
 
-export type ToolView = { kind: ToolKind; label: string; target: string; counts?: { add: number; del: number } };
+/** Lines an edit adds and deletes; about when a value was clipped, so the counts are an estimate. */
+export type Counts = { add: number; del: number; about: boolean };
+
+export type ToolView = { kind: ToolKind; label: string; target: string; counts?: Counts };
 
 /** A duration as the session view says it: 0.4 s, 1.2 s, 12 s, 2 m 5 s. */
 export function formatDuration(ms: number): string {
@@ -62,19 +65,23 @@ export function lineCount(s: string): number {
 
 const firstLine = (s: string) => s.split("\n", 1)[0];
 
-/** A failed tool's result as one line: its first non-empty line, without a hook's prefix or the tool error tags. */
+/**
+ * A failed tool's result as one line: its first non-empty line, without a hook's prefix or the tool error tags. A
+ * hook's denial reads "Blocked: <reason>", once: a reason that already says it was blocked or denied is shown as it is.
+ */
 export function errorLine(text: string): string {
   let s = text.trim().replace(/^<tool_use_error>/, "").replace(/<\/tool_use_error>$/, "");
-  let blocked = false;
+  let hook = false;
   s = s.replace(/^\w+(?::[\w*.-]+)? hook error:\s*/, () => {
-    blocked = true;
+    hook = true;
     return "";
   });
   const lines = s.split("\n").map((l) => l.trim()).filter(Boolean);
   let line = lines[0] ?? "";
   // "Exit code 1" alone says little: the line after it says why.
   if (/^Exit code \d+$/.test(line) && lines[1]) line += ": " + lines[1];
-  return (blocked ? "Blocked: " : "") + line;
+  if (!hook || !line) return line;
+  return /\b(blocked|denied)\b/i.test(line) ? line[0].toUpperCase() + line.slice(1) : "Blocked: " + line;
 }
 
 export type ResultView = { title: "Done" | "Failed" | "Stopped"; meta: string };
@@ -157,14 +164,32 @@ export function editDiff(oldText: string, newText: string): DiffLine[] {
   ];
 }
 
-/** The +N −M of one edit: of its diff, or of the whole strings when either was clipped. */
-function editCounts(input: ToolInput, path: string, edit: Record<string, unknown>) {
+/** Whether input's value at path reached the dashboard shortened ("_lines" has its full line count). */
+export function clipped(input: ToolInput, path: string): boolean {
+  return !!input._lines && path in input._lines;
+}
+
+/**
+ * The +N −M of one edit: of its diff. When either value was clipped the diff cannot be taken: the counts are the full
+ * line counts less the lines both shown versions share at their start (the last, cut line never counts as shared), and
+ * are marked about.
+ */
+function editCounts(input: ToolInput, path: string, edit: Record<string, unknown>): Counts {
   const o = str(edit, "old_string");
   const n = str(edit, "new_string");
-  const clipped = input._lines && (path + "old_string" in input._lines || path + "new_string" in input._lines);
-  if (clipped) return { add: linesOf(input, path + "new_string", n), del: linesOf(input, path + "old_string", o) };
+  if (clipped(input, path + "old_string") || clipped(input, path + "new_string")) {
+    const a = splitLines(o);
+    const b = splitLines(n);
+    let pre = 0;
+    while (pre < a.length - 1 && pre < b.length - 1 && a[pre] === b[pre]) pre++;
+    return {
+      add: Math.max(0, linesOf(input, path + "new_string", n) - pre),
+      del: Math.max(0, linesOf(input, path + "old_string", o) - pre),
+      about: true,
+    };
+  }
   const d = editDiff(o, n);
-  return { add: d.filter((l) => l.sign === "+").length, del: d.filter((l) => l.sign === "−").length };
+  return { add: d.filter((l) => l.sign === "+").length, del: d.filter((l) => l.sign === "−").length, about: false };
 }
 
 /** A MultiEdit's edits (an Edit is one), each with its _lines path prefix. */
@@ -204,15 +229,16 @@ export function describeTool(tool: string, input: ToolInput, summary: string): T
     }
     case "Write": {
       const content = str(input, "content");
-      return { kind: "write", label: "Created", target: path("file_path"), counts: { add: linesOf(input, "content", content), del: 0 } };
+      return { kind: "write", label: "Created", target: path("file_path"), counts: { add: linesOf(input, "content", content), del: 0, about: false } };
     }
     case "Edit":
     case "MultiEdit": {
-      const counts = { add: 0, del: 0 };
+      const counts: Counts = { add: 0, del: 0, about: false };
       for (const { edit, path: p } of editsOf(input)) {
         const c = editCounts(input, p, edit);
         counts.add += c.add;
         counts.del += c.del;
+        counts.about ||= c.about;
       }
       return { kind: "edit", label: "Edited", target: path("file_path"), counts };
     }
@@ -238,7 +264,8 @@ export function describeTool(tool: string, input: ToolInput, summary: string): T
     case "ToolSearch":
       return { kind: "hidden", label: "Loaded tools", target: "" };
     case "mcp__athena__report": {
-      const pull = Number(input.pull);
+      // A pull request number is a positive integer; anything else (1e999, 2.5) shows none.
+      const pull = Number.isSafeInteger(input.pull) ? Number(input.pull) : 0;
       const head = firstLine(str(input, "summary"));
       return { kind: "report", label: `Reported ${str(input, "status") || "progress"}`, target: pull > 0 ? `PR #${pull} · ${head}` : head };
     }
@@ -248,4 +275,21 @@ export function describeTool(tool: string, input: ToolInput, summary: string): T
   const mcp = /^mcp__[^_]+(?:_[^_]+)*?__(.+)$/.exec(tool);
   if (mcp) return { kind: "mcp", label: mcp[1].replace(/_/g, " "), target: fallback };
   return { kind: "other", label: tool || "Tool", target: fallback };
+}
+
+export type GithubFrom = { from: string; url?: string; kind: string };
+
+const SAFE_LINK = /^https?:\/\/[^\s\u0000-\u001f]+$/i;
+
+/** Who wrote a GitHub message the worker was sent (a "user" item's detail), its link only when it is http(s). */
+export function githubFrom(it: StreamItem): GithubFrom {
+  let d: Record<string, unknown> = {};
+  try {
+    const v: unknown = it.detail ? JSON.parse(it.detail) : {};
+    if (v && typeof v === "object" && !Array.isArray(v)) d = v as Record<string, unknown>;
+  } catch {
+    // No detail: a message from someone on GitHub.
+  }
+  const url = typeof d.url === "string" && SAFE_LINK.test(d.url) ? d.url : undefined;
+  return { from: stripAnsi(typeof d.from === "string" ? d.from : "") || "Someone", url, kind: typeof d.kind === "string" ? d.kind : "" };
 }

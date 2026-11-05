@@ -5,7 +5,9 @@
 // Input is hostile. Nothing here makes HTML from it: every piece of text reaches the page as a React text node, so a
 // <script> stays the characters "<script>". Links open only for http, https and mailto, in a new tab with no opener;
 // any other scheme renders as its label. Every block has dir="auto" and wraps anywhere; code scrolls inside its own
-// block. Parsing is linear: a marker with no closer anywhere after it is remembered, so it is not searched for again.
+// block. Parsing is linear: a marker with no closer anywhere after it is remembered, so it is not searched for again,
+// headings and table rows are read by hand, not by backtracking regexes, and a link's URL is looked for in at most
+// 2 KiB.
 import { type ReactNode, useMemo } from "react";
 import { cn } from "@/ui/cn";
 
@@ -20,14 +22,32 @@ type Block =
   | { t: "hr" };
 
 const FENCE = /^ {0,3}(`{3,}|~{3,})/;
-const HEADING = /^ {0,3}(#{1,6})\s+(.*?)(?:\s+#+)?\s*$/;
+const HEADING_OPEN = /^ {0,3}(#{1,6})(?:[ \t]|$)/;
 const RULE = /^ {0,3}([-*_])(?:\s*\1){2,}\s*$/;
 const QUOTE = /^ {0,3}> ?(.*)$/;
-const ITEM = /^( *)([-*+]|\d{1,9}[.)])\s+(.*)$/;
-const TABLE_SEP = /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/;
+const ITEM = /^( *)([-*+]|\d{1,9}[.)])[ \t]+(.*)$/;
+const SEP_CELL = /^:?-+:?$/;
 
 const blank = (l: string) => l.trim() === "";
 const indentOf = (l: string) => l.length - l.trimStart().length;
+/** A heading line's level and text, or null: parsed by hand, so a long run of spaces costs one pass. */
+function heading(line: string): { level: number; text: string } | null {
+  const m = HEADING_OPEN.exec(line);
+  if (!m) return null;
+  let text = line.slice(m[0].length).trim();
+  // A closing run of #s goes when a space (or nothing) comes before it.
+  let j = text.length;
+  while (j > 0 && text[j - 1] === "#") j--;
+  if (j < text.length && (j === 0 || text[j - 1] === " " || text[j - 1] === "\t")) text = text.slice(0, j).trimEnd();
+  return { level: Math.min(m[1].length, 3), text };
+}
+
+/** Whether a line is a table's separator row (| --- | :-: |): split and checked cell by cell, in one pass. */
+function tableSep(line: string): boolean {
+  if (!line.includes("-")) return false;
+  return cells(line).every((c) => SEP_CELL.test(c));
+}
+
 const cells = (l: string) =>
   l
     .trim()
@@ -35,7 +55,12 @@ const cells = (l: string) =>
     .replace(/\|$/, "")
     .split("|")
     .map((c) => c.trim());
-const startsBlock = (l: string) => FENCE.test(l) || HEADING.test(l) || RULE.test(l) || QUOTE.test(l) || ITEM.test(l);
+/** Whether a line ends a paragraph: a numbered item does only when it starts at 1, so "2024. A year" stays text. */
+const startsBlock = (l: string) => {
+  const item = ITEM.exec(l);
+  if (item) return !/\d/.test(item[2]) || parseInt(item[2], 10) === 1;
+  return FENCE.test(l) || heading(l) !== null || RULE.test(l) || QUOTE.test(l);
+};
 
 function parseList(lines: string[], i: number): [ListBlock, number] {
   const first = ITEM.exec(lines[i])!;
@@ -93,9 +118,9 @@ function parseBlocks(src: string, depth = 0): Block[] {
       out.push({ t: "code", text: body.join("\n") });
       continue;
     }
-    const h = HEADING.exec(line);
+    const h = heading(line);
     if (h) {
-      out.push({ t: "h", level: Math.min(h[1].length, 3), text: h[2] });
+      out.push({ t: "h", level: h.level, text: h.text });
       i++;
       continue;
     }
@@ -116,7 +141,7 @@ function parseBlocks(src: string, depth = 0): Block[] {
       i = next;
       continue;
     }
-    if (line.includes("|") && i + 1 < lines.length && lines[i + 1].includes("-") && TABLE_SEP.test(lines[i + 1])) {
+    if (line.includes("|") && i + 1 < lines.length && lines[i + 1].includes("|") && tableSep(lines[i + 1])) {
       const head = cells(line);
       const rows: string[][] = [];
       i += 2;
@@ -129,6 +154,22 @@ function parseBlocks(src: string, depth = 0): Block[] {
     out.push({ t: "p", text: para.join("\n") });
   }
   return out;
+}
+
+/** Where a link's (…) closes, its own balanced parentheses kept (Wikipedia's Go_(language)); -1 for none nearby. */
+function closeParen(text: string, from: number): number {
+  let depth = 0;
+  const stop = Math.min(text.length, from + 2048);
+  for (let k = from; k < stop; k++) {
+    const c = text[k];
+    if (c === "\n") return -1;
+    if (c === "(") depth++;
+    else if (c === ")") {
+      if (depth === 0) return k;
+      depth--;
+    }
+  }
+  return -1;
 }
 
 const SAFE_URL = /^(?:https?:\/\/|mailto:)[^\s\u0000-\u001f]+$/i;
@@ -204,7 +245,7 @@ function inline(text: string, depth = 0, links = true): ReactNode[] {
     }
     if (links && depth < 4 && c === "[") {
       const mid = find("](", i + 1);
-      const end = mid > i ? find(")", mid + 2) : -1;
+      const end = mid > i ? closeParen(text, mid + 2) : -1;
       if (mid > i && end > mid && !text.slice(i + 1, mid).includes("[")) {
         flush();
         const label = inline(text.slice(i + 1, mid), depth + 1, false);

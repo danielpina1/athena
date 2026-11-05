@@ -1,5 +1,6 @@
 // Fails when the initial route loads more than 200 KB of JS or 30 KB of CSS, gzipped: the entry chunk and its static
-// imports, from the Vite manifest. Lazy chunks (dynamic imports) do not count.
+// imports, from the Vite manifest. Lazy chunks (dynamic imports) do not count. It also fails when the code of a chunk
+// that must stay lazy (the session view, the diff viewer) is in the initial route.
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -31,6 +32,20 @@ visit(entry);
 
 console.log(`sw.js ${(gz("sw.js") / 1024).toFixed(1)} KB gzipped`);
 let failed = false;
+
+// Chunks that must stay lazy: text only their code holds. Inlined, the session view (about 9 KB) would still fit the
+// budget, so a stray static import of it would pass unseen without this.
+const lazyOnly = { "session view": ["Jump to latest", "Updated the plan"], "diff viewer": ["No changes yet."] };
+for (const [name, marks] of Object.entries(lazyOnly)) {
+  for (const key of seen) {
+    const code = readFileSync(join(dist, manifest[key].file), "utf8");
+    const hit = marks.find((m) => code.includes(m));
+    if (hit) {
+      console.error(`bundle-budget: the ${name} is in the initial route (${manifest[key].file} holds "${hit}"): import it lazily`);
+      failed = true;
+    }
+  }
+}
 for (const kind of ["js", "css"]) {
   const kb = sizes[kind] / 1024;
   console.log(`bundle ${kind} ${kb.toFixed(1)} KB / ${budgets[kind]} KB`);

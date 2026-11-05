@@ -53,6 +53,12 @@ test("an error reads as its first useful line, without the hook's prefix", () =>
     "Blocked: the session ended before the owner answered; do not retry",
   );
   expect(errorLine("<tool_use_error>File does not exist.</tool_use_error>")).toBe("File does not exist.");
+  // A reason that says it was blocked or denied is not prefixed again.
+  expect(errorLine("PreToolUse:Bash hook error: command gh auth is blocked: it would show a credential")).toBe(
+    "Command gh auth is blocked: it would show a credential",
+  );
+  expect(errorLine("PreToolUse:Bash hook error: blocked: rm is not allowed")).toBe("Blocked: rm is not allowed");
+  expect(errorLine("PreToolUse:Edit hook error: denied by the owner: not today")).toBe("Denied by the owner: not today");
   expect(errorLine('Exit code 1\nPost "https://api.github.com/graphql": tls: failed')).toBe(
     'Exit code 1: Post "https://api.github.com/graphql": tls: failed',
   );
@@ -94,14 +100,24 @@ test("each tool reads as a verb and a target", () => {
     kind: "write",
     label: "Created",
     target: "a.go",
-    counts: { add: 3, del: 0 },
+    counts: { add: 3, del: 0, about: false },
   });
-  expect(view("Write", { file_path: wt + "a.go", content: "a…", _lines: { content: 412 } }).counts).toEqual({ add: 412, del: 0 });
+  expect(view("Write", { file_path: wt + "a.go", content: "a…", _lines: { content: 412 } }).counts).toEqual({ add: 412, del: 0, about: false });
   expect(view("Edit", { file_path: wt + "a.go", old_string: "x\ny\nz", new_string: "x\nY\nY2\nz" })).toMatchObject({
     kind: "edit",
     label: "Edited",
-    counts: { add: 2, del: 1 },
+    counts: { add: 2, del: 1, about: false },
   });
+  // Clipped: the lines both shown versions share at the start are not counted, and the counts say they are about.
+  const head = Array.from({ length: 40 }, (_, i) => `same ${i}`).join("\n");
+  expect(
+    view("Edit", {
+      file_path: wt + "a.go",
+      old_string: head + "\nold…",
+      new_string: head + "\nnew…",
+      _lines: { old_string: 80, new_string: 81 },
+    }).counts,
+  ).toEqual({ add: 41, del: 40, about: true });
   expect(
     view("MultiEdit", {
       file_path: wt + "a.go",
@@ -110,7 +126,7 @@ test("each tool reads as a verb and a target", () => {
         { old_string: "c", new_string: "d\ne" },
       ],
     }).counts,
-  ).toEqual({ add: 3, del: 2 });
+  ).toEqual({ add: 3, del: 2, about: false });
   expect(view("NotebookEdit", { notebook_path: wt + "n.ipynb", new_source: "x" })).toMatchObject({ label: "Edited", target: "n.ipynb" });
   expect(view("Grep", { pattern: "func Items", path: wt + "internal" })).toMatchObject({
     kind: "search",
@@ -140,6 +156,8 @@ test("each tool reads as a verb and a target", () => {
     label: "Reported ready",
     target: "PR #12 · Shipped the API.",
   });
+  expect(view("mcp__athena__report", { status: "ready", summary: "x", pull: 1e999 }).target).toBe("x");
+  expect(view("mcp__athena__report", { status: "ready", summary: "x", pull: 2.5 }).target).toBe("x");
   expect(view("mcp__athena__ack", { text: "On it." })).toMatchObject({ kind: "ack", label: "Acknowledged", target: "On it." });
   expect(view("mcp__github__create_pull_request", { title: "x" }, "title=x")).toMatchObject({
     kind: "mcp",

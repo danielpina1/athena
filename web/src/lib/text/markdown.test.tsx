@@ -92,3 +92,38 @@ test("hostile input renders quickly and wraps", () => {
   expect(c.textContent!.length).toBeGreaterThan(30_000);
   expect(c.querySelector("p")!.className).toContain("wrap-anywhere");
 });
+
+test("whitespace-heavy headings, table rows and quotes stay linear", () => {
+  const spaces = " ".repeat(16_000);
+  const inputs = [
+    "# a" + spaces + "x",
+    "# a" + spaces + "#",
+    "| a |\n|" + spaces + "-x",
+    "|" + spaces + "\n" + "|" + spaces + "-" + spaces + "|",
+    "> > > # h" + spaces + "x",
+  ];
+  for (const text of inputs) {
+    const t0 = performance.now();
+    md(text);
+    expect(performance.now() - t0, text.slice(0, 20)).toBeLessThan(150);
+  }
+  // A big table: its 2000 rows cost DOM, not parsing (quadratic parsing would take seconds).
+  const t0 = performance.now();
+  md("| a | b |\n| - | - |\n" + Array.from({ length: 2000 }, () => "| x | y |").join("\n"));
+  expect(performance.now() - t0).toBeLessThan(1500);
+});
+
+test("links keep balanced parentheses", () => {
+  const a = md("See [Go](https://en.wikipedia.org/wiki/Go_(programming_language)) now.").querySelector("a")!;
+  expect(a.getAttribute("href")).toBe("https://en.wikipedia.org/wiki/Go_(programming_language)");
+  expect(a.parentElement!.textContent).toBe("See Go now.");
+});
+
+test("a number in a paragraph does not start a list", () => {
+  const c = md("It shipped in\n2024. A year later it was rewritten.");
+  expect(c.querySelector("ol")).toBeNull();
+  expect(c.querySelector("p")!.textContent).toBe("It shipped in\n2024. A year later it was rewritten.");
+  // 1. still interrupts a paragraph, and N.<no space> is no item.
+  expect(md("Steps:\n1. one").querySelector("ol")).toBeTruthy();
+  expect(md("3.14 is pi").querySelector("ol")).toBeNull();
+});

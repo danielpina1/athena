@@ -1,6 +1,7 @@
 // A Ticket's live session, as its stream renders it, made to be read: the agent's words as Markdown in the UI's sans
-// type, its thinking collapsed (and none when it has no text), the start of the session as a thin divider, the owner's
-// messages as "You", each tool call paired with its result in one compact row (ToolCall), and the result as a closing
+// type, its thinking collapsed (and none when it has no text), the start of the session as a thin divider, what the
+// worker was sent by who sent it (the Task it started from, "You", a GitHub comment, a muted line for Athena's own
+// nudges and notes), each tool call paired with its result in one compact row (ToolCall), and the result as a closing
 // "Done" block. Code, paths and commands stay mono. A gap in the stream says how much output was skipped. A batch
 // renders only its own rows: the rows already shown are memoised on their stream items, whose keys and stripped text
 // are computed once per item. The view follows the tail while the owner is within 48 px of the bottom; scrolled up, it
@@ -8,7 +9,7 @@
 // chunk: screens show it through LazySessionView (SessionFrame.tsx).
 import { timestampMs } from "@bufbuild/protobuf/wkt";
 import { ChevronRightIcon, CircleCheckIcon, CircleXIcon } from "lucide-react";
-import { memo, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, type ReactNode, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { StreamItem } from "@/gen/athena/v1/stream_pb";
 import { itemText } from "@/lib/stream/ansi";
 import { itemKey, useSessionStream } from "@/lib/stream/useSessionStream";
@@ -18,7 +19,7 @@ import { cn } from "@/ui/cn";
 import { Button } from "@/ui/primitives/button";
 import { logClass, SessionFrame, type SessionViewProps } from "./SessionFrame";
 import { ToolCall } from "./ToolCall";
-import { modelName, parseResult } from "./tools";
+import { githubFrom, modelName, parseResult } from "./tools";
 
 /** Within this many px of the bottom counts as at the bottom. */
 export const FOLLOW_PX = 48;
@@ -111,13 +112,97 @@ function Result({ item, text }: { item: StreamItem; text: string }) {
   return (
     <div data-kind="result" data-error={item.isError || undefined} className="grid min-w-0 gap-2 border-t border-line-soft pt-3">
       <p className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-        <Icon aria-hidden className={cn("size-4 shrink-0", failed ? "text-danger" : "text-ok")} />
-        <span className={cn("font-semibold", failed && "text-danger")}>{title}</span>
+        <Icon aria-hidden className={cn("size-4 shrink-0", failed ? "text-danger" : "text-success")} />
+        <span className={cn("font-semibold", failed ? "text-danger" : "text-success")}>{title}</span>
         {meta && <span className="font-mono text-xs text-muted tabular-nums">{meta}</span>}
       </p>
       {body && <Markdown text={body} className="max-w-[75ch]" />}
     </div>
   );
+}
+
+/** A request this long starts clamped, with "Show more". */
+const TASK_LINES = 6;
+const TASK_CHARS = 500;
+
+const LINK = "font-medium text-text underline decoration-line-soft underline-offset-4 hover:decoration-text";
+
+/** Who wrote a GitHub message, linked to it when its link is safe. */
+function GithubWho({ item }: { item: StreamItem }) {
+  const { from, url } = githubFrom(item);
+  const who = `${from} on GitHub`;
+  return url ? (
+    <a href={url} target="_blank" rel="noopener noreferrer" className={LINK}>
+      {who}
+    </a>
+  ) : (
+    <span className="font-medium text-text">{who}</span>
+  );
+}
+
+/** The request the Ticket started from, at the top of its session: Markdown, clamped until the owner asks for all. */
+function Task({ item, text }: { item: StreamItem; text: string }) {
+  const long = text.split("\n").length > TASK_LINES || text.length > TASK_CHARS;
+  const [open, setOpen] = useState(false);
+  const clamped = long && !open;
+  return (
+    <section data-kind="task" aria-label="Task" className="grid min-w-0 max-w-[75ch] gap-2 rounded-md border border-line-soft bg-surface-2 px-4 py-3">
+      <p className="flex min-w-0 flex-wrap items-baseline gap-x-1.5 text-xs text-muted">
+        <span className="font-semibold tracking-wide text-text uppercase">Task</span>
+        {item.detail && (
+          <>
+            <span aria-hidden>·</span>
+            <span>
+              from <GithubWho item={item} />
+            </span>
+          </>
+        )}
+      </p>
+      <div
+        data-clamped={clamped || undefined}
+        className={cn(clamped && "max-h-[9.6em] overflow-hidden [mask-image:linear-gradient(to_bottom,black_55%,transparent)]")}
+      >
+        <Markdown text={text} />
+      </div>
+      {long && (
+        <button type="button" onClick={() => setOpen((o) => !o)} className={cn(LINK, "w-fit text-sm")} aria-expanded={open}>
+          {open ? "Show less" : "Show more"}
+        </button>
+      )}
+    </section>
+  );
+}
+
+/** A message the worker was sent, by who sent it (the item's tool): the owner, GitHub, the Task or Athena itself. */
+function Sent({ item, text }: { item: StreamItem; text: string }): ReactNode {
+  switch (item.tool) {
+    case "task":
+      return <Task item={item} text={text} />;
+    case "github":
+      return (
+        <div data-kind="github" className="grid w-fit max-w-[min(85%,75ch)] min-w-0 gap-1 rounded-md border border-line-soft px-3 py-2">
+          <span className="text-xs text-muted">
+            <GithubWho item={item} />
+          </span>
+          <Markdown text={text} />
+        </div>
+      );
+    case "athena":
+      return (
+        <p data-kind="athena" dir="auto" className="text-xs whitespace-pre-wrap text-muted wrap-anywhere">
+          {text}
+        </p>
+      );
+    default:
+      return (
+        <div data-kind="user" className="ml-auto grid w-fit max-w-[min(85%,75ch)] min-w-0 gap-0.5 rounded-md border border-line-soft bg-surface-2 px-3 py-2">
+          <span className="text-xs font-medium text-muted">You</span>
+          <p dir="auto" className="whitespace-pre-wrap wrap-anywhere">
+            {text}
+          </p>
+        </div>
+      );
+  }
 }
 
 function Item({ item }: { item: StreamItem }) {
@@ -142,14 +227,7 @@ function Item({ item }: { item: StreamItem }) {
     case "result":
       return <Result item={item} text={text} />;
     case "user":
-      return (
-        <div data-kind="user" className="ml-auto grid w-fit max-w-[min(85%,75ch)] min-w-0 gap-0.5 rounded-md border border-line-soft bg-surface-2 px-3 py-2">
-          <span className="text-xs font-medium text-muted">You</span>
-          <p dir="auto" className="whitespace-pre-wrap wrap-anywhere">
-            {text}
-          </p>
-        </div>
-      );
+      return <Sent item={item} text={text} />;
     default:
       return (
         <p dir="auto" className="text-xs whitespace-pre-wrap text-muted wrap-anywhere">

@@ -24,6 +24,8 @@ test("the frame shows and the stream opens while the session view loads", async 
   expect(screen.getByRole("heading", { name: "Session", level: 2 })).toBeTruthy();
   const loading = screen.getByRole("log", { name: "Session output" });
   expect(loading.getAttribute("aria-busy")).toBe("true");
+  // The live dot shows from the start: it does not pop in when the view loads.
+  expect(screen.getByText("live")).toBeTruthy();
   expect(link.opens()).toEqual([{ ticketId: "T-1", fromOffset: -1n }]);
   expect(await screen.findByText("No session output yet.")).toBeTruthy();
   expect(screen.getByRole("log", { name: "Session output" }).hasAttribute("aria-busy")).toBe(false);

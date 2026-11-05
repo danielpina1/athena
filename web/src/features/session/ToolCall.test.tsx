@@ -51,11 +51,10 @@ test("an Edit row counts its lines and opens to a diff", async () => {
   expect(within(summary).getByText("Edited")).toBeTruthy();
   expect(within(summary).getByText("api/handler.go")).toBeTruthy();
   // The counts replace the duration.
-  expect(summary.textContent).toContain("+2");
-  expect(summary.textContent).toContain("−1");
+  expect(summary.querySelector("[data-counts]")!.textContent).toBe("+2−1");
   expect(summary.textContent).not.toContain("1.2 s");
   await userEvent.click(summary);
-  const diff = within(el).getByLabelText("Changes");
+  const diff = within(el).getByRole("group", { name: "Changes in api/handler.go" });
   const lines = [...diff.querySelectorAll("[data-line]")].map((l) => `${l.getAttribute("data-line")}${l.textContent}`);
   expect(lines).toEqual(["ctx a", "del−old", "add+new", "add+newer", "ctx b"]);
 });
@@ -139,4 +138,53 @@ test("a 1 MiB result and RTL text stay inside the row", async () => {
   expect(out.className).toContain("wrap-anywhere");
   expect(out.className).toContain("overflow-y-auto");
   expect(out.textContent).not.toContain("‮");
+});
+
+test("a long diff is a scroll region a keyboard can reach", async () => {
+  const old = Array.from({ length: 60 }, (_, i) => `old ${i}`).join("\n");
+  const neu = Array.from({ length: 60 }, (_, i) => `new ${i}`).join("\n");
+  const { el, summary } = row(call("Edit", { file_path: WT + "a.go", old_string: old, new_string: neu }), ok("ok"));
+  await userEvent.click(summary);
+  const diff = within(el).getByRole("group", { name: "Changes in a.go" });
+  expect(diff.getAttribute("tabindex")).toBe("0");
+  expect(diff.className).toContain("overflow-y-auto");
+});
+
+test("a clipped edit says its counts are approximate", () => {
+  const big = "x".repeat(1999);
+  const { summary } = row(
+    call("Edit", { file_path: WT + "a.go", old_string: big + "…", new_string: big + "…", _lines: { old_string: 1, new_string: 1 } }),
+    ok("ok"),
+  );
+  const counts = summary.querySelector("[data-counts]")!;
+  expect(counts.textContent).toBe("~+1−1");
+  expect(counts.getAttribute("title")).toBe("About: the edit is longer than the dashboard was sent");
+});
+
+test("a shortened report, command or prompt says so", async () => {
+  const report = row(call("mcp__athena__report", { status: "ready", summary: "Long…", _lines: { summary: 120 } }), ok("Report filed (ready)."));
+  await userEvent.click(report.summary);
+  expect(report.el.textContent).toContain("Shortened. The full report is on the Ticket.");
+});
+
+test("a shortened command says so", async () => {
+  const { el, summary } = row(call("Bash", { command: "echo " + "y".repeat(1990) + "…", _lines: { command: 1 } }), ok("ok"));
+  await userEvent.click(summary);
+  expect(el.textContent).toContain("Shortened: the command is longer than shown.");
+});
+
+test("a closed row renders no body until it is first opened", async () => {
+  const { el, summary } = row(call("Bash", { command: "ls", description: "List" }), ok("a.go"));
+  expect(el.querySelector("[aria-label=Terminal]")).toBeNull();
+  await userEvent.click(summary);
+  expect(await within(el).findByLabelText("Terminal")).toBeTruthy();
+  // Closed again, it keeps what it rendered.
+  await userEvent.click(summary);
+  expect(el.querySelector("[aria-label=Terminal]")).toBeTruthy();
+});
+
+test("success reads in the success colour", () => {
+  const { summary } = row(call("Write", { file_path: WT + "a.go", content: "a\n" }), ok("ok"));
+  expect(summary.querySelector("svg.text-success")).toBeTruthy();
+  expect(summary.querySelector("[data-counts] .text-success")?.textContent).toBe("+1");
 });

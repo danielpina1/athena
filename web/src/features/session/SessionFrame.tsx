@@ -3,6 +3,7 @@
 // bodies and Markdown) is a lazy chunk; LazySessionView shows this frame, empty, while it loads, and opens the stream
 // at once so the output is there when the view is.
 import { lazy, type ReactNode, Suspense } from "react";
+import { useAthena } from "@/lib/store/state";
 import { useSessionStream } from "@/lib/stream/useSessionStream";
 import { cn } from "@/ui/cn";
 
@@ -49,9 +50,10 @@ export function SessionFrame({ compact = false, title, actions, live, children }
 const SessionView = lazy(() => import("./SessionView").then((m) => ({ default: m.SessionView })));
 
 function Loading(props: SessionViewProps) {
-  useSessionStream(props.ticketId);
+  const { live } = useSessionStream(props.ticketId);
+  const working = useAthena((s) => (s.tickets.get(props.ticketId) ?? s.details.get(props.ticketId)?.summary)?.stage) === "working";
   return (
-    <SessionFrame {...props}>
+    <SessionFrame {...props} live={live && working}>
       <div role="log" aria-label="Session output" aria-busy="true" tabIndex={0} className={logClass(props.compact ?? false)}>
         <p className="text-muted">Loading the session…</p>
       </div>
