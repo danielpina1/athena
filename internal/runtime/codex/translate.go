@@ -14,8 +14,10 @@ import (
 // from one goroutine.
 type Translator struct {
 	threadID string
-	// usage is the last thread/tokenUsage/updated of the turn: Codex's `last` breakdown (this turn's), not `total`.
-	usage *tokenBreakdown
+	// total is the thread's token totals as of the latest thread/tokenUsage/updated, and prev as of the end of the
+	// previous turn (nil until the first update: then the totals before the update's own last model call). A turn's
+	// usage is the change in total over it: Codex's `last` is only the latest model call, not the turn.
+	total, prev *tokenBreakdown
 	// errors are the messages of this turn's `error` notifications that Codex will not retry.
 	errors []string
 	// lastText is the turn's last agent message.
@@ -29,10 +31,15 @@ type Translator struct {
 // NewTranslator returns a Translator for a new session (the zero value works too).
 func NewTranslator() *Translator { return &Translator{open: map[string]bool{}} }
 
+// tokenBreakdown is Codex's token counts; its input includes the cached part.
 type tokenBreakdown struct {
 	InputTokens       int64 `json:"inputTokens"`
 	OutputTokens      int64 `json:"outputTokens"`
 	CachedInputTokens int64 `json:"cachedInputTokens"`
+}
+
+func (a tokenBreakdown) minus(b tokenBreakdown) tokenBreakdown {
+	return tokenBreakdown{a.InputTokens - b.InputTokens, a.OutputTokens - b.OutputTokens, a.CachedInputTokens - b.CachedInputTokens}
 }
 
 // item is a thread item, with the fields of the kinds Athena models.
@@ -93,13 +100,18 @@ func (t *Translator) Translate(m Message) []rt.Event {
 	case "thread/tokenUsage/updated":
 		var p struct {
 			TokenUsage struct {
-				Last tokenBreakdown `json:"last"`
+				Last  tokenBreakdown `json:"last"`
+				Total tokenBreakdown `json:"total"`
 			} `json:"tokenUsage"`
 		}
 		if json.Unmarshal(m.Params, &p) != nil {
 			break
 		}
-		t.usage = &p.TokenUsage.Last
+		if t.prev == nil {
+			base := p.TokenUsage.Total.minus(p.TokenUsage.Last)
+			t.prev = &base
+		}
+		t.total = &p.TokenUsage.Total
 		return nil
 	case "account/rateLimits/updated":
 		var p struct {
@@ -215,8 +227,11 @@ func (t *Translator) turnEnd(params json.RawMessage) []rt.Event {
 	if end.SessionID == "" {
 		end.SessionID = t.threadID
 	}
-	if t.usage != nil {
-		end.InputTokens, end.OutputTokens, end.CacheReadTokens = t.usage.InputTokens, t.usage.OutputTokens, t.usage.CachedInputTokens
+	if t.total != nil && t.prev != nil {
+		// Input without its cached part, as Claude's counts it, so a consumer treats both runtimes alike.
+		d := t.total.minus(*t.prev)
+		end.InputTokens, end.OutputTokens, end.CacheReadTokens = max(d.InputTokens-d.CachedInputTokens, 0), d.OutputTokens, d.CachedInputTokens
+		t.prev = t.total
 	}
 	code := ""
 	if e := p.Turn.Error; e != nil {
@@ -238,7 +253,7 @@ func (t *Translator) turnEnd(params json.RawMessage) []rt.Event {
 			end.Subtype = p.Turn.Status
 		}
 	}
-	t.usage, t.errors, t.lastText = nil, nil, ""
+	t.total, t.errors, t.lastText = nil, nil, ""
 	t.open = map[string]bool{}
 	return []rt.Event{end}
 }
@@ -284,6 +299,7 @@ type rateLimitSnapshot struct {
 
 func (s rateLimitSnapshot) windows() []rt.Window {
 	var ws []rt.Window
+	anyUsedUp := false
 	for i, w := range []*rateLimitWindow{s.Primary, s.Secondary} {
 		if w == nil {
 			continue
@@ -293,15 +309,21 @@ func (s rateLimitSnapshot) windows() []rt.Window {
 			name = windowName(*w.WindowDurationMins)
 		}
 		win := rt.Window{
-			Name:    name,
-			Used:    min(max(w.UsedPercent/100, 0), 1),
-			Limited: s.RateLimitReachedType != nil && *s.RateLimitReachedType != "",
+			Name: name,
+			Used: min(max(w.UsedPercent/100, 0), 1),
 		}
+		anyUsedUp = anyUsedUp || win.Used >= 1
 		if w.ResetsAt != nil {
 			at := time.Unix(*w.ResetsAt, 0).UTC()
 			win.ResetsAt = &at
 		}
 		ws = append(ws, win)
+	}
+	// A limit reached stops the windows that are used up; with none used up (credits depleted), conservatively all.
+	if s.RateLimitReachedType != nil && *s.RateLimitReachedType != "" {
+		for i := range ws {
+			ws[i].Limited = !anyUsedUp || ws[i].Used >= 1
+		}
 	}
 	return ws
 }

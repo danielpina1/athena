@@ -40,7 +40,10 @@ type TurnEnd struct {
 	Text   string
 	Errors []string
 	// CostUSD is the session's cumulative cost so far (it carries across resumed processes).
-	CostUSD                                    float64
+	CostUSD float64
+	// InputTokens, OutputTokens and CacheReadTokens are this turn's, not the session's. InputTokens leaves out
+	// CacheReadTokens (what was read from the cache is counted once, there), whichever runtime ran: Codex reports its
+	// cached tokens inside its input, so its driver subtracts them.
 	InputTokens, OutputTokens, CacheReadTokens int64
 	NumTurns                                   int
 	Duration                                   time.Duration
@@ -53,7 +56,8 @@ type QuotaUpdate struct{ Windows []Window }
 
 // Window is one usage-limit window.
 type Window struct {
-	// Name is "5h", "7d" or "<n>m" (a window of n minutes).
+	// Name is "5h", "7d" or "<n>m" (a window of n minutes); "primary" or "secondary" for a window whose length the
+	// runtime did not say.
 	Name string
 	// Used is the fraction of the window used, in [0, 1].
 	Used float64

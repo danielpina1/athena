@@ -13,9 +13,13 @@
 #       with the synthetic fixtures, then copy over the ones you want (TestTranslateToolTurn expects the exact events
 #       of the synthetic tool-turn.jsonl, so update it with the copy) and edit testdata/codex/README.md.
 #
-# The turn runs in a temporary git repository with a temporary CODEX_HOME: Athena's credential
-# ($ATHENA_CODEX_HOME, default ${ATHENA_STATE_DIR:-$HOME/.athena}/codex) is linked in, never ~/.codex, and its config.toml
-# has hooks that only log their stdin. ATHENA_CODEX_BIN names another codex binary (a test double, say).
+# The turn runs in a temporary git repository against Athena's own CODEX_HOME ($ATHENA_CODEX_HOME, default
+# ${ATHENA_STATE_DIR:-$HOME/.athena}/codex), in place: no copy of its credential is made, so a token Codex rotates
+# stays where Athena looks for it. It never touches ~/.codex. Hooks that only log their stdin are passed as -c
+# overrides (the schema's shape: [[hooks.<Event>]] matcher groups holding [[hooks.<Event>.hooks]] handlers with
+# type = "command"). Stop the Athena node first: its own config.toml hooks would run too. Hooks from config may need
+# trusting before Codex runs them (hooks/list shows trustStatus); if hook-inputs.jsonl comes out empty, that is why.
+# ATHENA_CODEX_BIN names another codex binary (a test double, say).
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -42,16 +46,10 @@ turns)
   fi
   athena_home="${ATHENA_CODEX_HOME:-${ATHENA_STATE_DIR:-$HOME/.athena}/codex}"
   [ -d "$athena_home" ] || { echo "no Athena CODEX_HOME at $athena_home (run \`athena codex login\` first)" >&2; exit 1; }
-  mkdir -p "$work/codex-home" "$work/hooks" "$work/repo" "$out/captured"
-  chmod 700 "$work/codex-home"
-  [ -e "$athena_home/auth.json" ] && ln -s "$athena_home/auth.json" "$work/codex-home/auth.json"
-  : > "$work/codex-home/config.toml"
-  for ev in SessionStart PreToolUse PermissionRequest PostToolUse Stop; do
-    printf '[[hooks.%s.hooks]]\ncommand = "cat >> %s/%s.jsonl"\n\n' "$ev" "$work/hooks" "$ev" >> "$work/codex-home/config.toml"
-  done
+  mkdir -p "$work/hooks" "$work/repo" "$out/captured"
   git -C "$work/repo" init -q
   git -C "$work/repo" -c user.name=capture -c user.email=capture@example.invalid commit -q --allow-empty -m init
-  ATHENA_CAPTURE_REPO="$work/repo" ATHENA_CAPTURE_HOOKS="$work/hooks" CODEX_HOME="$work/codex-home" \
+  ATHENA_CAPTURE_REPO="$work/repo" ATHENA_CAPTURE_HOOKS="$work/hooks" CODEX_HOME="$athena_home" \
     python3 -I - "$bin" "$work" "$out/captured" <<'PY'
 import json, os, re, subprocess, sys, threading, uuid
 
@@ -60,7 +58,11 @@ repo = os.environ["ATHENA_CAPTURE_REPO"]
 hooks_dir = os.environ["ATHENA_CAPTURE_HOOKS"]
 # ATHENA_FAKE_ variables pass through so the script can be tried against fakecodex (ATHENA_CODEX_BIN).
 env = {k: v for k, v in os.environ.items() if k in ("PATH", "HOME", "LANG", "CODEX_HOME") or k.startswith("ATHENA_FAKE_")}
-proc = subprocess.Popen([binary, "app-server", "--listen", "stdio://", "--strict-config"], stdin=subprocess.PIPE,
+hook_flags = []
+for ev in ("SessionStart", "PreToolUse", "PermissionRequest", "PostToolUse", "Stop"):
+    cmd = "cat >> %s/%s.jsonl" % (hooks_dir, ev)
+    hook_flags += ["-c", "hooks.%s=[{hooks=[{type=\"command\",command=%s}]}]" % (ev, json.dumps(cmd))]
+proc = subprocess.Popen([binary, "app-server", "--listen", "stdio://", "--strict-config"] + hook_flags, stdin=subprocess.PIPE,
                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, cwd=repo, env=env)
 watchdog = threading.Timer(300, proc.kill)
 watchdog.start()
@@ -79,7 +81,8 @@ def read():
 
 def answer(msg):
     # Approvals are declined: this captures a turn, it does not let Codex change anything outside its sandbox.
-    if msg["method"].endswith("/requestApproval"):
+    # item/permissions/requestApproval answers with permissions, not a decision, so it gets an error.
+    if msg["method"] in ("item/commandExecution/requestApproval", "item/fileChange/requestApproval"):
         send({"id": msg["id"], "result": {"decision": "decline"}})
     else:
         send({"id": msg["id"], "error": {"code": -32601, "message": "not handled by the capture"}})

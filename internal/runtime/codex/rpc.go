@@ -8,10 +8,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 )
 
-// ErrConnClosed is what a Call returns once the server's output has ended (or the Conn was never able to read).
+// ErrConnClosed is what a Call returns once the server's output has ended; when it ended on a read error, the error
+// follows it ("codex: connection closed: <read error>").
 var ErrConnClosed = errors.New("codex: connection closed")
 
 // RPCError is a JSON-RPC error the server answered a request with.
@@ -35,13 +37,18 @@ type Conn struct {
 	r      *bufio.Reader
 	onLine func(raw []byte)
 
+	// Logf, when set before Run, is told of what the Conn could not use (a reply it cannot match to a call). It must
+	// not log the line itself: it may hold account data.
+	Logf func(format string, args ...any)
+
 	wmu sync.Mutex // serialises writes: a line is written whole
 	w   io.Writer
 
 	mu      sync.Mutex
 	nextID  int64
 	pending map[int64]chan reply
-	done    bool // Run has ended: no response will come
+	done    bool  // Run has ended: no response will come
+	endErr  error // why: ErrConnClosed, with the read error when there was one
 }
 
 type reply struct {
@@ -71,14 +78,15 @@ type wire struct {
 }
 
 // Call sends a request and waits for its response, decoding the result into result (when not nil). A JSON-RPC error
-// comes back as *RPCError. It returns ctx's error if ctx ends first (a late response is dropped), and ErrConnClosed
-// when the server's output ended first.
+// comes back as *RPCError. It returns ctx's error if ctx ends first, while waiting or while writing (a late response
+// is dropped), and ErrConnClosed when the server's output ended first. A nil params is sent as {}.
 func (c *Conn) Call(ctx context.Context, method string, params, result any) error {
 	ch := make(chan reply, 1)
 	c.mu.Lock()
 	if c.done {
+		err := c.endErr
 		c.mu.Unlock()
-		return ErrConnClosed
+		return err
 	}
 	c.nextID++
 	id := c.nextID
@@ -90,7 +98,10 @@ func (c *Conn) Call(ctx context.Context, method string, params, result any) erro
 		c.mu.Unlock()
 	}
 
-	if err := c.write(map[string]any{"id": id, "method": method, "params": params}); err != nil {
+	if params == nil {
+		params = struct{}{} // the protocol wants an object where it wants params at all, and rejects null
+	}
+	if err := c.writeCtx(ctx, map[string]any{"id": id, "method": method, "params": params}); err != nil {
 		forget()
 		return err
 	}
@@ -135,39 +146,74 @@ func (c *Conn) write(v any) error {
 	if err != nil {
 		return err
 	}
-	b = append(b, '\n')
+	return c.writeLine(append(b, '\n'))
+}
+
+func (c *Conn) writeLine(b []byte) error {
 	c.wmu.Lock()
 	defer c.wmu.Unlock()
-	_, err = c.w.Write(b)
+	_, err := c.w.Write(b)
 	return err
 }
 
-// Run reads the server's output until it ends: a response goes to its caller, a notification or a server request to
-// handle, in order, on this goroutine. handle must not block on a Call (nothing would read the response) or wait for a
-// person: a handler that does hands the message to its own goroutine. Lines are not capped in size (a command's output
-// can be megabytes); a line that is not a JSON object is skipped. When Run returns, every Call still waiting gets
-// ErrConnClosed.
-func (c *Conn) Run(handle func(Message)) {
-	defer c.finish()
+// writeCtx is write, but gives up when ctx ends: a server that stopped reading its stdin must not hold a Call past
+// its deadline. The abandoned write stays pending in its own goroutine until the pipe moves or closes.
+func (c *Conn) writeCtx(ctx context.Context, v any) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	done := make(chan error, 1)
+	go func() { done <- c.writeLine(append(b, '\n')) }()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// Run reads the server's output until it ends and returns why: nil at EOF, the read error otherwise. A response goes
+// to its caller; a notification goes to handle, in order, on this goroutine; a server request goes to handle on a
+// goroutine of its own (R46), so a handler may wait for a person or for a Call without stopping the reading its own
+// response needs. Lines are not capped in size (a command's output can be megabytes); a line that is not a JSON
+// object is skipped. When Run returns, every Call still waiting gets ErrConnClosed.
+func (c *Conn) Run(handle func(Message)) error {
+	var rerr error
+	defer func() { c.finish(rerr) }()
 	for {
 		line, err := c.r.ReadBytes('\n')
 		if line = bytes.TrimSpace(line); len(line) > 0 {
 			c.dispatch(line, handle)
 		}
 		if err != nil {
-			return
+			if err != io.EOF {
+				rerr = err
+			}
+			return rerr
 		}
 	}
 }
 
-func (c *Conn) finish() {
+func (c *Conn) finish(cause error) {
+	end := ErrConnClosed
+	if cause != nil {
+		end = fmt.Errorf("%w: %v", ErrConnClosed, cause)
+	}
 	c.mu.Lock()
-	c.done = true
+	c.done, c.endErr = true, end
+	c.mu.Unlock()
+	c.failAll(end)
+}
+
+// failAll ends every Call that waits with err.
+func (c *Conn) failAll(err error) {
+	c.mu.Lock()
 	pending := c.pending
 	c.pending = map[int64]chan reply{}
 	c.mu.Unlock()
 	for _, ch := range pending {
-		ch <- reply{err: ErrConnClosed}
+		ch <- reply{err: err}
 	}
 }
 
@@ -181,17 +227,53 @@ func (c *Conn) dispatch(line []byte, handle func(Message)) {
 		return
 	}
 	if c.onLine != nil {
-		c.onLine(line)
+		c.onLine(transcriptLine(line, w))
 	}
-	if handle != nil {
-		handle(Message{ID: w.ID, Method: w.Method, Params: w.Params})
+	if handle == nil {
+		return
 	}
+	m := Message{ID: w.ID, Method: w.Method, Params: w.Params}
+	if len(w.ID) > 0 {
+		go handle(m)
+		return
+	}
+	handle(m)
 }
 
-// answer routes a response to the Call that is waiting for it; one nobody waits for is dropped.
+// transcriptLine is the line the transcript keeps: the server's own, except a token refresh request, whose params name
+// the account.
+func transcriptLine(line []byte, w wire) []byte {
+	if w.Method != "account/chatgptAuthTokens/refresh" {
+		return line
+	}
+	params := map[string]json.RawMessage{}
+	_ = json.Unmarshal(w.Params, &params)
+	for k := range params {
+		if l := strings.ToLower(k); strings.Contains(l, "account") || strings.Contains(l, "token") || strings.Contains(l, "email") {
+			params[k] = json.RawMessage(`"[redacted]"`)
+		}
+	}
+	b, err := json.Marshal(map[string]any{"id": w.ID, "method": w.Method, "params": params})
+	if err != nil {
+		return []byte(`{"method":"` + w.Method + `"}`)
+	}
+	return b
+}
+
+// answer routes a response to the Call that is waiting for it; one nobody waits for is dropped. An error reply with no
+// usable id (a parse error the server could not tie to a request) ends every waiting Call with it, since one of them
+// was not understood and would otherwise wait for its context; any other unusable id is only logged.
 func (c *Conn) answer(w wire) {
 	var id int64
-	if json.Unmarshal(w.ID, &id) != nil {
+	noID := len(w.ID) == 0 || string(w.ID) == "null"
+	if noID && w.Error != nil {
+		c.failAll(&RPCError{Code: w.Error.Code, Message: w.Error.Message})
+		return
+	}
+	if noID || json.Unmarshal(w.ID, &id) != nil {
+		if c.Logf != nil {
+			c.Logf("codex: a reply with an id that is not a number was dropped")
+		}
 		return
 	}
 	c.mu.Lock()

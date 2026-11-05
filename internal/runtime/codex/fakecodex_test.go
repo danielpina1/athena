@@ -213,7 +213,7 @@ func TestFakecodexSpeaksTheFixture(t *testing.T) {
 		rt.Unknown{Kind: "agentMessage"},
 		rt.Unknown{Kind: "item/agentMessage/delta"},
 		rt.AssistantText{Text: "Done."},
-		rt.TurnEnd{SessionID: "thr_fixture_t1", OK: true, Text: "Done.", InputTokens: 5210, OutputTokens: 12, CacheReadTokens: 4096, NumTurns: 1, Duration: 4200 * time.Millisecond},
+		rt.TurnEnd{SessionID: "thr_fixture_t1", OK: true, Text: "Done.", InputTokens: 1114, OutputTokens: 12, CacheReadTokens: 4096, NumTurns: 1, Duration: 4200 * time.Millisecond},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("events:\n%+v\nwant:\n%+v", got, want)
@@ -396,7 +396,7 @@ func TestFakecodexSendsServerRequestsAndLogsTheAnswer(t *testing.T) {
 
 func toJSON(v any) string { b, _ := json.Marshal(v); return string(b) }
 
-const hookConfig = "# written by a test\n[[hooks.PreToolUse.hooks]]\ntype = \"command\"\ncommand = %q\n\n[[hooks.Stop.hooks]]\ncommand = \"true\"\n"
+const hookConfig = "# written by a test\n[[hooks.PreToolUse]]\n[[hooks.PreToolUse.hooks]]\ntype = \"command\"\ncommand = %q\n\n[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = \"command\"\ncommand = \"true\"\n"
 
 // writeHookHome puts a PreToolUse hook that records its stdin and denies in $CODEX_HOME/config.toml.
 func writeHookHome(t *testing.T, home string) (stdinFile string) {
@@ -550,5 +550,106 @@ func TestFakecodexRefusesOtherCommands(t *testing.T) {
 	var ee *exec.ExitError
 	if !errors.As(err, &ee) || ee.ExitCode() != 2 {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+// fakecodex is as strict as the real server: a request is checked against protocol.json (params an object when the
+// method requires params, the required fields present), so a driver that passes here passes there.
+func TestFakecodexRejectsInvalidParams(t *testing.T) {
+	p := startFake(t)
+	p.must("initialize", map[string]any{"clientInfo": map[string]string{"name": "athena", "version": "test"}}, nil)
+	var re *RPCError
+	for _, c := range []struct {
+		name, method string
+		params       any
+	}{
+		{"null params", "account/read", json.RawMessage("null")},
+		{"missing params", "hooks/list", json.RawMessage("[]")},
+		{"missing required field", "thread/resume", map[string]any{}},
+		{"turn/start without input", "turn/start", map[string]any{"threadId": "t"}},
+	} {
+		if err := p.call(c.method, c.params, nil); !errors.As(err, &re) || re.Code != -32600 {
+			t.Errorf("%s: err = %v, want -32600", c.name, err)
+		}
+	}
+	// What the driver sends is accepted: nil becomes {}, and params that need none may be anything object-shaped.
+	p.must("account/read", nil, nil)
+	p.must("hooks/list", nil, nil)
+	p.must("account/rateLimits/read", nil, nil)
+}
+
+// A hooks config in the shape Codex's --strict-config rejects (an entry with no matcher group before it, a handler
+// with no type) stops fakecodex at start, and a config in the real shape does not.
+func TestFakecodexStrictConfigRejectsTheOldHookShape(t *testing.T) {
+	for _, c := range []struct {
+		name, cfg string
+		ok        bool
+	}{
+		{"real shape", "[[hooks.PreToolUse]]\n[[hooks.PreToolUse.hooks]]\ntype = \"command\"\ncommand = \"true\"\n", true},
+		{"matcher group", "[[hooks.PreToolUse]]\nmatcher = \"Bash\"\n[[hooks.PreToolUse.hooks]]\ncommand = \"true\"\ntype = \"command\"\n", true},
+		{"no matcher group", "[[hooks.PreToolUse.hooks]]\ntype = \"command\"\ncommand = \"true\"\n", false},
+		{"no type", "[[hooks.PreToolUse]]\n[[hooks.PreToolUse.hooks]]\ncommand = \"true\"\n", false},
+		{"group of another event", "[[hooks.Stop]]\n[[hooks.PreToolUse.hooks]]\ntype = \"command\"\ncommand = \"true\"\n", false},
+	} {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "config.toml"), []byte(c.cfg), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command(fakeBinary(t), "app-server", "--listen", "stdio://", "--strict-config")
+		cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "CODEX_HOME=" + dir}
+		in, _ := cmd.StdinPipe()
+		var stderr strings.Builder
+		cmd.Stderr = &stderr
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		exited := make(chan error, 1)
+		go func() { exited <- cmd.Wait() }()
+		select {
+		case err := <-exited:
+			if c.ok || err == nil || !strings.Contains(stderr.String(), "config.toml") {
+				t.Errorf("%s: exited early: %v, %q", c.name, err, stderr.String())
+			}
+		case <-time.After(500 * time.Millisecond):
+			if !c.ok {
+				t.Errorf("%s: still running, want it to refuse the config", c.name)
+			}
+			in.Close()
+			<-exited
+		}
+	}
+}
+
+// turn/start while a turn runs steers into it, as the real server does, instead of being refused.
+func TestFakecodexTurnStartDuringATurnSteersIt(t *testing.T) {
+	hold := filepath.Join(t.TempDir(), "release")
+	p := startFake(t, "ATHENA_FAKE_CODEX_FIXTURE="+fixturePath(t, "simple-turn"), "ATHENA_FAKE_CODEX_LATER_FIXTURE="+fixturePath(t, "steer-turn"), "ATHENA_FAKE_CODEX_HOLD_RESULT="+hold)
+	thread := p.begin()
+	turn := p.startTurn(thread, "first", "u-1")
+	p.until(func(e rt.Event) bool { a, ok := e.(rt.AssistantText); return ok && a.Text == "Done." })
+	if id := p.startTurn(thread, "more", "u-2"); id != turn {
+		t.Fatalf("turn id = %q, want the running turn %q", id, turn)
+	}
+	evs := p.until(func(e rt.Event) bool { a, ok := e.(rt.AssistantText); return ok && a.Text == "Noted: it is sunny." })
+	var echoed bool
+	for _, e := range evs {
+		if u, ok := e.(rt.UserEcho); ok && u.Text == "more" && u.UUID == "u-2" {
+			echoed = true
+		}
+	}
+	if !echoed {
+		t.Fatalf("no echo in %+v", evs)
+	}
+	if err := os.WriteFile(hold, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p.until(isTurnEnd)
+}
+
+// protoextract is not built by `go build ./...` (it lives under testdata), so build it here.
+func TestProtoextractCompiles(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "protoextract")
+	if b, err := exec.Command("go", "build", "-o", out, "./testdata/protoextract").CombinedOutput(); err != nil {
+		t.Fatalf("%v\n%s", err, b)
 	}
 }

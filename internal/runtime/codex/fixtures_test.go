@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -55,6 +56,10 @@ func fixtureMessages(t *testing.T, name string) []Message {
 type protocolFile struct {
 	CodexVersion string              `json:"codexVersion"`
 	Methods      map[string][]string `json:"methods"`
+	// ParamsRequired lists the methods whose params must be present, as an object.
+	ParamsRequired []string `json:"paramsRequired"`
+	// ServerRequestAnswers says how the client answers each server request: "decline" or "error".
+	ServerRequestAnswers map[string]string `json:"serverRequestAnswers"`
 }
 
 func loadProtocol(t *testing.T) protocolFile {
@@ -79,6 +84,21 @@ func TestFixturesUseKnownMethodsAndRequiredFields(t *testing.T) {
 	}
 	if len(proto.Methods) == 0 {
 		t.Fatal("protocol.json lists no methods")
+	}
+	// Every server request has an answer, the four of the protocol Athena does not model among them (a turn must never
+	// wait on a request nobody answers), and the methods that need params say so.
+	for _, m := range []string{"item/commandExecution/requestApproval", "item/fileChange/requestApproval", "item/permissions/requestApproval",
+		"item/tool/requestUserInput", "mcpServer/elicitation/request", "item/tool/call", "account/chatgptAuthTokens/refresh",
+		"attestation/generate", "applyPatchApproval", "execCommandApproval"} {
+		if a := proto.ServerRequestAnswers[m]; a != "decline" && a != "error" {
+			t.Errorf("server request %s: answer %q, want decline or error", m, a)
+		}
+		if _, ok := proto.Methods[m]; !ok {
+			t.Errorf("server request %s is not in protocol.json", m)
+		}
+	}
+	if !slices.Contains(proto.ParamsRequired, "account/read") || !slices.Contains(proto.ParamsRequired, "hooks/list") || slices.Contains(proto.ParamsRequired, "initialized") {
+		t.Errorf("paramsRequired = %v", proto.ParamsRequired)
 	}
 	for _, name := range fixtureNames {
 		for i, l := range fixtureLines(t, name) {
@@ -118,8 +138,10 @@ func TestFixturesUseKnownMethodsAndRequiredFields(t *testing.T) {
 
 // The repository is public: a fixture holds no account data, and its ids are the placeholders.
 func TestFixturesCarryNoRealIDs(t *testing.T) {
-	ids := regexp.MustCompile(`"(?:threadId|sessionId|accountId)":"([^"]*)"`)
+	ids := regexp.MustCompile(`"(?:threadId|sessionId|session_id|accountId)":"([^"]*)"`)
 	files, err := filepath.Glob(filepath.Join(fixtureDir, "*.jsonl"))
+	captured, _ := filepath.Glob(filepath.Join(fixtureDir, "captured", "*.jsonl")) // what the capture script wrote
+	files = append(files, captured...)
 	if err != nil || len(files) < len(fixtureNames) {
 		t.Fatalf("fixtures = %v, %v", files, err)
 	}

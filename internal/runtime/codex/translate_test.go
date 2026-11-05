@@ -2,6 +2,7 @@ package codex
 
 import (
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"testing"
 	"time"
@@ -55,8 +56,8 @@ func TestTranslateToolTurn(t *testing.T) {
 		}},
 		rt.TurnEnd{
 			SessionID: "thr_fixture_0001", OK: true, Text: "Created the files and reported.",
-			// This turn's tokens (Codex's `last`), with its cached input.
-			InputTokens: 9100, OutputTokens: 240, CacheReadTokens: 8192,
+			// This turn's tokens: the change of the thread's totals over the turn; input without its cached part.
+			InputTokens: 908, OutputTokens: 240, CacheReadTokens: 8192,
 			NumTurns: 1, Duration: 7300 * time.Millisecond,
 		},
 	}
@@ -116,7 +117,7 @@ func TestTranslateUsageLimitSetsLimitWithReset(t *testing.T) {
 	}
 	// The windows of that turn say it was limited.
 	q := evs[len(evs)-2].(rt.QuotaUpdate)
-	if !q.Windows[0].Limited || q.Windows[0].Used != 1 {
+	if !q.Windows[0].Limited || q.Windows[0].Used != 1 || q.Windows[1].Limited {
 		t.Fatalf("quota = %+v", q)
 	}
 
@@ -152,7 +153,8 @@ func TestTranslateRateLimitWindowsNormalized(t *testing.T) {
 	tr := NewTranslator()
 	want := [][]rt.Window{
 		{{Name: "5h", Used: 0.42, ResetsAt: at(18000)}, {Name: "7d", Used: 0.08, ResetsAt: at(604800)}},
-		{{Name: "5h", Used: 1, ResetsAt: at(7200), Limited: true}, {Name: "7d", Used: 0.63, ResetsAt: at(259200), Limited: true}},
+		// Limited goes on the window that is used up, not on the 7d one that has room.
+		{{Name: "5h", Used: 1, ResetsAt: at(7200), Limited: true}, {Name: "7d", Used: 0.63, ResetsAt: at(259200)}},
 		{{Name: "45m", Used: 0.05, ResetsAt: at(2700)}},
 	}
 	if len(msgs) != len(want) {
@@ -168,8 +170,13 @@ func TestTranslateRateLimitWindowsNormalized(t *testing.T) {
 			t.Errorf("message %d: %+v\nwant %+v", i, evs[0], want[i])
 		}
 	}
+	// A limit reached with no window used up (credits depleted) limits them all, conservatively.
+	evs := tr.Translate(Message{Method: "account/rateLimits/updated", Params: raw(`{"rateLimits":{"primary":{"usedPercent":30,"windowDurationMins":300},"secondary":{"usedPercent":10,"windowDurationMins":10080},"rateLimitReachedType":"workspace_member_credits_depleted"}}`)})
+	if w := evs[0].(rt.QuotaUpdate).Windows; !w[0].Limited || !w[1].Limited {
+		t.Fatalf("windows = %+v, want both limited", w)
+	}
 	// A window that gives no length is named by its position, and no reset is nil.
-	evs := tr.Translate(Message{Method: "account/rateLimits/updated", Params: raw(`{"rateLimits":{"primary":{"usedPercent":150},"secondary":{"usedPercent":0,"windowDurationMins":60}}}`)})
+	evs = tr.Translate(Message{Method: "account/rateLimits/updated", Params: raw(`{"rateLimits":{"primary":{"usedPercent":150},"secondary":{"usedPercent":0,"windowDurationMins":60}}}`)})
 	got := evs[0].(rt.QuotaUpdate).Windows
 	if got[0].Name != "primary" || got[0].Used != 1 || got[0].ResetsAt != nil || got[1].Name != "60m" {
 		t.Fatalf("windows = %+v", got)
@@ -197,18 +204,24 @@ func TestTranslateUnknownItemIsUnknown(t *testing.T) {
 }
 
 func TestTranslateSteerAndApprovalTurns(t *testing.T) {
-	// The steer fixture is a later turn: no thread/started; the user echo carries the steer's client id.
-	got := translateAll(t, "steer-turn")
+	// The steer fixture is a later turn of the same thread: no thread/started; the user echo carries the steer's client
+	// id. Its tokens are the change of the totals since simple-turn's end (last is 5300/30/5120, the change 5290/30/5120).
+	tr := NewTranslator()
+	for _, m := range fixtureMessages(t, "simple-turn") {
+		tr.Translate(m)
+	}
+	var got []rt.Event
+	for _, m := range fixtureMessages(t, "steer-turn") {
+		got = append(got, tr.Translate(m)...)
+	}
 	want := []rt.Event{
 		rt.Unknown{Kind: "turn/started"},
 		rt.Unknown{Kind: "userMessage"},
 		rt.UserEcho{Text: "Also mention the weather.", UUID: "c0ffee00-0000-4000-8000-000000000003"},
 		rt.Unknown{Kind: "agentMessage"},
 		rt.AssistantText{Text: "Noted: it is sunny."},
-		rt.TurnEnd{OK: true, Text: "Noted: it is sunny.", InputTokens: 5300, OutputTokens: 30, CacheReadTokens: 5120, NumTurns: 1, Duration: 2100 * time.Millisecond},
+		rt.TurnEnd{SessionID: "thr_fixture_0001", OK: true, Text: "Noted: it is sunny.", InputTokens: 170, OutputTokens: 30, CacheReadTokens: 5120, NumTurns: 1, Duration: 2100 * time.Millisecond},
 	}
-	// Without a thread/started the session id still comes from the turn's own threadId.
-	want[5] = func() rt.Event { e := want[5].(rt.TurnEnd); e.SessionID = "thr_fixture_0001"; return e }()
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("steer:\n%+v\nwant\n%+v", got, want)
 	}
@@ -270,5 +283,40 @@ func TestTranslateToolResultsAndTurnEndDetails(t *testing.T) {
 	end = tr.Translate(Message{Method: "turn/completed", Params: raw(`{"threadId":"t","turn":{"id":"u","items":[],"status":"failed"}}`)})[0].(rt.TurnEnd)
 	if end.OK || end.Subtype != "failed" {
 		t.Fatalf("a failed turn with no error info: %+v", end)
+	}
+}
+
+// A turn's tokens are the change of the thread's totals over it (Codex's `last` is only the latest model call), and
+// input leaves out the cached part, as Claude's does.
+func TestTranslateTokensAreTheTurnsDeltaWithoutCachedInput(t *testing.T) {
+	tr := NewTranslator()
+	usage := func(lastIn, lastOut, lastCached, totIn, totOut, totCached int) {
+		b := func(i, o, c int) string {
+			return fmt.Sprintf(`{"inputTokens":%d,"outputTokens":%d,"cachedInputTokens":%d,"reasoningOutputTokens":0,"totalTokens":%d}`, i, o, c, i+o)
+		}
+		tr.Translate(Message{Method: "thread/tokenUsage/updated", Params: raw(`{"threadId":"t","turnId":"u","tokenUsage":{"last":` + b(lastIn, lastOut, lastCached) + `,"total":` + b(totIn, totOut, totCached) + `}}`)})
+	}
+	end := func() rt.TurnEnd {
+		return tr.Translate(Message{Method: "turn/completed", Params: raw(`{"threadId":"t","turn":{"id":"u","items":[],"status":"completed"}}`)})[0].(rt.TurnEnd)
+	}
+	// The first turn of a thread: two model calls.
+	usage(1000, 10, 400, 1000, 10, 400)
+	usage(1500, 20, 900, 2500, 30, 1300)
+	if e := end(); e.InputTokens != 1200 || e.OutputTokens != 30 || e.CacheReadTokens != 1300 {
+		t.Fatalf("turn 1: %+v", e)
+	}
+	// The next: one call, whose own usage (last) is not the turn's change in the totals either.
+	usage(1500, 20, 600, 4000, 50, 1900)
+	usage(1700, 25, 800, 5700, 75, 2700)
+	if e := end(); e.InputTokens != 1800 || e.OutputTokens != 45 || e.CacheReadTokens != 1400 {
+		t.Fatalf("turn 2: %+v (want 3200 input - 1400 cached, 45 output)", e)
+	}
+	// A turn with no usage update has no tokens; cached above input does not make input negative.
+	if e := end(); e.InputTokens != 0 || e.OutputTokens != 0 || e.CacheReadTokens != 0 {
+		t.Fatalf("turn without usage: %+v", e)
+	}
+	usage(10, 1, 50, 5710, 76, 2750)
+	if e := end(); e.InputTokens != 0 {
+		t.Fatalf("input = %d, want 0 (cached 50 of 10)", e.InputTokens)
 	}
 }

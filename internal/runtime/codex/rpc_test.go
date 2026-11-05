@@ -217,3 +217,128 @@ func TestConnSkipsLinesThatAreNotJSON(t *testing.T) {
 		t.Fatalf("msg = %+v", m)
 	}
 }
+
+// A nil params goes out as {}: the real protocol requires an object for most methods and rejects null.
+func TestConnNilParamsAreAnEmptyObject(t *testing.T) {
+	p := newPipeConn(t)
+	go func() { _ = p.conn.Call(context.Background(), "account/read", nil, nil) }()
+	if req := p.readRequest(t); string(req["params"]) != "{}" {
+		t.Fatalf("params = %s, want {}", req["params"])
+	}
+}
+
+// R46: a server request is handled off the read loop, so its handler may wait for a Call (an interrupt, while an
+// approval is pending) and the loop keeps reading, which that Call's response needs.
+func TestConnServerRequestHandlerMayCall(t *testing.T) {
+	cr, sw := io.Pipe()
+	sr, cw := io.Pipe()
+	defer sw.Close()
+	conn := NewConn(cr, cw, nil)
+	in := bufio.NewReader(sr)
+	handled := make(chan error, 1)
+	go conn.Run(func(m Message) {
+		if len(m.ID) == 0 {
+			return
+		}
+		err := conn.Call(context.Background(), "turn/interrupt", map[string]string{"threadId": "t"}, nil)
+		if err == nil {
+			err = conn.Respond(m.ID, map[string]string{"decision": "decline"})
+		}
+		handled <- err
+	})
+	io.WriteString(sw, `{"id":42,"method":"item/commandExecution/requestApproval","params":{}}`+"\n")
+	line, err := in.ReadBytes('\n') // the handler's Call
+	if err != nil || !strings.Contains(string(line), `"turn/interrupt"`) {
+		t.Fatalf("line = %q, %v", line, err)
+	}
+	io.WriteString(sw, `{"id":1,"result":{}}`+"\n")
+	line, err = in.ReadBytes('\n') // then its answer to the request
+	if err != nil || !strings.Contains(string(line), `"id":42`) || !strings.Contains(string(line), "decline") {
+		t.Fatalf("line = %q, %v", line, err)
+	}
+	if err := <-handled; err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The transcript must not keep the account a token refresh request names.
+func TestConnOnLineRedactsTheAuthRefreshRequest(t *testing.T) {
+	p := newPipeConn(t)
+	p.send(t, `{"id":3,"method":"account/chatgptAuthTokens/refresh","params":{"reason":"unauthorized","previousAccountId":"acct_real_123"}}`)
+	line := string(<-p.lines)
+	if strings.Contains(line, "acct_real_123") || !strings.Contains(line, "account/chatgptAuthTokens/refresh") || !strings.Contains(line, "unauthorized") {
+		t.Fatalf("transcript line = %s", line)
+	}
+	if m := <-p.msgs; !strings.Contains(string(m.Params), "acct_real_123") {
+		t.Fatalf("the handler must still get the real params: %s", m.Params)
+	}
+}
+
+// errReader gives its data, then fails.
+type errReader struct {
+	data string
+	err  error
+}
+
+func (r *errReader) Read(p []byte) (int, error) {
+	if r.data == "" {
+		return 0, r.err
+	}
+	n := copy(p, r.data)
+	r.data = r.data[n:]
+	return n, nil
+}
+
+func TestConnRunReturnsReadErrorsDistinctFromEOF(t *testing.T) {
+	boom := errors.New("boom")
+	conn := NewConn(&errReader{data: "{\"method\":\"a\",\"params\":{}}\n", err: boom}, io.Discard, nil)
+	var got []string
+	if err := conn.Run(func(m Message) { got = append(got, m.Method) }); !errors.Is(err, boom) || len(got) != 1 {
+		t.Fatalf("Run = %v after %v, want the read error", err, got)
+	}
+	if err := conn.Call(context.Background(), "x", nil, nil); !errors.Is(err, ErrConnClosed) || !strings.Contains(err.Error(), "boom") {
+		t.Fatalf("Call after a read error = %v", err)
+	}
+	if err := NewConn(strings.NewReader(""), io.Discard, nil).Run(nil); err != nil {
+		t.Fatalf("Run at EOF = %v, want nil", err)
+	}
+}
+
+func TestConnAReplyWithoutAUsableIDDoesNotStrandCallers(t *testing.T) {
+	p := newPipeConn(t)
+	var logged []string
+	p.conn.Logf = func(f string, a ...any) { logged = append(logged, f) }
+	errc := make(chan error, 1)
+	go func() { errc <- p.conn.Call(context.Background(), "x", nil, nil) }()
+	p.readRequest(t)
+	// A parse error the server could not tie to a request ends the waiting call with that error.
+	p.send(t, `{"id":null,"error":{"code":-32700,"message":"parse error"}}`)
+	var re *RPCError
+	if err := <-errc; !errors.As(err, &re) || re.Code != -32700 {
+		t.Fatalf("err = %v, want the parse error", err)
+	}
+	// A reply with a string id cannot be matched: it is logged, and the connection goes on.
+	p.send(t, `{"id":"abc","result":{}}`)
+	p.send(t, `{"method":"after","params":{}}`)
+	if m := <-p.msgs; m.Method != "after" {
+		t.Fatalf("msg = %+v", m)
+	}
+	if len(logged) != 1 {
+		t.Fatalf("logged = %v", logged)
+	}
+}
+
+// A server that stopped reading its stdin must not hold a Call past its deadline.
+func TestConnCallWriteHonoursTheContext(t *testing.T) {
+	cr, sw := io.Pipe()
+	_, cw := io.Pipe() // nobody reads it: a write blocks
+	defer sw.Close()
+	conn := NewConn(cr, cw, nil)
+	go conn.Run(nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if err := conn.Call(ctx, "x", nil, nil); !errors.Is(err, context.DeadlineExceeded) || time.Since(start) > 2*time.Second {
+		t.Fatalf("err = %v after %v", err, time.Since(start))
+	}
+}

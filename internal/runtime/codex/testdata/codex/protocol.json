@@ -1,11 +1,20 @@
 {
   "codexVersion": "0.160.1",
   "methods": {
+    "account/chatgptAuthTokens/refresh": [
+      "reason"
+    ],
     "account/rateLimits/read": [],
     "account/rateLimits/updated": [
       "rateLimits"
     ],
     "account/read": [],
+    "applyPatchApproval": [
+      "callId",
+      "conversationId",
+      "fileChanges"
+    ],
+    "attestation/generate": [],
     "config/batchWrite": [
       "edits"
     ],
@@ -14,6 +23,13 @@
       "threadId",
       "turnId",
       "willRetry"
+    ],
+    "execCommandApproval": [
+      "callId",
+      "command",
+      "conversationId",
+      "cwd",
+      "parsedCmd"
     ],
     "hooks/list": [],
     "initialize": [
@@ -117,5 +133,49 @@
       "input",
       "threadId"
     ]
+  },
+  "paramsRequired": [
+    "account/chatgptAuthTokens/refresh",
+    "account/rateLimits/updated",
+    "account/read",
+    "applyPatchApproval",
+    "attestation/generate",
+    "config/batchWrite",
+    "error",
+    "execCommandApproval",
+    "hooks/list",
+    "initialize",
+    "item/agentMessage/delta",
+    "item/commandExecution/requestApproval",
+    "item/completed",
+    "item/fileChange/requestApproval",
+    "item/permissions/requestApproval",
+    "item/started",
+    "item/tool/call",
+    "item/tool/requestUserInput",
+    "mcpServer/elicitation/request",
+    "serverRequest/resolved",
+    "thread/resume",
+    "thread/start",
+    "thread/started",
+    "thread/status/changed",
+    "thread/tokenUsage/updated",
+    "turn/completed",
+    "turn/interrupt",
+    "turn/start",
+    "turn/started",
+    "turn/steer"
+  ],
+  "serverRequestAnswers": {
+    "account/chatgptAuthTokens/refresh": "error",
+    "applyPatchApproval": "error",
+    "attestation/generate": "error",
+    "execCommandApproval": "error",
+    "item/commandExecution/requestApproval": "decline",
+    "item/fileChange/requestApproval": "decline",
+    "item/permissions/requestApproval": "error",
+    "item/tool/call": "error",
+    "item/tool/requestUserInput": "error",
+    "mcpServer/elicitation/request": "decline"
   }
 }

@@ -1,7 +1,12 @@
 // Command protoextract records, from the JSON schema `codex app-server generate-json-schema` writes, the required
 // params of the protocol methods Athena uses, as protocol.json:
 //
-//	{"codexVersion": "0.160.1", "methods": {"turn/start": ["input", "threadId"], ...}}
+//	{"codexVersion": "0.160.1", "methods": {"turn/start": ["input", "threadId"], ...},
+//	 "paramsRequired": ["turn/start", ...], "serverRequestAnswers": {"item/tool/call": "error", ...}}
+//
+// methods maps each method to the required fields of its params; paramsRequired lists the methods whose params must be
+// present (an object), which the schema says apart from "no required fields"; serverRequestAnswers says how the client
+// answers each server request (not in the schema: written here).
 //
 // The fixtures test checks every fixture line against it, so a hand-written fixture cannot drift from the protocol.
 //
@@ -16,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 
 	"github.com/danielpina1/athena/internal/runtime/codex"
@@ -35,12 +41,31 @@ var used = map[string][]string{
 	"ServerRequest.json": {
 		"item/commandExecution/requestApproval", "item/fileChange/requestApproval", "item/permissions/requestApproval",
 		"item/tool/requestUserInput", "mcpServer/elicitation/request", "item/tool/call",
+		"account/chatgptAuthTokens/refresh", "attestation/generate", "applyPatchApproval", "execCommandApproval",
 	},
 }
 
+// answers is how the client answers each server request, so that no turn waits on one: "decline" (the request's own
+// response with a refusal) or "error" (a JSON-RPC error: Athena does not support it). The legacy applyPatchApproval
+// and execCommandApproval take another response shape than the v2 approvals, and are answered with an error.
+var answers = map[string]string{
+	"item/commandExecution/requestApproval": "decline",
+	"item/fileChange/requestApproval":       "decline",
+	"mcpServer/elicitation/request":         "decline",
+	"item/permissions/requestApproval":      "error",
+	"item/tool/requestUserInput":            "error",
+	"item/tool/call":                        "error",
+	"account/chatgptAuthTokens/refresh":     "error",
+	"attestation/generate":                  "error",
+	"applyPatchApproval":                    "error",
+	"execCommandApproval":                   "error",
+}
+
 type output struct {
-	CodexVersion string              `json:"codexVersion"`
-	Methods      map[string][]string `json:"methods"`
+	CodexVersion         string              `json:"codexVersion"`
+	Methods              map[string][]string `json:"methods"`
+	ParamsRequired       []string            `json:"paramsRequired"`
+	ServerRequestAnswers map[string]string   `json:"serverRequestAnswers"`
 }
 
 func main() {
@@ -51,13 +76,14 @@ func main() {
 		fmt.Fprintln(os.Stderr, "usage: protoextract [-version X.Y.Z] [-o file] <schema dir>")
 		os.Exit(2)
 	}
-	res := output{CodexVersion: *version, Methods: map[string][]string{}}
+	res := output{CodexVersion: *version, Methods: map[string][]string{}, ParamsRequired: []string{}, ServerRequestAnswers: answers}
 	for file, methods := range used {
-		if err := extract(filepath.Join(flag.Arg(0), file), methods, res.Methods); err != nil {
+		if err := extract(filepath.Join(flag.Arg(0), file), methods, &res); err != nil {
 			fmt.Fprintln(os.Stderr, "protoextract:", err)
 			os.Exit(1)
 		}
 	}
+	sort.Strings(res.ParamsRequired)
 	b, err := json.MarshalIndent(res, "", "  ") // map keys are sorted: the output is stable
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "protoextract:", err)
@@ -82,6 +108,7 @@ type schema struct {
 }
 
 type variant struct {
+	Required   []string `json:"required"`
 	Properties struct {
 		Method struct {
 			Enum []string `json:"enum"`
@@ -94,7 +121,7 @@ type variant struct {
 
 // extract adds the wanted methods of one schema file to into, each with the required fields of its params (none for a
 // method without params). A wanted method the file lacks is an error: the protocol changed under us.
-func extract(path string, wanted []string, into map[string][]string) error {
+func extract(path string, wanted []string, into *output) error {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return err
@@ -104,6 +131,7 @@ func extract(path string, wanted []string, into map[string][]string) error {
 		return fmt.Errorf("%s: %w", path, err)
 	}
 	found := map[string][]string{}
+	needsParams := map[string]bool{}
 	for _, v := range s.OneOf {
 		if len(v.Properties.Method.Enum) != 1 {
 			continue
@@ -119,13 +147,17 @@ func extract(path string, wanted []string, into map[string][]string) error {
 			sort.Strings(req)
 		}
 		found[v.Properties.Method.Enum[0]] = req
+		needsParams[v.Properties.Method.Enum[0]] = slices.Contains(v.Required, "params")
 	}
 	for _, m := range wanted {
 		req, ok := found[m]
 		if !ok {
 			return fmt.Errorf("%s: no method %q (the protocol changed?)", path, m)
 		}
-		into[m] = req
+		into.Methods[m] = req
+		if needsParams[m] {
+			into.ParamsRequired = append(into.ParamsRequired, m)
+		}
 	}
 	return nil
 }

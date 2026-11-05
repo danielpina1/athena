@@ -18,9 +18,13 @@
 //	                                 default), "untrusted" (they also do not run), or "foreign" (trusted, plus an
 //	                                 enabled hook of a repository's .codex)
 //	ATHENA_FAKE_CODEX_LOGGED_OUT     when set, account/read says there is no account and the rate limits are refused
+//	ATHENA_FAKE_CODEX_PROTOCOL       path of protocol.json (default: testdata/codex/protocol.json of the source tree it
+//	                                 was built from); every request it knows is checked against it, as the real server
+//	                                 does: params must be an object where the method needs params, with the required
+//	                                 fields present, or the answer is -32600
 //
 // It answers initialize, thread/start (thread id thr_fixture_<ATHENA_TICKET>, announced by a thread/started
-// notification), thread/resume, turn/start, turn/steer, turn/interrupt (the turn ends "interrupted"), hooks/list,
+// notification), thread/resume, turn/start (during a turn it steers into it, as the real server does), turn/steer, turn/interrupt (the turn ends "interrupted"), hooks/list,
 // config/batchWrite, account/read (acct_fixture) and account/rateLimits/read; any other request gets a -32601 error.
 //
 // Fixtures are real server lines with the placeholder ids thr_fixture_0001 and turn_fixture_0001, which fakecodex
@@ -31,8 +35,9 @@
 //	{"fake":"request","method":"item/commandExecution/requestApproval","params":{...}}
 //	    sends that server request (ids from 1000), waits for the client's answer and logs it
 //	{"fake":"hook","event":"PreToolUse","input":{...}}
-//	    runs the commands config.toml names for that event (the exact lines `[[hooks.<Event>.hooks]]` and
-//	    `command = "..."`) with the input on stdin, and drops the next item (its item/started and item/completed) when
+//	    runs the commands config.toml names for that event (it parses only `[[hooks.<Event>]]` matcher groups holding
+//	    `[[hooks.<Event>.hooks]]` handlers with `type = "command"` and `command = "..."`; with --strict-config any other
+//	    hooks shape stops the process at start, as Codex does) with the input on stdin, and drops the next item (its item/started and item/completed) when
 //	    a hook denies it: exit code 2, or stdout with "permissionDecision":"deny" or "decision":"block"
 package main
 
@@ -47,6 +52,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -65,6 +71,10 @@ func main() {
 	if len(args) == 0 || args[0] != "app-server" {
 		fmt.Fprintf(os.Stderr, "fakecodex: unsupported command %q\n", strings.Join(args, " "))
 		os.Exit(2)
+	}
+	if _, err := readHooks(os.Getenv("CODEX_HOME")); err != nil && slices.Contains(args, "--strict-config") {
+		fmt.Fprintf(os.Stderr, "fakecodex: invalid config.toml: %v\n", err)
+		os.Exit(1)
 	}
 	newServer().serve(os.Stdin)
 }
@@ -128,6 +138,7 @@ type server struct {
 	active  *turn
 	nextReq int
 	pending map[string]chan json.RawMessage
+	proto   *protocol
 }
 
 // turn is a running turn: its replay stops when cancelled is closed.
@@ -139,6 +150,7 @@ type turn struct {
 
 func newServer() *server {
 	s := &server{out: bufio.NewWriterSize(os.Stdout, 1<<16), nextReq: 1000, pending: map[string]chan json.RawMessage{}, thread: "thr_fixture_" + ticketName()}
+	s.proto = loadProtocol()
 	if p := ticketPath(os.Getenv("ATHENA_FAKE_CODEX_RPC_LOG")); p != "" {
 		f, err := os.OpenFile(p, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 		if err != nil {
@@ -220,6 +232,10 @@ func (s *server) request(w wire) {
 	}
 	_ = json.Unmarshal(w.Params, &p)
 	home := os.Getenv("CODEX_HOME")
+	if msg := s.proto.check(w.Method, w.Params); msg != "" {
+		s.replyError(w.ID, -32600, "Invalid request: "+msg)
+		return
+	}
 	switch w.Method {
 	case "initialize":
 		osName := "linux"
@@ -253,9 +269,10 @@ func (s *server) request(w wire) {
 		}
 	case "turn/start":
 		s.mu.Lock()
-		if s.active != nil && !s.active.done {
+		if t := s.active; t != nil && !t.done { // the real server steers a turn/start into the running turn
 			s.mu.Unlock()
-			s.replyError(w.ID, -32600, "a turn is already running")
+			s.reply(w.ID, map[string]any{"turn": map[string]any{"id": t.id, "items": []any{}, "status": "inProgress"}})
+			go s.replay(t, fixture("ATHENA_FAKE_CODEX_LATER_FIXTURE"), userEcho{text: joinText(p.Input), clientID: p.ClientMsgID}, true, false)
 			return
 		}
 		s.turns++
@@ -546,31 +563,64 @@ func rewriteUser(line []byte, echo userEcho) []byte {
 // hook is one command of $CODEX_HOME/config.toml.
 type hook struct{ event, command string }
 
-// readHooks parses the hooks of $CODEX_HOME/config.toml: only the lines `[[hooks.<Event>.hooks]]` and `command = "…"`.
-func readHooks(home string) []hook {
+// readHooks parses the hooks of $CODEX_HOME/config.toml, in the shape Codex loads: `[[hooks.<Event>]]` matcher groups,
+// each followed by `[[hooks.<Event>.hooks]]` handlers with `type = "command"` and `command = "…"`. It returns the valid
+// hooks, and an error for the first piece of any other shape (which Codex's --strict-config refuses).
+func readHooks(home string) ([]hook, error) {
 	f, err := os.Open(filepath.Join(home, "config.toml"))
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 	defer f.Close()
 	var hooks []hook
-	event := ""
+	var firstErr error
+	fail := func(format string, a ...any) {
+		if firstErr == nil {
+			firstErr = fmt.Errorf(format, a...)
+		}
+	}
+	group := ""
+	var cur *hook
+	curType := ""
+	finish := func() {
+		if cur == nil {
+			return
+		}
+		if curType != "command" || cur.command == "" {
+			fail("hooks.%s.hooks: a handler needs type = \"command\" and a command", cur.event)
+		} else {
+			hooks = append(hooks, *cur)
+		}
+		cur, curType = nil, ""
+	}
 	sc := bufio.NewScanner(f)
 	sc.Buffer(nil, 1<<20)
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
 		switch {
 		case strings.HasPrefix(line, "[[hooks.") && strings.HasSuffix(line, ".hooks]]"):
-			event = strings.TrimSuffix(strings.TrimPrefix(line, "[[hooks."), ".hooks]]")
-		case strings.HasPrefix(line, "["):
-			event = ""
-		case event != "" && strings.HasPrefix(line, "command = "):
-			if cmd, err := strconv.Unquote(strings.TrimPrefix(line, "command = ")); err == nil {
-				hooks = append(hooks, hook{event: event, command: cmd})
+			finish()
+			event := strings.TrimSuffix(strings.TrimPrefix(line, "[[hooks."), ".hooks]]")
+			if group != event {
+				fail("[[hooks.%s.hooks]] has no [[hooks.%s]] matcher group before it", event, event)
 			}
+			cur = &hook{event: event}
+		case strings.HasPrefix(line, "[[hooks.") && strings.HasSuffix(line, "]]"):
+			finish()
+			group = strings.TrimSuffix(strings.TrimPrefix(line, "[[hooks."), "]]")
+		case strings.HasPrefix(line, "["):
+			finish()
+			group = ""
+		case cur != nil && strings.HasPrefix(line, "command = "):
+			if cmd, err := strconv.Unquote(strings.TrimPrefix(line, "command = ")); err == nil {
+				cur.command = cmd
+			}
+		case cur != nil && strings.HasPrefix(line, "type = "):
+			curType, _ = strconv.Unquote(strings.TrimPrefix(line, "type = "))
 		}
 	}
-	return hooks
+	finish()
+	return hooks, firstErr
 }
 
 func hooksMode() string {
@@ -588,7 +638,8 @@ func hookList(home, cwd string) []any {
 	if hooksMode() == "untrusted" {
 		trust = "untrusted"
 	}
-	for i, h := range readHooks(home) {
+	configured, _ := readHooks(home)
+	for i, h := range configured {
 		list = append(list, map[string]any{
 			"key": fmt.Sprintf("user:%s:%d", h.event, i), "eventName": lowerFirst(h.event), "handlerType": "command",
 			"command": h.command, "enabled": true, "isManaged": false, "source": "user",
@@ -628,7 +679,8 @@ func (s *server) runHook(event string, input json.RawMessage) (denied bool) {
 		rec["skipped"] = "untrusted"
 		return false
 	}
-	for _, h := range readHooks(os.Getenv("CODEX_HOME")) {
+	configured, _ := readHooks(os.Getenv("CODEX_HOME"))
+	for _, h := range configured {
 		if h.event != event {
 			continue
 		}
@@ -657,4 +709,55 @@ func (s *server) runHook(event string, input json.RawMessage) (denied bool) {
 		}
 	}
 	return false
+}
+
+// protocol is protocol.json: what the real server checks of a request.
+type protocol struct {
+	Methods        map[string][]string `json:"methods"`
+	ParamsRequired []string            `json:"paramsRequired"`
+}
+
+// loadProtocol reads ATHENA_FAKE_CODEX_PROTOCOL, or the protocol.json beside the fixtures of the source tree this
+// binary was built from; nil (every request passes) when it cannot be read.
+func loadProtocol() *protocol {
+	path := os.Getenv("ATHENA_FAKE_CODEX_PROTOCOL")
+	if path == "" {
+		_, file, _, _ := runtime.Caller(0)
+		path = filepath.Join(filepath.Dir(file), "..", "codex", "protocol.json")
+	}
+	b, err := os.ReadFile(path)
+	var p protocol
+	if err == nil {
+		err = json.Unmarshal(b, &p)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "fakecodex: no protocol.json, requests are not checked: %v\n", err)
+		return nil
+	}
+	return &p
+}
+
+// check returns why a request of a known method is invalid ("" when it is not, or the method is unknown).
+func (p *protocol) check(method string, params json.RawMessage) string {
+	if p == nil {
+		return ""
+	}
+	required, known := p.Methods[method]
+	if !known {
+		return ""
+	}
+	var obj map[string]json.RawMessage
+	present := len(bytes.TrimSpace(params)) > 0 && string(bytes.TrimSpace(params)) != "null"
+	if present && json.Unmarshal(params, &obj) != nil {
+		return method + ": params must be an object"
+	}
+	if !present && (slices.Contains(p.ParamsRequired, method) || len(required) > 0) {
+		return method + ": params is required (an object)"
+	}
+	for _, f := range required {
+		if _, ok := obj[f]; !ok {
+			return fmt.Sprintf("%s: missing field `%s`", method, f)
+		}
+	}
+	return ""
 }
