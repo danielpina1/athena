@@ -624,7 +624,9 @@ func (n *Node) worktreeFiles(ctx context.Context, p placement, branch string) ([
 	if err != nil {
 		return nil, false, err
 	}
-	env := append(diffEnv(), "GIT_DIR="+gitDir, "GIT_WORK_TREE="+dir)
+	// The common dir is pinned too: the worktree's commondir file is writable by the worker, and would otherwise choose
+	// the config git reads (gitDir is <common>/worktrees/<name>, worktreeGitDir checked it).
+	env := append(diffEnv(), "GIT_DIR="+gitDir, "GIT_COMMON_DIR="+filepath.Dir(filepath.Dir(gitDir)), "GIT_WORK_TREE="+dir)
 	others, cut, err := diffGit(ctx, dir, env, maxNumstatSize, "ls-files", "--others", "--exclude-standard", "-z")
 	if err != nil {
 		return nil, false, err
@@ -696,6 +698,10 @@ func worktreeGitDir(ctx context.Context, repo, dir string) (string, error) {
 			continue
 		}
 		at := strings.TrimSpace(string(b))
+		if !filepath.IsAbs(at) {
+			// worktree.useRelativePaths (git 2.48+) records it relative to the admin directory.
+			at = filepath.Join(admin, at)
+		}
 		if st, err := os.Stat(filepath.Dir(at)); err == nil && filepath.Base(at) == ".git" && os.SameFile(st, want) {
 			return admin, nil
 		}

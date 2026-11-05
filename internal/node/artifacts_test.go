@@ -699,6 +699,48 @@ func TestWorktreeGitDirIsPinned(t *testing.T) {
 	}
 }
 
+// A worker that rewrites its worktree's commondir (the sandbox leaves it writable) cannot point the listing at a
+// git config of its own: the common dir is pinned too.
+func TestWorktreeCommonDirIsPinned(t *testing.T) {
+	n, wt := repoFilesNode(t)
+	b, err := os.ReadFile(filepath.Join(wt, ".git"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin := strings.TrimSpace(strings.TrimPrefix(string(b), "gitdir:"))
+	fake := filepath.Join(t.TempDir(), "fake")
+	git(t, t.TempDir(), "init", "-q", fake)
+	gd := filepath.Join(fake, ".git")
+	writeFile(t, filepath.Join(gd, "info", "exclude"), "REPORT.md\n")
+	writeFile(t, filepath.Join(admin, "commondir"), gd+"\n")
+	files, _, err := n.TicketFiles(context.Background(), "T-0001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(files, func(f FileEntry) bool { return f.Path == "REPORT.md" && f.Status == "?" }) {
+		t.Errorf("REPORT.md is not listed: the worktree's commondir chose the git config: %v", files)
+	}
+}
+
+// A worktree recorded with a relative gitdir (worktree.useRelativePaths, git 2.48+) is found: the path is relative
+// to its admin directory, not to the server's working directory.
+func TestRelativeWorktreeGitdirIsFound(t *testing.T) {
+	n, wt := repoFilesNode(t)
+	b, err := os.ReadFile(filepath.Join(wt, ".git"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin := strings.TrimSpace(strings.TrimPrefix(string(b), "gitdir:"))
+	rel, err := filepath.Rel(admin, filepath.Join(wt, ".git"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(admin, "gitdir"), rel+"\n")
+	if _, _, err := n.TicketFiles(context.Background(), "T-0001"); err != nil {
+		t.Fatalf("relative gitdir: %v", err)
+	}
+}
+
 // The repository's own core.fsmonitor (which ls-files does run, as the control shows) never runs for a listing.
 func TestWorktreeFilesRunNoFsmonitor(t *testing.T) {
 	n, wt := repoFilesNode(t)
