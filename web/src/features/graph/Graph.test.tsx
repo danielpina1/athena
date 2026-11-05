@@ -266,6 +266,9 @@ describe("Graph", () => {
     // The running Ticket carries a ring.
     expect(node("T-1").querySelector("[data-ring]")).toBeTruthy();
     expect(node("T-2").querySelector("[data-ring]")).toBeNull();
+    // Its faint halo pulses (CSS only); other Tickets have none.
+    expect(node("T-1").querySelector("[data-glow]")?.classList.contains("motion-glow")).toBe(true);
+    expect(node("T-2").querySelector("[data-glow]")).toBeNull();
   });
 
   test("needs-you filter keeps the URL and shows only what needs you", async () => {

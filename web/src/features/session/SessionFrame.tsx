@@ -19,7 +19,7 @@ export type SessionViewProps = {
 export function LiveDot() {
   return (
     <span className="inline-flex shrink-0 items-center gap-1.5 font-mono text-xs text-text">
-      <span aria-hidden className="size-2 rounded-full bg-ok" />
+      <span aria-hidden className="size-2 animate-pulse rounded-full bg-ok" />
       live
     </span>
   );

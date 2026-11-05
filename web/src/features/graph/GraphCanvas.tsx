@@ -121,6 +121,20 @@ function Node({
           strokeWidth={2}
           className={cn("stroke-text", selected ? "opacity-100" : "opacity-0 group-focus-visible:opacity-100")}
         />
+        {/* A working Ticket's faint halo pulses (CSS only; still and invisible under reduced motion). */}
+        {node.look === "running" && (
+          <rect
+            data-glow
+            aria-hidden
+            x={x - 3}
+            y={y - 3}
+            width={w + 6}
+            height={h + 6}
+            fill="none"
+            strokeWidth={3}
+            className="motion-glow stroke-text"
+          />
+        )}
         <Box look={node.look} x={x} y={y} w={w} h={h} />
         {node.look === "running" && (
           <circle data-ring cx={x + w - 12} cy={y + 12} r={4} fill="none" strokeWidth={1.5} className="stroke-text" />

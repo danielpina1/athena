@@ -1,3 +1,103 @@
 @import "tailwindcss";
 @import "./ui/fonts.css";
 @import "./ui/tokens.css";
+
+/*
+ * Motion: the "flair", subtle and CSS only, on the --motion-* tokens' ease. Every animation here stops under
+ * prefers-reduced-motion (the global rule in tokens.css), and what a still element shows is its resting state: a ring
+ * and a glow are invisible, a washed row has no tint. Pulsing never says anything the text does not.
+ */
+@layer components {
+  /* Athena's mark: an ink box with a solid core; orange while anything needs the owner, its edge in --accent-ink
+     (orange alone is under 3:1 on white). Its ring breathes while a Ticket works, quicker while the owner is needed. */
+  .athena-mark {
+    position: relative;
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    flex-shrink: 0;
+    border: 1.5px solid var(--text);
+    border-radius: 3px;
+    color: var(--text);
+    --ring-duration: 2.4s;
+    --ring-scale: 1.8;
+  }
+  .athena-mark::before {
+    content: "";
+    position: absolute;
+    inset: 2px;
+    border-radius: 1px;
+    background: var(--text);
+  }
+  .athena-mark[data-state="needs-you"] {
+    border-color: var(--accent-ink);
+    color: var(--accent-ink);
+    --ring-duration: 1.6s;
+  }
+  .athena-mark[data-state="needs-you"]::before {
+    background: var(--accent);
+  }
+
+  /* A soft ring that grows from the element and fades, in its currentColor. */
+  .athena-ring {
+    position: relative;
+  }
+  .athena-ring::after {
+    content: "";
+    position: absolute;
+    inset: -1.5px;
+    border: 1.5px solid currentColor;
+    border-radius: inherit;
+    opacity: 0;
+    pointer-events: none;
+    animation: athena-ring var(--ring-duration, 1.6s) var(--ease) infinite;
+  }
+
+  /* A row that arrived while the page was open: it fades in under a brief accent wash that settles. */
+  .motion-wash {
+    animation:
+      athena-fade-in var(--motion-slow) var(--ease),
+      athena-wash 2.5s var(--ease);
+  }
+
+  /* The Needs you badge when its count goes up. */
+  .motion-pop {
+    animation: athena-pop var(--motion-slow) var(--ease);
+  }
+
+  /* The halo of a working Ticket on the graph. */
+  .motion-glow {
+    opacity: 0;
+    animation: athena-glow 2.4s ease-in-out infinite;
+  }
+}
+
+@keyframes athena-ring {
+  0% {
+    opacity: 0.6;
+    transform: scale(1);
+  }
+  70%,
+  100% {
+    opacity: 0;
+    transform: scale(var(--ring-scale, 2.1));
+  }
+}
+@keyframes athena-wash {
+  from {
+    background-color: color-mix(in srgb, var(--accent) 12%, transparent);
+  }
+  to {
+    background-color: transparent;
+  }
+}
+@keyframes athena-pop {
+  40% {
+    transform: scale(1.22);
+  }
+}
+@keyframes athena-glow {
+  50% {
+    opacity: 0.35;
+  }
+}
