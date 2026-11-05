@@ -10,7 +10,7 @@ option go_package = "github.com/danielpina1/athena/internal/pb/athenav1;athenav1
 
 message StreamOpen {
   string ticket_id = 1;
-  // from_offset -1 means "the last 200 items".
+  // from_offset -1 means "the last 200 items" (of the last 400 transcript lines).
   int64 from_offset = 2;
 }
 

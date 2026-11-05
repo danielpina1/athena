@@ -25,7 +25,7 @@ const (
 type StreamOpen struct {
 	state    protoimpl.MessageState `protogen:"open.v1"`
 	TicketId string                 `protobuf:"bytes,1,opt,name=ticket_id,json=ticketId,proto3" json:"ticket_id,omitempty"`
-	// from_offset -1 means "the last 200 items".
+	// from_offset -1 means "the last 200 items" (of the last 400 transcript lines).
 	FromOffset    int64 `protobuf:"varint,2,opt,name=from_offset,json=fromOffset,proto3" json:"from_offset,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

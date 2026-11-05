@@ -850,6 +850,29 @@ func TestStreamSkipsSilentLinesAndResumes(t *testing.T) {
 	}
 }
 
+// From the tail (from_offset -1) a stream sends the last tailItems items, however many transcript lines that takes: a
+// tail of silent lines does not leave the first screen sparse, and a dense one does not overrun the starting credit.
+func TestStreamTailIsTheLastItems(t *testing.T) {
+	_, fs, c := streamConn(t, InitialStreamCredit, "T-0001")
+	for i := 1; i <= node.TailLines; i++ {
+		fs.push("T-0001", say(i, fmt.Sprintf("line %d", i)))
+	}
+	streamOpen(c, "T-0001", -1)
+	texts, _ := c.items(tailItems)
+	if texts[0] != fmt.Sprintf("line %d", node.TailLines-tailItems+1) || texts[len(texts)-1] != fmt.Sprintf("line %d", node.TailLines) {
+		t.Fatalf("tail runs %q..%q", texts[0], texts[len(texts)-1])
+	}
+	c.quiet(200 * time.Millisecond)
+	for _, f := range c.backlog {
+		if f.GetStreamGap() != nil {
+			t.Fatalf("a gap in the tail: %v", f.GetStreamGap())
+		}
+	}
+	if node.TailLines < 2*tailItems {
+		t.Fatalf("the node reads %d lines for a tail of %d items: too few once half the lines are silent", node.TailLines, tailItems)
+	}
+}
+
 func TestStreamOpenErrorsAndClose(t *testing.T) {
 	_, fs, c := streamConn(t, 100, "T-0001")
 	streamOpen(c, "T-9999", -1)

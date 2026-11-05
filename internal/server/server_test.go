@@ -398,7 +398,7 @@ func TestEndToEndWithFake(t *testing.T) {
 	var lines []render.LogLine
 	eventually(t, "transcript rendered", func() bool {
 		lines = s.logs(id, false)
-		return len(lines) > 0 && lines[len(lines)-1].Kind == "other"
+		return slices.ContainsFunc(lines, func(l render.LogLine) bool { return l.Kind == "result" })
 	})
 	kinds := map[string]bool{}
 	for _, l := range lines {
@@ -407,7 +407,8 @@ func TestEndToEndWithFake(t *testing.T) {
 			t.Errorf("bad log line %+v", l)
 		}
 	}
-	for _, k := range []string{"init", "say", "tool", "result", "other"} {
+	// "input" is the task as the session echoed it (--replay-user-messages).
+	for _, k := range []string{"init", "input", "say", "tool", "result", "other"} {
 		if !kinds[k] {
 			t.Errorf("no %s line in %+v", k, lines)
 		}
@@ -485,7 +486,7 @@ func TestLogsFollowEndsWithTicket(t *testing.T) {
 	nodeCall(t, dir, node.ReportRequest{Op: node.OpReport, Ticket: id, Assignment: a.ID, Status: "dropped", Summary: "nothing to do"}, &resp)
 	select {
 	case l := <-got:
-		if len(l) == 0 || l[0].Kind != "init" {
+		if !slices.ContainsFunc(l, func(l render.LogLine) bool { return l.Kind == "init" }) {
 			t.Fatalf("follow lines = %+v, want the init line", l)
 		}
 	case <-time.After(waitTimeout):
@@ -831,7 +832,7 @@ func TestLogsSurviveWorktreeRemoval(t *testing.T) {
 		return os.IsNotExist(err)
 	})
 	lines := s.logs(sub.ID, false)
-	if len(lines) == 0 || lines[0].Kind != "init" {
+	if !slices.ContainsFunc(lines, func(l render.LogLine) bool { return l.Kind == "init" }) {
 		t.Fatalf("logs of the ended ticket = %+v, want its transcript", lines)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "transcripts", sub.ID+".jsonl")); err != nil {

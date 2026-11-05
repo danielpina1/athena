@@ -24,7 +24,7 @@ export type StreamOpen = Message<"athena.v1.StreamOpen"> & {
   ticketId: string;
 
   /**
-   * from_offset -1 means "the last 200 items".
+   * from_offset -1 means "the last 200 items" (of the last 400 transcript lines).
    *
    * @generated from field: int64 from_offset = 2;
    */

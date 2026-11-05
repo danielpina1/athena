@@ -941,6 +941,9 @@ func (r *runner) run() {
 			Env:                env,
 			TranscriptPath:     n.transcriptPath(s.t.ID),
 			OnLine:             func(off int64, line []byte) { n.streams.add(s.t.ID, off, line) },
+			// The transcript keeps what the worker was sent, so the session view shows it (internal/render); the echo
+			// is no event the runner acts on (onEvent and account ignore claude.UserEcho).
+			ReplayUserMessages: true,
 		})
 		if err != nil {
 			r.fail("start claude: " + err.Error())
@@ -1074,10 +1077,7 @@ func (r *runner) sendFirst(sess *claude.Session, recovering bool) {
 	} else if recovering {
 		b.WriteString(recoveryNote + recoveryAdvice + "\n")
 	} else {
-		fmt.Fprintf(&b, "You are the worker of Athena Ticket %s: %s\n\nExecution variables:\n", t.ID, t.Title)
-		for _, v := range r.n.variables(s) {
-			b.WriteString(v + "\n")
-		}
+		b.WriteString(workerPreamble(t, r.n.variables(s)))
 	}
 	// Inputs a crashed process received but never took into a step go again, ahead of what waits.
 	if len(r.unread) > 0 {
@@ -1099,6 +1099,17 @@ func (r *runner) sendFirst(sess *claude.Session, recovering bool) {
 	}
 	r.inputSent()
 	r.markSent(ids)
+}
+
+// workerPreamble opens a new session's first message: who the worker is and its execution variables. The session view
+// (internal/render) recognises it and shows only the Inputs after it.
+func workerPreamble(t core.Ticket, vars []string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "You are the worker of Athena Ticket %s: %s\n\nExecution variables:\n", t.ID, t.Title)
+	for _, v := range vars {
+		b.WriteString(v + "\n")
+	}
+	return b.String()
 }
 
 // deliver sends the Inputs that wait for the Ticket now and reports exactly those as delivered.
