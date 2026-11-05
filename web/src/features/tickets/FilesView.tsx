@@ -1,7 +1,9 @@
 import { type TicketFiles, useArtifact } from "@/lib/artifacts/api";
 import { Mono } from "@/ui/athena/Mono";
 import { EmptyState } from "@/ui/athena/EmptyState";
+import { hasBidi, markBidi } from "@/lib/text/ansi";
 import { ArtifactFailure, ListSkeleton } from "./ArtifactFailure";
+import { BidiWarning } from "./BidiWarning";
 
 /** 2.0 KB, 12 B. */
 export function formatSize(bytes: number): string {
@@ -34,18 +36,24 @@ export function FilesView({ ticketId }: { ticketId: string }) {
         </p>
       )}
       <ul aria-label="Files" className="grid min-w-0 border-t border-line-soft">
-        {files.map((f) => (
-          <li key={f.path} className="flex min-w-0 items-center gap-3 border-b border-line-soft">
-            <a
-              href={fileHref(ticketId, f.path)}
-              download={f.path.split("/").pop()}
-              className="flex min-h-11 min-w-0 flex-1 items-center py-1 font-mono text-xs break-words wrap-anywhere underline decoration-line-soft underline-offset-4 hover:decoration-text lg:min-h-9"
-            >
-              {f.path}
-            </a>
-            <Mono className="shrink-0">{formatSize(f.size)}</Mono>
-          </li>
-        ))}
+        {files.map((f) => {
+          // A name with bidirectional controls shows them as markers, here and as the saved name: never reordered.
+          const bidi = hasBidi(f.path);
+          const shown = bidi ? markBidi(f.path) : f.path;
+          return (
+            <li key={f.path} className="flex min-w-0 flex-wrap items-center gap-x-3 border-b border-line-soft">
+              <a
+                href={fileHref(ticketId, f.path)}
+                download={shown.split("/").pop()}
+                className="flex min-h-11 min-w-0 flex-1 items-center py-1 font-mono text-xs break-words wrap-anywhere underline decoration-line-soft underline-offset-4 hover:decoration-text lg:min-h-9"
+              >
+                {shown}
+              </a>
+              <Mono className="shrink-0">{formatSize(f.size)}</Mono>
+              {bidi && <BidiWarning className="mb-2 basis-full" />}
+            </li>
+          );
+        })}
       </ul>
     </div>
   );

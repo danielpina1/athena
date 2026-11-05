@@ -9,7 +9,8 @@ import { EmptyState } from "@/ui/athena/EmptyState";
 import { Mono } from "@/ui/athena/Mono";
 import { Button } from "@/ui/primitives/button";
 import { ArtifactFailure, ListSkeleton } from "./ArtifactFailure";
-import { type DiffLine, type FileSection, parsePatch } from "./diff";
+import { BidiWarning } from "./BidiWarning";
+import { type DiffLine, displayPath, type FileSection, parsePatch } from "./diff";
 
 const STATUS: Record<string, string> = {
   A: "Added",
@@ -101,6 +102,7 @@ function FileBlock({
         </span>
         {file && <Counts file={file} />}
       </button>
+      {section.bidi && <BidiWarning className="mt-2" />}
       <div id={`${id}-body`} hidden={!open} className="pt-2">
         {open &&
           (section.lines.length > 0 ? (
@@ -118,7 +120,7 @@ function Changes({ diff }: { diff: Diff }) {
   // The patch and the file list come from one git run, in one order; when the list was cut they differ and the
   // sections are matched by path.
   const fileFor = (s: FileSection, i: number) =>
-    sections.length === diff.files.length ? diff.files[i] : diff.files.find((f) => f.path === s.path);
+    sections.length === diff.files.length ? diff.files[i] : diff.files.find((f) => displayPath(f.path) === s.path);
   const [open, setOpen] = useState<ReadonlySet<number>>(
     () => new Set(sections.flatMap((s, i) => (i < OPEN_FILES && s.lines.length <= OPEN_LINES ? [i] : []))),
   );
@@ -131,7 +133,7 @@ function Changes({ diff }: { diff: Diff }) {
       return next;
     });
   const jump = (path: string, i: number) => {
-    const at = sections.findIndex((s, j) => (sections.length === diff.files.length ? j === i : s.path === path));
+    const at = sections.findIndex((s, j) => (sections.length === diff.files.length ? j === i : s.path === displayPath(path)));
     if (at < 0) return;
     setOpen((prev) => new Set(prev).add(at));
     requestAnimationFrame(() => root.current?.querySelector(`#diff-file-${at}`)?.scrollIntoView({ block: "start" }));
@@ -172,7 +174,7 @@ function Changes({ diff }: { diff: Diff }) {
                 <span aria-hidden>{f.status}</span>
               </Mono>
               <span dir="auto" className="min-w-0 flex-1 font-mono text-xs break-words wrap-anywhere">
-                {f.oldPath ? `${f.oldPath} → ${f.path}` : f.path}
+                {f.oldPath ? `${displayPath(f.oldPath)} → ${displayPath(f.path)}` : displayPath(f.path)}
               </span>
               <Counts file={f} />
             </button>

@@ -119,6 +119,12 @@ test("a long title stays on one line", () => {
   expect((title).getAttribute("dir")).toBe("auto");
 });
 
+test("a title loses escapes and bidirectional controls", () => {
+  load({ tickets: [{ id: "T-9", title: "\u001b[31mfix\u001b[0m the \u202elogin\u202c page", stage: "working", updatedAt: at(0) }] });
+  renderList();
+  expect(screen.getByText("fix the login page")).toBeTruthy();
+});
+
 test("two filter changes before a re-render both land", () => {
   const { result } = renderHook(() => useFilterParams(), { wrapper: ({ children }) => <MemoryRouter initialEntries={["/tickets?tab=changes"]}>{children}</MemoryRouter> });
   act(() => {

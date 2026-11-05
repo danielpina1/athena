@@ -1,9 +1,10 @@
 // A unified diff (git's, as the server cuts it) split into files and lines. Only the DiffView chunk imports this.
-import { stripAnsi } from "@/lib/text/ansi";
+import { hasBidi, markBidi, stripEscapes } from "@/lib/text/ansi";
 
 export type DiffLineKind = "hunk" | "add" | "del" | "ctx" | "note";
 export type DiffLine = { kind: DiffLineKind; /** The line without its marker. */ text: string };
-export type FileSection = { path: string; binary: boolean; lines: DiffLine[] };
+/** bidi: the file's name or lines had bidirectional controls, shown as markers (the view warns about it). */
+export type FileSection = { path: string; binary: boolean; lines: DiffLine[]; bidi: boolean };
 
 const ESC: Record<string, number> = { a: 7, b: 8, f: 12, n: 10, r: 13, t: 9, v: 11, "\\": 92, '"': 34 };
 
@@ -50,26 +51,33 @@ function section(header: string): FileSection {
   const rest = header.slice("diff --git ".length);
   for (const re of HEADERS) {
     const m = re.exec(rest);
-    if (m) return { path: dropPrefix(unquotePath(m[2]), "b/"), binary: false, lines: [] };
+    if (m) return { path: dropPrefix(unquotePath(m[2]), "b/"), binary: false, lines: [], bidi: false };
   }
-  return { path: "", binary: false, lines: [] };
+  return { path: "", binary: false, lines: [], bidi: false };
 }
 
-/** The patch's files in order. Escapes are stripped, so no line can carry a terminal sequence. */
+/**
+ * The patch's files in order. Escapes are stripped, so no line can carry a terminal sequence; bidirectional controls
+ * are shown as markers, in the lines and the names, and flag their file.
+ */
 export function parsePatch(patch: string): FileSection[] {
   const out: FileSection[] = [];
   let cur: FileSection | undefined;
   let inHunk = false;
-  const lines = stripAnsi(patch).split("\n");
+  const lines = stripEscapes(patch).split("\n");
   if (lines[lines.length - 1] === "") lines.pop();
-  for (const line of lines) {
+  for (const raw of lines) {
+    const bidi = hasBidi(raw);
+    const line = bidi ? markBidi(raw) : raw;
     if (line.startsWith("diff --git ")) {
       cur = section(line);
+      if (bidi) cur.bidi = true;
       out.push(cur);
       inHunk = false;
       continue;
     }
     if (!cur) continue;
+    if (bidi) cur.bidi = true;
     if (!inHunk) {
       if (line.startsWith("@@")) {
         inHunk = true;
@@ -93,5 +101,16 @@ export function parsePatch(patch: string): FileSection[] {
     else if (marker === "\\") cur.lines.push({ kind: "note", text: line.slice(2) });
     else cur.lines.push({ kind: "ctx", text });
   }
+  // A quoted name is decoded only now (git writes its UTF-8 as octal escapes): its controls go, its bidi is shown.
+  for (const f of out) {
+    const path = stripEscapes(f.path);
+    f.path = displayPath(path);
+    if (f.path !== path) f.bidi = true;
+  }
   return out;
+}
+
+/** A path as the diff view shows it: bidirectional controls as markers. The file list uses it too, to match. */
+export function displayPath(path: string): string {
+  return hasBidi(path) ? markBidi(path) : path;
 }

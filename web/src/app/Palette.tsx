@@ -23,6 +23,7 @@ import { NAV } from "@/app/routes";
 import { search, type SearchHit } from "@/app/search";
 import { errorMessage, interrupt, reply, retry, stop } from "@/lib/commands/actions";
 import { useAthena } from "@/lib/store/state";
+import { stripAnsi } from "@/lib/text/ansi";
 import { Mono } from "@/ui/athena/Mono";
 import {
   CommandDialog,
@@ -231,7 +232,7 @@ export function Palette({ open, onOpenChange }: { open: boolean; onOpenChange: (
                   <CommandItem key={t.id} value={`ticket ${t.id}`} onSelect={() => go(t.to)}>
                     <TicketIcon aria-hidden />
                     <Mono className="shrink-0 text-current">{t.id}</Mono>
-                    <span className="min-w-0 truncate">{t.title}</span>
+                    <span className="min-w-0 truncate">{stripAnsi(t.title)}</span>
                   </CommandItem>
                 ))}
               </CommandGroup>

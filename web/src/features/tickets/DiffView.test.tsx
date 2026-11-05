@@ -113,3 +113,32 @@ test("a Ticket without a branch yet is not found", async () => {
   render(<DiffView ticketId="T-1" />);
   expect(await screen.findByText("No changes to show.")).toBeTruthy();
 });
+
+test("a file with bidirectional controls shows them and says so", async () => {
+  respond(200, {
+    ...DIFF,
+    files: [
+      { path: "auth.js", status: "M", added: 1, deleted: 0, binary: false },
+      { path: "plain.js", status: "M", added: 1, deleted: 0, binary: false },
+    ],
+    patch: [
+      "diff --git a/auth.js b/auth.js",
+      "--- a/auth.js",
+      "+++ b/auth.js",
+      "@@ -1 +1 @@",
+      "+if (isAdmin\u202e) {",
+      "diff --git a/plain.js b/plain.js",
+      "--- a/plain.js",
+      "+++ b/plain.js",
+      "@@ -1 +1 @@",
+      "+ok();",
+      "",
+    ].join("\n"),
+  });
+  render(<DiffView ticketId="T-1" />);
+  const auth = await screen.findByRole("region", { name: "auth.js" });
+  expect(within(auth).getByText("if (isAdmin⟪U+202E⟫) {")).toBeTruthy();
+  const warning = within(auth).getByRole("note");
+  expect(warning.textContent).toMatch(/text-direction/i);
+  expect(within(screen.getByRole("region", { name: "plain.js" })).queryByRole("note")).toBeNull();
+});

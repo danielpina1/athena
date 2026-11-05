@@ -50,3 +50,21 @@ test("an unknown Ticket is said plainly", async () => {
   render(<FilesView ticketId="T-1" />);
   expect(await screen.findByText("No files to show.")).toBeTruthy();
 });
+
+test("a file name with bidirectional controls shows them and says so", async () => {
+  respond(200, {
+    files: [
+      { path: "invoice\u202efdp.exe", size: 10, modTime: "2026-11-04T09:00:00Z" },
+      { path: "plain.txt", size: 10, modTime: "2026-11-04T09:00:00Z" },
+    ],
+    truncated: false,
+  });
+  render(<FilesView ticketId="T-1" />);
+  const [odd, plain] = within(await screen.findByRole("list", { name: "Files" })).getAllByRole("listitem");
+  const link = within(odd).getByRole("link");
+  expect(link.textContent).toBe("invoice⟪U+202E⟫fdp.exe");
+  expect(link.getAttribute("download")).toBe("invoice⟪U+202E⟫fdp.exe");
+  expect(link.getAttribute("href")).toBe("/api/tickets/T-1/files/invoice%E2%80%AEfdp.exe");
+  expect(within(odd).getByRole("note").textContent).toMatch(/text-direction/i);
+  expect(within(plain).queryByRole("note")).toBeNull();
+});

@@ -7,6 +7,7 @@ import type { TicketSummary } from "@/gen/athena/v1/state_pb";
 import { useShortcut } from "@/app/shortcuts";
 import { selectSynced, selectTickets } from "@/lib/store/selectors";
 import { useAthena } from "@/lib/store/state";
+import { stripAnsi } from "@/lib/text/ansi";
 import { EmptyState } from "@/ui/athena/EmptyState";
 import { Mono } from "@/ui/athena/Mono";
 import { RelativeTime } from "@/ui/athena/RelativeTime";
@@ -35,7 +36,7 @@ function Row({ ticket, selected, needsYou, search }: { ticket: TicketSummary; se
         <span className="flex min-w-0 items-center gap-2">
           {needsYou && <span data-testid="needs-you-dot" aria-hidden className="size-2 shrink-0 rounded-full bg-accent" />}
           <span dir="auto" className="min-w-0 flex-1 truncate font-semibold">
-            {ticket.title}
+            {stripAnsi(ticket.title)}
           </span>
           <StageBadge stage={ticket.stage} action={ticket.action} outcome={ticket.outcome} />
         </span>

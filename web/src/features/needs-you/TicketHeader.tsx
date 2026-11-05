@@ -2,6 +2,7 @@ import { timestampMs, type Timestamp } from "@bufbuild/protobuf/wkt";
 import { type RefObject, useRef } from "react";
 import { Link } from "react-router";
 import type { TicketSummary } from "@/gen/athena/v1/state_pb";
+import { stripAnsi } from "@/lib/text/ansi";
 import { Mono } from "@/ui/athena/Mono";
 import { RelativeTime } from "@/ui/athena/RelativeTime";
 import { StageBadge } from "@/ui/athena/StageBadge";
@@ -31,7 +32,7 @@ export function TicketHeader({
     <header className="grid gap-1">
       <div className="flex items-start justify-between gap-3">
         <h2 className="min-w-0 flex-1 text-body font-semibold">
-          <Truncate text={ticket.title} lines={2} />
+          <Truncate text={stripAnsi(ticket.title)} lines={2} />
         </h2>
         <StageBadge
           stage={answered ? "working" : ticket.stage}
