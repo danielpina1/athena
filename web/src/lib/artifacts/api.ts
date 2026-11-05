@@ -35,9 +35,32 @@ export class ArtifactError extends Error {
   }
 }
 
-/** Each segment is escaped, the slashes between them are not: the route takes a path. */
-export const fileHref = (ticketId: string, path: string) =>
-  `/api/tickets/${encodeURIComponent(ticketId)}/files/${path.split("/").map(encodeURIComponent).join("/")}`;
+const decoded = (segment: string) => {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return segment;
+  }
+};
+
+/**
+ * Whether path is a file path inside a Ticket: relative, with no empty, "." or ".." segment (nor one that decodes to
+ * them, nor to a slash), and no NUL. A browser resolves ".." in a URL, so such a path would leave the Ticket's route.
+ */
+export function isFilePath(path: string): boolean {
+  if (!path || path.includes("\u0000")) return false;
+  return path.split("/").every((seg) => {
+    const d = decoded(seg);
+    return seg !== "" && d !== "." && d !== ".." && !d.includes("/") && !d.includes("\u0000");
+  });
+}
+
+/** Each segment is escaped, the slashes between them are not: the route takes a path. Throws for a path that is not
+ * a file path inside the Ticket (isFilePath). */
+export function fileHref(ticketId: string, path: string): string {
+  if (!isFilePath(path)) throw new Error("not a file path inside the Ticket");
+  return `/api/tickets/${encodeURIComponent(ticketId)}/files/${path.split("/").map(encodeURIComponent).join("/")}`;
+}
 
 /** The file to read in the page: text as text/plain (its first 1 MiB), an allowed image as itself. */
 export const viewHref = (ticketId: string, path: string) => `${fileHref(ticketId, path)}?view=1`;

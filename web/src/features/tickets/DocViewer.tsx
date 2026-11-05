@@ -291,9 +291,10 @@ export default function DocViewer({
   const here = useLocation();
   const [mode, setMode] = useState<Mode>("rendered");
   const [modes, setModes] = useState(false);
+  // Only a path in the loaded listing is read: ?file= is a URL anyone can craft, and never a way out of the Ticket.
   const listed = files.status === "ready" ? files.data.files : undefined;
-  const path = listed ? resolveFile(file, listed, dir) : files.status === "error" && !file.startsWith("/") ? file : undefined;
-  const entry = (path && listed?.find((f) => f.path === path)) || (path ? { path, size: 0 } : undefined);
+  const path = listed ? resolveFile(file, listed, dir) : undefined;
+  const entry = path ? listed?.find((f) => f.path === path) : undefined;
 
   useEffect(() => {
     if (path && path !== file) onResolve(path);
@@ -311,7 +312,7 @@ export default function DocViewer({
   const shownPath = path ?? file;
   const name = markBidi(baseName(shownPath));
   const folder = markBidi(shownPath.slice(0, shownPath.length - baseName(shownPath).length));
-  const status = entry && "status" in entry && entry.status ? FILE_STATUS[entry.status] : undefined;
+  const status = entry?.status ? FILE_STATUS[entry.status] : undefined;
   const meta = [folder || undefined, entry && entry.size > 0 ? formatSize(entry.size) : undefined, status?.label].filter(Boolean).join(" · ");
 
   let content;
@@ -330,7 +331,13 @@ export default function DocViewer({
       />
     );
   } else if (files.status === "error") {
-    content = <ErrorState title="The files could not be loaded." detail={files.error.code} onRetry={files.retry} />;
+    content = (
+      <ErrorState
+        title="The files could not be loaded."
+        detail={files.error.code === "not_found" ? "This Ticket has no files to read right now." : files.error.code}
+        onRetry={files.retry}
+      />
+    );
   } else {
     content = (
       <div aria-busy="true" className="grid gap-2">
@@ -345,7 +352,7 @@ export default function DocViewer({
     <Dialog open onOpenChange={(open) => !open && onClose()}>
       <Modal
         hideClose
-        data-doc-viewer
+        data-chunk={LAZY_SENTINEL}
         className={cn(
           "m-0 h-dvh max-h-none w-full max-w-none border-0 open:animate-fade-in",
           "lg:my-0 lg:mr-0 lg:ml-auto lg:w-[min(64rem,62vw)] lg:border-l lg:border-line lg:open:animate-slide-in",

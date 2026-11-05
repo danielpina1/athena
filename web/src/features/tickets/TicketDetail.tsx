@@ -4,7 +4,7 @@
 // holds, or what its worktree added or changed). ?file=<path> opens a file in the viewer, over the page. The Ticket's detail Deltas come from useWatch for as long as the page is open. The header's Reply (and
 // r) opens the Session tab and puts the cursor in the composer; replying is the composer's.
 import { ArrowLeftIcon } from "lucide-react";
-import { lazy, Suspense, useCallback, useState } from "react";
+import { lazy, Suspense, useCallback, useMemo, useState } from "react";
 import type { ReportView } from "@/gen/athena/v1/state_pb";
 import { Link, useLocation, useSearchParams } from "react-router";
 import type { ApprovalView, TicketSummary } from "@/gen/athena/v1/state_pb";
@@ -16,7 +16,7 @@ import { Composer, interruptSession } from "@/features/session/Composer";
 import { PinToggle } from "@/features/session/PinnedSessions";
 import { LazySessionView } from "@/features/session/SessionFrame";
 import { errorMessage, retry } from "@/lib/commands/actions";
-import { type Artifact, type TicketFiles, useArtifact } from "@/lib/artifacts/api";
+import { type Artifact, isFilePath, type TicketFiles, useArtifact } from "@/lib/artifacts/api";
 import { useWatch } from "@/lib/commands/useWatch";
 import { selectSynced } from "@/lib/store/selectors";
 import { useAthena } from "@/lib/store/state";
@@ -253,7 +253,12 @@ export function TicketDetail({ id }: { id: string }) {
   const back = `/tickets${filterSearch(params)}`;
   // The Ticket's files, read once for the Documents strip, the Files tab and the viewer, and again after a new Report.
   const listed = !!summary && hasFiles(summary);
-  const files = useArtifact<TicketFiles>(listed ? `/api/tickets/${encodeURIComponent(id)}/files` : "", useReportsSeen(detail?.reports));
+  const read = useArtifact<TicketFiles>(listed ? `/api/tickets/${encodeURIComponent(id)}/files` : "", useReportsSeen(detail?.reports));
+  // A listed path that is not a file path inside the Ticket (the server never sends one) is dropped, not linked.
+  const files = useMemo<Artifact<TicketFiles>>(
+    () => (read.status === "ready" ? { ...read, data: { ...read.data, files: read.data.files.filter((f) => isFilePath(f.path)) } } : read),
+    [read],
+  );
   const file = listed ? params.get("file") : null;
   const setFile = useCallback(
     (path: string | null) =>

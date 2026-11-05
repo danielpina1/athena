@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
-import { type Artifact, type TicketFiles } from "@/lib/artifacts/api";
+import { type Artifact, ArtifactError, type TicketFiles } from "@/lib/artifacts/api";
 import { bindSession } from "@/lib/auth/session";
 import DocViewer, { LAZY_SENTINEL } from "./DocViewer";
 
@@ -41,8 +41,36 @@ function open(file: string, files: Artifact<TicketFiles>, extra: { onClose?: () 
 
 const dialog = () => screen.getByRole("dialog");
 
-test("the viewer is a lazy chunk with its own sentinel", () => {
+test("the viewer is a lazy chunk with its own sentinel, rendered like the others", () => {
   expect(LAZY_SENTINEL).toBe("athena-lazy-chunk:doc-viewer");
+  serve("text");
+  open("notes.txt", ready(f("notes.txt")));
+  expect(document.querySelector(`[data-chunk="${LAZY_SENTINEL}"]`)).toBeTruthy();
+});
+
+test("?file= opens only a path in the loaded listing: never a way out of the Ticket", () => {
+  for (const file of ["../../auth/session", "../../T-0002/files/x.md", "docs/../../../auth/session", "%2e%2e/x"]) {
+    const fetch = serve("secret");
+    const view = open(file, ready(f("REPORT.md"), f("docs/x.md")));
+    expect(dialog().textContent, file).toContain("This file is not among the Ticket's files.");
+    expect(fetch, file).not.toHaveBeenCalled();
+    expect(within(dialog()).queryByRole("link", { name: "Download" }), file).toBeNull();
+    view.unmount();
+  }
+});
+
+test("when the listing failed, the viewer says so and fetches nothing", async () => {
+  const fetch = serve("secret");
+  const retry = vi.fn();
+  open("../../auth/session", { status: "error", error: new ArtifactError("not_found", 404), retry });
+  expect(dialog().textContent).toContain("The files could not be loaded.");
+  expect(fetch).not.toHaveBeenCalled();
+  expect(within(dialog()).queryByRole("link", { name: "Download" })).toBeNull();
+  await userEvent.click(within(dialog()).getByRole("button", { name: "Retry" }));
+  expect(retry).toHaveBeenCalled();
+  // Even a plain path is not read without the listing.
+  open("REPORT.md", { status: "error", error: new ArtifactError("internal", 500), retry });
+  expect(fetch).not.toHaveBeenCalled();
 });
 
 test("a Markdown report renders as a document, with its source a toggle away", async () => {
