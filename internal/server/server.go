@@ -362,6 +362,7 @@ func Run(ctx context.Context, cfg Config) (err error) {
 			home, _ = os.UserHomeDir()
 		}
 		c.local = newLocalRepos(fileCfg.localRepoRoots(home), []string{stateDir, ncfg.WorkRoot}, logger)
+		c.facts = newPlaceFacts()
 		if err := webEP.start(c, n, fx, version, &hubRef); err != nil {
 			return err
 		}

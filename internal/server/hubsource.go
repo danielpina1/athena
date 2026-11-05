@@ -4,8 +4,6 @@ import (
 	"cmp"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"slices"
 	"time"
 
@@ -215,8 +213,9 @@ func (s hubSource) NodeStatus() node.Status {
 // the newest Tickets, the last used first. A configured repository no Ticket used goes after them, by name; together
 // they are at most maxRepos. Then come the local git repositories the last scan found under the localRepoRoots and
 // not listed already (under any spelling through symbolic links), by name, at most maxLocalRepos (kind git, never
-// used). A folder is a git repository when it has
-// a .git entry.
+// used). A folder is a git repository when it has a .git entry. Repos runs on the hub's loop and reads the store
+// only: whether a used folder has a .git entry, and where it resolves, are what the placeFacts pass found off the
+// loop (a folder it has not probed yet is a plain folder until it has).
 func (s hubSource) Repos() ([]*athenav1.RepoView, error) {
 	places, err := s.d.st.RecentPlacements(repoTickets)
 	if err != nil {
@@ -238,7 +237,7 @@ func (s hubSource) Repos() ([]*athenav1.RepoView, error) {
 		}
 		if p.Dir != "" {
 			kind := "dir"
-			if _, err := os.Lstat(filepath.Join(p.Dir, ".git")); err == nil {
+			if s.d.facts.lookup(p.Dir).git {
 				kind = "git"
 			}
 			use(p.Dir, kind, p.At)
@@ -279,7 +278,7 @@ func (s hubSource) Repos() ([]*athenav1.RepoView, error) {
 		listed[name] = true
 		if e.kind != "github" {
 			// A found repository is a resolved path: a used folder spelled through a link is the same place.
-			listed[resolvePath(name)] = true
+			listed[s.d.facts.lookup(name).resolved] = true
 		}
 		out[i] = &athenav1.RepoView{Name: name, Kind: e.kind}
 		if !e.at.IsZero() {

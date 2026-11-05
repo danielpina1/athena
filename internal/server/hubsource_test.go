@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -35,6 +36,24 @@ func putTickets(t *testing.T, st *store.Store, tks ...*core.Ticket) {
 	}
 }
 
+// probedRepos is d's Repos once the folders a first read asked about were probed, as the background pass does.
+func probedRepos(t *testing.T, d *Dispatcher) []*athenav1.RepoView {
+	t.Helper()
+	if d.facts == nil {
+		d.facts = newPlaceFacts()
+	}
+	src := newHubSource(d)
+	if _, err := src.Repos(); err != nil {
+		t.Fatal(err)
+	}
+	d.facts.refresh(false)
+	got, err := src.Repos()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return got
+}
+
 func repoNames(rs []*athenav1.RepoView) (names, kinds []string) {
 	for _, r := range rs {
 		names, kinds = append(names, r.Name), append(kinds, r.Kind)
@@ -60,11 +79,7 @@ func TestSnapshotHasReposNewestFirst(t *testing.T) {
 		placedTicket("T-4", "c/d", "", t0.Add(-time.Hour)), // an older use of c/d does not move it back
 		placedTicket("T-5", "", "", t0.Add(2*time.Hour)),   // names nothing
 	)
-	src := newHubSource(&Dispatcher{st: st, gh: &gitHub{cfg: &GitHubConfig{Repos: []string{"z/last", "a/b", "c/d"}}}})
-	got, err := src.Repos()
-	if err != nil {
-		t.Fatal(err)
-	}
+	got := probedRepos(t, &Dispatcher{st: st, gh: &gitHub{cfg: &GitHubConfig{Repos: []string{"z/last", "a/b", "c/d"}}}})
 	names, kinds := repoNames(got)
 	wantNames := []string{"/tmp/x", gitDir, "c/d", "a/b", "z/last"}
 	wantKinds := []string{"dir", "git", "github", "github", "github"}
@@ -142,5 +157,87 @@ func TestReposAndNotificationsReachTheHub(t *testing.T) {
 	}
 	if snap, _ = w.hub.Snapshot(); fmt.Sprint(snap.Notifications.Muted) != "[answer]" || len(snap.Repos) != 1 {
 		t.Errorf("snapshot after: repos %v notifications %v", snap.Repos, snap.Notifications)
+	}
+}
+
+// Repos runs on the hub's loop: it reads what the background pass found about the placement folders (a .git entry,
+// the path through links), never the filesystem, so a folder on a dead mount cannot stall every dashboard.
+func TestReposReadCachedFolderFacts(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "athena.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	gitDir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(gitDir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	putTickets(t, st, placedTicket("T-1", "", gitDir, time.Date(2026, 11, 4, 9, 0, 0, 0, time.UTC)))
+	facts := newPlaceFacts()
+	var probed []string
+	probe := facts.probe
+	facts.probe = func(dir string) placeFact {
+		probed = append(probed, dir)
+		return probe(dir)
+	}
+	src := newHubSource(&Dispatcher{st: st, facts: facts})
+	kinds := func() string {
+		t.Helper()
+		got, err := src.Repos()
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, k := repoNames(got)
+		return fmt.Sprint(k)
+	}
+
+	// Not probed yet: a plain folder until the pass the read asked for.
+	if k := kinds(); k != "[dir]" || len(probed) != 0 {
+		t.Fatalf("before the pass: kinds %s, probed %v", k, probed)
+	}
+	if !facts.refresh(false) {
+		t.Error("the pass found a repository but reported no change")
+	}
+	if k := kinds(); k != "[git]" || fmt.Sprint(probed) != fmt.Sprint([]string{gitDir}) {
+		t.Fatalf("after the pass: kinds %s, probed %v", k, probed)
+	}
+	// Reads touch nothing; a periodic pass that finds the same reports no change.
+	probed = nil
+	kinds()
+	if len(probed) != 0 {
+		t.Errorf("a read probed %v", probed)
+	}
+	if facts.refresh(true) {
+		t.Error("an unchanged pass reported a change")
+	}
+	// A folder no read asked about over a whole period is forgotten.
+	facts.refresh(true)
+	if _, ok := facts.known[gitDir]; ok {
+		t.Error("a folder nobody reads is still kept")
+	}
+}
+
+// A placement folder the hub has not seen is probed off the loop at once, and a fact that differs from the guess
+// reaches the dashboards through the change callback.
+func TestPlaceFactsRunProbesANewFolder(t *testing.T) {
+	gitDir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(gitDir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	facts := newPlaceFacts()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	changed := make(chan struct{}, 1)
+	go facts.run(ctx, time.Hour, func() { changed <- struct{}{} })
+	if facts.lookup(gitDir).git {
+		t.Fatal("a folder not probed yet is a repository")
+	}
+	select {
+	case <-changed:
+	case <-time.After(waitTimeout):
+		t.Fatal("no change reported")
+	}
+	if f := facts.lookup(gitDir); !f.git || f.resolved != resolvePath(gitDir) {
+		t.Errorf("fact = %+v", f)
 	}
 }

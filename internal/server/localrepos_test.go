@@ -346,9 +346,7 @@ func TestReposAppendLocalRepositories(t *testing.T) {
 	}
 	putTickets(t, st, placedTicket("T-3", "", filepath.Join(alias, "proj"), t0.Add(-time.Hour)))
 	local.found = []string{filepath.Join(real, "proj")}
-	if got, err = newHubSource(d).Repos(); err != nil {
-		t.Fatal(err)
-	}
+	got = probedRepos(t, d)
 	if names, _ := repoNames(got); slices.Contains(names, filepath.Join(real, "proj")) || !slices.Contains(names, filepath.Join(alias, "proj")) {
 		t.Errorf("a linked used folder and its found repository: %v", names)
 	}

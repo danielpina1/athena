@@ -59,6 +59,9 @@ type Dispatcher struct {
 	web *webEndpoint
 	// local finds the local git repositories the dashboard lists; nil when the dashboard or the listing is off.
 	local *localRepos
+	// facts holds what the dashboard's places need to know about the used folders, found off the hub's loop; nil
+	// when the dashboard is off (Repos then guesses: plain folders, unresolved).
+	facts *placeFacts
 	// onPolicyChange, when set (tests), runs before the Engine hears of a Policy change; an error refuses it.
 	onPolicyChange func(from, to policy.Settings) error
 	// inflight serializes the copies of one Command (by client and command id) from lookup to stored result.
