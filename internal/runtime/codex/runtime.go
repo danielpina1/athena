@@ -85,20 +85,22 @@ func (r *Runtime) home() Home {
 	return Home{Dir: r.Home, AthenaBin: r.AthenaBin, Socket: r.Socket, Model: r.Model}
 }
 
-// writeHome writes h (WriteHome), or with KeepHome writes it only when absent and otherwise reports whether the
-// existing file differs (stale), leaving it as it is.
+// writeHome writes h (WriteHome), or with KeepHome creates it only when absent (CreateHome, create-only, so a file the
+// server writes meanwhile is never replaced) and otherwise reports whether the existing file differs (stale), leaving
+// it as it is.
 func (r *Runtime) writeHome(h Home) (stale bool, err error) {
 	if !r.KeepHome {
 		return false, WriteHome(h)
 	}
-	exists, cur, err := HomeCurrent(h)
+	created, err := CreateHome(h)
+	if err != nil || created {
+		return false, err
+	}
+	_, cur, err := HomeCurrent(h)
 	if err != nil {
 		return false, err
 	}
-	if !exists {
-		return false, WriteHome(h)
-	}
-	return !cur, EnsureHomeDir(h.Dir)
+	return !cur, nil
 }
 
 func (r *Runtime) clock() time.Time {

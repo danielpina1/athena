@@ -198,14 +198,28 @@ func HomeCurrent(h Home) (exists, current_ bool, err error) {
 
 // onlyTrustState reports whether tail is nothing but [hooks.state."<key>"] tables of keys of the config file at path,
 // each holding only trusted_hash: what Codex appends when Athena trusts its hooks (config/batchWrite).
+//
+// Codex names the file in a key as it reports sourcePath, with symlinks resolved, so a key may begin with path or with
+// its resolved form (sameConfigPaths).
 func onlyTrustState(tail, path string) bool {
-	prefix := "[hooks.state." + strings.TrimSuffix(tomlString(path+":"), `"`)
+	var prefixes []string
+	for _, p := range sameConfigPaths(path) {
+		prefixes = append(prefixes, "[hooks.state."+strings.TrimSuffix(tomlString(p+":"), `"`))
+	}
+	ours := func(line string) bool {
+		for _, p := range prefixes {
+			if strings.HasPrefix(line, p) {
+				return true
+			}
+		}
+		return false
+	}
 	inTable := false
 	for _, line := range strings.Split(tail, "\n") {
 		line = strings.TrimSpace(line)
 		switch {
 		case line == "":
-		case strings.HasPrefix(line, prefix) && strings.HasSuffix(line, `"]`):
+		case ours(line) && strings.HasSuffix(line, `"]`):
 			inTable = true
 		case inTable && strings.HasPrefix(line, "trusted_hash = \"") && strings.HasSuffix(line, `"`) &&
 			!strings.ContainsAny(line[len("trusted_hash = \""):len(line)-1], "\"\\"):
@@ -214,6 +228,33 @@ func onlyTrustState(tail, path string) bool {
 		}
 	}
 	return true
+}
+
+// sameConfigPaths is path and, when it differs, path with its directory's symlinks resolved: the forms in which Codex
+// may name Athena's config.toml.
+func sameConfigPaths(path string) []string {
+	paths := []string{filepath.Clean(path)}
+	if dir, err := filepath.EvalSymlinks(filepath.Dir(path)); err == nil {
+		if real := filepath.Join(dir, filepath.Base(path)); real != paths[0] {
+			paths = append(paths, real)
+		}
+	}
+	return paths
+}
+
+// samePath reports whether reported (a path Codex reported) names the file at want: the same path, or the same one
+// once symlinks are resolved (Codex resolves them: /var/folders/... is /private/var/folders/... on macOS).
+func samePath(reported, want string) bool {
+	if reported == "" || want == "" {
+		return false
+	}
+	reported = filepath.Clean(reported)
+	for _, p := range sameConfigPaths(want) {
+		if reported == p {
+			return true
+		}
+	}
+	return false
 }
 
 // EnsureHomeDir makes dir, Athena's CODEX_HOME, a private directory (0700, created when missing) and tightens the
@@ -261,6 +302,30 @@ func isUserCodexHome(dir string) bool {
 
 // writePrivate writes path (0600), replacing it in one rename.
 func writePrivate(path string, data []byte) error {
+	return writeAtomically(path, data, os.Rename)
+}
+
+// CreateHome writes h.Dir/config.toml as WriteHome would, but only when there is none: the file appears whole or not
+// at all (a hard link of a finished temporary file, which fails when the name exists), so it never replaces one the
+// server wrote meanwhile. created is false, and the file untouched, when one was already there.
+func CreateHome(h Home) (created bool, err error) {
+	content, err := renderConfig(h)
+	if err != nil {
+		return false, err
+	}
+	if err := EnsureHomeDir(h.Dir); err != nil {
+		return false, err
+	}
+	err = writeAtomically(filepath.Join(h.Dir, configName), content, os.Link)
+	if errors.Is(err, fs.ErrExist) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+// writeAtomically writes data to a 0600 temporary file beside path, then puts it at path with place (os.Rename to
+// replace, os.Link to create only); the temporary file is removed either way.
+func writeAtomically(path string, data []byte, place func(oldpath, newpath string) error) error {
 	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-*")
 	if err != nil {
 		return fmt.Errorf("codex: %w", err)
@@ -282,7 +347,7 @@ func writePrivate(path string, data []byte) error {
 	if err := f.Close(); err != nil {
 		return fmt.Errorf("codex: write %s: %w", path, err)
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := place(tmp, path); err != nil {
 		return fmt.Errorf("codex: write %s: %w", path, err)
 	}
 	return nil
@@ -393,7 +458,7 @@ func listHooks(ctx context.Context, c *Conn, cwd string) (hooksEntry, error) {
 // layer, from w.File): a command hook of the same event, command and timeout, synchronous, with no matcher, and not
 // managed. A hook that differs in any of these is someone else's, however alike.
 func ours(h hookInfo, w HookSpec) bool {
-	return h.Source == "user" && !h.managed() && filepath.Clean(h.SourcePath) == filepath.Clean(w.File) &&
+	return h.Source == "user" && !h.managed() && samePath(h.SourcePath, w.File) &&
 		h.HandlerType == "command" && h.EventName == lowerFirst(w.Event) && h.Command == w.Command &&
 		h.TimeoutSec == int64(w.Timeout/time.Second) && !h.Async && h.Matcher == nil
 }

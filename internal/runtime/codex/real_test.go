@@ -45,6 +45,13 @@ func TestRealHooksListTrusted(t *testing.T) {
 	if n := strings.Count(cfg, "\n[hooks.state."); n != len(hookEvents) {
 		t.Fatalf("%d trust entries recorded, want %d:\n%s", n, len(hookEvents), cfg)
 	}
+	// The trust Codex recorded is in a form WriteHome keeps (Codex names the file with symlinks resolved).
+	header := cfg[strings.Index(cfg, "\n[hooks.state.")+1:]
+	header = header[:strings.Index(header, "\n")]
+	t.Logf("first trust entry: %s", strings.ReplaceAll(header, dir, "<dir>"))
+	if exists, cur, err := HomeCurrent(r.home()); !exists || !cur || err != nil {
+		t.Fatalf("WriteHome would drop the trust Codex recorded: exists=%v current=%v err=%v", exists, cur, err)
+	}
 	r.Invalidate()
 	if s := r.Status(context.Background()); s.Hooks != "trusted" {
 		t.Fatalf("second check: %+v", s)

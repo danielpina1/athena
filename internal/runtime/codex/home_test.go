@@ -512,3 +512,35 @@ func TestCheckHooksVerdicts(t *testing.T) {
 		}
 	}
 }
+
+// CreateHome only ever creates: a config.toml that is already there (the server's, written between the CLI's look
+// and its write) is left byte for byte, and no temporary file is left behind.
+func TestCreateHomeNeverReplaces(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "codex")
+	h := testHome(dir)
+	created, err := CreateHome(h)
+	if err != nil || !created {
+		t.Fatalf("no file: created=%v err=%v", created, err)
+	}
+	path := filepath.Join(dir, "config.toml")
+	if got := readFile(t, path); got != readFile(t, filepath.Join(fixtureDir, "config.golden.toml")) {
+		t.Fatalf("created:\n%s", got)
+	}
+	if m := mode(t, path); m != 0o600 {
+		t.Errorf("mode = %o", m)
+	}
+	server := "# the server's\n"
+	if err := os.WriteFile(path, []byte(server), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if created, err := CreateHome(h); err != nil || created {
+		t.Fatalf("existing file: created=%v err=%v", created, err)
+	}
+	if got := readFile(t, path); got != server {
+		t.Fatalf("the existing file was replaced:\n%s", got)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("files left in the home: %v, %v", entries, err)
+	}
+}

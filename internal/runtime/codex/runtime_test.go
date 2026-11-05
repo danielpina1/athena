@@ -319,3 +319,37 @@ func TestEnvKeepsCodexVariablesAndSetsAthenasHome(t *testing.T) {
 		t.Fatalf("Env = %v, want %v", got, want)
 	}
 }
+
+// Codex reports a hook's sourcePath (and its key) with the home's symlinks resolved; a Home reached through a symlink
+// (macOS's /var/folders is /private/var/folders) is still Athena's, and its recorded trust survives a recheck.
+func TestCheckHomeThroughASymlink(t *testing.T) {
+	r, rpcLog := newRuntime(t, "ATHENA_FAKE_CODEX_HOOKS=untrusted")
+	real := filepath.Join(t.TempDir(), "real-state")
+	if err := os.MkdirAll(real, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "state")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	r.Home = filepath.Join(link, "codex")
+	for i := 0; i < 2; i++ {
+		r.Invalidate()
+		if s := r.Status(context.Background()); !s.Ready || s.Hooks != "trusted" {
+			t.Fatalf("check %d: %+v", i, s)
+		}
+	}
+	n := 0
+	for _, m := range methods(t, rpcLog) {
+		if m == "config/batchWrite" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("%d batchWrites over two checks, want 1: the trust recorded under the resolved path was dropped", n)
+	}
+	// The CLI's comparison sees the trust recorded under the resolved path as current, too.
+	if exists, cur, err := HomeCurrent(r.home()); !exists || !cur || err != nil {
+		t.Fatalf("HomeCurrent: exists=%v current=%v err=%v", exists, cur, err)
+	}
+}

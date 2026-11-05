@@ -34,9 +34,9 @@
 // hooks.state."<key>".trusted_hash edits), account/read (acct_fixture) and account/rateLimits/read; any other request
 // gets a -32601 error.
 //
-// Hooks are listed as Codex lists them: key "<config path>:<snake_event>:<group>:<handler>", source "user", their
-// timeout (600 when the handler names none), async flag and group matcher, and a currentHash of all of these. Trust
-// is recorded as Codex records it, at the end of config.toml:
+// Hooks are listed as Codex lists them: key "<config path>:<snake_event>:<group>:<handler>" (the path with the home's
+// symlinks resolved, as in sourcePath), source "user", their timeout (600 when the handler names none), async flag and
+// group matcher, and a currentHash of all of these. Trust is recorded as Codex records it, at the end of config.toml:
 //
 //	[hooks.state."<key>"]
 //	trusted_hash = "<currentHash>"
@@ -367,7 +367,7 @@ func (s *server) request(w wire) {
 			s.replyError(w.ID, -32603, "config/batchWrite: "+err.Error())
 			return
 		}
-		s.reply(w.ID, map[string]any{"status": "ok", "version": "fixture", "filePath": filepath.Join(home, "config.toml")})
+		s.reply(w.ID, map[string]any{"status": "ok", "version": "fixture", "filePath": configPath(home)})
 	case "account/read":
 		if os.Getenv("ATHENA_FAKE_CODEX_LOGGED_OUT") != "" {
 			s.reply(w.ID, map[string]any{"account": nil, "requiresOpenaiAuth": true})
@@ -621,7 +621,16 @@ type hook struct {
 
 // key is the hook's key as Codex makes it: "<config path>:<snake_event>:<group>:<handler>".
 func (h hook) key(home string) string {
-	return fmt.Sprintf("%s:%s:%d:%d", filepath.Join(home, "config.toml"), snake(h.event), h.group, h.handler)
+	return fmt.Sprintf("%s:%s:%d:%d", configPath(home), snake(h.event), h.group, h.handler)
+}
+
+// configPath is $CODEX_HOME/config.toml as Codex reports it (sourcePath, and in hook keys): with the home's symlinks
+// resolved (/var/folders/... is /private/var/folders/... on macOS).
+func configPath(home string) string {
+	if real, err := filepath.EvalSymlinks(home); err == nil {
+		home = real
+	}
+	return filepath.Join(home, "config.toml")
 }
 
 // hash is the hook's currentHash: a hash of its event, command, timeout, async flag and matcher (what Codex hashes
@@ -837,7 +846,7 @@ func hookList(home, cwd string) []any {
 		list = append(list, map[string]any{
 			"key": h.key(home), "eventName": lowerFirst(h.event), "handlerType": "command", "async": h.async,
 			"command": h.command, "enabled": true, "isManaged": false, "source": "user",
-			"sourcePath": filepath.Join(home, "config.toml"), "currentHash": h.hash(),
+			"sourcePath": configPath(home), "currentHash": h.hash(),
 			"displayOrder": i, "timeoutSec": h.timeout, "trustStatus": trustStatus(h, home, trust), "matcher": h.matcher,
 			"statusMessage": nil, "pluginId": nil, "additionalContextLimit": nil,
 		})
