@@ -37,25 +37,26 @@ test("tool call and result pair by id", async () => {
   const calls = screen.getAllByTestId("tool-call");
   expect(calls).toHaveLength(3);
   const [bash, read, edit] = calls;
-  expect(within(bash).getByText("Bash")).toBeTruthy();
+  expect(within(bash).getByText("Ran a command")).toBeTruthy();
   expect(within(bash).getByText("go test ./...")).toBeTruthy();
   expect(bash.getAttribute("data-status")).toBe("ok");
-  expect(within(bash).getByText("ok · 1.2 s")).toBeTruthy();
+  expect(within(bash).getByText("1.2 s")).toBeTruthy();
   // The result is inside its call, not a row of its own.
-  expect(screen.getAllByText("ok acme/api 0.2s")).toHaveLength(1);
+  expect(screen.getAllByText(/ok acme\/api 0.2s/)).toHaveLength(1);
   expect(bash.textContent).toContain("ok acme/api 0.2s");
   expect(read.getAttribute("data-status")).toBe("running");
   expect(within(read).getByText("running")).toBeTruthy();
   expect(edit.getAttribute("data-status")).toBe("error");
-  expect(within(edit).getByText("error · 0.1 s")).toBeTruthy();
+  expect(within(edit).getByText("failed")).toBeTruthy();
+  expect(within(edit.querySelector("summary")!).getByText("no such line")).toBeTruthy();
   // Collapsed until opened.
-  const summary = within(bash).getByText("Bash").closest("summary")!;
+  const summary = bash.querySelector("summary")!;
   expect(bash.hasAttribute("open")).toBe(false);
   await userEvent.click(summary);
   expect(bash.hasAttribute("open")).toBe(true);
   // The order of the log is the order of the stream.
   const log = screen.getByRole("log");
-  expect(log.textContent!.indexOf("Bash")).toBeLessThan(log.textContent!.indexOf("Checking the tests"));
+  expect(log.textContent!.indexOf("go test")).toBeLessThan(log.textContent!.indexOf("Checking the tests"));
 });
 
 test("a call without a result runs in every stage but ended", () => {
@@ -76,22 +77,55 @@ test("renders each kind, strips ANSI and wraps long lines", () => {
   const long = "x".repeat(3000);
   act(() =>
     link.items("T-1", [
-      item({ offset: 0n, kind: "init", text: "session abc model opus" }),
+      item({ offset: 0n, kind: "init", text: "session abc model claude-haiku-4-5-20251001" }),
       item({ offset: 10n, kind: "thinking", text: "Consider the handler first" }),
+      item({ offset: 15n, kind: "thinking", text: "  " }),
       item({ offset: 20n, kind: "say", text: "\u001b[1;32mAll green\u001b[0m " + long }),
-      item({ offset: 30n, kind: "result", text: "success turns=3 cost=$0.0100\nShipped the API" }),
+      item({ offset: 25n, kind: "user", text: "Run the handler tests too" }),
+      item({ offset: 27n, kind: "other", text: "tool_progress" }),
+      item({ offset: 30n, kind: "result", text: "success turns=3 cost=$0.0100 duration_ms=372000\nShipped the **API**" }),
     ]),
   );
-  expect(hasClasses(screen.getByText("session abc model opus"), "text-muted")).toBe(true);
-  const thinking = screen.getByText("Thinking").closest("details")!;
-  expect(thinking.hasAttribute("open")).toBe(false);
-  expect(thinking.textContent).toContain("Consider the handler first");
+  const init = screen.getByText(/Session started/).closest("[data-kind=init]")!;
+  expect(init.textContent).toMatch(/^Session started · haiku 4\.5 · \d{2}:\d{2}$/);
+  expect(init.querySelector("time")).toBeTruthy();
+  // Only thinking with text shows, collapsed.
+  const thinking = screen.getAllByText("Thinking");
+  expect(thinking).toHaveLength(1);
+  const details = thinking[0].closest("details")!;
+  expect(details.hasAttribute("open")).toBe(false);
+  expect(details.textContent).toContain("Consider the handler first");
   const say = screen.getByText(/All green/);
   expect(say.textContent).not.toContain("\u001b");
-  expect(hasClasses(say, "whitespace-pre-wrap", "wrap-anywhere")).toBe(true);
-  expect(screen.getByText("success turns=3 cost=$0.0100")).toBeTruthy();
-  expect(screen.getByText("Shipped the API")).toBeTruthy();
-  expect(hasClasses(screen.getByRole("log"), "font-mono", "text-sm")).toBe(true); // text-sm is 13 px
+  expect(hasClasses(say, "wrap-anywhere")).toBe(true);
+  const you = screen.getByText("Run the handler tests too").closest("[data-kind=user]")!;
+  expect(you.textContent).toBe("YouRun the handler tests too");
+  expect(hasClasses(screen.getByText("tool_progress"), "text-muted", "text-xs")).toBe(true);
+  const done = screen.getByText("Done").closest("[data-kind=result]")!;
+  expect(done.textContent).toContain("3 turns · $0.01 · 6 m 12 s");
+  expect(done.querySelector("strong")?.textContent).toBe("API");
+  expect(hasClasses(screen.getByRole("log"), "font-sans")).toBe(true);
+});
+
+test("a failed result says so", () => {
+  render(<SessionView ticketId="T-1" />);
+  act(() => link.items("T-1", [item({ offset: 0n, kind: "result", isError: true, text: "error_during_execution turns=2 cost=$0.0200" })]));
+  const block = screen.getByText("Failed").closest("[data-kind=result]")!;
+  expect(block.getAttribute("data-error")).toBe("true");
+});
+
+test("tool searches and empty thinking take no row", () => {
+  render(<SessionView ticketId="T-1" />);
+  act(() =>
+    link.items("T-1", [
+      item({ offset: 0n, kind: "tool_call", tool: "ToolSearch", toolUseId: "ts", text: "select:mcp__athena__report" }),
+      item({ offset: 10n, kind: "tool_result", toolUseId: "ts", text: "loaded" }),
+      item({ offset: 20n, kind: "thinking", text: "" }),
+      item({ offset: 30n, kind: "say", text: "Next." }),
+    ]),
+  );
+  expect(screen.queryAllByTestId("tool-call")).toHaveLength(0);
+  expect(screen.getByRole("log").querySelectorAll("li")).toHaveLength(1);
 });
 
 test("a gap says output was skipped, with its size", () => {

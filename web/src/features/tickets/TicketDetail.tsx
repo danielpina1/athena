@@ -12,7 +12,7 @@ import { stopTicket } from "@/features/needs-you/stopTicket";
 import { useShortcut } from "@/app/shortcuts";
 import { Composer, interruptSession } from "@/features/session/Composer";
 import { PinToggle } from "@/features/session/PinnedSessions";
-import { SessionView } from "@/features/session/SessionView";
+import { LazySessionView } from "@/features/session/SessionFrame";
 import { errorMessage, retry } from "@/lib/commands/actions";
 import { useWatch } from "@/lib/commands/useWatch";
 import { selectSynced } from "@/lib/store/selectors";
@@ -170,7 +170,7 @@ function TicketTabs({
         {third === "files" && <TabsTrigger value="files">Files</TabsTrigger>}
       </TabsList>
       <TabsContent value="session" className="grid min-w-0 gap-3">
-        <SessionView ticketId={ticket.id} />
+        <LazySessionView ticketId={ticket.id} />
         <Composer ticket={ticket} focus={focusComposer} onFocused={onComposerFocused} />
       </TabsContent>
       <TabsContent value="timeline" className="min-w-0">
