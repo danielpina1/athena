@@ -95,6 +95,14 @@ export async function expectAccessible(page: Page): Promise<void> {
   expect(bad, `axe on ${page.url()}`).toEqual([]);
 }
 
+/**
+ * What a screenshot must not pin in the live feed: its rows (the events since the page opened, with their Tickets'
+ * ids) and its working count. Every screenshot that shows the feed masks these.
+ */
+export function liveFeed(page: Page) {
+  return [page.locator("[data-live-feed] ul"), page.locator("[data-live-feed] [data-working]")];
+}
+
 /** The shell is up: the main navigation shows and the link is open. */
 export async function expectShell(page: Page): Promise<void> {
   await expect(page.getByRole("navigation", { name: "Main" })).toBeVisible();

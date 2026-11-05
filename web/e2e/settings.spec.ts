@@ -4,7 +4,7 @@
 // no Ticket is created (R37). Screenshots mask only what changes between runs: times, counts, the node's queue and
 // live Tickets, and the enrollment link, its QR code and its countdown.
 import type { Page } from "@playwright/test";
-import { addAuthenticator, expect, expectAccessible, expectShell, signedInPage, test } from "./harness";
+import { addAuthenticator, expect, expectAccessible, expectShell, signedInPage, test, liveFeed } from "./harness";
 
 const SECTIONS = ["general", "github", "notifications", "devices", "prompts", "execution", "system"];
 
@@ -17,7 +17,7 @@ const volatile = (page: Page) => [
 
 async function shot(page: Page, name: string) {
   await page.evaluate(() => document.fonts.ready);
-  await expect(page).toHaveScreenshot(name, { mask: volatile(page) });
+  await expect(page).toHaveScreenshot(name, { mask: [...volatile(page), ...liveFeed(page)] });
 }
 
 async function themes(page: Page, name: string) {

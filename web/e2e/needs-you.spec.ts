@@ -2,7 +2,7 @@
 // with one tap, answers inline and denies from the keyboard. Every Ticket a test opens is stopped at its end, so the
 // shared server has no open Tickets for the specs after it.
 import type { Page } from "@playwright/test";
-import { athena, expect, expectAccessible, signedInPage, test } from "./harness";
+import { athena, expect, expectAccessible, signedInPage, test, liveFeed } from "./harness";
 
 const header = (page: Page) => page.getByRole("heading", { name: "Needs you", level: 1 }).locator("xpath=following-sibling::p");
 
@@ -38,11 +38,11 @@ test("approve with one tap and answer a question, light and dark", async ({ page
 
     await expectAccessible(page);
     await page.evaluate(() => document.fonts.ready);
-    await expect(page).toHaveScreenshot("needs-you-light.png", { mask: unstable(page) });
+    await expect(page).toHaveScreenshot("needs-you-light.png", { mask: [...unstable(page), ...liveFeed(page)] });
     await page.emulateMedia({ colorScheme: "dark", reducedMotion: "reduce" });
     await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
     await expectAccessible(page);
-    await expect(page).toHaveScreenshot("needs-you-dark.png", { mask: unstable(page) });
+    await expect(page).toHaveScreenshot("needs-you-dark.png", { mask: [...unstable(page), ...liveFeed(page)] });
 
     // One tap: the count drops and the card says Approved; the session is let through; the card leaves.
     await approval.getByRole("button", { name: "Approve" }).click();
@@ -122,9 +122,45 @@ test("nothing needs you", async ({ page }) => {
   await expect(page.getByText("Nothing needs you.")).toBeVisible();
   await expectAccessible(page);
   await page.evaluate(() => document.fonts.ready);
-  await expect(page).toHaveScreenshot("empty-light.png", { mask: unstable(page) });
+  await expect(page).toHaveScreenshot("empty-light.png", { mask: [...unstable(page), ...liveFeed(page)] });
   await page.emulateMedia({ colorScheme: "dark", reducedMotion: "reduce" });
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
   await expectAccessible(page);
-  await expect(page).toHaveScreenshot("empty-dark.png", { mask: unstable(page) });
+  await expect(page).toHaveScreenshot("empty-dark.png", { mask: [...unstable(page), ...liveFeed(page)] });
+});
+
+test("the live feed shows what happens as it happens, and the mark says what Athena is doing", async ({ page, session }) => {
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await signedInPage(page);
+  // The desktop has the feed in its sidebar; the phone and tablet at the bottom of Needs you.
+  const feed = page.locator("[data-live-feed]");
+  const mark = page.locator("[data-mark]");
+  await expect(feed.getByText("Quiet for now. New events will show here.")).toBeAttached();
+  const ticket = await athena("task", "Tidy the changelog");
+  try {
+    const row = (event: string) => feed.getByRole("listitem").filter({ hasText: ticket }).filter({ hasText: event });
+    await expect(row("Started work")).toHaveCount(1);
+    await expect(row("Started work")).toHaveClass(/motion-wash/);
+    await expect(row("Started work").getByRole("link", { name: ticket })).toHaveAttribute("href", `/tickets/${ticket}`);
+    await expect(mark).toHaveAttribute("data-state", "working");
+
+    const verdict = session.requestApproval(ticket, "Bash", { command: "make deploy --dry-run" });
+    await expect(row("Needs your approval")).toHaveCount(1);
+    await expect(feed.getByRole("listitem").first()).toContainText("Needs your approval");
+    await expect(mark).toHaveAttribute("data-state", "needs-you");
+    await expectAccessible(page);
+
+    // The mark's ring breathes; under reduced motion everything is still.
+    const ring = () => mark.evaluate((el) => getComputedStyle(el, "::after").animationName);
+    expect(await ring()).toBe("athena-ring");
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    expect(await ring()).toBe("none");
+    expect(await row("Needs your approval").evaluate((el) => getComputedStyle(el).animationName)).toBe("none");
+
+    await page.getByRole("group", { name: /Tidy the changelog/ }).getByRole("button", { name: "Approve" }).click();
+    expect((await verdict).decision).toBe("allow");
+  } finally {
+    await stopAll(ticket);
+  }
+  await expect(feed.getByRole("listitem").first()).toContainText("Stopped");
 });

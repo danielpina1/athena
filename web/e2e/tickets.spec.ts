@@ -3,12 +3,12 @@
 // one without a repository, and hostile content (a 2,000-character title, RTL, ANSI, a 3,000-character diff line)
 // that must never move the page sideways. Every Ticket a test opens is stopped at its end (R37).
 import { execFile } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import type { Page } from "@playwright/test";
-import { athena, expect, expectAccessible, signedInPage, test } from "./harness";
+import { athena, expect, expectAccessible, signedInPage, test, liveFeed } from "./harness";
 
 const run = promisify(execFile);
 const git = (cwd: string, ...args: string[]) =>
@@ -108,11 +108,11 @@ test("Changes shows the worker's edit, three panes, light and dark", async ({ pa
       page.locator("[data-ticket-row] .font-mono"),
     ];
     await page.evaluate(() => document.fonts.ready);
-    await expect(page).toHaveScreenshot("ticket-changes-light.png", { mask: unstable });
+    await expect(page).toHaveScreenshot("ticket-changes-light.png", { mask: [...unstable, ...liveFeed(page)] });
     await page.emulateMedia({ colorScheme: "dark", reducedMotion: "reduce" });
     await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
     await expectAccessible(page);
-    await expect(page).toHaveScreenshot("ticket-changes-dark.png", { mask: unstable });
+    await expect(page).toHaveScreenshot("ticket-changes-dark.png", { mask: [...unstable, ...liveFeed(page)] });
   } finally {
     await finish(repo);
   }
@@ -126,11 +126,15 @@ test("the detail follows its Ticket live", async ({ page, session }) => {
     await expect(page.getByRole("heading", { name: "Choose the cache layer", level: 1 })).toBeVisible();
     await expect(page.getByRole("tab", { name: "Files" })).toBeVisible();
 
-    // The Report arrives while the page is open: its question is inline and its text is on the timeline.
+    // The Report arrives while the page is open: its question is inline, the report card shows it, and the timeline
+    // has a row for it that washes in.
     await session.report(ticket, "waiting", "Two caches fit", "Redis or in-process?");
     const question = page.getByRole("group", { name: /Choose the cache layer/ });
     await expect(question.getByText("Redis or in-process?")).toBeVisible();
-    await expect(page.getByText("Two caches fit")).toBeVisible();
+    await expect(page.getByRole("region", { name: "Report" }).getByText("Two caches fit")).toBeVisible();
+    const row = page.getByTestId("timeline-row").filter({ hasText: "Waiting on you" });
+    await expect(row).toContainText("Two caches fit");
+    await expect(row).toHaveClass(/motion-wash/);
     await expectAccessible(page);
 
     const box = question.getByRole("textbox", { name: "Your answer" });
@@ -176,7 +180,8 @@ test("long and ANSI content stays inside the column", async ({ page, session }, 
     await session.report(repo.id, "waiting", `\u001b[31mred failure\u001b[0m ${"z".repeat(2500)}`, "Go on?");
     await page.goto(`/tickets/${repo.id}?tab=timeline`);
     await expect(page.getByTestId("ticket-detail").getByRole("heading", { level: 1 })).toBeVisible();
-    await expect(page.getByText("red failure")).toBeVisible();
+    await expect(page.getByRole("region", { name: "Report" }).getByText(/red failure/)).toBeVisible();
+    await expect(page.getByTestId("timeline-row").filter({ hasText: "Waiting on you" })).toContainText("red failure");
     expect(await page.locator("body").innerText()).not.toContain("\u001b");
     await expectNoSideScroll(page);
 
@@ -236,5 +241,121 @@ test("the list filters by search and stage, and the keyboard opens a Ticket", as
     }
   } finally {
     await finish(keep, other);
+  }
+});
+
+/** The Assignment the Ticket's session runs, from the environment fakeclaude logged for it. */
+function sessionAssignment(ticket: string): string {
+  try {
+    const env = readFileSync(join(process.env.ATHENA_E2E_STATE ?? "", `env-${ticket}.log`), "utf8");
+    return /^ATHENA_ASSIGNMENT=(.*)$/m.exec(env)?.[1] ?? "";
+  } catch {
+    return "";
+  }
+}
+
+const REVIEW = [
+  "## Review of the login flow",
+  "",
+  "The login form works, but three things need fixing before it ships:",
+  "",
+  "1. **Login doesn't type-check `password`**: an empty string passes the guard in `auth/login.ts`.",
+  "2. The session cookie is set without `SameSite`; it is `Lax` now.",
+  "3. Rate limiting counts per IP only, so one account can be guessed from many addresses.",
+  "",
+  "### Checks run",
+  "",
+  "- `npm test`: 142 passed",
+  "- `npm run lint`: clean",
+  "- `kubectl rollout status deploy/api`: rolled out on preview",
+  "",
+  "```ts",
+  'if (typeof password !== "string" || password.length === 0) {',
+  '  return fail("password required");',
+  "}",
+  "```",
+  "",
+  "Next: the per-account rate limit, then a pull request.",
+].join("\n");
+
+const COMMANDS = ["make deploy ENV=preview", "kubectl get pods -n preview", "kubectl rollout status deploy/api", "terraform apply -target=module.cdn"];
+
+test("the timeline tells the Ticket's story, with the Report first", async ({ page, session }) => {
+  // The real clock: the entries are the server's, today.
+  await page.emulateMedia({ colorScheme: "light", reducedMotion: "reduce" });
+  await signedInPage(page);
+  const ticket = await athena("task", "Review the login flow");
+  try {
+    // The filters keep the list to this Ticket, so the screenshots do not depend on the specs that ran before.
+    await page.goto(`/tickets/${ticket}?tab=timeline&stage=open&q=login%20flow`);
+    // A first try fails and is retried: its session ends and a new one starts.
+    await session.report(ticket, "failed", "The test database is down");
+    const first = sessionAssignment(ticket);
+    await athena("retry", ticket);
+    await expect.poll(() => sessionAssignment(ticket), { timeout: 20_000 }).not.toBe(first);
+    await expect.poll(() => sessionAssignment(ticket)).not.toBe("");
+
+    // Four commands approved in a row, from the card at the top of the page.
+    const card = page.getByRole("group", { name: /Review the login flow/ });
+    for (const command of COMMANDS) {
+      const verdict = session.requestApproval(ticket, "Bash", { command });
+      await card.getByRole("button", { name: "Approve" }).click();
+      expect((await verdict).decision).toBe("allow");
+      await expect(card).toHaveCount(0);
+    }
+    await session.report(ticket, "progress", REVIEW);
+    // The next one waits on the owner.
+    void session.requestApproval(ticket, "Bash", { command: "git push --force-with-lease origin athena/login" });
+    await expect(card.getByRole("button", { name: "Approve" })).toBeVisible();
+
+    // The Report, first and readable: Markdown, clamped until asked.
+    const report = page.getByRole("region", { name: "Report" });
+    await expect(report.getByText("Progress", { exact: true })).toBeVisible();
+    await expect(report.locator("ol > li")).toHaveCount(3);
+    await expect(report.locator("code", { hasText: "password" }).first()).toBeVisible();
+    const body = report.getByTestId("report-body").first();
+    await expect(body).toHaveAttribute("data-clamped", "true");
+
+    // The rail, newest first.
+    const rows = page.getByTestId("timeline-row");
+    await expect(rows.first()).toContainText("Needs your approval");
+    await expect(rows.first()).toContainText("Bash: git push --force-with-lease origin athena/login");
+    await expect(rows.first().locator("[data-dot]")).toHaveAttribute("data-tone", "attention");
+    await expect(rows.nth(1)).toContainText("Progress update");
+    await expect(rows.nth(1)).toContainText("Review of the login flow");
+    const group = rows.filter({ hasText: "You approved 4 commands" });
+    await expect(group).toHaveCount(1);
+    await expect(rows.filter({ hasText: "Retried" })).toHaveCount(1);
+    await expect(rows.filter({ hasText: "Started work" })).toHaveCount(2);
+    await expect(rows.filter({ hasText: "Started from your request" })).toContainText("Review the login flow");
+
+    await expectAccessible(page);
+    const unstable = [
+      page.locator("time"),
+      page.locator("aside .font-mono"),
+      page.getByRole("region", { name: "Today" }),
+      page.getByRole("region", { name: "Facts" }),
+      page.getByTestId("ticket-detail").locator("header .font-mono"),
+      page.locator("[data-ticket-row] .font-mono"),
+    ];
+    await page.evaluate(() => document.fonts.ready);
+    await expect(page).toHaveScreenshot("timeline-story-light.png", { mask: [...unstable, ...liveFeed(page)], fullPage: true });
+
+    // Opened: the group lists what was approved; the full report reads in place.
+    await group.getByText("You approved 4 commands").click();
+    await expect(group.getByRole("list", { name: "What you approved" }).getByRole("listitem")).toHaveText(COMMANDS.map((c) => `Bash: ${c}`));
+    await report.getByRole("button", { name: "Show the full report" }).click();
+    await expect(body).toHaveAttribute("data-clamped", "false");
+    await expect(report.getByText("Next: the per-account rate limit, then a pull request.")).toBeVisible();
+    await page.emulateMedia({ colorScheme: "dark", reducedMotion: "reduce" });
+    await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+    await expectAccessible(page);
+    await expect(page).toHaveScreenshot("timeline-story-dark.png", { mask: [...unstable, ...liveFeed(page)], fullPage: true });
+
+    // View report brings the card into view.
+    await rows.nth(1).getByRole("button", { name: "View report" }).click();
+    await expect(report).toBeFocused();
+  } finally {
+    await finish(ticket);
   }
 });

@@ -3,7 +3,7 @@
 // The Ticket is stopped at the end, so the shared server is back to no open Tickets for the specs after it.
 import type { Page } from "@playwright/test";
 import { READABLE_SESSION } from "./fixtures/readable-session";
-import { athena, expect, expectAccessible, holdLaterResult, laterFixture, signedInPage, stdinLog, test } from "./harness";
+import { athena, expect, expectAccessible, holdLaterResult, laterFixture, signedInPage, stdinLog, test, liveFeed } from "./harness";
 
 test("a session's approval and question reach the dashboard", async ({ page, session }) => {
   await signedInPage(page);
@@ -130,11 +130,11 @@ test("the live session streams tool calls in order and takes a reply", async ({ 
       ...(pinned ? [page.getByRole("region", { name: "Pinned sessions" }).getByText(pinned, { exact: true })] : []),
     ];
     await page.evaluate(() => document.fonts.ready);
-    await expect(page).toHaveScreenshot("session-light.png", { mask: unstable });
+    await expect(page).toHaveScreenshot("session-light.png", { mask: [...unstable, ...liveFeed(page)] });
     await page.emulateMedia({ colorScheme: "dark", reducedMotion: "reduce" });
     await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
     await expectAccessible(page);
-    await expect(page).toHaveScreenshot("session-dark.png", { mask: unstable });
+    await expect(page).toHaveScreenshot("session-dark.png", { mask: [...unstable, ...liveFeed(page)] });
   } finally {
     for (const t of [ticket, pinned]) if (t) await athena("stop", t).catch(() => {});
   }
@@ -216,11 +216,11 @@ test("the session view reads as a log of the agent's work", async ({ page, sessi
       page.getByPlaceholder("Search by title or id"),
     ];
     await page.evaluate(() => document.fonts.ready);
-    await expect(page).toHaveScreenshot("readable-light.png", { mask: unstable });
+    await expect(page).toHaveScreenshot("readable-light.png", { mask: [...unstable, ...liveFeed(page)] });
     await page.emulateMedia({ colorScheme: "dark", reducedMotion: "reduce" });
     await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
     await expectAccessible(page);
-    await expect(page).toHaveScreenshot("readable-dark.png", { mask: unstable });
+    await expect(page).toHaveScreenshot("readable-dark.png", { mask: [...unstable, ...liveFeed(page)] });
   } finally {
     await athena("stop", ticket).catch(() => {});
   }
