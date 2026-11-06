@@ -289,14 +289,27 @@ func (o *op) startEval(key string, p Policy) error {
 		}
 		return o.tx.PutThread(th)
 	}
-	// The brake: the strongest candidate is inferred, so every admitted one is; a repository with the ceiling's worth
-	// waiting on the owner takes no self-chosen work.
+	// The brake: the strongest candidate is inferred, so every admitted one is. A repository with the ceiling's worth
+	// waiting on the owner takes no self-chosen work, and neither does one that already holds braked candidates (a
+	// new one does not jump them), unless the owner or a release sent this batch back to Eval.
 	if repo := th.Meta["repo"]; repo != "" && gate.Strength == StrengthInferred {
 		owed, err := o.owed(repo)
 		if err != nil {
 			return err
 		}
-		if ceiling := p.WIPCeiling(repo); owed >= ceiling {
+		ceiling := p.WIPCeiling(repo)
+		held := false
+		if owed < ceiling {
+			if held, err = o.holdsOthers(repo, admitted); err != nil {
+				return err
+			}
+			for _, tr := range triggers {
+				if tr.Disposition.Requeued != nil && slices.Contains(admitted, tr.ID) {
+					held = false
+				}
+			}
+		}
+		if owed >= ceiling || held {
 			return o.brake(th, repo, owed, ceiling, admitted, notAdmitted, reasons)
 		}
 	}
@@ -305,6 +318,11 @@ func (o *op) startEval(key string, p Policy) error {
 	th.Eval = ev
 	if err := o.tx.PutThread(th); err != nil {
 		return err
+	}
+	for _, id := range ids { // a Trigger an Eval holds is no longer held back
+		if err := o.tx.DeleteBrake(id); err != nil {
+			return err
+		}
 	}
 	if err := o.enqueueAssessment(ev); err != nil {
 		return err
@@ -927,6 +945,9 @@ func (e *Engine) Reevaluate(triggerID string, origin ...CommandOrigin) error {
 // requeue queues a stored Trigger for a fresh Eval on its primary Thread th and records the requeue.
 func (o *op) requeue(tr *Trigger, th *Thread) error {
 	queueForEval(th, tr.ID)
+	if err := o.tx.DeleteBrake(tr.ID); err != nil { // sent back to Eval: no longer held
+		return err
+	}
 	if err := o.tx.PutThread(th); err != nil {
 		return err
 	}

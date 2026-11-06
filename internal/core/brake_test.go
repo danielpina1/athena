@@ -175,3 +175,100 @@ func TestBrakeReleasedWhenCeilingRises(t *testing.T) {
 		t.Fatal("not released")
 	}
 }
+
+func TestManualReevaluateEvaluatesHeldOnce(t *testing.T) {
+	h := newEvals(t)
+	h.waiting("T1", "acme/web", false)
+	h.waiting("T2", "acme/web", false)
+	h.waiting("T3", "acme/web", false)
+	h.receive(h.botCandidate("c:1", issue))
+	h.due()
+	eq(t, "held", len(h.brakes()), 1)
+	h.caughtUp("T1")
+	h.caughtUp("T2")
+	h.caughtUp("T3")
+	// The owner re-evaluates it by hand before any release.
+	h.must(h.eng.Reevaluate("c:1"))
+	h.tick(1)
+	for i := 0; i < 4; i++ {
+		h.due()
+		h.tick(1)
+	}
+	eq(t, "evals started", len(h.eventsOf(EventEvalStarted)), 1)
+	eq(t, "requeued", len(h.eventsOf(EventTriggerRequeued)), 1)
+	eq(t, "no brake left", len(h.brakes()), 0)
+}
+
+func TestNewCandidateDoesNotJumpHeldOnes(t *testing.T) {
+	h := newEvals(t)
+	h.waiting("T1", "acme/web", false)
+	h.waiting("T2", "acme/web", false)
+	h.waiting("T3", "acme/web", false)
+	h.receive(h.botCandidate("c:1", issue))
+	h.due()
+	// Two Evals start in the repository (explicit work is never braked) ...
+	for i, th := range []string{pull2, other} {
+		r := h.request("x:"+string(rune('1'+i)), th)
+		r.Meta = map[string]string{"repo": "acme/web"}
+		h.receive(r)
+	}
+	h.due()
+	// ... and the owner catches up to 1 of 3: no room is left to release the held candidate.
+	h.caughtUp("T1")
+	h.caughtUp("T2")
+	h.tick(1)
+	h.due()
+	eq(t, "held candidate stays", len(h.brakes()), 1)
+
+	// A new candidate arrives while owed < ceiling: it queues behind the held one.
+	h.tick(1)
+	h.receive(h.botCandidate("c:2", pull1))
+	h.due()
+	if h.evalOf(pull1) != nil {
+		t.Fatal("the new candidate jumped the held one")
+	}
+	bs := h.brakes()
+	if len(bs) != 2 || bs[0].TriggerID != "c:1" || bs[1].TriggerID != "c:2" {
+		t.Fatalf("brakes = %+v, want c:1 then c:2", bs)
+	}
+	ds := h.decisionsOn(pull1)
+	eq(t, "reason", ds[0].Reasons, []Reason{{Code: "wip_brake",
+		Values: map[string]string{"repo": "acme/web", "owed": "1", "ceiling": "3"}}})
+
+	// The running Evals end; room for one: the older candidate goes first.
+	h.decide(DecisionInput{TriggerID: "x:1", Kind: "ignore", Reason: "no"})
+	h.decide(DecisionInput{TriggerID: "x:2", Kind: "ignore", Reason: "no"})
+	h.pol.ceiling = 2
+	h.tick(1)
+	h.due()
+	if h.evalOf(issue) == nil || h.evalOf(pull1) != nil {
+		t.Fatalf("release order wrong: issue eval %v, pull1 eval %v", h.evalOf(issue), h.evalOf(pull1))
+	}
+	eq(t, "newer still held", len(h.brakes()), 1)
+}
+
+func TestBrakeRepoCaseDoesNotReleasePastCeiling(t *testing.T) {
+	h := newEvals(t)
+	h.pol.ceiling = 1
+	h.waiting("T1", "O/R", false)
+	a := h.botMessage("c:1", issue)
+	a.Meta = map[string]string{"repo": "O/R"}
+	b := h.botMessage("c:2", pull1)
+	b.Meta = map[string]string{"repo": "o/r"}
+	h.receive(a)
+	h.tick(1)
+	h.receive(b)
+	h.due()
+	eq(t, "both held", len(h.brakes()), 2)
+	h.caughtUp("T1") // room for exactly one
+	h.tick(1)
+	h.due()
+	n := 0
+	for _, th := range []string{issue, pull1} {
+		if h.evalOf(th) != nil {
+			n++
+		}
+	}
+	eq(t, "released", n, 1)
+	eq(t, "still held", len(h.brakes()), 1)
+}

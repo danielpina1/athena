@@ -107,10 +107,11 @@ func (e *Engine) ReleaseBrakes() ([]string, error) {
 	byRepo := map[string][]Brake{}
 	var repos []string
 	for _, b := range brakes {
-		if _, ok := byRepo[b.Repo]; !ok {
-			repos = append(repos, b.Repo)
+		key := strings.ToLower(b.Repo)
+		if _, ok := byRepo[key]; !ok {
+			repos = append(repos, key)
 		}
-		byRepo[b.Repo] = append(byRepo[b.Repo], b)
+		byRepo[key] = append(byRepo[key], b)
 	}
 	slices.Sort(repos)
 	var released []string
@@ -206,4 +207,18 @@ func (e *Engine) HasBrakes() (bool, error) {
 		return err
 	})
 	return held, err
+}
+
+// holdsOthers tells whether the brake holds a candidate of the repository other than the given Triggers.
+func (o *op) holdsOthers(repo string, except []string) (bool, error) {
+	brakes, err := o.tx.Brakes()
+	if err != nil {
+		return false, err
+	}
+	for _, b := range brakes {
+		if strings.EqualFold(b.Repo, repo) && !slices.Contains(except, b.TriggerID) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
