@@ -16,14 +16,18 @@ import { Devices } from "./Devices";
 import { Execution } from "./Execution";
 import { Notifications } from "./Notifications";
 import { GeneralSettings, GitHubSettings } from "./PolicyForm";
+import { Repositories } from "./Repositories";
 import { UnsavedProvider } from "./SaveBar";
 import { System } from "./System";
+import { Trust } from "./Trust";
 
 const Prompts = lazy(() => import("./Prompts"));
 
 export const SECTIONS = [
   { id: "general", label: "General" },
   { id: "github", label: "Sources › GitHub" },
+  { id: "repositories", label: "Repositories" },
+  { id: "trust", label: "Trust" },
   { id: "notifications", label: "Notifications" },
   { id: "devices", label: "Devices" },
   { id: "prompts", label: "Prompts" },
@@ -38,6 +42,10 @@ function SectionView({ id }: { id: SectionId }) {
       return <GeneralSettings />;
     case "github":
       return <GitHubSettings />;
+    case "repositories":
+      return <Repositories />;
+    case "trust":
+      return <Trust />;
     case "notifications":
       return <Notifications />;
     case "devices":

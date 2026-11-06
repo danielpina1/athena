@@ -41,7 +41,7 @@ const MODE: Record<(typeof MODES)[number], { label: string; text: string }> = {
 };
 
 /** The Policy as the store has it, read once per change. */
-function usePolicyDoc() {
+export function usePolicyDoc() {
   const policy = useAthena((s) => s.policy);
   const synced = useAthena(selectSynced);
   const doc = useMemo(() => (policy ? parsePolicy(policy.settingsJson) : undefined), [policy]);
@@ -49,7 +49,7 @@ function usePolicyDoc() {
 }
 
 /** Sends the block's fields written over the latest document. */
-function savePolicy(base: number, write: (doc: ReturnType<typeof parsePolicy>) => string) {
+export function savePolicy(base: number, write: (doc: ReturnType<typeof parsePolicy>) => string) {
   const latest = useAthena.getState().policy;
   return setPolicy(base, write(parsePolicy(latest?.settingsJson ?? "{}")));
 }

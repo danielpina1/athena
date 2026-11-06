@@ -4,10 +4,12 @@
 // no Ticket is created (R37). Screenshots mask only what changes between runs: times, counts, the node's queue, live
 // Tickets and runtimes, and the enrollment link, its QR code and its countdown.
 import type { Page } from "@playwright/test";
-import { addAuthenticator, expect, expectAccessible, expectShell, signedInPage, test, liveFeed } from "./harness";
+import { addAuthenticator, athena, expect, expectAccessible, expectShell, signedInPage, test, liveFeed } from "./harness";
+import { create } from "@bufbuild/protobuf";
+import { RepoViewSchema } from "../src/gen/athena/v1/state_pb";
 import { editLink, runtimeStatus } from "./link";
 
-const SECTIONS = ["general", "github", "notifications", "devices", "prompts", "execution", "system"];
+const SECTIONS = ["general", "github", "repositories", "trust", "notifications", "devices", "prompts", "execution", "system"];
 
 const volatile = (page: Page) => [
   page.locator("aside .font-mono"),
@@ -196,4 +198,70 @@ test("add a device and enroll it through the QR link", async ({ page, browser, b
   await expect(passkeys).toHaveCount(before + 1);
   await expect(passkeys.filter({ hasText: "Second screen" })).toHaveCount(1);
   for (const line of logs) expect(line).not.toContain(token);
+});
+
+const githubRepos = {
+  repos: (r: import("../src/gen/athena/v1/state_pb").RepoView[]) => {
+    r.splice(
+      0,
+      r.length,
+      create(RepoViewSchema, { name: "acme/web", kind: "github", owed: 3, ceiling: 3, braked: 2, mode: "live" }),
+      create(RepoViewSchema, { name: "acme/api", kind: "github", owed: 1, ceiling: 3, braked: 0, mode: "live" }),
+    );
+  },
+};
+
+test("a repository switched to Shadow is saved in the Policy, and the Policy ends as it started", async ({ page }) => {
+  await editLink(page, githubRepos);
+  await page.emulateMedia({ colorScheme: "light", reducedMotion: "reduce" });
+  await signedInPage(page);
+  await page.goto("/settings/repositories");
+  await expect(page.getByText("3 of 3 waiting on you, 2 held back")).toBeVisible();
+  const own = page.getByRole("combobox", { name: /Hold work in acme\/web/ });
+  await expect(own.locator("option:checked")).toHaveText("3 (default)");
+  await expectAccessible(page);
+  await themes(page, "settings-repositories");
+
+  const bar = page.getByRole("region", { name: "Save Repositories" });
+  try {
+    await page.getByRole("combobox", { name: "Mode of acme/web" }).selectOption("shadow");
+    await own.selectOption("2");
+    await bar.getByRole("button", { name: "Save" }).click();
+    await expect(bar).toHaveCount(0);
+    await expect.poll(async () => (await athena("policy", "show")).replace(/\s+/g, "")).toContain('"mode":"shadow"');
+    expect((await athena("policy", "show")).replace(/\s+/g, "")).toContain('"wipCeiling":2');
+  } finally {
+    await page.getByRole("combobox", { name: "Mode of acme/web" }).selectOption("live");
+    await own.selectOption("");
+    if (await bar.isVisible()) await bar.getByRole("button", { name: "Save" }).click();
+    await expect(bar).toHaveCount(0);
+    await expect.poll(async () => (await athena("policy", "show")).replace(/\s+/g, "")).not.toContain('"shadow"');
+  }
+});
+
+test("trust shows its classes and the standing rules, and the owner row is locked", async ({ page }) => {
+  await editLink(page, {
+    policy: (p) => {
+      const doc = JSON.parse(p.settingsJson);
+      doc.allow = [
+        { tool: "Bash", rule: "make test", repo: "acme/web", added: "2026-11-01T10:00:00Z" },
+        { tool: "Edit", rule: "docs/**", repo: "acme/api", added: "2026-11-03T10:00:00Z" },
+      ];
+      p.settingsJson = JSON.stringify(doc);
+    },
+  });
+  await page.emulateMedia({ colorScheme: "light", reducedMotion: "reduce" });
+  await signedInPage(page);
+  await page.goto("/settings/trust");
+  await expect(page.getByRole("combobox", { name: "You" })).toBeDisabled();
+  await expect(page.getByRole("combobox", { name: "Strangers" })).toHaveValue("restricted");
+  const rules = page.getByRole("region", { name: "Standing rules" });
+  await expect(rules.getByRole("listitem")).toHaveCount(2);
+  await expect(rules.getByRole("listitem").first()).toContainText("Bash · make test in acme/web, added 1 Nov 2026");
+  await rules.getByRole("button", { name: /^Remove Edit/ }).click();
+  await expect(rules.getByRole("listitem")).toHaveCount(1);
+  await page.getByRole("button", { name: "Discard" }).click();
+  await expect(rules.getByRole("listitem")).toHaveCount(2);
+  await expectAccessible(page);
+  await themes(page, "settings-trust");
 });

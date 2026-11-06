@@ -12,6 +12,7 @@ import {
   RuntimeStatusSchema,
   TimelineEntrySchema,
   type NodeStatus,
+  type PolicyView,
   type PromotionOffer,
   type ProposalView,
   type RepoView,
@@ -35,6 +36,8 @@ export type LinkEdits = {
   repos?: (r: RepoView[]) => void;
   /** Shapes the held Proposals a Snapshot carries; it may push to or replace the entries. */
   proposals?: (p: ProposalView[]) => void;
+  /** Shapes the Policy a Snapshot and a policy Delta carry (settings_json is a string: parse, change, stringify). */
+  policy?: (p: PolicyView) => void;
   /** Shapes the promotion offers a Snapshot carries (and an offers Delta); it may push to or replace the entries. */
   offers?: (o: PromotionOffer[]) => void;
 };
@@ -56,6 +59,7 @@ export async function editLink(page: Page, edits: LinkEdits): Promise<void> {
         body.value.triggers.forEach((t) => edits.trigger?.(t));
         edits.repos?.(body.value.repos);
         edits.proposals?.(body.value.proposals);
+        if (body.value.policy) edits.policy?.(body.value.policy);
         if (body.value.offers) edits.offers?.(body.value.offers.offers);
         else if (edits.offers) {
           body.value.offers = create(OfferListSchema, {});
@@ -72,6 +76,7 @@ export async function editLink(page: Page, edits: LinkEdits): Promise<void> {
         if (change.case === "ticket") edits.ticket?.(change.value);
         if (change.case === "trigger") edits.trigger?.(change.value);
         if (change.case === "repos") edits.repos?.(change.value.repos);
+        if (change.case === "policy") edits.policy?.(change.value);
         if (change.case === "offers") edits.offers?.(change.value.offers);
       }
       ws.send(Buffer.from(toBinary(FrameSchema, f)));
