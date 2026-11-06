@@ -126,6 +126,10 @@ export function describeEntry(e: Entry, afterLimit = false): EntryView {
           return { title: "Interrupted by a server restart", subtitle: "", tone: "warn" };
         case "resumed":
           return { title: "Resumed automatically", subtitle: "", tone: "ok" };
+        case "paused":
+          return { title: "Paused by the owner", subtitle: "", tone: "neutral" };
+        case "unpaused":
+          return { title: "Resumed", subtitle: "", tone: "ok" };
         case "failed":
           return { title: "Failed", subtitle: text, tone: "danger" };
         case "stopped":

@@ -462,9 +462,13 @@ func ticketTimeline(t *core.Ticket, origin *core.Trigger, pending *core.Approval
 			out = append(out, timelineEntry(r.At, "report", string(r.State), subject, firstLine(clean(headOf(r.Summary))), a.ID))
 		}
 		for _, in := range a.Interruptions {
-			out = append(out, withRuntime(timelineEntry(in.At, "assignment", "restart", "", "", a.ID), a.Runtime))
+			cut, resumed := "restart", "resumed"
+			if in.Reason == core.InterruptPaused {
+				cut, resumed = "paused", "unpaused"
+			}
+			out = append(out, withRuntime(timelineEntry(in.At, "assignment", cut, "", "", a.ID), a.Runtime))
 			if in.ResumedAt != nil {
-				out = append(out, withRuntime(timelineEntry(*in.ResumedAt, "assignment", "resumed", "", "", a.ID), a.Runtime))
+				out = append(out, withRuntime(timelineEntry(*in.ResumedAt, "assignment", resumed, "", "", a.ID), a.Runtime))
 			}
 		}
 		if a.State == core.AssignmentEnded && a.EndedAt != nil {

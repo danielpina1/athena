@@ -219,6 +219,8 @@ type Node struct {
 	infos  map[string]rt.Info
 	// statusGen moves whenever a runtime's readiness or quota changes, so publishStatus tells OnStatus.
 	statusGen atomic.Int64
+	// paused is the kill switch (pause.go): no queued launch starts and live sessions park at their turn's end.
+	paused atomic.Bool
 }
 
 type engineRef struct{ e EngineCallbacks }
@@ -595,8 +597,9 @@ func (n *Node) onEnded(st *loopState, s *session) {
 			}
 			st.queue = append(st.queue, ns)
 		}
-	} else if !st.shutting && !s.isStopped() && len(s.deliverCh) > 0 {
-		// Inputs arrived after the runner stopped listening: launch the Assignment again to take them.
+	} else if !st.shutting && !s.isStopped() && (len(s.deliverCh) > 0 || n.relaunchAfterPause(s)) {
+		// Inputs arrived after the runner stopped listening, or the pause that parked it was lifted before it left:
+		// launch the Assignment again.
 		a := s.a
 		a.State = core.AssignmentRunning
 		if id := s.currentSessionID(); id != "" {
@@ -632,6 +635,9 @@ func (n *Node) onShutdown(st *loopState) {
 // schedule launches queued sessions while slots are free, skipping a Ticket whose previous session still ends, a
 // non-git directory another Ticket uses and a launch put off until later (waiting for credentials or a runtime).
 func (n *Node) schedule(st *loopState) {
+	if n.Paused() {
+		return // the queue waits for the resume (SetPaused)
+	}
 	for i := 0; i < len(st.queue); {
 		if n.liveCount() >= n.cfg.Slots {
 			return
@@ -698,6 +704,7 @@ type session struct {
 
 	deliverCh chan struct{} // cap 1: a delivery is wanted
 	reportCh  chan struct{} // cap 1: the session filed a Report
+	pauseCh   chan struct{} // cap 1: the node paused; park if idle
 	stopCh    chan struct{}
 
 	mu          sync.Mutex
@@ -722,6 +729,8 @@ type session struct {
 	// request); parked once its runner ended the process for it, the Assignment running on with its session.
 	handoff bool
 	parked  bool
+	// pauseParked is set once the node's pause parked the session (pause.go).
+	pauseParked bool
 	// wait is set when the launch cannot go yet (GitHub credentials, its runtime limited or at its session cap): it
 	// is queued again, without a slot, to be tried after the pause.
 	wait launchWait
@@ -864,6 +873,7 @@ func (n *Node) newSession(t core.Ticket, a core.Assignment, p placement) *sessio
 		log:       n.log.With("ticket", t.ID, "assignment", a.ID),
 		deliverCh: make(chan struct{}, 1),
 		reportCh:  make(chan struct{}, 1),
+		pauseCh:   make(chan struct{}, 1),
 		stopCh:    make(chan struct{}),
 	}
 }
@@ -1115,7 +1125,7 @@ func (r *runner) run() {
 	// The runtime first: a launch whose runtime is limited (or at its session cap) waits without a slot, like one
 	// waiting for credentials; one whose runtime cannot run it fails with why.
 	rtm, ok := r.chooseRuntime()
-	if !ok {
+	if !ok || r.putOffForPause() {
 		return
 	}
 	// GitHub credentials that cannot be had yet (GitHub unreachable, the bot not known yet) delay the launch; they are
@@ -1382,6 +1392,8 @@ loop:
 		case <-s.reportCh:
 			r.markRead(s.reportCount())
 			r.parkIfHandedOff()
+		case <-s.pauseCh:
+			r.parkIfPaused()
 		case <-s.stopCh:
 			crashed = false
 			r.log.Info("session stopped", "reason", s.reason())
@@ -1393,10 +1405,9 @@ loop:
 			break loop
 		}
 		if r.park {
-			// The worker handed off and its turn is over: the process ends, the slot is free, the Assignment runs on
-			// with its session, which a later Input resumes.
+			// The worker handed off, or the node paused, and its turn is over: the process ends, the slot is free, the
+			// Assignment runs on with its session, which a later Input (or the resume) starts again.
 			crashed = false
-			r.log.Info("worker handed off; session paused until its next input")
 			_ = sess.Close()
 			for ev := range events {
 				r.account(ev)
@@ -1457,7 +1468,9 @@ func (r *runner) sendFirst(sess rt.Session, recovering bool) {
 	}
 	ids := r.pending(t)
 	var b strings.Builder
-	if recovering && r.paused {
+	if recovering && pausedByOwner(t, s.a.ID) {
+		b.WriteString(pauseNote + "\n")
+	} else if recovering && r.paused {
 		b.WriteString(resumeNote + "\n")
 	} else if recovering && r.restarted {
 		b.WriteString(restartNote + recoveryAdvice + "\n")
@@ -1507,6 +1520,9 @@ func workerPreamble(t core.Ticket, vars []string) string {
 
 // deliver sends the Inputs that wait for the Ticket now and reports exactly those as delivered.
 func (r *runner) deliver(sess rt.Session) {
+	if r.parkIfPaused(); r.park {
+		return // paused while idle: the Inputs wait for the session's start after the resume
+	}
 	t, _, err := r.eng.Ticket(r.s.t.ID)
 	if err != nil {
 		r.log.Error("read ticket", "error", err)
@@ -1723,6 +1739,7 @@ func (r *runner) onEvent(ev rt.Event) {
 		r.idle = true
 		r.turnEnded()
 		r.parkIfHandedOff()
+		r.parkIfPaused()
 	}
 }
 
@@ -1747,6 +1764,7 @@ func (r *runner) parkIfHandedOff() {
 		r.log.Error("record turn end", "error", err)
 		return
 	}
+	r.log.Info("worker handed off; session paused until its next input")
 	s.markParked()
 	r.park = true
 }
@@ -1833,6 +1851,7 @@ func (r *runner) turnEnded() {
 		return
 	}
 	r.inputSent() // start over: the turn of the next Input is checked afresh
+	r.idle = true // nothing was sent: the session waits
 	if r.s.isStopped() {
 		return
 	}

@@ -266,6 +266,7 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	if killSwitch.Paused() {
 		logger.Warn("athena is paused; `athena resume` starts the decisions and replies again", "since", killSwitch.State().Since)
 	}
+	n.SetPaused(killSwitch.Paused())
 	eng := core.NewEngineWith(st.Repos(), n, core.Options{Now: time.Now, Emit: emit, Policy: pc.policy, Scope: sourceReg,
 		Wake: fx.Wake, Relays: routerOn, DefaultRuntime: fileCfg.Runtimes.Default, Pairing: pc.pairing})
 	eng.SetMetrics(reg)
@@ -296,9 +297,13 @@ func Run(ctx context.Context, cfg Config) (err error) {
 		}
 		defer webEP.stop()
 	}
-	// The one seam a change of the switch goes through: the dashboard hears of it here, and the effects that were put off
-	// while paused run again at once. (Task 5 adds the node's parking here.)
+	// The one seam a change of the switch goes through: the node parks its sessions or starts them again, the dashboard
+	// hears of it, and the effects that were put off while paused run again at once.
 	killSwitch.OnChange(func(s pause.State) {
+		n.SetPaused(s.Paused)
+		if !s.Paused {
+			resumeParked(eng, n, logger)
+		}
 		if h := hubRef.Load(); h != nil {
 			h.OnCommit(store.Changes{Control: true})
 		}
@@ -505,7 +510,8 @@ func expirePendingApprovals(eng *core.Engine, log *slog.Logger) {
 // first. The node resumes a running one's session with a restart or recovery note and sends it the Inputs that still
 // wait (Ticket.Undelivered). A running Assignment idle
 // since its last turn (one whose worker handed off included) keeps its Session without a process: the node resumes
-// it, with the resume note, when its next Input arrives.
+// it, with the resume note, when its next Input arrives. While paused it records the interruptions but starts nothing:
+// resumeParked does, on resume.
 func recoverAssignments(eng *core.Engine, n *node.Node, log *slog.Logger) {
 	tickets, err := eng.Tickets(false)
 	if err != nil {
@@ -530,19 +536,48 @@ func recoverAssignments(eng *core.Engine, n *node.Node, log *slog.Logger) {
 				t, a = fresh, fresh.LatestAssignment()
 			}
 		}
+		if n.Paused() {
+			log.Info("athena is paused; the assignment starts on resume", "ticket", t.ID, "assignment", a.ID, "state", a.State)
+			continue
+		}
 		log.Info("recovering assignment", "ticket", t.ID, "assignment", a.ID, "state", a.State, "undelivered", len(t.Undelivered))
 		n.Start(t, *a)
 	}
 }
 
+// resumeParked starts again, on resume, what the pause held, as recovery does: of every open Ticket, a pending latest
+// Assignment and a running one that was interrupted (its session parked by the pause or cut short by a restart, or
+// Inputs wait for it). The node resumes a session with the pause or restart note. A Start of one that is queued or
+// still live changes nothing.
+func resumeParked(eng *core.Engine, n *node.Node, log *slog.Logger) {
+	tickets, err := eng.Tickets(false)
+	if err != nil {
+		log.Error("resume: list tickets", "error", err)
+		return
+	}
+	for _, t := range tickets {
+		a := t.LatestAssignment()
+		if a == nil || !(a.State == core.AssignmentPending || a.State == core.AssignmentRunning && interrupted(&t, a)) {
+			continue
+		}
+		log.Info("resuming assignment", "ticket", t.ID, "assignment", a.ID, "state", a.State, "undelivered", len(t.Undelivered))
+		n.Start(t, *a)
+	}
+}
+
 // interrupted reports whether a running Assignment was busy when the server stopped: no turn of its worker ended
-// since it started, an Input (or the nudge to report) reached it after its turn last ended, Inputs wait for it, or a
-// shutdown recorded an interruption that no start has closed and no turn ended after.
+// since it started, an Input (or the nudge to report) reached it after its turn last ended, Inputs wait for it, a
+// shutdown recorded an interruption that no start has closed and no turn ended after, or the owner's pause parked its
+// session (one that handed off waits for its next Input).
 // A Ticket whose latest Report is failed or blocked, with no person's message since, waits for a person instead: a
 // failed turn may skip the Stop hook, but nothing is to run until someone answers (plan 1 R34).
 func interrupted(t *core.Ticket, a *core.Assignment) bool {
 	if t.WaitsForPerson() {
 		return false
+	}
+	if i := a.OpenInterruption(); i != nil && i.Reason == core.InterruptPaused {
+		// The pause parked it at the end of a turn; one that handed off starts again on its next Input instead.
+		return !t.HandedOff() || len(t.Undelivered) > 0
 	}
 	if i := a.OpenInterruption(); i != nil && (a.IdleAt == nil || !a.IdleAt.After(i.At)) {
 		return true

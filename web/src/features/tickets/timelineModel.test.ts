@@ -48,6 +48,11 @@ test("a Decision and an Assignment read as what happened", () => {
   expect(titleOf("assignment", "", "", "ended: retried")).toBe("Session ended");
 });
 
+test("timeline says paused by the owner and resumed", () => {
+  expect(describeEntry(e("assignment", "paused"))).toMatchObject({ title: "Paused by the owner", subtitle: "", tone: "neutral" });
+  expect(describeEntry(e("assignment", "unpaused"))).toMatchObject({ title: "Resumed", subtitle: "", tone: "ok" });
+});
+
 test("timeline says interrupted and resumed", () => {
   expect(describeEntry(e("assignment", "restart"))).toMatchObject({ title: "Interrupted by a server restart", subtitle: "", tone: "warn" });
   expect(describeEntry(e("assignment", "resumed"))).toMatchObject({ title: "Resumed automatically", subtitle: "", tone: "ok" });

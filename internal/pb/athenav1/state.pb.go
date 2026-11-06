@@ -802,7 +802,8 @@ type TimelineEntry struct {
 	//   trigger: where it came from: issue, pull, issue-comment, pull-comment, review-comment, review, ci or owner;
 	//   decision: accepted;
 	//   assignment: queued, started (the start entry), restart (its session was cut short by a server restart),
-	//     resumed (it started again by itself), limited (it ended at a usage limit: subject is the runtime, text the
+	//     resumed (it started again by itself), paused (the owner's pause parked its session at the end of a turn),
+	//     unpaused (it started again after the pause), limited (it ended at a usage limit: subject is the runtime, text the
 	//     RFC 3339 reset, empty when unknown), review (a review Assignment's start), or ended, interrupted, stopped
 	//     or retried (the end entry, at the Assignment's end);
 	//   review: approved, changes or failed, at the end of a review; text is the first finding line (or why it

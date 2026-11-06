@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -174,5 +175,90 @@ func TestResumeReleasesHeldReplyAtOnce(t *testing.T) {
 	}
 	if n := len(g.postedComments()); n != 1 {
 		t.Fatalf("%d comments posted 4 s after resume, want the held reply", n)
+	}
+}
+
+// Review Focus 2: a server stopped mid-session while paused starts paused and launches nothing; `athena resume` resumes
+// the session through plan 5's restart path (the restart note, the same session).
+func TestRestartWhilePausedStaysParked(t *testing.T) {
+	fake := newFakeEnv(t, openTurnFixture(t))
+	dir := newStateDir(t)
+	s := startServerWith(t, dir, fastClose)
+	id := s.submit("Long task\nbody-p4u5")
+	a := s.running(id)
+	s.ok(Request{Op: OpPause}, nil)
+	s.stop()
+	if got := s.interruptions(id); len(got) != 1 || got[0].Reason != core.InterruptRestart || got[0].ResumedAt != nil {
+		t.Fatalf("after the stop: interruptions %+v, want one open restart", got)
+	}
+
+	s = startServerWith(t, dir, fastClose)
+	if h := s.health(); !h.Paused {
+		t.Fatalf("health after the restart = %+v, want paused", h)
+	}
+	time.Sleep(300 * time.Millisecond)
+	if n := len(fake.invocations(t)); n != 1 {
+		t.Fatalf("claude started %d times, want only the first start while paused", n)
+	}
+	if got := s.interruptions(id); len(got) != 1 || got[0].ResumedAt != nil {
+		t.Fatalf("while paused: interruptions %+v, want the restart still open", got)
+	}
+
+	s.ok(Request{Op: OpResume}, nil)
+	eventually(t, "the session resumed", func() bool { return len(fake.invocations(t)) == 2 })
+	if rid, ok := argValue(fake.invocations(t)[1], "--resume"); !ok || rid != fixtureSessionID {
+		t.Fatalf("second start args = %v, want --resume %s", fake.invocations(t)[1], fixtureSessionID)
+	}
+	eventually(t, "the interruption resumed", func() bool {
+		got := s.interruptions(id)
+		return len(got) == 1 && got[0].ResumedAt != nil
+	})
+	if in := fake.stdin(t); !strings.Contains(in, `"`+restartText) || strings.Contains(in, recoveryText) {
+		t.Fatalf("stdin = %q, want the restart note and no crash note", in)
+	}
+	if d := s.detail(id); len(d.Assignments) != 1 || d.Assignments[0].ID != a.ID || d.Stage != "working" {
+		t.Fatalf("after the resume: stage %q, assignments %+v, want the same Assignment working", d.Stage, d.Assignments)
+	}
+}
+
+// Pause parks a session at the end of its turn; resume starts it again on the same Assignment. The Ticket records the
+// pause (Paused by the owner) and the resume (Resumed).
+func TestResumeRelaunchesParked(t *testing.T) {
+	fake := newFakeEnv(t, claudeFixture(t, "simple-turn.jsonl"))
+	hold := filepath.Join(t.TempDir(), "turn-may-end")
+	t.Setenv("ATHENA_FAKE_HOLD_RESULT", hold)
+	dir := newStateDir(t)
+	s := startServerWith(t, dir, fastClose)
+	id := s.submit("Task\nbody-r3s4")
+	a := s.running(id)
+	var resp node.Response
+	nodeCall(t, dir, node.ReportRequest{Op: node.OpReport, Ticket: id, Assignment: a.ID, Status: "progress", Summary: "going"}, &resp)
+	if !resp.OK {
+		t.Fatalf("report = %+v", resp)
+	}
+	s.ok(Request{Op: OpPause}, nil)
+	if err := os.WriteFile(hold, nil, 0o600); err != nil { // the turn ends
+		t.Fatal(err)
+	}
+	eventually(t, "the session parked", func() bool {
+		got := s.interruptions(id)
+		return len(got) == 1 && got[0].Reason == core.InterruptPaused && got[0].ResumedAt == nil
+	})
+	time.Sleep(200 * time.Millisecond)
+	if n := len(fake.invocations(t)); n != 1 {
+		t.Fatalf("claude started %d times while paused, want 1", n)
+	}
+
+	s.ok(Request{Op: OpResume}, nil)
+	eventually(t, "the session started again", func() bool { return len(fake.invocations(t)) == 2 })
+	if rid, ok := argValue(fake.invocations(t)[1], "--resume"); !ok || rid != fixtureSessionID {
+		t.Fatalf("second start args = %v, want --resume %s", fake.invocations(t)[1], fixtureSessionID)
+	}
+	eventually(t, "the pause closed by the resume", func() bool {
+		got := s.interruptions(id)
+		return len(got) == 1 && got[0].Reason == core.InterruptPaused && got[0].ResumedAt != nil
+	})
+	if d := s.detail(id); len(d.Assignments) != 1 || d.Assignments[0].ID != a.ID || d.Stage != "working" {
+		t.Fatalf("after the resume: stage %q, assignments %+v, want the same Assignment working", d.Stage, d.Assignments)
 	}
 }

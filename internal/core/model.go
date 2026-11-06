@@ -79,6 +79,9 @@ const RoleReview = "review"
 // InterruptRestart is the reason of an Interruption a server restart caused.
 const InterruptRestart = "server restart"
 
+// InterruptPaused is the reason of an Interruption the owner's pause caused: the session parked at the end of its turn.
+const InterruptPaused = "paused"
+
 // Interruption is a time an Assignment's session was cut short while it worked. ResumedAt is when the session started
 // again, and EndedAt when the Assignment ended before it did (a stop, a failover, a review); both are nil while the
 // Interruption is open.
