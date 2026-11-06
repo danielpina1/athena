@@ -89,6 +89,24 @@ export function resume() {
   return submit({ case: "resume", value: {} });
 }
 
+/** Lets a held reply, push or pull request go. */
+export function applyProposal(id: string) {
+  return submit({ case: "applyProposal", value: { id } });
+}
+
+export function discardProposal(id: string) {
+  return submit({ case: "discardProposal", value: { id } });
+}
+
+/** Writes a standing allow rule for the offered class. Sensitive: the outbox asks for the passkey and resends. */
+export function allowAction(cls: string) {
+  return submit({ case: "allowAction", value: { class: cls } });
+}
+
+export function dismissOffer(cls: string) {
+  return submit({ case: "dismissOffer", value: { class: cls } });
+}
+
 /**
  * Starts the Ticket's detail Deltas (seq 0) on this connection. Not refcounted: a screen that can show one Ticket
  * twice (list pane and pinned session, say) counts its own users and calls watch on the first and unwatch on the last.

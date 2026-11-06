@@ -18,6 +18,8 @@ import { Button } from "@/ui/primitives/button";
 import { AnswerCard } from "./AnswerCard";
 import { BrakeNotice } from "./BrakeNotice";
 import { ApprovalCard } from "./ApprovalCard";
+import { OfferCard } from "./OfferCard";
+import { ProposalCard } from "./ProposalCard";
 import { ReviewCard } from "./ReviewCard";
 import { StalledCard } from "./StalledCard";
 
@@ -30,6 +32,8 @@ function ItemCard({ item }: { item: NeedsYouItem }) {
   switch (item.kind) {
     case "approval":
       return item.approval ? <ApprovalCard ticket={item.ticket} approval={item.approval} /> : null;
+    case "proposal":
+      return item.proposal ? <ProposalCard ticket={item.ticket} proposal={item.proposal} /> : null;
     case "answer":
       return <AnswerCard key={item.ticket.attentionQuestion} ticket={item.ticket} />;
     case "review":
@@ -67,6 +71,7 @@ export function NeedsYou() {
   const counts = useAthena((s) => selectCounts(s));
   const node = useAthena((s) => s.node);
   const repos = useAthena((s) => s.repos);
+  const offers = useAthena((s) => s.offers);
   const synced = useAthena(selectSynced);
   const [shown, setShown] = useState(PAGE);
   // The desktop has the live feed in its sidebar; the phone has it here, under the cards.
@@ -99,7 +104,7 @@ export function NeedsYou() {
       {synced && <BrakeNotice repos={repos} />}
       {!synced ? (
         <Waiting className="border-t border-line py-8" />
-      ) : items.length === 0 ? (
+      ) : items.length === 0 && offers.length === 0 ? (
         <EmptyState
           title="Nothing needs you."
           description={`Today: ${counts.working} working, ${counts.endedToday} ended, ${counts.mergedToday} merged.`}
@@ -108,13 +113,22 @@ export function NeedsYou() {
         <>
           <ul ref={list} className="grid gap-3">
             {items.slice(0, shown).map((item) => (
-              <li key={item.approval ? `approval:${item.approval.id}` : `${item.kind}:${item.ticket.id}`} className="min-w-0">
+              <li key={item.approval ? `approval:${item.approval.id}` : item.proposal ? `proposal:${item.proposal.id}` : `${item.kind}:${item.ticket.id}`} className="min-w-0">
                 <ItemCard item={item} />
               </li>
             ))}
           </ul>
           {items.length > shown && (
             <Button onClick={() => setShown((n) => n + PAGE)}>{`Show more (${items.length - shown})`}</Button>
+          )}
+          {offers.length > 0 && (
+            <ul aria-label="Always allow" className="grid gap-3">
+              {offers.map((o) => (
+                <li key={o.class} className="min-w-0">
+                  <OfferCard offer={o} />
+                </li>
+              ))}
+            </ul>
           )}
         </>
       )}

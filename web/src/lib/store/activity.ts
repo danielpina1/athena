@@ -33,6 +33,7 @@ type Event = Pick<ActivityItem, "key" | "event" | "tone">;
 
 const NEEDS_YOU: Record<NeedsYouKind, [string, Tone]> = {
   approval: ["Needs your approval", "attention"],
+  proposal: ["Is holding something for you", "attention"],
   answer: ["Asked you a question", "attention"],
   review: ["Ready for review", "attention"],
   delivery: ["Delivery failed", "danger"],

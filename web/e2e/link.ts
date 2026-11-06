@@ -8,9 +8,12 @@ import { create, fromBinary, toBinary, type MessageInitShape } from "@bufbuild/p
 import type { Page } from "@playwright/test";
 import { FrameSchema } from "../src/gen/athena/v1/link_pb";
 import {
+  OfferListSchema,
   RuntimeStatusSchema,
   TimelineEntrySchema,
   type NodeStatus,
+  type PromotionOffer,
+  type ProposalView,
   type RepoView,
   type RuntimeStatus,
   type TicketDetail,
@@ -30,6 +33,10 @@ export type LinkEdits = {
   trigger?: (t: TriggerView) => void;
   /** Shapes the repository list (a Snapshot's and a repos Delta's); it may push to or replace the entries. */
   repos?: (r: RepoView[]) => void;
+  /** Shapes the held Proposals a Snapshot carries; it may push to or replace the entries. */
+  proposals?: (p: ProposalView[]) => void;
+  /** Shapes the promotion offers a Snapshot carries (and an offers Delta); it may push to or replace the entries. */
+  offers?: (o: PromotionOffer[]) => void;
 };
 
 /** Routes the page's link through `edits`. The object is read on every frame, so a test may swap its edits. */
@@ -48,6 +55,12 @@ export async function editLink(page: Page, edits: LinkEdits): Promise<void> {
         body.value.tickets.forEach((t) => edits.ticket?.(t));
         body.value.triggers.forEach((t) => edits.trigger?.(t));
         edits.repos?.(body.value.repos);
+        edits.proposals?.(body.value.proposals);
+        if (body.value.offers) edits.offers?.(body.value.offers.offers);
+        else if (edits.offers) {
+          body.value.offers = create(OfferListSchema, {});
+          edits.offers(body.value.offers.offers);
+        }
       }
       if (body.case === "delta") {
         const change = body.value.change;
@@ -59,6 +72,7 @@ export async function editLink(page: Page, edits: LinkEdits): Promise<void> {
         if (change.case === "ticket") edits.ticket?.(change.value);
         if (change.case === "trigger") edits.trigger?.(change.value);
         if (change.case === "repos") edits.repos?.(change.value.repos);
+        if (change.case === "offers") edits.offers?.(change.value.offers);
       }
       ws.send(Buffer.from(toBinary(FrameSchema, f)));
     });

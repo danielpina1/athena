@@ -2,10 +2,11 @@
 // banner, the "holding new work" notice in Needs you, and the trust badges on Tickets and Triggers, at the three
 // widths, light and dark. The brake and the badges are states the shared server does not reach on its own, so the
 // link edits them in (link.ts); pausing is real, and every test resumes in `finally`.
-import { create } from "@bufbuild/protobuf";
+import { create, type MessageInitShape } from "@bufbuild/protobuf";
 import type { Page } from "@playwright/test";
-import { RepoViewSchema } from "../src/gen/athena/v1/state_pb";
-import { athena, expect, expectAccessible, liveFeed, signedInPage, test } from "./harness";
+import { timestampFromDate } from "@bufbuild/protobuf/wkt";
+import { PromotionOfferSchema, ProposalViewSchema, RepoViewSchema } from "../src/gen/athena/v1/state_pb";
+import { athena, expect, expectAccessible, expectShell, liveFeed, signedInPage, test } from "./harness";
 import { editLink, type LinkEdits } from "./link";
 
 /** Pauses from the dashboard: the control (the sidebar's, or the top bar's on the phone), then the confirm. */
@@ -18,13 +19,13 @@ async function pauseFromDashboard(page: Page) {
 
 const banner = (page: Page) => page.locator("[data-paused-banner]");
 
-async function shot(page: Page, name: string, mask: ReturnType<Page["locator"]>[] = []) {
+async function shot(page: Page, name: string, mask: ReturnType<Page["locator"]>[] = [], fullPage = false) {
   for (const scheme of ["light", "dark"] as const) {
     await page.emulateMedia({ colorScheme: scheme, reducedMotion: "reduce" });
     await expect(page.locator("html")).toHaveAttribute("data-theme", scheme);
     await expectAccessible(page);
     await page.evaluate(() => document.fonts.ready);
-    await expect(page).toHaveScreenshot(`${name}-${scheme}.png`, { mask: [page.locator("time"), ...mask, ...liveFeed(page)] });
+    await expect(page).toHaveScreenshot(`${name}-${scheme}.png`, { fullPage, mask: [page.locator("time"), ...mask, ...liveFeed(page)] });
   }
 }
 
@@ -119,6 +120,67 @@ test("trust badges on a Ticket's card, its page and a Trigger", async ({ page, s
     await expect(page.locator("[data-trigger-row]").first().getByText("From a bot")).toBeVisible();
     await expectAccessible(page);
     void verdict.catch(() => {});
+  } finally {
+    await athena("stop", ticket).catch(() => {});
+  }
+});
+
+test("held Proposals and an always-allow offer in Needs you", async ({ page }) => {
+  // The shared server has no GitHub repository to hold work for, so the link tells the page about a reply, a push, a
+  // pull request and a failed reply on the Ticket; the buttons are the page's real Commands, which the server answers.
+  const held: { ticket: string } = { ticket: "" };
+  const at = timestampFromDate(new Date("2026-11-04T09:00:00Z"));
+  const proposal = (id: string, kind: string, extra: MessageInitShape<typeof ProposalViewSchema>) =>
+    create(ProposalViewSchema, { id, ticketId: held.ticket, repo: "acme/web", kind, state: "pending", createdAt: at, ...extra });
+  const edits: LinkEdits = {
+    // The Ticket waits on its Proposals (action "proposal"), as the server tells it.
+    ticket: (t) => {
+      if (t.id === held.ticket) {
+        t.stage = "person";
+        t.action = "proposal";
+      }
+    },
+    proposals: (p) => {
+      p.splice(
+        0,
+        p.length,
+        proposal("P-1", "reply", { summary: "Thanks, fixed in the next release.", detail: "Thanks, fixed in the next release." }),
+        proposal("P-2", "push", { summary: "Push fix/login", detail: "fix/login @ a1b2c3d" }),
+        proposal("P-3", "pull_request", { summary: "Open a pull request", detail: "Fix the flaky login test (into main)" }),
+        proposal("P-4", "reply", { state: "failed", summary: "Reply on #4", detail: "On it.", error: "GitHub refused the comment: 403" }),
+      );
+    },
+    offers: (o) => {
+      o.splice(0, o.length, create(PromotionOfferSchema, { class: "bash|make test|acme/web", tool: "Bash", rule: "make test", repo: "acme/web", approved: 5 }));
+    },
+  };
+  await editLink(page, edits);
+  await page.emulateMedia({ colorScheme: "light", reducedMotion: "reduce" });
+  await signedInPage(page);
+  const ticket = await athena("task", "Fix the flaky login test");
+  held.ticket = ticket;
+  try {
+    await page.reload();
+    await expectShell(page);
+    const reply = page.getByRole("group", { name: "Reply held for you" }).first();
+    await expect(reply).toContainText("Thanks, fixed in the next release.");
+    await expect(page.getByRole("group", { name: "Push held for you" })).toContainText("fix/login @ a1b2c3d");
+    await expect(page.getByRole("group", { name: "Pull request held for you" })).toBeVisible();
+    const failed = page.getByRole("group", { name: "Reply held for you" }).nth(1);
+    await expect(failed).toContainText("GitHub refused the comment: 403");
+    await expect(failed.getByRole("button", { name: "Try again" })).toBeVisible();
+    await expect(failed.getByRole("button", { name: "Apply" })).toHaveCount(0);
+    const offer = page.getByRole("group", { name: "Always allow Bash" });
+    await expect(offer).toContainText("You approved Bash · make test in acme/web 5 times in a row. Always allow it here?");
+    await expect(offer).toContainText("Writes a standing rule to your Policy. Never applies to work from outside your allow list.");
+    const unstable = [page.locator('main a[href^="/tickets/"]'), page.getByText(/^Today: /), page.getByText(/need you/)];
+    await shot(page, "proposals-needs-you", unstable, true);
+
+    // The buttons send the real Commands; the server holds none of these, so it refuses them and the card says so.
+    await reply.getByRole("button", { name: "Apply" }).click();
+    await expect(page.getByText("Could not apply")).toBeVisible();
+    await offer.getByRole("button", { name: "Always allow" }).click();
+    await expect(page.getByText("Could not allow it")).toBeVisible();
   } finally {
     await athena("stop", ticket).catch(() => {});
   }

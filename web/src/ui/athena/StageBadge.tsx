@@ -7,6 +7,7 @@ const PERSON: Record<string, string> = {
   answer: "Needs your answer",
   approval: "Needs approval",
   review: "Ready for review",
+  proposal: "Review what Athena holds for you",
   delivery: "Delivery failed",
   blocked: "Blocked",
   failed: "Failed",
