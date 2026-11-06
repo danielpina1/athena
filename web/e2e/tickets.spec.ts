@@ -1,14 +1,17 @@
 // Tickets, end to end: the list with its filters, the detail's live timeline and inline question, the Changes of a
 // Ticket in a temp git repository (the worker's edit is made here, as the fake session does not write), the Files of
 // one without a repository (docs.spec.ts has the viewer), and hostile content (a 2,000-character title, RTL, ANSI, a 3,000-character diff line)
-// that must never move the page sideways. Every Ticket a test opens is stopped at its end (R37).
+// that must never move the page sideways; each row's runtime and the runtime filter, and a timeline with a failover
+// and a review. Every Ticket a test opens is stopped at its end (R37).
 import { execFile } from "node:child_process";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import type { Page } from "@playwright/test";
+import { timestampFromMs } from "@bufbuild/protobuf/wkt";
 import { athena, expect, expectAccessible, signedInPage, test, liveFeed } from "./harness";
+import { editLink, timelineEntry, type LinkEdits } from "./link";
 
 const run = promisify(execFile);
 const git = (cwd: string, ...args: string[]) =>
@@ -360,6 +363,131 @@ test("the timeline tells the Ticket's story, with the Report first", async ({ pa
     // View report brings the card into view.
     await rows.nth(1).getByRole("button", { name: "View report" }).click();
     await expect(report).toBeFocused();
+  } finally {
+    await finish(ticket);
+  }
+});
+
+test("each row says its runtime and the list filters by it, light and dark", async ({ page }) => {
+  await page.clock.setFixedTime(new Date("2026-11-04T10:00:00"));
+  await page.emulateMedia({ colorScheme: "light", reducedMotion: "reduce" });
+  await signedInPage(page);
+  const tickets: string[] = [];
+  try {
+    await page.goto("/tickets?stage=working&q=runtime%20list");
+    // One at a time, each once its session started, so the list's order (newest change first) is the same every run.
+    const rows = page.locator("[data-ticket-row]");
+    for (const [title, args, badge] of [
+      ["Runtime list: write the release notes", ["--runtime", "claude"], "Claude Code"],
+      ["Runtime list: port the tokenizer", ["--runtime", "codex"], "Codex"],
+      ["Runtime list: choose the cache layer", [], "Claude Code · auto"],
+    ] as const) {
+      tickets.push(await athena("task", title, ...args));
+      await expect(rows.filter({ hasText: title })).toContainText(badge, { timeout: 20_000 });
+    }
+    await expect(rows).toHaveCount(3);
+    await expect(page.getByText("3 Tickets")).toBeVisible();
+    await expectAccessible(page);
+    const unstable = [page.locator("time"), page.locator("aside .font-mono"), page.getByRole("region", { name: "Today" })];
+    await page.evaluate(() => document.fonts.ready);
+    await expect(page).toHaveScreenshot("list-runtimes-light.png", { mask: [...unstable, ...liveFeed(page)] });
+    await page.emulateMedia({ colorScheme: "dark", reducedMotion: "reduce" });
+    await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+    await expect(page).toHaveScreenshot("list-runtimes-dark.png", { mask: [...unstable, ...liveFeed(page)] });
+
+    // Filtered to Codex: the count is the rows shown.
+    await page.getByLabel("Runtime", { exact: true }).selectOption("codex");
+    await expect(page).toHaveURL(/runtime=codex/);
+    await expect(rows).toHaveCount(1);
+    await expect(rows.first()).toContainText("Runtime list: port the tokenizer");
+    await expect(page.getByText("1 Ticket", { exact: true })).toBeVisible();
+    await expectAccessible(page);
+    await expect(page).toHaveScreenshot("list-codex-dark.png", { mask: [...unstable, ...liveFeed(page)] });
+    await page.emulateMedia({ colorScheme: "light", reducedMotion: "reduce" });
+    await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+    await expect(page).toHaveScreenshot("list-codex-light.png", { mask: [...unstable, ...liveFeed(page)] });
+    await page.getByLabel("Runtime", { exact: true }).selectOption("claude");
+    await expect(rows).toHaveCount(2);
+    await expect(page.getByText("2 Tickets")).toBeVisible();
+  } finally {
+    await finish(...tickets);
+  }
+});
+
+test("the timeline tells a failover and a review, light and dark", async ({ page }) => {
+  const day = (h: number, m: number) => new Date(2026, 10, 4, h, m).getTime();
+  await page.clock.setFixedTime(day(16, 0));
+  await page.emulateMedia({ colorScheme: "light", reducedMotion: "reduce" });
+  const title = "Port the parser to the new grammar";
+  let ticket = "";
+  const entry = (h: number, m: number, kind: string, subkind: string, runtime = "", subject = "", text = "") =>
+    timelineEntry({ at: timestampFromMs(day(h, m)), kind, subkind, runtime, subject, text, refId: `${kind}-${h}${m}` });
+  // The story a shared server cannot tell on its own: Claude Code hits its limit, Codex continues, a server restart
+  // cuts the session short and it resumes, then a review that could not finish, one that asked for changes and one
+  // that approved.
+  const story = [
+    entry(9, 0, "trigger", "owner", "", "", title),
+    entry(9, 1, "assignment", "started", "claude", "claude-sonnet-4-5"),
+    entry(10, 12, "assignment", "limited", "claude", "claude", new Date(day(15, 0)).toISOString()),
+    entry(10, 13, "assignment", "started", "codex", "gpt-5.5"),
+    entry(11, 30, "assignment", "restart", "codex"),
+    entry(11, 31, "assignment", "resumed", "codex"),
+    entry(12, 5, "assignment", "review", "claude", "claude-opus-4-1"),
+    entry(12, 9, "review", "failed", "claude", "claude", "The review session ended before it gave a verdict"),
+    entry(12, 30, "assignment", "review", "claude", "claude-opus-4-1"),
+    entry(12, 48, "review", "changes", "claude", "claude", "The parser drops the last token of a file without a newline"),
+    entry(12, 50, "assignment", "started", "codex", "gpt-5.5"),
+    entry(13, 40, "assignment", "review", "claude", "claude-opus-4-1"),
+    entry(13, 55, "review", "approved", "claude", "claude"),
+  ];
+  const edits: LinkEdits = {
+    detail: (d) => {
+      if (d.summary?.id === ticket) d.timeline = story;
+    },
+  };
+  await editLink(page, edits);
+  await signedInPage(page);
+  ticket = await athena("task", title);
+  try {
+    await page.goto(`/tickets/${ticket}?tab=timeline&stage=open&q=new%20grammar`);
+    await expect(page.getByRole("heading", { name: title, level: 1 })).toBeVisible();
+    const rows = page.getByTestId("timeline-row");
+    await expect(rows).toHaveText([
+      /Review approved/,
+      /Review started · Claude Code/,
+      /Started work · Codex · gpt-5.5/,
+      /Changes requested.*The parser drops the last token/,
+      /Review started · Claude Code/,
+      /Review could not finish.*ended before it gave a verdict/,
+      /Review started · Claude Code/,
+      /Resumed automatically/,
+      /Interrupted by a server restart/,
+      /Continued on Codex · gpt-5.5/,
+      /Usage limit reached on Claude Code.*Resets at 15:00/,
+      /Started work · Claude Code · sonnet 4.5/,
+      /Started from your request/,
+    ]);
+    const tone = (i: number) => rows.nth(i).locator("[data-dot]");
+    await expect(tone(0)).toHaveAttribute("data-tone", "ok");
+    await expect(tone(3)).toHaveAttribute("data-tone", "neutral");
+    await expect(tone(5)).toHaveAttribute("data-tone", "warn");
+    await expect(tone(7)).toHaveAttribute("data-tone", "ok");
+    await expect(tone(8)).toHaveAttribute("data-tone", "warn");
+    await expect(tone(10)).toHaveAttribute("data-tone", "warn");
+    await expectAccessible(page);
+    const unstable = [
+      page.locator("aside .font-mono"),
+      page.getByRole("region", { name: "Today" }),
+      page.getByRole("region", { name: "Facts" }),
+      page.getByTestId("ticket-detail").locator("header .font-mono"),
+      page.locator("[data-ticket-row] time"),
+    ];
+    await page.evaluate(() => document.fonts.ready);
+    await expect(page).toHaveScreenshot("timeline-failover-light.png", { mask: [...unstable, ...liveFeed(page)], fullPage: true });
+    await page.emulateMedia({ colorScheme: "dark", reducedMotion: "reduce" });
+    await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+    await expectAccessible(page);
+    await expect(page).toHaveScreenshot("timeline-failover-dark.png", { mask: [...unstable, ...liveFeed(page)], fullPage: true });
   } finally {
     await finish(ticket);
   }

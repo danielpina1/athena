@@ -44,7 +44,7 @@ async function inBothThemes(page: Page, testInfo: TestInfo, state: string) {
 /**
  * In the phone shell (under 1024 px: the phone and the tablet) every control a thumb must hit is at least 44 px tall:
  * buttons and link-buttons, tabs, radios, checkboxes, switches, menu items, options, fields, the navigation's links
- * and the list rows (inline text links excepted).
+ * and the list rows (inline text links excepted). A hit area a control extends with an absolute ::before counts.
  */
 async function expectTouchTargets(page: Page) {
   const targets = [
@@ -69,7 +69,13 @@ async function expectTouchTargets(page: Page) {
       .filter((el) => {
         const r = el.getBoundingClientRect();
         const hidden = r.width === 0 || r.height === 0 || getComputedStyle(el).visibility === "hidden" || el.closest("[hidden]") !== null;
-        return !hidden && !el.matches(".sr-only, .sr-only *") && r.height < 43.5;
+        // A control may reach past its box with an absolute ::before (the Switch's 44 px hit area): count it.
+        const before = getComputedStyle(el, "::before");
+        const reach =
+          before.content !== "none" && before.position === "absolute"
+            ? Math.max(0, -parseFloat(before.top) || 0) + Math.max(0, -parseFloat(before.bottom) || 0)
+            : 0;
+        return !hidden && !el.matches(".sr-only, .sr-only *") && r.height + reach < 43.5;
       })
       .map((el) => `${el.tagName.toLowerCase()} "${(el.getAttribute("aria-label") || el.textContent || "").trim().slice(0, 30)}" ${Math.round(el.getBoundingClientRect().height)}px`),
     targets,

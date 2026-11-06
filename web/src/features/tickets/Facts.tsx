@@ -3,6 +3,7 @@ import { Link } from "react-router";
 import type { TicketSummary } from "@/gen/athena/v1/state_pb";
 import { safePrUrl } from "@/features/needs-you/ReviewCard";
 import { RelativeTime } from "@/ui/athena/RelativeTime";
+import { runtimeText } from "@/ui/athena/RuntimeBadge";
 import { stageLabel } from "@/ui/athena/StageBadge";
 
 const time = (ts: Timestamp | undefined) => (ts ? timestampMs(ts) : undefined);
@@ -16,19 +17,24 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
   );
 }
 
-/** What a Ticket is: where it works, its branch, model and runtime, when it started and ended, its pull request and Threads. */
+/**
+ * What a Ticket is: where it works, its branch, model and runtime (and its review rounds when it is paired with a
+ * review), when it started and ended, its pull request and Threads.
+ */
 export function Facts({ ticket, threads }: { ticket: TicketSummary; threads: readonly string[] }) {
   const created = time(ticket.createdAt);
   const updated = time(ticket.updatedAt);
   const ended = time(ticket.endedAt);
   const pr = safePrUrl(ticket.prUrl);
+  const runtime = runtimeText(ticket.runtime, ticket.runtimeChoice);
   return (
     <section aria-label="Facts">
       <dl className="grid grid-cols-[auto_minmax(0,1fr)] items-baseline gap-x-4 gap-y-1">
         {ticket.repo ? <Row label="Repository">{ticket.repo}</Row> : ticket.dir ? <Row label="Directory">{ticket.dir}</Row> : null}
         {ticket.branch && <Row label="Branch">{ticket.branch}</Row>}
         {ticket.model && <Row label="Model">{ticket.model}</Row>}
-        {ticket.runtime && <Row label="Runtime">{ticket.runtime}</Row>}
+        {runtime && <Row label="Runtime">{runtime}</Row>}
+        {ticket.pairing && <Row label="Review rounds">{ticket.reviewRounds}</Row>}
         {created !== undefined && (
           <Row label="Created">
             <RelativeTime at={created} />

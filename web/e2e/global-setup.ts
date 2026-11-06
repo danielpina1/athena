@@ -1,7 +1,8 @@
 // Builds the dashboard and the binaries (into bin/e2e, never bin/athena), then runs one `athena server` for every spec: a temp state dir (under /tmp,
 // so the Unix socket paths stay short) whose config.json turns the dashboard on at http://localhost:<free port> with
 // TLS off and no GitHub source, fakeclaude as the runtime (`athena server --claude`) and fakecodex as Codex
-// (`--codex`, so no spec reaches this machine's codex). fakeclaude replays
+// (config.json's runtimes.codex, so no spec reaches this machine's codex or its quota; its CODEX_HOME is
+// <state>/codex, never ~/.codex). fakeclaude replays
 // <state>/fixture-<ticket>.jsonl, or fixture-default.jsonl (a turn that never ends, so every Ticket's session stays
 // live) when a spec wrote none; after each later message it replays <state>/later-<ticket>.jsonl if a spec wrote one
 // (R37: each spec gives its own Tickets their fixtures, see harness.ts), its result line waiting while
@@ -55,7 +56,11 @@ export default async function globalSetup() {
     join(state, "config.json"),
     // No local repository discovery: the picker lists only what the specs create, not this machine's repositories.
     JSON.stringify(
-      { web: { enabled: true, listen: `127.0.0.1:${port}`, tls: "off", host: "localhost" }, localRepoRoots: [] },
+      {
+        web: { enabled: true, listen: `127.0.0.1:${port}`, tls: "off", host: "localhost" },
+        localRepoRoots: [],
+        runtimes: { codex: { enabled: true, binary: join(BIN, "fakecodex") } },
+      },
       null,
       2,
     ),
@@ -66,8 +71,7 @@ export default async function globalSetup() {
   writeFileSync(join(state, "fixture-default.jsonl"), captured.split("\n")[0] + "\n");
 
   const log = openSync(join(state, "server.log"), "a");
-  // Codex is fakecodex: no spec reaches this machine's codex or its quota.
-  const args = ["server", "--state-dir", state, "--claude", join(BIN, "fakeclaude"), "--codex", join(BIN, "fakecodex")];
+  const args = ["server", "--state-dir", state, "--claude", join(BIN, "fakeclaude")];
   const server = spawn(join(BIN, "athena"), args, {
     env: {
       ...process.env,

@@ -102,6 +102,24 @@ test("execution shows the node's slots and Claude version, read-only", () => {
   expect(within(facts).getByText(/athena server --slots/)).toBeTruthy();
 });
 
+test("execution lists each runtime's version", () => {
+  load({
+    policy: { revision: 1, settingsJson: JSON.stringify(settings) },
+    node: {
+      name: "mac-mini",
+      slots: 4,
+      runtimes: [
+        { name: "claude", version: "", ready: true },
+        { name: "codex", version: "0.161.0", ready: true, tested: false },
+      ],
+    },
+  });
+  renderSettings("/settings/execution", "desktop");
+  const facts = screen.getByRole("region", { name: "Execution" });
+  expect(within(facts).getByText("Claude Code version").nextElementSibling?.textContent).toBe("Not reported");
+  expect(within(facts).getByText("Codex version").nextElementSibling?.textContent).toBe("0.161.0 untested");
+});
+
 test("system links to Routing and Nodes and switches the theme", async () => {
   const user = userEvent.setup();
   renderSettings("/settings/system", "desktop");

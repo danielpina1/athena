@@ -28,8 +28,13 @@ function undoable(mark: (s: AthenaState) => Optimistic): SubmitOptions {
   };
 }
 
-export function submitTask(t: { text: string; repo?: string; dir?: string; model?: string }) {
-  return submit({ case: "submitTask", value: { text: t.text, repo: t.repo ?? "", dir: t.dir ?? "", model: t.model ?? "" } });
+/**
+ * runtime is claude, codex or auto (empty: the server's configured default). review is sent only when the owner chose
+ * it: true pairs the task with a review, false with none, and left out the Policy's default decides.
+ */
+export function submitTask(t: { text: string; repo?: string; dir?: string; model?: string; runtime?: string; review?: boolean }) {
+  const value = { text: t.text, repo: t.repo ?? "", dir: t.dir ?? "", model: t.model ?? "", runtime: t.runtime ?? "" };
+  return submit({ case: "submitTask", value: t.review === undefined ? value : { ...value, review: t.review } });
 }
 
 export function reply(ticketId: string, text: string) {

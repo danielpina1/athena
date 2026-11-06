@@ -121,6 +121,18 @@ describe("selectors", () => {
     expect(ids({ stage: "open", repo: "o/b" })).toEqual(["T-4"]);
   });
 
+  test("selectTickets filters by runtime", () => {
+    const s = load([
+      ticket("T-1", { runtime: "claude", updatedAt: at(1) }),
+      ticket("T-2", { runtime: "codex", runtimeChoice: "auto", updatedAt: at(2) }),
+      ticket("T-3", { runtime: "codex", updatedAt: at(3) }),
+    ]);
+    const ids = (f: Parameters<typeof selectTickets>[1]) => selectTickets(s, f).map((t) => t.id);
+    expect(ids({ runtime: "codex" })).toEqual(["T-2", "T-3"]);
+    expect(ids({ runtime: "claude" })).toEqual(["T-1"]);
+    expect(ids({})).toEqual(["T-1", "T-2", "T-3"]);
+  });
+
   test("selectors return the same list while the state is unchanged", () => {
     const s = load([ticket("T-1", { stage: "person", action: "answer" })]);
     expect(selectNeedsYou(s)).toBe(selectNeedsYou(useAthena.getState()));

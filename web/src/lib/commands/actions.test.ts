@@ -67,6 +67,23 @@ describe("actions", () => {
     expect(new Set(sent.map((c) => c.id)).size).toBe(sent.length);
   });
 
+  test("submitTask sends the runtime, and review only when it was chosen", async () => {
+    const sent = async (t: Parameters<typeof actions.submitTask>[0]) => {
+      const p = actions.submitTask(t);
+      await outbox.settled();
+      const a = last().action;
+      const v = a.case === "submitTask" ? a.value : undefined;
+      answer();
+      await p;
+      return v;
+    };
+    expect(await sent({ text: "x", runtime: "codex", review: true })).toMatchObject({ text: "x", runtime: "codex", review: true });
+    expect((await sent({ text: "x", runtime: "auto", review: false }))?.review).toBe(false);
+    const unset = await sent({ text: "x" });
+    expect(unset?.runtime).toBe("");
+    expect(unset?.review).toBeUndefined();
+  });
+
   describe("answerApproval", () => {
     beforeEach(() => {
       st().applySnapshot(

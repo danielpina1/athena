@@ -181,7 +181,7 @@ test("facts list what the Ticket is", () => {
   detail({ summary: working, threads: ["github:acme/api#7"] });
   renderDetail();
   const facts = screen.getByRole("region", { name: "Facts" });
-  for (const text of ["acme/api", "athena/t-1", "opus", "claude", "Merged"]) expect(within(facts).getByText(text)).toBeTruthy();
+  for (const text of ["acme/api", "athena/t-1", "opus", "Claude Code", "Merged"]) expect(within(facts).getByText(text)).toBeTruthy();
   expect((within(facts).getByRole("link", { name: /pull\/7/ })).getAttribute("href")).toBe("https://github.com/acme/api/pull/7");
   expect(within(facts).getByRole("link", { name: "github:acme/api#7" }).getAttribute("href")).toBe(
     "/routing?tab=threads&thread=github%3Aacme%2Fapi%237",

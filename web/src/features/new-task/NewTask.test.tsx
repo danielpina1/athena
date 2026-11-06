@@ -58,12 +58,12 @@ test("repo picker sends repo for owner/name and dir for a path", async () => {
   await user.type(task(), "Fix the bug");
   await user.type(repoBox(), "acme/web");
   await user.click(start());
-  expect(submitTask).toHaveBeenLastCalledWith({ text: "Fix the bug", repo: "acme/web" });
+  expect(submitTask).toHaveBeenLastCalledWith({ text: "Fix the bug", repo: "acme/web", runtime: "auto" });
 
   await user.clear(repoBox());
   await user.type(repoBox(), "/srv/app");
   await user.click(start());
-  expect(submitTask).toHaveBeenLastCalledWith({ text: "Fix the bug", dir: "/srv/app" });
+  expect(submitTask).toHaveBeenLastCalledWith({ text: "Fix the bug", dir: "/srv/app", runtime: "auto" });
 
   // A listed repo goes by its kind: GitHub as repo, local repositories and folders as dir.
   await user.clear(repoBox());
@@ -73,11 +73,11 @@ test("repo picker sends repo for owner/name and dir for a path", async () => {
   expect(screen.getByText("Folders")).toBeTruthy();
   await user.click(screen.getByRole("option", { name: "acme/api" }));
   await user.click(start());
-  expect(submitTask).toHaveBeenLastCalledWith({ text: "Fix the bug", repo: "acme/api" });
+  expect(submitTask).toHaveBeenLastCalledWith({ text: "Fix the bug", repo: "acme/api", runtime: "auto" });
   await user.click(repoBox());
   await user.click(screen.getByRole("option", { name: "/Users/me/code/web" }));
   await user.click(start());
-  expect(submitTask).toHaveBeenLastCalledWith({ text: "Fix the bug", dir: "/Users/me/code/web" });
+  expect(submitTask).toHaveBeenLastCalledWith({ text: "Fix the bug", dir: "/Users/me/code/web", runtime: "auto" });
 });
 
 test("no repository sends neither", async () => {
@@ -85,7 +85,7 @@ test("no repository sends neither", async () => {
   expect(repoBox().getAttribute("placeholder")).toBe("No repository");
   await user.type(task(), "Just think");
   await user.click(start());
-  expect(submitTask).toHaveBeenCalledWith({ text: "Just think" });
+  expect(submitTask).toHaveBeenCalledWith({ text: "Just think", runtime: "auto" });
 });
 
 test("invalid owner/name is refused inline", async () => {
@@ -140,7 +140,7 @@ test("model suggestions are the recent models, and an empty model sends none", a
   await user.type(task(), "x");
   await user.type(screen.getByRole("combobox", { name: "Model" }), "haiku");
   await user.click(start());
-  expect(submitTask).toHaveBeenCalledWith({ text: "x", model: "haiku" });
+  expect(submitTask).toHaveBeenCalledWith({ text: "x", model: "haiku", runtime: "auto" });
 });
 
 test("a bare slash is refused as a directory", async () => {
@@ -190,4 +190,90 @@ test("a pointercancel never collapses the list", async () => {
   fireEvent.pointerCancel(task());
   expect(list().hidden).toBe(false);
   expect(list().className).not.toContain("invisible");
+});
+
+const both = [
+  { name: "claude", ready: true, tested: true },
+  { name: "codex", ready: true, tested: true, version: "0.160.1" },
+];
+
+function withRuntimes(runtimes: Array<{ name: string; ready: boolean; tested?: boolean; why?: string }>, settingsJson = "{}") {
+  load({
+    repos: [],
+    tickets: [],
+    node: { name: "mac-mini", slots: 2, runtimes },
+    policy: { revision: 1, settingsJson },
+  });
+}
+
+test("new task sends runtime and review", async () => {
+  withRuntimes(both);
+  const user = setup();
+  submitTask.mockResolvedValue(create(CommandResultSchema, { ok: false, code: "unavailable" }));
+  await user.type(task(), "Port the parser");
+  await user.click(screen.getByRole("radio", { name: "Codex" }));
+  // The switch untouched: the Policy's default decides, so no review is sent.
+  await user.click(start());
+  expect(submitTask).toHaveBeenLastCalledWith({ text: "Port the parser", runtime: "codex" });
+  const review = screen.getByRole("switch", { name: "Review on the other runtime" });
+  expect(review.getAttribute("aria-checked")).toBe("false");
+  await user.click(review);
+  await user.click(start());
+  expect(submitTask).toHaveBeenLastCalledWith({ text: "Port the parser", runtime: "codex", review: true });
+  // Turned off again by the person: an explicit no.
+  await user.click(review);
+  await user.click(screen.getByRole("radio", { name: "Auto" }));
+  await user.click(start());
+  expect(submitTask).toHaveBeenLastCalledWith({ text: "Port the parser", runtime: "auto", review: false });
+});
+
+test("the review switch starts at the Policy's default and sends only when toggled", async () => {
+  withRuntimes(both, '{"pairing":{"review":"on","maxRounds":2}}');
+  const user = setup();
+  submitTask.mockResolvedValue(create(CommandResultSchema, { ok: false, code: "unavailable" }));
+  const review = screen.getByRole("switch", { name: "Review on the other runtime" });
+  expect(review.getAttribute("aria-checked")).toBe("true");
+  await user.type(task(), "x");
+  await user.click(start());
+  expect(submitTask).toHaveBeenLastCalledWith({ text: "x", runtime: "auto" });
+  await user.click(review);
+  await user.click(start());
+  expect(submitTask).toHaveBeenLastCalledWith({ text: "x", runtime: "auto", review: false });
+});
+
+test("review switch only with two ready runtimes", () => {
+  withRuntimes([both[0], { name: "codex", ready: false, why: "Codex is not logged in" }]);
+  const { unmount } = render(
+    <MemoryRouter>
+      <NewTask />
+    </MemoryRouter>,
+  );
+  expect(screen.queryByRole("switch", { name: "Review on the other runtime" })).toBeNull();
+  unmount();
+  withRuntimes([both[0]]);
+  const again = render(
+    <MemoryRouter>
+      <NewTask />
+    </MemoryRouter>,
+  );
+  expect(screen.queryByRole("switch", { name: "Review on the other runtime" })).toBeNull();
+  again.unmount();
+  withRuntimes(both);
+  render(
+    <MemoryRouter>
+      <NewTask />
+    </MemoryRouter>,
+  );
+  expect(screen.getByRole("switch", { name: "Review on the other runtime" })).toBeTruthy();
+});
+
+test("a chosen runtime that stops being ready sends auto", async () => {
+  withRuntimes(both);
+  const user = setup();
+  await user.type(task(), "x");
+  await user.click(screen.getByRole("radio", { name: "Codex" }));
+  act(() => withRuntimes([both[0], { name: "codex", ready: false, why: "Codex is not logged in" }]));
+  expect(screen.getByRole("radio", { name: "Auto" }).getAttribute("aria-checked")).toBe("true");
+  await user.click(start());
+  expect(submitTask).toHaveBeenLastCalledWith({ text: "x", runtime: "auto" });
 });

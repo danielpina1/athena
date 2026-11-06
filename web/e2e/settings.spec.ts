@@ -1,10 +1,11 @@
 // Nodes and Settings, end to end. The Policy mode changed on one screen shows on a second one through Deltas, and a
 // stale save there comes back "Changed on another device" with the edit kept; Add a device makes a link whose QR
 // screen enrolls a second browser. Every section renders, passes axe and fits 320 px. The Policy ends as it started;
-// no Ticket is created (R37). Screenshots mask only what changes between runs: times, counts, the node's queue and
-// live Tickets, and the enrollment link, its QR code and its countdown.
+// no Ticket is created (R37). Screenshots mask only what changes between runs: times, counts, the node's queue, live
+// Tickets and runtimes, and the enrollment link, its QR code and its countdown.
 import type { Page } from "@playwright/test";
 import { addAuthenticator, expect, expectAccessible, expectShell, signedInPage, test, liveFeed } from "./harness";
+import { editLink, runtimeStatus } from "./link";
 
 const SECTIONS = ["general", "github", "notifications", "devices", "prompts", "execution", "system"];
 
@@ -13,6 +14,8 @@ const volatile = (page: Page) => [
   page.getByRole("region", { name: "Today" }),
   page.locator("time"),
   page.locator("[data-volatile]"),
+  // The sidebar's runtime lines: whether Claude Code has a quota reading yet depends on the specs that ran before.
+  page.locator("aside").getByRole("list", { name: "Runtimes" }),
 ];
 
 async function shot(page: Page, name: string) {
@@ -33,6 +36,16 @@ async function themes(page: Page, name: string) {
 
 test("nodes shows the node and its health", async ({ page }) => {
   await page.emulateMedia({ colorScheme: "light", reducedMotion: "reduce" });
+  // The runtimes' blocks grow with what the specs before left (a quota reading, a why): their states are pinned here
+  // so the card keeps one height, and shell.spec.ts shows each state.
+  await editLink(page, {
+    node: (n) => {
+      n.runtimes = [
+        runtimeStatus({ name: "claude", ready: true, measured: false }),
+        runtimeStatus({ name: "codex", version: "0.160.1", ready: true, tested: true, measured: false }),
+      ];
+    },
+  });
   await signedInPage(page);
   await page.goto("/nodes");
   await expect(page.getByRole("heading", { name: "Nodes", level: 1 })).toBeVisible();

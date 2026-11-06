@@ -1,9 +1,11 @@
-// The Ticket list's filters, kept in the URL (?stage=working&repo=acme%2Fapi&model=opus&q=text) so a filtered list can
-// be shared, reloaded and returned to with the back link. Other parameters (the detail's `tab`) are left alone.
+// The Ticket list's filters, kept in the URL (?stage=working&repo=acme%2Fapi&model=opus&runtime=codex&q=text) so a
+// filtered list can be shared, reloaded and returned to with the back link. Other parameters (the detail's `tab`) are
+// left alone.
 import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router";
 import type { RepoView } from "@/gen/athena/v1/state_pb";
 import type { TicketFilter } from "@/lib/store/selectors";
+import { RUNTIMES, runtimeLabel } from "@/lib/text/runtime";
 import { Input } from "@/ui/primitives/input";
 import { Select } from "@/ui/primitives/select";
 import { ToggleGroup, ToggleGroupItem } from "@/ui/primitives/toggle-group";
@@ -18,15 +20,20 @@ const STAGES: ReadonlyArray<{ param: string; stage: Stage; label: string }> = [
   { param: "ended", stage: "ended", label: "Ended" },
 ];
 
-const KEYS = ["stage", "repo", "model", "q"] as const;
+const KEYS = ["stage", "repo", "model", "runtime", "q"] as const;
 
-/** The filter the parameters say; an unknown stage is no filter. */
+/** The runtime the parameters name, or "" for any (an unknown one included). */
+const runtimeOf = (sp: URLSearchParams) => RUNTIMES.find((r) => r === sp.get("runtime")) ?? "";
+
+/** The filter the parameters say; an unknown stage or runtime is no filter. */
 export function readFilters(sp: URLSearchParams): TicketFilter {
   const stage = STAGES.find((s) => s.param === sp.get("stage"))?.stage;
+  const runtime = runtimeOf(sp);
   return {
     ...(stage && { stage }),
     ...(sp.get("repo") && { repo: sp.get("repo") ?? undefined }),
     ...(sp.get("model") && { model: sp.get("model") ?? undefined }),
+    ...(runtime && { runtime }),
     ...(sp.get("q") && { q: sp.get("q") ?? undefined }),
   };
 }
@@ -197,7 +204,22 @@ export function Filters({
           ))}
         </Select>
       </div>
-      <SearchBox key={params.external} params={params} inputRef={searchRef} />
+      <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-2">
+        <SearchBox key={params.external} params={params} inputRef={searchRef} />
+        <Select
+          aria-label="Runtime"
+          className="w-36"
+          value={runtimeOf(sp)}
+          onChange={(e) => set("runtime", e.target.value)}
+        >
+          <option value="">All runtimes</option>
+          {RUNTIMES.map((r) => (
+            <option key={r} value={r}>
+              {runtimeLabel(r)}
+            </option>
+          ))}
+        </Select>
+      </div>
     </div>
   );
 }
