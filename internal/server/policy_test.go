@@ -179,3 +179,31 @@ func TestPairingDefaultFromSettings(t *testing.T) {
 		t.Fatalf("task pairing = %q %v", tk.Pairing, err)
 	}
 }
+
+// The node's Policy reads the cache's current Policy at each call: a stranger's work is restricted by default, and a
+// saved change applies to the next question, without a new adapter.
+func TestNodePolicyReadsCurrentPolicy(t *testing.T) {
+	st := openStore(t)
+	pc, err := newPolicyCache(st, nil, allScope{}, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pc.awaitCheck() // the Engine has no Policy: the tool policies still hold
+	np := nodePolicy{pc}
+	if got := np.ToolPolicy(core.TrustStranger); got != policy.ToolRestricted {
+		t.Fatalf("stranger = %q, want restricted", got)
+	}
+	if got := np.ToolPolicy(core.TrustOwner); got != policy.ToolStandard {
+		t.Fatalf("owner = %q, want standard", got)
+	}
+	s, rev := pc.current()
+	s.Trust = map[string]string{core.TrustCollaborator: policy.ToolRestricted, core.TrustStranger: policy.ToolStandard}
+	s.Repos = map[string]policy.RepoSettings{"o/r": {Mode: policy.RepoShadow}}
+	pc.set(s, rev+1)
+	if np.ToolPolicy(core.TrustCollaborator) != policy.ToolRestricted || np.ToolPolicy(core.TrustStranger) != policy.ToolStandard {
+		t.Fatalf("after the change: collaborator %q, stranger %q", np.ToolPolicy(core.TrustCollaborator), np.ToolPolicy(core.TrustStranger))
+	}
+	if !np.Shadow("o/r") || np.Shadow("o/other") {
+		t.Fatal("shadow does not follow the current Policy")
+	}
+}

@@ -20,6 +20,7 @@ import (
 
 	"github.com/danielpina1/athena/internal/core"
 	"github.com/danielpina1/athena/internal/metrics"
+	"github.com/danielpina1/athena/internal/policy"
 	"github.com/danielpina1/athena/internal/quota"
 	"github.com/danielpina1/athena/internal/redact"
 	"github.com/danielpina1/athena/internal/render"
@@ -108,6 +109,10 @@ type Config struct {
 	ReviewerPrompt func() string
 	// Sandbox, when set, turns on Claude Code's sandbox for worker sessions (sandbox.go); nil leaves it off.
 	Sandbox *SandboxConfig
+	// Policy, when set, gives each Ticket's sessions their tool policy by the trust class of its Mandate
+	// (toolpolicy.go): a restricted session always runs sandboxed, reaching GitHub alone, and asks nobody for anything.
+	// nil runs every session standard.
+	Policy Policy
 	// Logger receives the node's log lines (default slog.Default()).
 	Logger *slog.Logger
 	// Name and ClaudeVersion are shown in Status; the node does not interpret them.
@@ -189,6 +194,8 @@ type Node struct {
 
 	// restartDelay is the pause before restart n (1-based) of a crashed session.
 	restartDelay func(n int) time.Duration
+	// canSandbox reports whether this machine can sandbox a session (default SandboxSupported).
+	canSandbox func() bool
 
 	// queued is the number of launches waiting (written by the loop goroutine); statusSig is the last status
 	// OnStatus was told of (loop goroutine only).
@@ -266,6 +273,7 @@ func New(cfg Config, eng EngineCallbacks) *Node {
 		done:         make(chan struct{}),
 		live:         map[string]*session{},
 		restartDelay: func(n int) time.Duration { return time.Duration(n) * time.Second },
+		canSandbox:   SandboxSupported,
 		reg:          cfg.Metrics,
 		slotsGauge:   cfg.Metrics.Gauge("slots_in_use"),
 	}
@@ -754,6 +762,23 @@ type session struct {
 	shared map[string]*sharedVerdict
 	// runtime is the runtime the session's runner chose (chooseRuntime), set before it prepares its directory.
 	runtime string
+	// toolPolicy is the session's tool policy (policy.ToolStandard, policy.ToolRestricted), read once from the Policy
+	// when it prepares its directory, so that a change of the Policy never flips a running session.
+	toolPolicy string
+}
+
+func (s *session) setToolPolicy(p string) {
+	s.mu.Lock()
+	s.toolPolicy = p
+	s.mu.Unlock()
+}
+
+// restricted reports whether the session runs under the restricted tool policy: any but standard, so a session not
+// prepared yet is restricted too.
+func (s *session) restricted() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.toolPolicy != policy.ToolStandard
 }
 
 func (s *session) setRuntime(name string) {
@@ -1140,6 +1165,10 @@ func (r *runner) run() {
 	// retried until they come or the session is stopped, never filed as failed: the Ticket shows working/queued meanwhile.
 	// The launch waits without a slot: the runner ends, and the loop queues it again, due after the pause (onEnded).
 	if err := n.prepare(s); err != nil {
+		if su := (*sandboxUnavailableError)(nil); errors.As(err, &su) {
+			r.fail(su.Error())
+			return
+		}
 		if !credentialsLater(err) {
 			r.fail("prepare ticket directory: " + redact.String(err.Error()))
 			return
@@ -1190,7 +1219,7 @@ func (r *runner) run() {
 	if trPath == "" {
 		trPath = filepath.Join(adir, "transcript.jsonl")
 	}
-	sandbox, sandboxEnv := n.sessionSandbox(s.place.workDir, s.reviewing())
+	sandbox, sandboxEnv := n.sessionSandbox(s.place.workDir, s.reviewing(), s.restricted())
 	var roots []string
 	if !s.reviewing() {
 		roots = n.writableRoots(s.place.workDir)
@@ -2312,6 +2341,10 @@ func WorktreeBranch(t core.Ticket, hasGit func(dir string) bool) string {
 // prepare makes the session's directory and writes its settings and MCP config.
 func (n *Node) prepare(s *session) error {
 	p := s.place
+	s.setToolPolicy(n.toolPolicy(s.t))
+	if err := n.checkRestrictedSandbox(s); err != nil {
+		return err
+	}
 	// An earlier session may have repointed the worktree's git links and its process not ended cleanly (a node that
 	// died, a child that outlived it): put them back before anything, the sandbox included, reads them.
 	if err := n.restoreGitLinks(s.t, s.log); err != nil {
@@ -2358,7 +2391,7 @@ func (n *Node) prepare(s *session) error {
 	if !ok {
 		return fmt.Errorf("runtime %q is not available on this node", name)
 	}
-	sb, sbEnv := n.sessionSandbox(p.workDir, s.reviewing())
+	sb, sbEnv := n.sessionSandbox(p.workDir, s.reviewing(), s.restricted())
 	role := roleWorker
 	if s.reviewing() {
 		role = core.RoleReview

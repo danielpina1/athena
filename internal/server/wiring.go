@@ -362,6 +362,40 @@ func (c *policyCache) policy() core.Policy {
 	return c.pol
 }
 
+// nodePolicy is the node's Policy (node.Policy) over the cache: each call reads the current Policy, so a saved change
+// reaches the next session the node prepares. It reads the Policy built from the current settings even while the
+// Engine has none (policy): their tool policies hold then too. A Policy that is not a node.Policy fails closed:
+// restricted, no allow rule, every repository held.
+type nodePolicy struct{ c *policyCache }
+
+func (p nodePolicy) current() node.Policy {
+	p.c.mu.RLock()
+	defer p.c.mu.RUnlock()
+	np, _ := p.c.pol.(node.Policy)
+	return np
+}
+
+func (p nodePolicy) ToolPolicy(class string) string {
+	if np := p.current(); np != nil {
+		return np.ToolPolicy(class)
+	}
+	return policy.ToolRestricted
+}
+
+func (p nodePolicy) Allows(tool, rule, repo string) bool {
+	if np := p.current(); np != nil {
+		return np.Allows(tool, rule, repo)
+	}
+	return false
+}
+
+func (p nodePolicy) Shadow(repo string) bool {
+	if np := p.current(); np != nil {
+		return np.Shadow(repo)
+	}
+	return true
+}
+
 // pairing is the Engine's pairing defaults: the current settings' (policy.Settings.PairingDefaults).
 func (c *policyCache) pairing() core.PairingDefaults {
 	c.mu.RLock()

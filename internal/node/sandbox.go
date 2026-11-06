@@ -48,7 +48,11 @@ var caEnvNames = []string{"SSL_CERT_FILE", "GIT_SSL_CAINFO", "CURL_CA_BUNDLE"}
 // sandboxFor is the sandbox block of a session working in workDir, and the settings env it needs; nil without
 // Config.Sandbox.
 func (n *Node) sandboxFor(workDir string) (*rt.Sandbox, []string) {
-	c := n.cfg.Sandbox
+	return n.sandboxWith(n.cfg.Sandbox, workDir)
+}
+
+// sandboxWith is sandboxFor with the sandbox configuration c; nil without c.
+func (n *Node) sandboxWith(c *SandboxConfig, workDir string) (*rt.Sandbox, []string) {
 	if c == nil {
 		return nil, nil
 	}
@@ -80,9 +84,18 @@ func (n *Node) sandboxFor(workDir string) (*rt.Sandbox, []string) {
 // sessionSandbox is sandboxFor for a session working in workDir. A read-only session's (a review's) writes nothing of
 // the Ticket's: of allowWrite it keeps only the owner's paths that neither hold nor lie in workDir or the repository's
 // git directories (a build cache, so that its tests can run), and workDir and the git directories are denied too, since
-// Claude Code's sandbox lets a session write in its working directory whatever allowWrite says.
-func (n *Node) sessionSandbox(workDir string, readOnly bool) (*rt.Sandbox, []string) {
-	sb, env := n.sandboxFor(workDir)
+// Claude Code's sandbox lets a session write in its working directory whatever allowWrite says. A restricted session's
+// (toolpolicy.go) is always there, even with Config.Sandbox nil, required and reaching GitHub alone
+// (restrictedSandbox).
+func (n *Node) sessionSandbox(workDir string, readOnly, restricted bool) (*rt.Sandbox, []string) {
+	c := n.cfg.Sandbox
+	if c == nil && restricted {
+		c = restrictedSandboxConfig()
+	}
+	sb, env := n.sandboxWith(c, workDir)
+	if restricted {
+		sb = restrictedSandbox(sb)
+	}
 	if sb != nil && readOnly {
 		sb.AllowWrite = []string{}
 		gitDir, common := gitDirs(workDir)
@@ -100,7 +113,7 @@ func (n *Node) sessionSandbox(workDir string, readOnly bool) (*rt.Sandbox, []str
 			}
 			return false
 		}
-		for _, p := range n.cfg.Sandbox.AllowWrite {
+		for _, p := range c.AllowWrite {
 			if !overlaps(p) {
 				sb.AllowWrite = append(sb.AllowWrite, p)
 			}

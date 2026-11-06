@@ -562,14 +562,14 @@ func TestReadOnlySandboxKeepsOutsideCaches(t *testing.T) {
 	work := t.TempDir()
 	cache := filepath.Join(t.TempDir(), "gocache")
 	n := &Node{cfg: Config{Sandbox: &SandboxConfig{AllowWrite: []string{cache, filepath.Join(work, "build"), filepath.Dir(work)}}}}
-	sb, _ := n.sessionSandbox(work, true)
+	sb, _ := n.sessionSandbox(work, true, false)
 	if !slices.Equal(sb.AllowWrite, []string{cache}) {
 		t.Fatalf("allowWrite = %v, want only the cache %s", sb.AllowWrite, cache)
 	}
 	if !slices.Contains(sb.DenyWrite, work) {
 		t.Fatalf("denyWrite %v lacks the working directory", sb.DenyWrite)
 	}
-	if sb, _ := n.sessionSandbox(work, false); !slices.Contains(sb.AllowWrite, work) || !slices.Contains(sb.AllowWrite, cache) {
+	if sb, _ := n.sessionSandbox(work, false, false); !slices.Contains(sb.AllowWrite, work) || !slices.Contains(sb.AllowWrite, cache) {
 		t.Fatalf("worker allowWrite = %v", sb.AllowWrite)
 	}
 }
@@ -592,13 +592,36 @@ func TestReadOnlySandboxDropsGitDirs(t *testing.T) {
 	}
 	cache := filepath.Join(dir, "gocache")
 	n := &Node{cfg: Config{Sandbox: &SandboxConfig{AllowWrite: []string{cache, repo, filepath.Join(common, "objects"), gitDir}}}}
-	sb, _ := n.sessionSandbox(work, true)
+	sb, _ := n.sessionSandbox(work, true, false)
 	if !slices.Equal(sb.AllowWrite, []string{cache}) {
 		t.Fatalf("allowWrite = %v, want only the cache %s", sb.AllowWrite, cache)
 	}
 	for _, d := range []string{work, common, gitDir} {
 		if !slices.Contains(sb.DenyWrite, d) {
 			t.Fatalf("denyWrite %v lacks %s", sb.DenyWrite, d)
+		}
+	}
+}
+
+// A restricted session's sandbox is required and reaches GitHub alone, with the owner's sandbox configured or not; a
+// restricted review's stays read-only too.
+func TestRestrictedSessionSandboxWithoutConfig(t *testing.T) {
+	work := t.TempDir()
+	for _, c := range []*SandboxConfig{nil, {AllowedDomains: []string{"pypi.org"}, AllowWrite: []string{"/cache/go"}}} {
+		n := &Node{cfg: Config{Sandbox: c, SocketPath: "/tmp/n.sock"}}
+		for _, readOnly := range []bool{false, true} {
+			sb, _ := n.sessionSandbox(work, readOnly, true)
+			if sb == nil || !sb.Required || !slices.Equal(sb.AllowedDomains, GitHubDomains) || !slices.Contains(sb.UnixSockets, "/tmp/n.sock") {
+				t.Fatalf("config %+v readOnly %v: sandbox = %+v", c, readOnly, sb)
+			}
+			if readOnly == slices.Contains(sb.AllowWrite, work) || readOnly != slices.Contains(sb.DenyWrite, work) {
+				t.Fatalf("config %+v readOnly %v: allowWrite %v denyWrite %v", c, readOnly, sb.AllowWrite, sb.DenyWrite)
+			}
+		}
+		if c == nil {
+			if sb, _ := n.sessionSandbox(work, false, false); sb != nil {
+				t.Fatalf("a standard session without a sandbox got %+v", sb)
+			}
 		}
 	}
 }

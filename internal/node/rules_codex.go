@@ -249,7 +249,12 @@ func strictness(verdict string) int {
 // claudeToolNames are Claude Code's tool names the rules know; a Codex call by one of them is evaluated as Claude's.
 var claudeToolNames = map[string]bool{"Bash": true, "WebFetch": true, "WebSearch": true, "Task": true, "TodoWrite": true, "LS": true}
 
+// evaluateCall is the rules' verdict on one call of runtime, a restricted session's through restrictRule.
 func evaluateCall(ctx RuleContext, runtime string, c ToolCall) Decision {
+	return restrictRule(ctx, c.Tool, evaluateRuntimeCall(ctx, runtime, c))
+}
+
+func evaluateRuntimeCall(ctx RuleContext, runtime string, c ToolCall) Decision {
 	if runtime != core.RuntimeCodex {
 		return Evaluate(ctx, c.Tool, c.Input)
 	}

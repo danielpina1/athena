@@ -52,6 +52,10 @@ type RuleContext struct {
 	// ReadOnly is set for a session that may change nothing (a review): every write it names is denied (readOnlyRule).
 	ReadOnly bool
 
+	// Restricted is set for a session under the restricted tool policy (toolpolicy.go): what the rules escalate is
+	// denied, since nobody is asked, and so are the web tools (restrictRule).
+	Restricted bool
+
 	// tainted names the expandable variables a Bash command assigns or may change; set by bashWriteRule.
 	tainted map[string]bool
 }
@@ -69,6 +73,7 @@ const (
 	ruleProtectedPath = "protected_path"
 	ruleAttribution   = "attribution"
 	ruleReadOnly      = "read_only"
+	ruleRestricted    = "restricted"
 )
 
 // routerToolPrefix names the tools of Athena's MCP server, the only server the router session has.
@@ -100,8 +105,32 @@ func escalate(rule, reason string) Decision {
 // to a protected path (deny) or outside the ticket dir (escalate; for Bash the
 // redirections and file commands that name a target), risky Bash commands
 // (escalate); anything else is allowed. Malformed input is denied. A Bash
-// input's "workdir", when set, is the directory the command runs in.
+// input's "workdir", when set, is the directory the command runs in. A restricted session's verdict then goes
+// through restrictRule.
 func Evaluate(ctx RuleContext, tool string, input json.RawMessage) Decision {
+	return restrictRule(ctx, tool, evaluate(ctx, tool, input))
+}
+
+// webTools are the tools that reach the web outside the sandbox: Claude Code's and Codex's.
+var webTools = map[string]bool{"WebFetch": true, "WebSearch": true, "web_search": true}
+
+// restrictRule is the restricted tool policy over the rules' verdict d on a call of tool: a session that is not
+// Restricted keeps d; a restricted one's web tool is denied, and an escalation becomes a deny of the same rule, since
+// nobody is asked. A deny stays as it is.
+func restrictRule(ctx RuleContext, tool string, d Decision) Decision {
+	if !ctx.Restricted || d.Verdict == VerdictDeny {
+		return d
+	}
+	if webTools[tool] {
+		return deny(ruleRestricted, restrictedWebReason)
+	}
+	if d.Verdict == VerdictEscalate {
+		return deny(d.Rule, restrictedEscalateReason)
+	}
+	return d
+}
+
+func evaluate(ctx RuleContext, tool string, input json.RawMessage) Decision {
 	var in map[string]any
 	if len(input) == 0 || json.Unmarshal(input, &in) != nil || in == nil {
 		return deny(ruleInput, "tool input is not a JSON object")

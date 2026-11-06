@@ -101,3 +101,38 @@ func TestReportToolRejects(t *testing.T) {
 		t.Fatalf("report with the node unreachable: %v %+v, want a tool error", err, res)
 	}
 }
+
+// A restricted session's MCP server does not offer follow_thread, which reads other Threads, and the node refuses it
+// anyway; the other tools remain. A server that cannot ask the node offers no follow_thread either.
+func TestRestrictedWorkerToolsOmitFollowThread(t *testing.T) {
+	h := newHarness(t, func(c *Config) { c.Policy = restrictOwner })
+	tk := h.submit("Stranger's change", "")
+	_, a := h.running(tk.ID)
+	ctx := context.Background()
+	names := func(cs *mcp.ClientSession) []string {
+		t.Helper()
+		tools, err := cs.ListTools(ctx, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []string
+		for _, tl := range tools.Tools {
+			out = append(out, tl.Name)
+		}
+		slices.Sort(out)
+		return out
+	}
+	want := []string{"ack", "handback", "mark_unrelated", "reply", "report"}
+	if got := names(mcpClient(t, tk.ID, a.ID, h.cfg.SocketPath)); !slices.Equal(got, want) {
+		t.Fatalf("restricted tools = %v, want %v", got, want)
+	}
+	if got := names(mcpClient(t, tk.ID, a.ID, "/tmp/athena-no-such.sock")); !slices.Equal(got, want) {
+		t.Fatalf("tools without the node = %v, want %v", got, want)
+	}
+	var resp WorkerResponse
+	err := callNode(h.cfg.SocketPath, WorkerRequest{Op: OpWorker, Ticket: tk.ID, Assignment: a.ID, Tool: "follow_thread",
+		Args: []byte(`{"thread":"github:o/r#1"}`)}, &resp)
+	if err != nil || resp.OK || !strings.Contains(resp.Error, "outside your allow list") {
+		t.Fatalf("restricted follow_thread = %+v %v, want refused", resp, err)
+	}
+}

@@ -182,6 +182,8 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	ncfg.WorkerPrompt = func() string { return currentPrompt(st, logger, true) }
 	ncfg.ReviewerPrompt = func() string { return currentReviewerPrompt(st, logger) }
 	ncfg.SocketPath = filepath.Join(stateDir, NodeSocket)
+	// The node gives each session its tool policy from the current Policy, read when the session prepares.
+	ncfg.Policy = nodePolicy{pc}
 	if ncfg.Sandbox == nil {
 		ncfg.Sandbox = fileCfg.nodeSandbox()
 	}

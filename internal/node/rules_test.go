@@ -1228,3 +1228,83 @@ func TestRedirectToDescriptorOrFile(t *testing.T) {
 		}
 	}
 }
+
+// A restricted session's escalations are denials: nobody is asked. Its rules' denials stay as they were.
+func TestRestrictedDeniesEscalations(t *testing.T) {
+	e := newRuleEnv(t)
+	cases := []struct {
+		tool, rule string
+		input      json.RawMessage
+	}{
+		{"Write", "write-outside-ticket", in(map[string]any{"file_path": filepath.Join(e.outDir, "x.txt"), "content": "x"})},
+		{"Bash", "write-outside-ticket", in(map[string]any{"command": "echo x > " + filepath.Join(e.outDir, "x.txt")})},
+		{"Bash", "bash-escalate:kubectl", in(map[string]any{"command": "kubectl apply -f x.yaml"})},
+		{"Bash", "bash-escalate:pip-install", in(map[string]any{"command": "pip install requests"})},
+		{"Write", "session-config-write", in(map[string]any{"file_path": filepath.Join(e.ctx.TicketDir, ".claude", "settings.json"), "content": "{}"})},
+	}
+	for _, c := range cases {
+		std := Evaluate(e.ctx, c.tool, c.input)
+		if std.Verdict != VerdictEscalate || std.Rule != c.rule {
+			t.Fatalf("standard %s %s = %+v, want an escalation by %s", c.tool, c.input, std, c.rule)
+		}
+		rc := e.ctx
+		rc.Restricted = true
+		got := Evaluate(rc, c.tool, c.input)
+		if got.Verdict != VerdictDeny || got.Reason != restrictedEscalateReason || got.Rule != c.rule {
+			t.Errorf("restricted %s %s = %+v, want deny by %s with %q", c.tool, c.input, got, c.rule, restrictedEscalateReason)
+		}
+		// Codex's calls are judged the same way.
+		if d, _ := EvaluateCalls(rc, core.RuntimeCodex, []ToolCall{{Tool: c.tool, Input: c.input}}); d.Verdict != VerdictDeny {
+			t.Errorf("restricted codex %s %s = %+v, want deny", c.tool, c.input, d)
+		}
+	}
+	// Codex's unreadable command escalates for a standard session and is denied for a restricted one.
+	rc := e.ctx
+	rc.Restricted = true
+	bad := []ToolCall{{Tool: "Bash", Input: in(map[string]any{"command": "  "})}}
+	if d, _ := EvaluateCalls(e.ctx, core.RuntimeCodex, bad); d.Verdict != VerdictEscalate {
+		t.Fatalf("standard unreadable command = %+v, want escalate", d)
+	}
+	if d, _ := EvaluateCalls(rc, core.RuntimeCodex, bad); d.Verdict != VerdictDeny || d.Reason != restrictedEscalateReason {
+		t.Errorf("restricted unreadable command = %+v, want deny", d)
+	}
+	// A credential read is denied either way, with its own reason.
+	cred := in(map[string]any{"command": "cat " + filepath.Join(e.ctx.Home, ".ssh", "id_rsa")})
+	for _, restricted := range []bool{false, true} {
+		rc := e.ctx
+		rc.Restricted = restricted
+		if d := Evaluate(rc, "Bash", cred); d.Verdict != VerdictDeny || d.Rule != "credential-read" || d.Reason == restrictedEscalateReason {
+			t.Errorf("restricted=%v credential read = %+v, want its own deny", restricted, d)
+		}
+	}
+}
+
+// A restricted session has no web tools; a standard one keeps them.
+func TestRestrictedDeniesWebTools(t *testing.T) {
+	e := newRuleEnv(t)
+	rc := e.ctx
+	rc.Restricted = true
+	for _, c := range []struct {
+		runtime, tool string
+		input         json.RawMessage
+	}{
+		{core.RuntimeClaude, "WebFetch", in(map[string]any{"url": "https://example.com", "prompt": "read"})},
+		{core.RuntimeClaude, "WebSearch", in(map[string]any{"query": "athena"})},
+		{core.RuntimeCodex, "web_search", in(map[string]any{"query": "athena"})},
+	} {
+		if d, _ := EvaluateCalls(e.ctx, c.runtime, []ToolCall{{Tool: c.tool, Input: c.input}}); d.Verdict != VerdictAllow {
+			t.Errorf("standard %s = %+v, want allow", c.tool, d)
+		}
+		d, _ := EvaluateCalls(rc, c.runtime, []ToolCall{{Tool: c.tool, Input: c.input}})
+		if d.Verdict != VerdictDeny || d.Reason != restrictedWebReason {
+			t.Errorf("restricted %s = %+v, want deny with %q", c.tool, d, restrictedWebReason)
+		}
+	}
+	if d := Evaluate(rc, "WebFetch", in(map[string]any{"url": "https://github.com/x/y"})); d.Verdict != VerdictDeny {
+		t.Errorf("restricted WebFetch of GitHub = %+v, want deny", d)
+	}
+	// Other tools are judged as before.
+	if d := Evaluate(rc, "Read", in(map[string]any{"file_path": filepath.Join(e.ctx.TicketDir, "a.txt")})); d.Verdict != VerdictAllow {
+		t.Errorf("restricted Read = %+v, want allow", d)
+	}
+}
