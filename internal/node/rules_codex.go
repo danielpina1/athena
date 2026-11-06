@@ -25,9 +25,9 @@ var codexShellTools = map[string]bool{"Bash": true, "shell": true, "local_shell"
 //
 //   - a shell tool (Bash, shell, local_shell, exec_command, unified_exec) is Bash{command}, an argv array joined with
 //     POSIX shell quoting, with its "workdir" (or "cwd") as the Bash input's workdir; a command it cannot read is
-//     Bash{command: ""}, which EvaluateCalls escalates. Codex applies a patch a shell command carries itself
-//     (`apply_patch <<'EOF'…`, or the argv ["apply_patch", patch]), so a command that carries patch headers is also a
-//     Write per path they name, relative paths under its workdir;
+//     Bash{command: ""}, which EvaluateCalls escalates. Codex applies a patch a shell command runs apply_patch on itself
+//     (`cd sub && apply_patch <<'EOF'…`, or the argv ["apply_patch", patch]), so such a command is also a Write per
+//     path the patch names, relative paths from where apply_patch runs (shellPatchWrites);
 //   - apply_patch is one Write{file_path} per path its patch adds, updates, deletes or moves to;
 //   - every other tool (write_stdin, mcp__…, web_search, the rest) is one call, unchanged.
 //
@@ -46,12 +46,7 @@ func NormalizeTool(runtime, tool string, input json.RawMessage) []ToolCall {
 		}
 		calls := []ToolCall{{Tool: "Bash", Input: mustJSON(in)}}
 		if paths, bad := patchPaths(input); len(paths) > 0 || bad {
-			for i, p := range paths {
-				if dir != "" && !filepath.IsAbs(p) && !strings.HasPrefix(p, "~") {
-					paths[i] = filepath.Join(dir, p)
-				}
-			}
-			calls = append(calls, patchWrites(paths, bad)...)
+			calls = append(calls, shellPatchWrites(cmd, dir, paths, bad)...)
 		}
 		return calls
 	case tool == "apply_patch":
@@ -59,6 +54,38 @@ func NormalizeTool(runtime, tool string, input json.RawMessage) []ToolCall {
 		return patchWrites(paths, bad || len(paths) == 0)
 	}
 	return []ToolCall{{Tool: tool, Input: input}}
+}
+
+// shellPatchWrites are the Writes of a patch a shell command carries (paths, bad: patchPaths), when the command runs
+// apply_patch (or applypatch), which Codex then applies itself; none when it only mentions patch headers (a grep, an
+// echo). Relative paths are named from the directory apply_patch runs in (shellDirs: the command's workdir, then its
+// cd and pushd); a directory the rules cannot follow, or two runs in different ones, escalates.
+func shellPatchWrites(cmd, workdir string, paths []string, bad bool) []ToolCall {
+	var runs []dirSeg
+	for _, sg := range shellDirs(cmd, workdir, true, 0) {
+		if w0 := sg.words[0]; w0 == "apply_patch" || w0 == "applypatch" {
+			runs = append(runs, sg)
+		}
+	}
+	if len(runs) == 0 {
+		return nil
+	}
+	from, known := runs[0].dir, runs[0].known
+	for _, r := range runs[1:] {
+		known = known && r.known && r.dir == from
+	}
+	var out []string
+	for _, p := range paths {
+		switch {
+		case filepath.IsAbs(p):
+			out = append(out, p)
+		case known:
+			out = append(out, joinDir(from, p))
+		default:
+			bad = true
+		}
+	}
+	return patchWrites(out, bad)
 }
 
 // patchWrites are the Writes of a patch's paths, and with unread a Write with no path, which escalates.

@@ -278,15 +278,18 @@ func (n *Node) EnsureClone(ctx context.Context, repo, tok string) (clone, defaul
 		return "", "", "", err
 	}
 	env := cloneGitEnv(clone, repo)
+	// Once it exists, git's directories are the clone's own, never found from its files.
+	cenv := repoGitEnv(env, filepath.Join(clone, ".git"), clone)
 	if _, err := os.Stat(filepath.Join(clone, ".git")); err != nil {
 		_ = os.RemoveAll(clone)
 		if _, err := runGit(ctx, "", env, "clone", "--quiet", mirror, clone); err != nil {
 			_ = os.RemoveAll(clone)
 			return "", "", "", fmt.Errorf("clone %s from its mirror: %w", repo, err)
 		}
-	} else if _, err := runGit(ctx, clone, env, "fetch", "--quiet", "--prune", mirror, "+refs/heads/*:refs/remotes/origin/*"); err != nil {
+	} else if _, err := runGit(ctx, clone, cenv, "fetch", "--quiet", "--prune", mirror, "+refs/heads/*:refs/remotes/origin/*"); err != nil {
 		return "", "", "", fmt.Errorf("fetch %s from its mirror: %w", repo, err)
 	}
+	env = cenv
 	if _, err := runGit(ctx, clone, env, "cat-file", "-e", base+"^{commit}"); err != nil {
 		return "", "", "", fmt.Errorf("the clone of %s lacks the %s commit %s GitHub advertised, after its fetch: %w", repo, defaultBranch, base, err)
 	}

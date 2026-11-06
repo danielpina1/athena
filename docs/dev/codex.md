@@ -49,7 +49,7 @@ onto Claude Code's vocabulary first:
 
 | Codex tool | judged as |
 | --- | --- |
-| `Bash`, `shell`, `local_shell`, `exec_command`, `unified_exec` | `Bash` with the command (an argv array joined with POSIX quoting), run in its `workdir`; a command carrying a patch (`apply_patch <<'EOF'`, or the argv `["apply_patch", patch]`) is also a `Write` per path, as below |
+| `Bash`, `shell`, `local_shell`, `exec_command`, `unified_exec` | `Bash` with the command (an argv array joined with POSIX quoting), run in its `workdir`; a command that runs `apply_patch` (`cd sub && apply_patch <<'EOF'`, or the argv `["apply_patch", patch]`) is also a `Write` per path, relative paths from the directory it runs in after `cd`/`pushd` (one the rules cannot follow asks the owner); a command that only mentions a patch header (`grep`) is plain `Bash` |
 | `apply_patch` | one `Write` per path the patch adds, updates, deletes or moves to (indented headers too); the strictest verdict wins |
 | `write_stdin` | what it types, by the `Bash` text rules: a credential or state path, a token variable, a blocked command or an AI attribution denies; anything else is allowed |
 | Claude Code's tool names (`Edit`, `Write`, `Read`, `WebFetch`, …), `mcp__…`, `web_search` | as Claude Code's |
@@ -75,8 +75,9 @@ turn, and the same commands' exact text or the same paths, every one) gets once,
 its answer. A `PreToolUse` ask (to run the action in the sandbox) shares nothing, and the same door asking again asks
 anew. Whether Codex 0.160.1 does ask twice, and in which order, is not verified yet (it takes a real turn).
 
-A call Codex's `PreToolUse` hook denies shows no result in Codex's events; the call's next item means the model has
-seen the deny, so a report after it is accepted (Claude Code's waits for the failed result).
+A call Codex's `PreToolUse` hook denies shows no result in Codex's events; the next item (not one of Athena's own
+tools, such as the report of the same step) means the model has seen the deny, so a report after it is accepted (Claude
+Code's waits for the failed result).
 
 What the hook prints follows the output schemas Codex 0.160.1 embeds (`pre-tool-use.command.output`,
 `permission-request.command.output`; pinned in `internal/node/testdata/hooks/codex`). They are Claude Code's shapes with
@@ -89,7 +90,9 @@ redirection or file command) to `.athena/settings.json`, `.athena/mcp.json`, `.a
 directory's `config`, `config.worktree` and `hooks/`, the git directory's `commondir` and, for a worktree, its own
 `config.worktree` and `gitdir` and the working directory's `.git` file: the same list Claude Code's sandbox denies.
 The node's own git (creating and removing worktrees, `git status`) runs with `core.fsmonitor=false` and
-`core.hooksPath=/dev/null`, whatever a repository's config says.
+`core.hooksPath=/dev/null`, whatever a repository's config says, and with `GIT_DIR`, `GIT_COMMON_DIR` and
+`GIT_WORK_TREE` pinned to the directories Athena made (`<common>/worktrees/<name>`), so a rewritten `.git`,
+`commondir` or `gitdir` cannot hand it another config (a filter driver).
 
 ### Keep one athena binary
 

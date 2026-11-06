@@ -767,8 +767,56 @@ func TestApplyPatchFailsClosed(t *testing.T) {
 			t.Errorf("%s: %+v, want escalate", name, d)
 		}
 	}
-	if d := codexEval(c, "exec_command", in(map[string]any{"cmd": "grep -rn '*** Add File' docs"})); d.Verdict != VerdictEscalate {
-		t.Errorf("a command naming a patch header: %+v, want escalate", d)
+	// A command that only mentions a patch header runs no patch: it is plain Bash.
+	for _, cmd := range []string{"grep -rn '*** Add File' docs", `echo "*** Update File:" >> notes.md`, "rg '\\*\\*\\* Delete File' -n"} {
+		if d := codexEval(c, "exec_command", in(map[string]any{"cmd": cmd})); d.Verdict != VerdictAllow {
+			t.Errorf("%q: %+v, want allow", cmd, d)
+		}
+	}
+	if d := codexEval(c, "exec_command", in(map[string]any{"cmd": "apply_patch <<'EOF'\n*** Begin Patch\n*** Update File:\n*** End Patch\nEOF"})); d.Verdict != VerdictEscalate {
+		t.Errorf("apply_patch with an unreadable header: %+v, want escalate", d)
+	}
+}
+
+// A shell-invoked apply_patch names its relative paths from where it runs: after cd or pushd, in the command or its
+// sh -c script. A directory the rules cannot follow escalates.
+func TestShellApplyPatchFollowsCd(t *testing.T) {
+	e := newRuleEnv(t)
+	c := e.ctx
+	if err := os.MkdirAll(filepath.Join(c.TicketDir, ".git", "hooks"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	c.Protected = ProtectedPaths(c.TicketDir)
+	heredoc := func(pre, header string) string {
+		return pre + "apply_patch <<'EOF'\n*** Begin Patch\n" + header + "\n+x\n*** End Patch\nEOF"
+	}
+	// The reviewer's probes.
+	for name, input := range map[string]map[string]any{
+		"cd .athena":       {"cmd": heredoc("cd .athena && ", "*** Update File: settings.json")},
+		"bash -lc cd .git": {"cmd": []any{"bash", "-lc", heredoc("cd .git && ", "*** Add File: hooks/pre-push")}},
+		"pushd":            {"cmd": heredoc("pushd .git >/dev/null; ", "*** Add File: hooks/pre-commit")},
+		"cd twice":         {"cmd": heredoc("cd sub; cd ../.git; ", "*** Update File: config")},
+	} {
+		if d := codexEval(c, "exec_command", in(input)); d.Verdict != VerdictDeny || d.Rule != ruleProtectedPath {
+			t.Errorf("%s: %+v, want the protected-path deny", name, d)
+		}
+	}
+	// Outside the ticket directory from a cd: escalate on the write.
+	if d := codexEval(c, "exec_command", in(map[string]any{"cmd": heredoc("cd "+e.outDir+" && ", "*** Add File: x.txt")})); d.Verdict != VerdictEscalate || d.Rule != ruleWrite {
+		t.Errorf("cd outside: %+v, want the write escalation", d)
+	}
+	// A directory the rules cannot follow.
+	for _, pre := range []string{"cd $DIR && ", "cd - && ", "(cd sub) && ", "popd; ", "cd a b; ", "cd ~bob && "} {
+		if d := codexEval(c, "exec_command", in(map[string]any{"cmd": heredoc(pre, "*** Add File: x.txt")})); d.Verdict != VerdictEscalate {
+			t.Errorf("%q: %+v, want escalate", pre, d)
+		}
+	}
+	// Absolute paths need no directory; a cd that stays inside allows.
+	if d := codexEval(c, "exec_command", in(map[string]any{"cmd": heredoc("cd $DIR && ", "*** Add File: "+filepath.Join(c.TicketDir, "ok.txt"))})); d.Verdict != VerdictAllow {
+		t.Errorf("absolute path after an unknown cd: %+v, want allow", d)
+	}
+	if d := codexEval(c, "exec_command", in(map[string]any{"cmd": heredoc("mkdir -p sub && cd sub && ", "*** Add File: ok.txt")})); d.Verdict != VerdictAllow {
+		t.Errorf("cd inside the ticket dir: %+v, want allow", d)
 	}
 }
 
@@ -945,7 +993,7 @@ func TestAttributionMessageFiles(t *testing.T) {
 	if err := os.Symlink(outside, filepath.Join(c.TicketDir, "link.txt")); err != nil {
 		t.Fatal(err)
 	}
-	if body, ok := c.messageFile("link.txt", c.TicketDir); ok || body != "" {
+	if body, ok := c.messageFile("link.txt"); ok || body != "" {
 		t.Fatalf("a symlink out of the ticket dir was read: %q", body)
 	}
 	if d := bash(`git commit -F link.txt`); d.Verdict == VerdictDeny {

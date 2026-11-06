@@ -668,9 +668,9 @@ func (n *Node) worktreeFiles(ctx context.Context, p placement, branch string) ([
 	return files, b.cut || cut, nil
 }
 
-// worktreeGitDir is the git dir of the worktree at dir, found from the repository's side: the entry of
-// <common dir>/worktrees whose gitdir file names dir's .git. The worktree's own .git file, which its worker can
-// rewrite to point at a git dir of its own (with its own config, exclude file and index), is never read.
+// worktreeGitDir is the git dir of the worktree at dir as ensureWorktree made it (worktreeAdmin): the repository's
+// common dir's worktrees/<dir's name>. The worktree's own .git file and its git dir's gitdir and commondir, which its
+// worker can rewrite to point at a git dir of its own (with its own config, exclude file and index), are never read.
 func worktreeGitDir(ctx context.Context, repo, dir string) (string, error) {
 	common := filepath.Join(repo, ".git")
 	if st, err := os.Lstat(common); err != nil || !st.IsDir() {
@@ -681,32 +681,14 @@ func worktreeGitDir(ctx context.Context, repo, dir string) (string, error) {
 		}
 		common = strings.TrimSpace(string(out))
 	}
-	want, err := os.Stat(dir)
-	if err != nil {
+	if _, err := os.Stat(dir); err != nil {
 		return "", ErrNoWorkspace
 	}
-	names := []string{filepath.Base(dir)}
-	if entries, err := os.ReadDir(filepath.Join(common, "worktrees")); err == nil {
-		for _, e := range entries {
-			names = append(names, e.Name())
-		}
+	admin := worktreeAdmin(common, dir)
+	if st, err := os.Lstat(admin); err != nil || !st.IsDir() {
+		return "", fmt.Errorf("no worktree of %s is registered at %s", repo, dir)
 	}
-	for _, name := range names {
-		admin := filepath.Join(common, "worktrees", name)
-		b, err := readSmall(filepath.Join(admin, "gitdir"))
-		if err != nil {
-			continue
-		}
-		at := strings.TrimSpace(string(b))
-		if !filepath.IsAbs(at) {
-			// worktree.useRelativePaths (git 2.48+) records it relative to the admin directory.
-			at = filepath.Join(admin, at)
-		}
-		if st, err := os.Stat(filepath.Dir(at)); err == nil && filepath.Base(at) == ".git" && os.SameFile(st, want) {
-			return admin, nil
-		}
-	}
-	return "", fmt.Errorf("no worktree of %s is registered at %s", repo, dir)
+	return admin, nil
 }
 
 // readSmall reads a file of git's own bookkeeping, at most 4 KiB of it.

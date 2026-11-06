@@ -2,12 +2,16 @@ package node
 
 import (
 	"encoding/json"
+	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/danielpina1/athena/internal/core"
 )
 
 type sandboxBlock struct {
@@ -218,5 +222,68 @@ func TestNodeGitRunsNoHookOrFsmonitor(t *testing.T) {
 	}
 	if b, err := os.ReadFile(marker); err == nil {
 		t.Fatalf("node git ran the repository's hook or fsmonitor:\n%s", b)
+	}
+}
+
+// The node's git in a worktree finds its directories where Athena made them: a worker that repoints the worktree's
+// commondir, or its .git file, at a git directory of its own whose config names a filter driver runs nothing when the
+// node reads the worktree's status.
+func TestNodeGitIgnoresRepointedGitDirs(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell filter")
+	}
+	for _, how := range []string{"commondir", ".git file"} {
+		t.Run(how, func(t *testing.T) {
+			repo := newRepo(t)
+			if err := os.WriteFile(filepath.Join(repo, ".gitattributes"), []byte("*.txt filter=evil\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(repo, "a.txt"), []byte("a\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			git(t, repo, "add", ".gitattributes", "a.txt")
+			git(t, repo, "commit", "-q", "-m", "attrs")
+			wt := filepath.Join(t.TempDir(), "wt-t-1")
+			if err := ensureWorktree(repo, wt, "athena/t-1", "HEAD", nil); err != nil {
+				t.Fatal(err)
+			}
+			admin := worktreeAdmin(filepath.Join(repo, ".git"), wt)
+			// The worker's git directory: a copy of the repository's, whose config defines the filter.
+			marker := filepath.Join(t.TempDir(), "ran")
+			filter := filepath.Join(t.TempDir(), "evil.sh")
+			if err := os.WriteFile(filter, []byte("#!/bin/sh\necho ran >> "+marker+"\ncat\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			fake := filepath.Join(t.TempDir(), "common")
+			if out, err := exec.Command("cp", "-R", filepath.Join(repo, ".git"), fake).CombinedOutput(); err != nil {
+				t.Fatalf("cp: %v %s", err, out)
+			}
+			git(t, fake, "--git-dir="+fake, "config", "filter.evil.clean", filter)
+			switch how {
+			case "commondir":
+				if err := os.WriteFile(filepath.Join(admin, "commondir"), []byte(fake+"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			case ".git file":
+				fakeAdmin := filepath.Join(fake, "worktrees", filepath.Base(wt))
+				if err := os.WriteFile(filepath.Join(fakeAdmin, "commondir"), []byte(fake+"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(wt, ".git"), []byte("gitdir: "+fakeAdmin+"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// The same size: git must hash the file to tell, through the filter.
+			if err := os.WriteFile(filepath.Join(wt, "a.txt"), []byte("b\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			cleanupWorktree(placement{workDir: wt, repo: repo}, core.Ticket{ID: "T-1"}, slog.New(slog.DiscardHandler))
+			if b, err := os.ReadFile(marker); err == nil {
+				t.Fatalf("the node's git ran the worker's filter driver:\n%s", b)
+			}
+			if _, err := os.Stat(wt); err != nil {
+				t.Fatalf("the changed worktree was removed: %v", err)
+			}
+		})
 	}
 }

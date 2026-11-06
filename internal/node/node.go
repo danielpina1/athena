@@ -804,6 +804,9 @@ func (s *session) noteDenial() {
 	s.mu.Unlock()
 }
 
+// athenaToolPrefix begins the names of Athena's own MCP tools.
+const athenaToolPrefix = "mcp__athena__"
+
 // denialSeen records that the model has seen the node's last deny (a runtime that shows no result of a denied call).
 func (s *session) denialSeen() {
 	s.mu.Lock()
@@ -1420,9 +1423,10 @@ func (r *runner) onEvent(ev rt.Event) {
 		}
 	case rt.AssistantText, rt.ToolUse:
 		r.s.stepTaken()
-		if r.runtime == core.RuntimeCodex {
+		if tu, ok := e.(rt.ToolUse); r.runtime == core.RuntimeCodex && (!ok || !strings.HasPrefix(tu.Name, athenaToolPrefix)) {
 			// Codex shows no result of a call its PreToolUse hook denied, and runs that hook before the call's item
-			// starts: a later item means the deny already went back to the model.
+			// starts: a later item means the deny already went back to the model. Athena's own tools are not one: the
+			// report of the denied call's step starts its item after the deny too.
 			r.s.denialSeen()
 		}
 	case rt.TurnEnd:
@@ -1925,29 +1929,103 @@ func (n *Node) prepare(s *session) error {
 }
 
 // ensureWorktree creates dir as a worktree of repo on branch, from base for a new branch (without tracking it); an
-// existing dir is reused (a resumed Ticket).
+// existing dir is reused (a resumed Ticket). Its git directory must be where worktreeAdmin says (the node finds it
+// there from then on, never from the files a worker can rewrite).
 func ensureWorktree(repo, dir, branch, base string, env []string) error {
-	gitOut := func(dir string, args ...string) (string, error) { return gitIn(dir, env, args...) }
+	common, err := repoGitDir(repo)
+	if err != nil {
+		return err
+	}
+	renv := repoGitEnv(env, common, repo)
+	gitOut := func(args ...string) (string, error) { return gitIn(repo, renv, args...) }
 	if st, err := os.Stat(dir); err == nil {
 		if !st.IsDir() {
 			return fmt.Errorf("%s exists and is not a directory", dir)
 		}
 		return nil
 	}
-	// A new Ticket's branch does not exist yet: creating it with the worktree is the one git call the common case needs
-	// (each git process costs ~20 ms, which counts against the dispatch budget).
-	if _, err := gitOut(repo, "worktree", "add", "--no-track", "-b", branch, dir, base); err == nil {
+	admin := worktreeAdmin(common, dir)
+	added := func() error {
+		// git names a worktree's git directory after its directory, unless that name is taken.
+		b, err := readSmall(filepath.Join(admin, "gitdir"))
+		if err != nil {
+			return fmt.Errorf("the worktree at %s has no git directory at %s: %w", dir, admin, err)
+		}
+		at, want := strings.TrimSpace(string(b)), filepath.Join(dir, ".git")
+		if !filepath.IsAbs(at) {
+			at = filepath.Join(admin, at)
+		}
+		if a, err := os.Stat(filepath.Dir(at)); err != nil || filepath.Base(at) != ".git" || !sameDir(a, filepath.Dir(want)) {
+			return fmt.Errorf("the git directory %s is not the worktree at %s's", admin, dir)
+		}
 		return nil
 	}
-	// The branch exists (a resumed Ticket) or a removed worktree is still registered: prune, then reuse the branch.
-	_, _ = gitOut(repo, "worktree", "prune")
-	var err error
-	if _, berr := gitOut(repo, "rev-parse", "--verify", "--quiet", "refs/heads/"+branch); berr == nil {
-		_, err = gitOut(repo, "worktree", "add", dir, branch)
-	} else {
-		_, err = gitOut(repo, "worktree", "add", "--no-track", "-b", branch, dir, base)
+	if _, err := os.Lstat(admin); err == nil {
+		_, _ = gitOut("worktree", "prune") // a removed worktree of the same name is still registered
 	}
-	return err
+	// A new Ticket's branch does not exist yet: creating it with the worktree is the one git call the common case needs
+	// (each git process costs ~20 ms, which counts against the dispatch budget).
+	if _, err := gitOut("worktree", "add", "--no-track", "-b", branch, dir, base); err == nil {
+		return added()
+	}
+	// The branch exists (a resumed Ticket) or a removed worktree is still registered: prune, then reuse the branch.
+	_, _ = gitOut("worktree", "prune")
+	if _, berr := gitOut("rev-parse", "--verify", "--quiet", "refs/heads/"+branch); berr == nil {
+		_, err = gitOut("worktree", "add", dir, branch)
+	} else {
+		_, err = gitOut("worktree", "add", "--no-track", "-b", branch, dir, base)
+	}
+	if err != nil {
+		return err
+	}
+	return added()
+}
+
+func sameDir(a os.FileInfo, dir string) bool {
+	b, err := os.Stat(dir)
+	return err == nil && os.SameFile(a, b)
+}
+
+// repoGitDir is the git directory of the repository whose top level is repo: repo/.git when it is a directory (the
+// node's clones, and an owner's repository), else the common directory git names for it. A Ticket's worker never
+// works in repo itself.
+func repoGitDir(repo string) (string, error) {
+	dotGit := filepath.Join(repo, ".git")
+	if st, err := os.Lstat(dotGit); err == nil && st.IsDir() {
+		return dotGit, nil
+	}
+	out, err := gitIn(repo, nil, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil {
+		return "", err
+	}
+	return filepath.Clean(out), nil
+}
+
+// worktreeAdmin is the git directory of the worktree at dir of the repository whose git directory is common, as
+// ensureWorktree made it: <common>/worktrees/<dir's name>.
+func worktreeAdmin(common, dir string) string {
+	return filepath.Join(common, "worktrees", filepath.Base(dir))
+}
+
+// repoGitEnv is env (the node's, if nil) with git's directories pinned to the repository's own: git reads no .git
+// entry, commondir file or gitdir file to find them.
+func repoGitEnv(env []string, common, repo string) []string {
+	return append(gitBase(env), "GIT_DIR="+common, "GIT_COMMON_DIR="+common, "GIT_WORK_TREE="+repo)
+}
+
+// worktreeGitEnv is env (the node's, if nil) with git's directories pinned to those Athena made for the worktree at
+// dir: its git directory (worktreeAdmin), the repository's common directory and dir. The worktree's .git file and its
+// git directory's commondir and gitdir, which the worker can rewrite to point at a directory of its own (with a config
+// naming a filter driver, an fsmonitor or hooks), are never read.
+func worktreeGitEnv(env []string, common, dir string) []string {
+	return append(gitBase(env), "GIT_DIR="+worktreeAdmin(common, dir), "GIT_COMMON_DIR="+common, "GIT_WORK_TREE="+dir)
+}
+
+func gitBase(env []string) []string {
+	if env == nil {
+		return os.Environ()
+	}
+	return slices.Clone(env)
 }
 
 // cleanupWorktree removes an ended Ticket's worktree when nothing in it would be lost: no uncommitted or untracked
@@ -1966,7 +2044,19 @@ func cleanupWorktree(p placement, t core.Ticket, log *slog.Logger) {
 		defer lockRepo(p.repo)()
 		env = cloneGitEnv(p.repo, p.github)
 	}
-	gitOut := func(dir string, args ...string) (string, error) { return gitIn(dir, env, args...) }
+	common, err := repoGitDir(p.repo)
+	if err != nil {
+		log.Warn("keeping worktree: cannot find its repository's git directory", "dir", p.workDir, "error", err)
+		return
+	}
+	// git's directories are those Athena made, never those the worktree's files name now.
+	wenv, renv := worktreeGitEnv(env, common, p.workDir), repoGitEnv(env, common, p.repo)
+	gitOut := func(dir string, args ...string) (string, error) {
+		if dir == p.workDir {
+			return gitIn(dir, wenv, args...)
+		}
+		return gitIn(dir, renv, args...)
+	}
 	dirty, err := gitOut(p.workDir, "status", "--porcelain")
 	if err != nil {
 		log.Warn("keeping worktree: cannot read its status", "dir", p.workDir, "error", err)

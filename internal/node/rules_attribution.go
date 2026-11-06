@@ -3,6 +3,7 @@ package node
 import (
 	"io"
 	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -32,42 +33,27 @@ func attributionRule(ctx RuleContext, command, workdir string) (Decision, bool) 
 	if !strings.Contains(command, "git") && !strings.Contains(command, "gh") {
 		return Decision{}, false
 	}
-	dir := ctx.TicketDir
-	if workdir != "" {
-		dir = ctx.absPath(workdir)
-	}
-	if ctx.attributed(command, dir, 0) {
+	if ctx.attributed(command, workdir) {
 		return deny(ruleAttribution, attributionReason), true
 	}
 	return Decision{}, false
 }
 
-// attributed reports whether command carries an attribution, run from dir ("" when it cannot be known).
-func (c RuleContext) attributed(command, dir string, depth int) bool {
+// attributed reports whether command, run from workdir ("" for the ticket directory), carries an attribution.
+func (c RuleContext) attributed(command, workdir string) bool {
 	athena := baseName(c.AthenaBin)
-	for _, words := range shellSegments(command) {
-		words = commandStart(words)
-		if len(words) == 0 {
-			continue
-		}
+	for _, sg := range shellDirs(command, workdir, true, 0) {
+		words := sg.words
 		var texts, files []string
-		fdir := dir
+		dir, known := sg.dir, sg.known
 		switch w0 := words[0]; {
-		case w0 == "cd" || w0 == "pushd":
-			var args []string
-			for _, w := range words[1:] {
-				if !strings.HasPrefix(w, "-") || w == "-" {
-					args = append(args, w)
-				}
-			}
-			dir = c.changeDir(args, dir)
-		case w0 == "popd":
-			dir = ""
 		case w0 == "git":
 			sub, rest, gdirs := gitSubcommandArgs(words[1:])
 			for _, g := range gdirs {
-				if fdir != "" {
-					fdir = c.absPathIn(g, fdir)
+				if d, ok := cdTo(dir, []string{g}); ok {
+					dir = d
+				} else {
+					known = false
 				}
 			}
 			if sub == "commit" {
@@ -77,18 +63,11 @@ func (c RuleContext) attributed(command, dir string, depth int) bool {
 			texts, files = prMessages(words[1:])
 		case (w0 == "athena" || (athena != "" && w0 == athena)) && len(words) > 1 && words[1] == "gh":
 			texts, files = prMessages(words[2:])
-		case shellCmds[w0] && depth < 3:
-			for i, w := range words[1:] {
-				if w == "-c" || (strings.HasPrefix(w, "-") && strings.HasSuffix(w, "c") && !strings.HasPrefix(w, "--")) {
-					if i+2 < len(words) && c.attributed(words[i+2], dir, depth+1) {
-						return true
-					}
-					break
-				}
-			}
 		}
 		for _, f := range files {
-			if body, ok := c.messageFile(f, fdir); ok {
+			if stdinFiles[f] || !known {
+				texts = append(texts, command)
+			} else if body, ok := c.messageFile(joinDir(dir, f)); ok {
 				texts = append(texts, body)
 			} else {
 				texts = append(texts, command)
@@ -103,17 +82,95 @@ func (c RuleContext) attributed(command, dir string, depth int) bool {
 	return false
 }
 
+// dirSeg is a simple command of a shell command (commandStart's words) and the directory it runs in: dir is relative to
+// where the command starts ("" for there) unless absolute or ~; known is false once a directory change the rules
+// cannot follow ran before it (cd -, a variable, popd, a cd inside a subshell or command substitution).
+type dirSeg struct {
+	words []string
+	dir   string
+	known bool
+}
+
+// shellDirs lists the simple commands of command with the directory each runs in, starting from dir (known: the
+// start is known), following cd and pushd, and the scripts of `sh -c` (whose own cds stay in them).
+func shellDirs(command, dir string, known bool, depth int) []dirSeg {
+	var out []dirSeg
+	for _, sg := range shellSegs(command) {
+		words := commandStart(sg.words)
+		if len(words) == 0 {
+			continue
+		}
+		out = append(out, dirSeg{words, dir, known})
+		switch w0 := words[0]; {
+		case w0 == "cd" || w0 == "pushd":
+			var args []string
+			for _, w := range words[1:] {
+				if (!strings.HasPrefix(w, "-") || w == "-") && !redirectWordRe.MatchString(w) {
+					args = append(args, w)
+				}
+			}
+			d, ok := cdTo(dir, args)
+			if sg.sub || !ok {
+				known = false // a subshell's cd ends with it, wherever the rules lose count of where that is
+			} else {
+				dir = d
+			}
+		case w0 == "popd":
+			known = false
+		case shellCmds[w0] && depth < 3:
+			for i, w := range words[1:] {
+				if w == "-c" || (strings.HasPrefix(w, "-") && strings.HasSuffix(w, "c") && !strings.HasPrefix(w, "--")) {
+					if i+2 < len(words) {
+						out = append(out, shellDirs(words[i+2], dir, known, depth+1)...)
+					}
+					break
+				}
+			}
+		}
+	}
+	return out
+}
+
+// redirectWordRe matches a redirection a shell word starts with (>/dev/null, 2>, <in): no operand of the command.
+var redirectWordRe = regexp.MustCompile(`^[0-9]*[<>]`)
+
+// cdTo is the directory `cd args` changes to from dir; ok is false when the rules cannot tell (cd -, a variable or
+// command substitution, ~user, more than one operand).
+func cdTo(dir string, args []string) (string, bool) {
+	switch len(args) {
+	case 0:
+		return "~", true
+	case 1:
+	default:
+		return "", false
+	}
+	a := args[0]
+	if a == "-" || a == "" || strings.ContainsAny(a, "$`") || otherTilde(a) {
+		return "", false
+	}
+	return joinDir(dir, a), true
+}
+
+// joinDir is p named from dir (dirSeg's dir): p itself when absolute or ~, else under dir. It does not clean the result:
+// the rules apply ".." against the real filesystem (realpath).
+func joinDir(dir, p string) string {
+	if dir == "" || filepath.IsAbs(p) || p == "~" || strings.HasPrefix(p, "~/") {
+		return p
+	}
+	return dir + string(filepath.Separator) + p
+}
+
 // stdinFiles are the paths a message file read from stdin is named by.
 var stdinFiles = map[string]bool{"-": true, "/dev/stdin": true, "/dev/fd/0": true, "/proc/self/fd/0": true}
 
 // messageFile is the start of a regular file in the ticket directory a commit message or pull request body is read
-// from, p relative to dir; ok is false for stdin and for any other path, or one it cannot read.
-func (c RuleContext) messageFile(p, dir string) (string, bool) {
+// from (p relative to the ticket directory); ok is false for stdin and for any other path, or one it cannot read.
+func (c RuleContext) messageFile(p string) (string, bool) {
 	if p == "" || stdinFiles[p] || c.TicketDir == "" || otherTilde(p) {
 		return "", false
 	}
 	base, ok := realpath(c.TicketDir)
-	target, ok2 := realpath(c.absPathIn(p, dir))
+	target, ok2 := realpath(c.absPath(p))
 	if !ok || !ok2 || !within(base, target) {
 		return "", false
 	}
@@ -303,8 +360,24 @@ func commandStart(words []string) []string {
 // "…", $'…') and backslashes are honoured and removed, and ;, &, |, newlines and parentheses outside quotes end a
 // command. Expansions are left as written, and a here-document's lines read as commands of their own.
 func shellSegments(cmd string) [][]string {
-	var segs [][]string
+	var out [][]string
+	for _, sg := range shellSegs(cmd) {
+		out = append(out, sg.words)
+	}
+	return out
+}
+
+// shellSeg is a simple command's words, and whether it runs in a subshell or a command substitution ("(…)", "$(…)").
+type shellSeg struct {
+	words []string
+	sub   bool
+}
+
+// shellSegs is shellSegments with where each command runs.
+func shellSegs(cmd string) []shellSeg {
+	var segs []shellSeg
 	var words []string
+	depth := 0
 	var cur strings.Builder
 	inWord := false
 	endWord := func() {
@@ -317,7 +390,7 @@ func shellSegments(cmd string) [][]string {
 	endSeg := func() {
 		endWord()
 		if len(words) > 0 {
-			segs = append(segs, words)
+			segs = append(segs, shellSeg{words, depth > 0})
 			words = nil
 		}
 	}
@@ -370,8 +443,14 @@ func shellSegments(cmd string) [][]string {
 			inWord = true
 		case c == ' ' || c == '\t':
 			endWord()
-		case c == '\n' || c == ';' || c == '&' || c == '|' || c == '(' || c == ')':
+		case c == '\n' || c == ';' || c == '&' || c == '|':
 			endSeg()
+		case c == '(':
+			endSeg()
+			depth++
+		case c == ')':
+			endSeg()
+			depth = max(depth-1, 0)
 		case c == '#' && !inWord:
 			if nl := strings.IndexByte(cmd[i:], '\n'); nl >= 0 {
 				i += nl - 1

@@ -2516,3 +2516,33 @@ func TestShareKey(t *testing.T) {
 		t.Errorf("undecodable input subject = %q", callSubject(bad1))
 	}
 }
+
+// Athena's own tool is no later item: a ready report filed in the step of a denied call stays refused.
+func TestCodexDenyThenReportItemStillRefused(t *testing.T) {
+	h := newCodexHarness(t, codexTurn(
+		codexHook(EventPreToolUse, "cat ~/.ssh/id_rsa"),
+		codexCommandItem("item/started", "item_0003", "cat ~/.ssh/id_rsa"),
+		codexCommandItem("item/completed", "item_0003", "cat ~/.ssh/id_rsa"),
+		`{"method":"item/started","params":{"threadId":"thr_fixture_0001","turnId":"turn_fixture_0001","item":{"id":"item_0007","type":"mcpToolCall","server":"athena","tool":"report","status":"inProgress","arguments":{"status":"ready","summary":"read it"},"result":null,"error":null,"durationMs":null},"startedAtMs":1893456003750}}`,
+		`{"fake":"mcp","tool":"report","arguments":{"status":"ready","summary":"read it"}}`,
+	), nil)
+	tk := h.submitCodex("Read a key and report at once")
+	h.eventually("the report was answered", func() bool { return h.rpcHas(`"fake":"mcp"`) })
+	var rec struct {
+		IsError bool   `json:"isError"`
+		Text    string `json:"text"`
+	}
+	for _, l := range h.rpc() {
+		if strings.Contains(l, `"fake":"mcp"`) {
+			if err := json.Unmarshal([]byte(l), &rec); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if !rec.IsError || !strings.Contains(rec.Text, "failed") {
+		t.Fatalf("report answer = %+v, want the same-step refusal", rec)
+	}
+	if cur, _ := h.ticket(tk.ID); cur.Ended != nil {
+		t.Fatalf("ticket ended: %+v", cur.Ended)
+	}
+}
