@@ -1103,6 +1103,11 @@ func cloneTicket(t *Ticket) Ticket {
 			a.DeliveredAt = clonePtr(a.DeliveredAt)
 			a.IdleAt = clonePtr(a.IdleAt)
 			a.Report = clonePtr(a.Report)
+			if a.Limit != nil {
+				l := *a.Limit
+				l.ResetsAt = clonePtr(l.ResetsAt)
+				a.Limit = &l
+			}
 			if a.Interruptions != nil {
 				a.Interruptions = slices.Clone(a.Interruptions)
 				for j := range a.Interruptions {

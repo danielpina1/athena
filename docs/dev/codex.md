@@ -266,7 +266,40 @@ runtime"). A new Assignment continues the Ticket's last session only when it run
 review always starts fresh. The node's status lists each runtime with its last known readiness (Claude Code is taken
 as ready), its quota and its live sessions; the server checks the other runtimes once at start.
 
-*Failover on a limit is to be written.*
+**Failover.** A turn that stops at its usage limit is no failure and asks no person. Codex says so in the turn's
+error (`usageLimitExceeded`, or `rateLimitExceeded` for a transient limit); Claude Code with a `rate_limit_event`
+whose status is `rejected` (whichever window it names, one Athena does not map too) followed by an error `result`, or
+with an error `result` whose text says it hit a limit. The node then:
+
+1. records the limit in the quota (above);
+2. checkpoints the work in progress, when the Ticket runs in a git worktree (below);
+3. ends the Assignment with reason `usage_limit` and its limit (runtime, reset, message) and queues a new Assignment of
+   the same role (`UsageLimited`): pinned to the limited runtime when the Ticket names one, else for the chooser to
+   place. The trigger Inputs the limited session never read go to it first. No Report is filed and no question raised:
+   the Ticket shows working/queued until the new Assignment runs;
+4. ends the limited session as if stopped. Its process has exited before the next session starts: a Ticket has one
+   live session, so two sessions never write the same worktree at once.
+
+The new Assignment launches through the chooser, the only wait there is: an `auto` Ticket goes to the other runtime
+(the limited one is no candidate), or, with both limited, waits until the earliest reset; a pinned Ticket waits for its
+runtime's reset and then resumes its session. A reset that is unknown or already past is never waited on: the quota
+backs off (15 min, doubling) and the limit's reset shows as unknown.
+
+The new session works in the same directory (the Ticket's recorded placement). Its transcript marker says
+`"reason":"failover"` when it moved to the other runtime. A new worker session whose previous worker Assignment ended
+at its limit, and a resumed session that another runtime's work came after, get a handoff note after the worker
+preamble: who stopped where, the Ticket's last 20 Inputs, its last 3 Reports, the branch's commits since its base, its
+uncommitted changes and untracked file count, and what the previous session said last; at most 32 KiB, every part
+quoted so nothing in it reads as an Input. A review, a retry or a crash recovery gets none. The timeline shows the end
+as `assignment`/`limited` (subject the runtime, text the RFC 3339 reset or empty).
+
+**The checkpoint (a deviation from §6.1a).** The spec says the work in progress "is committed to the Ticket branch
+first". Athena commits it instead to the side ref `refs/athena/<lowercased ticket id>/checkpoint` (a commit on the
+branch's HEAD, through an index of its own: `git add -A` respecting `.gitignore`, `write-tree`, `commit-tree`,
+`update-ref`), and leaves the branch, the index and the files as they are. Nothing is lost, because the next session
+works in the same worktree, and no checkpoint commit lands on the pull request. The node's git runs it with no shell,
+its git directories pinned, a minimal environment and a 30 s timeout; a failure is logged and does not hold up the
+failover. Moving the branch instead would be a small change.
 
 ## 8. Review pairing
 

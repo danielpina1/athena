@@ -276,6 +276,18 @@ func TestTimelineAssignmentEnds(t *testing.T) {
 		{"interrupted", func(tk *core.Ticket) {
 			tk.Assignments = []core.Assignment{{ID: "a", State: core.AssignmentEnded, EndedAt: at(2 * time.Minute), EndedReason: "node restart"}}
 		}, "assignment/started  · |assignment/interrupted  · node restart"},
+		{"limited", func(tk *core.Ticket) {
+			reset := time.Date(2026, 11, 6, 15, 0, 0, 0, time.FixedZone("x", 3600))
+			tk.Assignments = []core.Assignment{
+				{ID: "a", State: core.AssignmentEnded, Runtime: core.RuntimeClaude, EndedAt: at(2 * time.Minute), EndedReason: core.ReasonUsageLimit,
+					Limit: &core.UsageLimit{Runtime: core.RuntimeClaude, ResetsAt: &reset, Message: "usage limit reached"}},
+				{ID: "b", State: core.AssignmentPending, CreatedAt: *at(2 * time.Minute)},
+			}
+		}, "assignment/started  · |assignment/limited claude · 2026-11-06T14:00:00Z|assignment/queued  · "},
+		{"limited, reset unknown", func(tk *core.Ticket) {
+			tk.Assignments = []core.Assignment{{ID: "a", State: core.AssignmentEnded, Runtime: core.RuntimeCodex, EndedAt: at(2 * time.Minute),
+				EndedReason: core.ReasonUsageLimit, Limit: &core.UsageLimit{Runtime: core.RuntimeCodex}}}
+		}, "assignment/started  · |assignment/limited codex · "},
 	} {
 		f := newFake()
 		tk := ticket("T-1")

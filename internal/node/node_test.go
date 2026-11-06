@@ -10,9 +10,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -884,8 +886,9 @@ func TestInputReadOnlyAtTurnEndOrReport(t *testing.T) {
 	})
 }
 
-// A turn that ends in an error (here a real `error_max_turns` result; also an expired login or a rate limit) leaves the
-// CLI waiting with stdin open: the Assignment reports failed with the subtype and the reason instead of staying working.
+// A turn that ends in an error (here a real `error_max_turns` result; also an expired login) leaves the CLI waiting
+// with stdin open: the Assignment reports failed with the subtype and the reason instead of staying working. (A usage
+// limit is no failure: the Ticket fails over, TestClaudeLimitFailsOverToCodex.)
 func TestErrorResultReportsFailed(t *testing.T) {
 	h := newHarness(t, nil)
 	t.Setenv("ATHENA_FAKE_FIXTURE", claudeFixture(t, "max-turns.jsonl"))
@@ -1254,6 +1257,10 @@ func (b blockingEngine) AssignmentInterrupted(string, string, string) error {
 	return nil
 }
 func (b blockingEngine) FileReport(string, core.ReportInput) error { b.wait(); return nil }
+func (b blockingEngine) UsageLimited(string, string, core.UsageLimit) error {
+	b.wait()
+	return nil
+}
 func (b blockingEngine) Ticket(string) (core.Ticket, core.Stage, error) {
 	b.wait()
 	return core.Ticket{}, core.Stage{}, fmt.Errorf("released")
@@ -2839,6 +2846,260 @@ func TestSessionCapWaitsWithoutLooping(t *testing.T) {
 			}
 			if n := ch.count(second.ID); n > 4 {
 				t.Fatalf("the waiting launch was chosen %d times in all", n)
+			}
+		})
+	}
+}
+
+// --- usage-limit failover ---
+
+const limitSessionID = "limit-session-0001"
+
+// claudeLimitFixture is a Claude Code turn that says something and stops at its usage limit: a rejected
+// rate_limit_event resetting at reset (a unix time, or fakeclaude's {now+Ns}; "" for none), then the error result.
+func claudeLimitFixture(t *testing.T, reset string) string {
+	t.Helper()
+	lines := []string{
+		`{"type":"system","subtype":"init","cwd":"/home/user/work","session_id":"` + limitSessionID + `","model":"claude-haiku-4-5","tools":[]}`,
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"I am halfway through the parser."}]},"session_id":"` + limitSessionID + `"}`,
+	}
+	if reset != "" {
+		lines = append(lines, `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":`+reset+`,"rateLimitType":"five_hour"},"session_id":"`+limitSessionID+`"}`)
+	}
+	lines = append(lines, `{"type":"result","subtype":"success","is_error":true,"result":"Claude AI usage limit reached","session_id":"`+limitSessionID+`","num_turns":1}`)
+	p := filepath.Join(t.TempDir(), "limit.jsonl")
+	if err := os.WriteFile(p, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// limitedAssignment waits until the Ticket's first Assignment ended at its usage limit, and returns the Ticket.
+func (h *harness) limitedAssignment(id string) core.Ticket {
+	h.t.Helper()
+	var tk core.Ticket
+	h.eventually("the first assignment ends at its usage limit", func() bool {
+		tk, _ = h.ticket(id)
+		return len(tk.Assignments) > 1 && tk.Assignments[0].EndedReason == core.ReasonUsageLimit
+	})
+	return tk
+}
+
+// codexTurnStart is the text of the first turn/start the Codex session sent, "" before it sent one.
+func (h *codexHarness) codexTurnStart() string {
+	for _, l := range h.rpc() {
+		var m struct {
+			Method string `json:"method"`
+			Params struct {
+				Input []struct {
+					Text string `json:"text"`
+				} `json:"input"`
+			} `json:"params"`
+		}
+		if json.Unmarshal([]byte(l), &m) == nil && m.Method == "turn/start" && len(m.Params.Input) > 0 {
+			return m.Params.Input[0].Text
+		}
+	}
+	return ""
+}
+
+// A Claude Code session that stops at its usage limit fails over to Codex, with no person asked: its work in progress
+// is checkpointed, its Assignment ends at the limit, and Codex continues in the same work dir, its first message
+// telling it, after the worker preamble, what the Claude session knew.
+func TestClaudeLimitFailsOverToCodex(t *testing.T) {
+	h := newCodexHarness(t, codexTurn(), nil)
+	hold := filepath.Join(t.TempDir(), "hold")
+	t.Setenv("ATHENA_FAKE_HOLD_RESULT", hold)
+	t.Setenv("ATHENA_FAKE_FIXTURE", claudeLimitFixture(t, strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10)))
+	repo := newRepo(t)
+	tk, err := h.eng.SubmitOwnerTask("Fix the parser", core.TaskOptions{Dir: repo, Runtime: core.RuntimeAuto})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.eventually("claude runs", func() bool { return len(h.invocations()) == 1 })
+	wd, err := WorkingDir(h.cfg.WorkRoot, tk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The worker leaves work in progress, then its turn stops at the limit.
+	h.eventually("the worktree exists", func() bool { _, err := os.Stat(wd); return err == nil })
+	if err := os.WriteFile(filepath.Join(wd, "wip.txt"), []byte("half a parser\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hold, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cur := h.limitedAssignment(tk.ID)
+	h.eventually("codex gets its first message", func() bool { return h.codexTurnStart() != "" })
+	limited := cur.Assignments[0]
+	if limited.Limit == nil || limited.Limit.Runtime != core.RuntimeClaude || limited.Limit.ResetsAt == nil ||
+		!strings.Contains(limited.Limit.Message, "usage limit") || limited.Report != nil {
+		t.Fatalf("limited assignment = %+v, limit %+v", limited, limited.Limit)
+	}
+	cur, st := h.ticket(tk.ID)
+	if next := cur.Assignments[1]; next.Runtime != core.RuntimeCodex || next.Role != "" {
+		t.Fatalf("next assignment = %+v", next)
+	}
+	if st.Stage == "person" || cur.Attention != nil {
+		t.Fatalf("stage %+v, attention %+v", st, cur.Attention)
+	}
+	if !h.n.Quota().State(core.RuntimeClaude).Limited(time.Now()) {
+		t.Fatal("claude is not limited in the quota")
+	}
+
+	// Codex works in the same directory.
+	b, err := os.ReadFile(strings.ReplaceAll(h.argsLog, "{ticket}", tk.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var inv invocation
+	if err := json.Unmarshal(b, &inv); err != nil {
+		t.Fatal(err)
+	}
+	if claudeDir := h.invocations()[0].Env["ATHENA_DIR"]; inv.Env["ATHENA_DIR"] != wd || claudeDir != wd {
+		t.Fatalf("codex in %q, claude in %q, want both in %q", inv.Env["ATHENA_DIR"], claudeDir, wd)
+	}
+	// Its first message: the preamble, then the handoff note with the Ticket's request and Claude's last words.
+	text := h.codexTurnStart()
+	opening := fmt.Sprintf(handoffOpening, "Claude Code")
+	pre, note, ok := strings.Cut(text, "\n"+opening)
+	if !ok || !strings.HasPrefix(pre, "You are the worker of Athena Ticket "+tk.ID) || !strings.HasSuffix(pre, "ATHENA_RUNTIME=codex\n") {
+		t.Fatalf("first message:\n%s", text)
+	}
+	for _, want := range []string{"Fix the parser", "I am halfway through the parser.", "Untracked files: 1"} {
+		if !strings.Contains(note, want) {
+			t.Errorf("handoff lacks %q:\n%s", want, note)
+		}
+	}
+	// The work in progress is in the checkpoint; the branch has no new commit.
+	ref := "refs/athena/" + strings.ToLower(tk.ID) + "/checkpoint"
+	if tree := git(t, repo, "ls-tree", "--name-only", ref); !strings.Contains(tree, "wip.txt") {
+		t.Fatalf("checkpoint tree = %q", tree)
+	}
+	if git(t, repo, "rev-parse", ref+"^") != git(t, repo, "rev-parse", "refs/heads/"+branchName(tk)) {
+		t.Fatal("the checkpoint is not on the branch's head, or the branch moved")
+	}
+	// The transcript says where the Ticket moved, and why.
+	h.eventually("the failover marker", func() bool {
+		return strings.Contains(h.transcript(tk.ID), `"runtime":"codex"`) && strings.Contains(h.transcript(tk.ID), `"reason":"failover"`)
+	})
+}
+
+// pidCheckRuntime is a runtime that, at each session start, notes whether a session process it or a sibling started
+// still runs, or the Ticket's run file still names one.
+type pidCheckRuntime struct {
+	rt.Runtime
+	stateDir string
+	mu       *sync.Mutex
+	pids     *[]int
+	overlaps *[]string
+}
+
+func (p pidCheckRuntime) Start(ctx context.Context, o rt.StartOptions) (rt.Session, error) {
+	p.mu.Lock()
+	for _, pid := range *p.pids {
+		if syscall.Kill(pid, 0) == nil {
+			*p.overlaps = append(*p.overlaps, fmt.Sprintf("%s starts while pid %d runs", p.Name(), pid))
+		}
+	}
+	if _, err := os.Stat(runFile(p.stateDir, o.TicketID)); err == nil {
+		*p.overlaps = append(*p.overlaps, p.Name()+" starts while the run file names a process")
+	}
+	p.mu.Unlock()
+	sess, err := p.Runtime.Start(ctx, o)
+	if err == nil {
+		p.mu.Lock()
+		*p.pids = append(*p.pids, sess.Pid())
+		p.mu.Unlock()
+	}
+	return sess, err
+}
+
+// Two sessions never work in one worktree: the limited session's process has exited, and its run file is gone, before
+// the next one spawns.
+func TestNoTwoSessionsInOneWorktree(t *testing.T) {
+	mu, pids, overlaps := &sync.Mutex{}, &[]int{}, &[]string{}
+	h := newCodexHarness(t, codexTurn(), func(c *Config) {
+		for name, r := range c.Runtimes {
+			c.Runtimes[name] = pidCheckRuntime{Runtime: r, stateDir: c.StateDir, mu: mu, pids: pids, overlaps: overlaps}
+		}
+	})
+	t.Setenv("ATHENA_FAKE_FIXTURE", claudeLimitFixture(t, "{now+3600s}"))
+	tk, err := h.eng.SubmitOwnerTask("Fix the parser", core.TaskOptions{Dir: newRepo(t), Runtime: core.RuntimeAuto})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.limitedAssignment(tk.ID)
+	h.eventually("codex gets its first message", func() bool { return h.codexTurnStart() != "" })
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*pids) != 2 || len(*overlaps) != 0 {
+		t.Fatalf("pids %v, overlaps %v", *pids, *overlaps)
+	}
+}
+
+// Both runtimes limited: the Ticket stays working/queued, launches nothing until the earliest reset (Claude Code's
+// here), then launches once, on that runtime, resuming its session.
+func TestBothLimitedWaitsForEarliestReset(t *testing.T) {
+	h := newCodexHarness(t, codexTurn(), nil)
+	fixture := claudeLimitFixture(t, "{now+4s}")
+	t.Setenv("ATHENA_FAKE_FIXTURE", fixture)
+	codexReset := time.Now().Add(20 * time.Second)
+	h.n.Quota().Hit(core.RuntimeCodex, rt.LimitHit{Runtime: core.RuntimeCodex, ResetsAt: &codexReset})
+	tk, err := h.eng.SubmitOwnerTask("Fix the parser", core.TaskOptions{Runtime: core.RuntimeAuto})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cur := h.limitedAssignment(tk.ID)
+	reset := cur.Assignments[0].Limit.ResetsAt
+	if reset == nil || !reset.After(time.Now()) {
+		t.Fatalf("limit reset = %v, want one ahead", reset)
+	}
+	// The session after the reset ends its turn well.
+	if err := os.WriteFile(fixture, must(os.ReadFile(claudeFixture(t, "simple-turn.jsonl"))), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	launched := func() bool { return len(h.invocations()) > 1 || h.rpcHas(`"method":"thread/start"`) }
+	if _, st := h.ticket(tk.ID); st != (core.Stage{Stage: "working", Action: "queued"}) {
+		t.Fatalf("stage while both are limited = %+v", st)
+	}
+	h.never("a launch before the earliest reset", time.Until(*reset)-200*time.Millisecond, launched)
+	if _, st := h.ticket(tk.ID); st != (core.Stage{Stage: "working", Action: "queued"}) {
+		t.Fatalf("stage before the reset = %+v", st)
+	}
+	h.eventually("one launch after the reset", func() bool { return len(h.invocations()) == 2 })
+	h.never("a second launch", time.Second, func() bool { return len(h.invocations()) > 2 || h.rpcHas(`"method":"thread/start"`) })
+	if id, _ := argValue(h.invocations()[1].Args, "--resume"); id != limitSessionID {
+		t.Fatalf("the launch after the reset resumes %q, want the limited session", id)
+	}
+	if _, st := h.ticket(tk.ID); st.Stage != "working" {
+		t.Fatalf("stage after the reset = %+v", st)
+	}
+}
+
+// A limit that says no reset, or one that has already passed, backs off (15 minutes first) rather than wait on a time
+// that means nothing: the Ticket stays working/queued, its limit shows no reset, and nothing launches meanwhile.
+func TestUnknownResetBacksOff(t *testing.T) {
+	for name, reset := range map[string]string{"no reset": "", "a reset that passed": "1600000000"} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, nil)
+			t.Setenv("ATHENA_FAKE_FIXTURE", claudeLimitFixture(t, reset))
+			tk := h.submit("Fix the parser", "")
+			cur := h.limitedAssignment(tk.ID)
+			if l := cur.Assignments[0].Limit; l == nil || l.ResetsAt != nil {
+				t.Fatalf("limit = %+v, want no reset", l)
+			}
+			if next := cur.Assignments[1]; next.Runtime != core.RuntimeClaude {
+				t.Fatalf("the ticket pinned to claude moved: %+v", next)
+			}
+			q := h.n.Quota().State(core.RuntimeClaude)
+			if q.LimitedUntil == nil || q.LimitedUntil.Before(time.Now().Add(14*time.Minute)) || q.LimitedUntil.After(time.Now().Add(16*time.Minute)) {
+				t.Fatalf("limited until %v, want the 15 minute backoff", q.LimitedUntil)
+			}
+			h.never("a launch during the backoff", 1500*time.Millisecond, func() bool { return len(h.invocations()) > 1 })
+			if _, st := h.ticket(tk.ID); st != (core.Stage{Stage: "working", Action: "queued"}) {
+				t.Fatalf("stage = %+v", st)
 			}
 		})
 	}

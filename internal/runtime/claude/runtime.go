@@ -25,8 +25,11 @@ type Runtime struct {
 
 var _ rt.Runtime = Runtime{}
 
+// runtimeName is Claude Code's rt.Runtime name.
+const runtimeName = "claude"
+
 // Name is "claude".
-func (Runtime) Name() string { return "claude" }
+func (Runtime) Name() string { return runtimeName }
 
 func (r Runtime) binary() string {
 	if r.Binary == "" {

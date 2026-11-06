@@ -126,6 +126,9 @@ type EngineCallbacks interface {
 	TurnEnded(ticketID, assignmentID string) error
 	// AssignmentInterrupted records that the session of a busy Assignment is cut short from outside (a shutdown).
 	AssignmentInterrupted(ticketID, assignmentID, reason string) error
+	// UsageLimited records that the session of a running Assignment stopped at its usage limit: a new Assignment takes
+	// over, with no person stage.
+	UsageLimited(ticketID, assignmentID string, l core.UsageLimit) error
 	FileReport(ticketID string, r core.ReportInput) error
 	Ticket(id string) (core.Ticket, core.Stage, error)
 	RequestApproval(a core.Approval) (core.Approval, error)
@@ -1057,6 +1060,8 @@ type runner struct {
 	restarted bool
 	// redeliver is set when sending waiting Inputs failed while the process ran: the next turn end tries again.
 	redeliver bool
+	// handoff is the handoff note (handoff.go) the first message of the Assignment's first process carries, if any.
+	handoff string
 
 	// usage is what the session did since the last RecordUsage; tools maps the ids of tool calls in flight to their
 	// tool; firstSent and firstOutput time the Ticket's time to first output.
@@ -1154,6 +1159,11 @@ func (r *runner) run() {
 	}
 	sandbox, sandboxEnv := n.sandboxFor(s.place.workDir)
 	roots := n.writableRoots(s.place.workDir)
+	// A new Assignment after a usage limit (or after another runtime's work) tells its session what the one before knew.
+	failover := false
+	if !recovering {
+		r.handoff, failover = r.handoffFor(rtm.Name(), resumeID)
+	}
 	for crashes := 0; ; {
 		spawnStart := time.Now()
 		// One transcript per process: the session appends every line it prints, and it is closed after the process.
@@ -1166,6 +1176,9 @@ func (r *runner) run() {
 		reason := "start"
 		if resumeID != "" {
 			reason = "resume"
+		}
+		if failover {
+			reason, failover = "failover", false // its first process only
 		}
 		// Its model is the one the session runs with, once known: Codex's own default is named by its first process.
 		tr.Append(render.MarkerLine(render.Marker{At: time.Now(), Runtime: rtm.Name(), Model: r.model, Assignment: s.a.ID,
@@ -1421,7 +1434,11 @@ func (r *runner) sendFirst(sess rt.Session, recovering bool) {
 		b.WriteString(recoveryNote + recoveryAdvice + "\n")
 	} else {
 		b.WriteString(workerPreamble(t, r.n.variables(s)))
+		if r.handoff != "" {
+			b.WriteString("\n" + r.handoff + "\n")
+		}
 	}
+	r.handoff = "" // once: a restarted process gets the recovery note
 	// Inputs a crashed process received but never took into a step go again, ahead of what waits.
 	if len(r.unread) > 0 {
 		b.WriteString("\n" + renderInputs(t, r.unreadIDs(), r.trigger))
@@ -1646,9 +1663,11 @@ func (r *runner) onEvent(ev rt.Event) {
 		// next message: report it, or the Ticket stays working with nothing running. Its Inputs may not have reached
 		// the model, so they stay unread and a retry sends them again. A turn Athena itself ends (a stop) never gets
 		// here: the stop drains the events without onEvent, and fail does nothing once the session is stopped. A usage
-		// limit that stopped the turn limits its runtime in the quota, which the next launch's choice reads.
+		// limit that stopped the turn is no failure: the Ticket fails over (usageLimited).
 		if e.Limit != nil {
-			r.n.quota.Hit(r.runtime, *e.Limit)
+			r.nudged = false
+			r.usageLimited(e)
+			return
 		}
 		if e.OK {
 			r.n.quota.TurnOK(r.runtime)
@@ -1812,6 +1831,40 @@ func (r *runner) unreadIDs() []string {
 		ids[i] = u.id
 	}
 	return ids
+}
+
+// usageLimited handles a turn that stopped at its runtime's usage limit: the limit goes to the quota (which the next
+// launch's choice reads), the work in progress is checkpointed, and the Engine ends the Assignment and queues a new one
+// (UsageLimited), which the chooser places: on the other runtime, or on this one once it resets. The session ends as if
+// stopped, and its process has exited before the next one starts in the same worktree (one live session per Ticket).
+// No person is asked: only when the Engine cannot take the fact does the Assignment report failed.
+func (r *runner) usageLimited(e rt.TurnEnd) {
+	s, n := r.s, r.n
+	n.quota.Hit(r.runtime, *e.Limit)
+	if s.isStopped() {
+		return
+	}
+	if !r.started {
+		r.fail(turnFailure(e)) // the Engine never saw this Assignment run
+		return
+	}
+	n.checkpointSession(s)
+	l := core.UsageLimit{Runtime: r.runtime, Message: redact.String(strings.TrimSpace(e.Limit.Message))}
+	if at := e.Limit.ResetsAt; at != nil && at.After(time.Now()) {
+		// A reset that has passed says nothing of when the limit lifts (the quota backs off instead): unknown.
+		reset := at.UTC()
+		l.ResetsAt = &reset
+	}
+	if utf8.RuneCountInString(l.Message) > summaryMaxRunes {
+		l.Message = string([]rune(l.Message)[:summaryMaxRunes-1]) + "…"
+	}
+	if err := r.eng.UsageLimited(s.t.ID, s.a.ID, l); err != nil {
+		r.log.Error("record the usage limit", "error", err)
+		r.fail(turnFailure(e))
+		return
+	}
+	r.log.Info("usage limit reached; the ticket continues in a new assignment", "runtime", r.runtime, "resetsAt", l.ResetsAt)
+	s.stop(core.ReasonUsageLimit, false)
 }
 
 // fail reports the Assignment failed, unless it was stopped meanwhile.
@@ -2405,8 +2458,16 @@ var gitPins = []string{"-c", "core.fsmonitor=false", "-c", "core.hooksPath=" + o
 
 // gitIn runs git in dir with env (the node's, if nil) and the pins above, and returns its trimmed stdout.
 func gitIn(dir string, env []string, args ...string) (string, error) {
+	return gitInCtx(context.Background(), dir, env, args...)
+}
+
+// gitInCtx is gitIn bounded by ctx: git is killed once ctx ends, and its output is waited for at most a second more.
+func gitInCtx(ctx context.Context, dir string, env []string, args ...string) (string, error) {
 	full := append(slices.Clone(gitPins), "-C", dir)
-	cmd := exec.Command("git", append(full, args...)...)
+	cmd := exec.CommandContext(ctx, "git", append(full, args...)...)
+	if ctx.Done() != nil {
+		cmd.WaitDelay = time.Second // only a bounded call: gitIn waits for its output as it always did
+	}
 	if env == nil {
 		env = os.Environ()
 	}

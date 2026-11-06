@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -158,10 +160,12 @@ func start(ctx context.Context, o Options, forRT bool) (*Session, error) {
 	if forRT {
 		q := rt.NewQueue[rt.Event]()
 		s.rtEvents = q.Out()
+		// push runs on the stdout reader alone, which owns limits.
+		var limits limitWatch
 		s.push = func(evs []Event) {
 			out := make([]rt.Event, len(evs))
 			for i, ev := range evs {
-				out[i] = toRT(ev)
+				out[i] = limits.translate(ev)
 			}
 			q.Push(out...)
 		}
@@ -197,6 +201,76 @@ func start(ctx context.Context, o Options, forRT bool) (*Session, error) {
 		close(s.done)
 	}()
 	return s, nil
+}
+
+// limitText matches what a failed turn's result says when Claude Code stopped it at a usage limit.
+var limitText = regexp.MustCompile(`(?i)usage limit|rate limit|hit your limit|limit reached`)
+
+// limitWatch translates a session's events for the node (toRT), and sets the Limit of the TurnEnd of a turn that
+// failed at its usage limit: one that saw a rate_limit_event with status "rejected" (resetting when that event says,
+// whichever window it names), or whose result is an error that says so (limitText; no reset known). A turn that ended
+// well is not limited, and a rejection does not outlive its turn. One watch serves one session's events, in order.
+type limitWatch struct{ rejected *rt.LimitHit }
+
+func (w *limitWatch) translate(ev Event) rt.Event {
+	out := toRT(ev)
+	switch e := ev.(type) {
+	case Unknown:
+		if e.Type == "rate_limit_event" {
+			if h, ok := rejectedLimit(e.Raw); ok {
+				w.rejected = &h
+			}
+		}
+	case Result:
+		te, ok := out.(rt.TurnEnd)
+		if !ok {
+			return out
+		}
+		hit := w.rejected
+		w.rejected = nil
+		if te.OK {
+			return te
+		}
+		why := strings.TrimSpace(strings.Join(append([]string{e.Text}, e.Errors...), "\n"))
+		if hit == nil && limitText.MatchString(why) {
+			hit = &rt.LimitHit{Runtime: runtimeName}
+		}
+		if hit != nil {
+			hit.Message = why
+			te.Limit = hit
+		}
+		return te
+	}
+	return out
+}
+
+// rejectedLimit reads a rate_limit_event whose rate_limit_info.status is "rejected": a limit of whatever window
+// rateLimitType names, even one parseRateLimit does not map, resetting at its resetsAt (or its window's in
+// unifiedWindows; nil when neither says).
+func rejectedLimit(line []byte) (rt.LimitHit, bool) {
+	var ev struct {
+		Info *struct {
+			Status         string `json:"status"`
+			ResetsAt       int64  `json:"resetsAt"`
+			RateLimitType  string `json:"rateLimitType"`
+			UnifiedWindows map[string]struct {
+				ResetsAt int64 `json:"resetsAt"`
+			} `json:"unifiedWindows"`
+		} `json:"rate_limit_info"`
+	}
+	if json.Unmarshal(line, &ev) != nil || ev.Info == nil || ev.Info.Status != "rejected" {
+		return rt.LimitHit{}, false
+	}
+	h := rt.LimitHit{Runtime: runtimeName}
+	reset := ev.Info.ResetsAt
+	if reset == 0 {
+		reset = ev.Info.UnifiedWindows[ev.Info.RateLimitType].ResetsAt
+	}
+	if reset > 0 {
+		at := time.Unix(reset, 0)
+		h.ResetsAt = &at
+	}
+	return h, true
 }
 
 // childEnv is a session's environment (rt.ChildEnv): Claude Code's own CLAUDE_ and ANTHROPIC_ variables are kept

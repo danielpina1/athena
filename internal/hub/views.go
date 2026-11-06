@@ -273,22 +273,35 @@ func approvalWhy(a *core.Approval) string {
 	return ""
 }
 
-// assignmentEnd is how an ended Assignment's end reads: its subkind and text. latest says it is the Ticket's last,
-// the one a Ticket's end stops.
-func assignmentEnd(t *core.Ticket, a *core.Assignment, latest bool) (string, string) {
+// assignmentEnd is how an ended Assignment's end reads: its subkind, subject and text. latest says it is the Ticket's
+// last, the one a Ticket's end stops. An end at a usage limit is "limited", its subject the runtime and its text the
+// RFC 3339 reset (empty when unknown).
+func assignmentEnd(t *core.Ticket, a *core.Assignment, latest bool) (sub, subject, text string) {
 	reason := a.EndedReason
 	switch {
+	case reason == core.ReasonUsageLimit:
+		// Its runtime, and when the limit resets (empty when unknown).
+		runtime := a.Runtime
+		if l := a.Limit; l != nil {
+			if l.Runtime != "" {
+				runtime = l.Runtime
+			}
+			if l.ResetsAt != nil {
+				text = l.ResetsAt.UTC().Format(time.RFC3339)
+			}
+		}
+		return "limited", runtime, text
 	case reason == "retried":
-		return "retried", ""
+		return "retried", "", ""
 	case strings.Contains(reason, "restart"):
-		return "interrupted", reason
+		return "interrupted", "", reason
 	case a.Report != nil && a.Report.State == core.ReportFailed:
 		// The failed Report says why on its own row: the end is only the end.
-		return "ended", ""
+		return "ended", "", ""
 	case latest && t.Ended != nil && t.Ended.By == core.EndByHuman:
-		return "stopped", t.Ended.Reason
+		return "stopped", "", t.Ended.Reason
 	}
-	return "ended", reason
+	return "ended", "", reason
 }
 
 // headBytes is how much of a Report's summary the timeline reads for its first line: enough for any line it shows.
@@ -374,8 +387,8 @@ func ticketTimeline(t *core.Ticket, origin *core.Trigger, pending *core.Approval
 			}
 		}
 		if a.State == core.AssignmentEnded && a.EndedAt != nil {
-			sub, text := assignmentEnd(t, a, i == len(t.Assignments)-1)
-			out = append(out, timelineEntry(*a.EndedAt, "assignment", sub, "", text, a.ID))
+			sub, subject, text := assignmentEnd(t, a, i == len(t.Assignments)-1)
+			out = append(out, timelineEntry(*a.EndedAt, "assignment", sub, subject, text, a.ID))
 		}
 	}
 	echo := originEcho(t, origin)

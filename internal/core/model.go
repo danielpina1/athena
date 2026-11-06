@@ -64,6 +64,8 @@ type Assignment struct {
 	// Role is what the Assignment's session does: empty for the Ticket's worker (it implements), RoleReview for a
 	// review of its work.
 	Role string `json:"role,omitempty"`
+	// Limit is the usage limit its session stopped at, for an Assignment that ended with ReasonUsageLimit.
+	Limit *UsageLimit `json:"limit,omitempty"`
 }
 
 // RoleReview is the Role of an Assignment that reviews the Ticket's work.

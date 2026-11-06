@@ -360,3 +360,88 @@ func TestClaudeRateLimitRejectedLimitsItsWindow(t *testing.T) {
 		t.Fatalf("an event without rate_limit_info = %#v", u)
 	}
 }
+
+// turnsOf translates lines as one session does (a limit seen mid-turn belongs to the turn's end), and returns the
+// TurnEnds.
+func turnsOf(t *testing.T, lines ...string) []rt.TurnEnd {
+	t.Helper()
+	var w limitWatch
+	var out []rt.TurnEnd
+	for _, l := range lines {
+		evs, err := ParseEvents([]byte(l))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, ev := range evs {
+			if te, ok := w.translate(ev).(rt.TurnEnd); ok {
+				out = append(out, te)
+			}
+		}
+	}
+	return out
+}
+
+const (
+	errorResult   = `{"type":"result","subtype":"error_during_execution","is_error":true,"result":"","session_id":"s"}`
+	successResult = `{"type":"result","subtype":"success","is_error":false,"result":"Done.","session_id":"s"}`
+)
+
+// A turn that saw a rejected rate_limit_event and failed stopped at its usage limit: its TurnEnd carries the limit,
+// resetting when the event said, whichever window it names (one Athena does not map too).
+func TestRejectedRateLimitSetsTurnLimit(t *testing.T) {
+	rejected := `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1794000000,"rateLimitType":"five_hour"}}`
+	ends := turnsOf(t, string(fixtureLine(t, "simple-turn.jsonl", "system")), rejected, errorResult)
+	if len(ends) != 1 || ends[0].Limit == nil {
+		t.Fatalf("ends = %+v, want one with a limit", ends)
+	}
+	l := ends[0].Limit
+	if l.Runtime != "claude" || l.ResetsAt == nil || l.ResetsAt.Unix() != 1794000000 || l.Transient {
+		t.Fatalf("limit = %+v", l)
+	}
+	// A window Athena does not map (per model) still limits, with the event's reset.
+	opus := `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1794000100,"rateLimitType":"seven_day_opus"}}`
+	if ends = turnsOf(t, opus, errorResult); len(ends) != 1 || ends[0].Limit == nil || ends[0].Limit.ResetsAt.Unix() != 1794000100 {
+		t.Fatalf("unmapped window: %+v", ends)
+	}
+	// The window's own reset, when the event gives only that.
+	unified := `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":"seven_day","unifiedWindows":{"seven_day":{"utilization":1,"resetsAt":1794000200}}}}`
+	if ends = turnsOf(t, unified, errorResult); len(ends) != 1 || ends[0].Limit == nil || ends[0].Limit.ResetsAt.Unix() != 1794000200 {
+		t.Fatalf("window reset: %+v", ends)
+	}
+	// No reset at all: a limit all the same.
+	bare := `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected"}}`
+	if ends = turnsOf(t, bare, errorResult); len(ends) != 1 || ends[0].Limit == nil || ends[0].Limit.ResetsAt != nil {
+		t.Fatalf("no reset: %+v", ends)
+	}
+	// An allowed event is no limit, and a rejection does not outlive its turn: the next failed turn is not limited.
+	allowed := string(fixtureLine(t, "simple-turn.jsonl", "rate_limit_event"))
+	if ends = turnsOf(t, allowed, errorResult, rejected, successResult, errorResult); len(ends) != 3 ||
+		ends[0].Limit != nil || ends[1].Limit != nil || ends[2].Limit != nil {
+		t.Fatalf("allowed, then a rejection in a turn that ended well, then a failed turn: %+v", ends)
+	}
+}
+
+// A failed turn whose result says it hit a usage limit is limited, without a rate_limit_event; another failure, or a
+// turn that ended well whatever it says, is not.
+func TestUsageLimitResultTextSetsLimit(t *testing.T) {
+	for line, want := range map[string]bool{
+		`{"type":"result","subtype":"success","is_error":true,"result":"Claude AI usage limit reached|1794000000"}`:        true,
+		`{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["API Error: Rate limit exceeded"]}`: true,
+		`{"type":"result","subtype":"success","is_error":true,"result":"You've hit your limit · resets 3pm"}`:              true,
+		`{"type":"result","subtype":"success","is_error":true,"result":"5-hour limit reached ∙ resets 3pm"}`:               true,
+		`{"type":"result","subtype":"error_max_turns","is_error":true,"errors":["Reached maximum number of turns (1)"]}`:   false,
+		`{"type":"result","subtype":"success","is_error":false,"result":"I added a rate limit to the API."}`:               false,
+	} {
+		ends := turnsOf(t, line)
+		if len(ends) != 1 {
+			t.Fatalf("%s: %d ends", line, len(ends))
+		}
+		if got := ends[0].Limit != nil; got != want {
+			t.Errorf("%s: limited = %v, want %v", line, got, want)
+			continue
+		}
+		if want && (ends[0].Limit.Runtime != "claude" || ends[0].Limit.Message == "" || ends[0].Limit.ResetsAt != nil) {
+			t.Errorf("%s: limit = %+v", line, ends[0].Limit)
+		}
+	}
+}

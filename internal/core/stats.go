@@ -14,6 +14,7 @@ const (
 	cmdDeliveryFailed        = "delivery_failed"
 	cmdInputsRead            = "inputs_read"
 	cmdAssignmentInterrupted = "assignment_interrupted"
+	cmdUsageLimited          = "usage_limited"
 	cmdTurnEnded             = "turn_ended"
 	cmdFileReport            = "file_report"
 	cmdPersonInput           = "person_input"
@@ -44,7 +45,7 @@ const (
 
 var commandNames = []string{
 	cmdSubmit, cmdAssignmentStarted, cmdInputsDelivered, cmdDeliveryFailed, cmdInputsRead, cmdTurnEnded, cmdAssignmentInterrupted,
-	cmdFileReport, cmdPersonInput, cmdStop, cmdRetry, cmdRequestApproval, cmdAnswerApproval, cmdExpireApproval,
+	cmdUsageLimited, cmdFileReport, cmdPersonInput, cmdStop, cmdRetry, cmdRequestApproval, cmdAnswerApproval, cmdExpireApproval,
 	cmdRecordUsage, cmdReceive, cmdBindThread, cmdThreadClosed, cmdEvaluateDue, cmdCandidateDelivered, cmdDecide,
 	cmdAttach, cmdHandback, cmdReevaluate, cmdDismiss, cmdPolicyChanged, cmdFollowForContext, cmdMarkUnrelated,
 	cmdUnsubscribe, cmdNote, cmdRequestStatus, cmdReply,
