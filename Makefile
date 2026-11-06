@@ -9,10 +9,12 @@ web/node_modules: web/package-lock.json
 proto: web/node_modules
 	go tool buf generate
 
-# check lints the protos and fails when the committed generated code is not what the protos generate, then runs the Go
-# checks and the web app's.
+# check lints the protos and fails when the committed generated code is not what the protos generate, fails on Go code
+# gofmt would change, then runs the Go checks and the web app's.
 check: web/node_modules
 	go tool buf lint
+	@unformatted=$$(gofmt -l bench cmd internal prompts tools); \
+	[ -z "$$unformatted" ] || { echo "gofmt would change these (run gofmt -w):"; echo "$$unformatted"; exit 1; }
 	@before=$$(find internal/pb web/src/gen -type f | sort | xargs shasum); \
 	go tool buf generate; \
 	after=$$(find internal/pb web/src/gen -type f | sort | xargs shasum); \

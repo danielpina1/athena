@@ -2,11 +2,14 @@ package node
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/danielpina1/athena/internal/core"
+	"github.com/danielpina1/athena/internal/render"
 )
 
 func limitedPrevious(runtime string) core.Assignment {
@@ -178,5 +181,32 @@ func TestHandoffOnlyAfterALimitOrAnotherRuntime(t *testing.T) {
 		if got != c.prev || failover != c.failover {
 			t.Errorf("%s: previous %q failover %v, want %q %v", c.name, got, failover, c.prev, c.failover)
 		}
+	}
+}
+
+// What the previous session said last is the implementer's: a review that ran since (a changes round moving runtime)
+// is not quoted as the implementer.
+func TestLastSayIsTheImplementers(t *testing.T) {
+	say := func(text string) string {
+		return `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"` + text + `"}]},"session_id":"s"}`
+	}
+	marker := func(assignment, role string) string {
+		return string(render.MarkerLine(render.Marker{At: time.Now(), Runtime: core.RuntimeClaude, Assignment: assignment, Role: role, Reason: "start"}))
+	}
+	path := filepath.Join(t.TempDir(), "t.jsonl")
+	lines := []string{say("before any marker"), marker("a1", roleImplement), say("the parser is half done"),
+		marker("r1", core.RoleReview), say("- [high] parser.go:3 — leaks")}
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := lastSay(path); got != "the parser is half done" {
+		t.Fatalf("last say = %q, want the implementer's", got)
+	}
+	// A transcript from before markers: its last say.
+	if err := os.WriteFile(path, []byte(say("old")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := lastSay(path); got != "old" {
+		t.Fatalf("last say = %q", got)
 	}
 }

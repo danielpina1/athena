@@ -62,14 +62,14 @@ message TicketSummary {
   string attention_question = 16;
   // branch is the worktree branch, athena/<lowercased id>; empty when the Ticket has no repository.
   string branch = 17;
-  // runtime is the runtime of the latest Assignment that started (claude or codex), else the Ticket's choice
-  // (runtime_choice: claude, codex or auto).
+  // runtime is the runtime of the latest Assignment that started (claude or codex), a review's included, so it shows
+  // the reviewer's runtime while a review runs; else the Ticket's choice (runtime_choice: claude, codex or auto).
   string runtime = 18;
   // runtime_choice is what the Ticket asked for: claude, codex or auto.
   string runtime_choice = 19;
   // pairing is how the Ticket's work is paired: review, or empty for none.
   string pairing = 20;
-  // review_rounds is how many rounds of changes a review sent back to the implementer.
+  // review_rounds is how many reviews of its ready reports ended (approved, changes or failed).
   uint32 review_rounds = 21;
 }
 
@@ -109,8 +109,9 @@ message TimelineEntry {
   // subject is what the entry is about, short: an Approval's tool and command (Bash: npm test), an Assignment's
   // model, a Report's pull request (PR #12), or the GitHub login of a reply.
   string subject = 6;
-  // runtime is the runtime of the session, set on assignment and review entries (claude or codex); empty when the
-  // Assignment never ran.
+  // runtime is the runtime of the Assignment, set on assignment and review entries (claude or codex): the one it ran
+  // on, or, for a queued Assignment pinned to one, the one it will run on; empty when it names none yet (an unpinned
+  // queued Assignment, or a review that never started).
   string runtime = 7;
 }
 

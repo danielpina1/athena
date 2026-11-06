@@ -36,7 +36,7 @@ const dialTimeout = 2 * time.Second
 // usage is each command's usage line, without the --state-dir flag every command takes.
 var usage = map[string]string{
 	"server":      "athena server [--slots N] [--model M] [--blocked a,b] [--approval-timeout D] [--claude PATH] [--codex PATH]",
-	"task":        `athena task "<text>" [--dir D | --repo owner/name] [--model M] [--runtime claude|codex|auto]`,
+	"task":        `athena task "<text>" [--dir D | --repo owner/name] [--model M] [--runtime claude|codex|auto] [--review[=false]]`,
 	"github":      "athena github setup --app-id N --slug S --key FILE --installation N --repo owner/name [--repo ...] [--receive-all owner/name ...] | athena github check",
 	"policy":      "athena policy show | athena policy set FILE",
 	"triggers":    "athena triggers [--thread K]",

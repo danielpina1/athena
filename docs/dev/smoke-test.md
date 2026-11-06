@@ -98,6 +98,10 @@ What to look for:
   footer; with a GitHub repository, neither does the pull request.
 - The dashboard's node card shows a quota bar per window for each runtime that has run, moving as the sessions run.
 - Nothing is ever written to `~/.codex` (`ls -la ~/.codex` before and after).
+- A process a Codex worker leaves running ends with its session. Ask a `codex` task to start a long-running background
+  command (for example "run `sleep 600` in the background, then report ready"); once its Ticket has ended,
+  `pgrep -fl "sleep 600"` must find nothing. Codex's background terminals may start their commands in a session of
+  their own, outside the process group Athena stops: if the process is still there, report it (and `kill` it by hand).
 
 Clean up with `rm -rf /tmp/athena-scratch` (and the state dir as above).
 

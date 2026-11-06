@@ -1016,6 +1016,28 @@ func TestStartClosesOpenInterruption(t *testing.T) {
 	eq(t, "clone", h.ticket(id).Assignments[0].Interruptions[0].ResumedAt, &resumed)
 }
 
+// An Assignment that ends before its session starts again (a stop, a failover, a review) closes its open
+// Interruption with the end, never as resumed: nothing stays open on an ended Assignment.
+func TestEndClosesOpenInterruption(t *testing.T) {
+	h := newHarness(t)
+	id := h.accepted()
+	a := h.ticket(id).Assignments[0].ID
+	h.tick(1)
+	h.must(h.eng.AssignmentStarted(id, a, "sess", "", ""))
+	h.tick(1)
+	h.must(h.eng.AssignmentInterrupted(id, a, InterruptRestart))
+	h.tick(1)
+	h.must(h.eng.StopTicket(id, ""))
+	got := h.ticket(id).Assignments[0]
+	ended := base.Add(3e9)
+	eq(t, "open", got.OpenInterruption(), (*Interruption)(nil))
+	eq(t, "closed by the end", got.Interruptions[0], Interruption{At: base.Add(2e9), Reason: InterruptRestart, EndedAt: &ended})
+	tk, _, err := h.eng.Ticket(id)
+	h.must(err)
+	*tk.Assignments[0].Interruptions[0].EndedAt = base
+	eq(t, "clone", h.ticket(id).Assignments[0].Interruptions[0].EndedAt, &ended)
+}
+
 func TestInterruptIgnoresEndedOrIdleTargets(t *testing.T) {
 	h := newHarness(t)
 	// An Assignment that has not started is no running one.

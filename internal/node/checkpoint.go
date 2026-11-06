@@ -93,12 +93,13 @@ func (n *Node) worktreeEnv(p placement, t core.Ticket) ([]string, error) {
 	return worktreeGitEnv(base, admin, common, p.workDir), nil
 }
 
-// checkpointSession checkpoints the work of a session that stopped at its usage limit, when it runs in a git worktree.
-// A failure is logged: it never holds up the failover, since the next session works in the same worktree anyway.
+// checkpointSession checkpoints the work of a worker session that stopped at its usage limit, when it runs in a git
+// worktree; a review writes nothing, so its session is not checkpointed. A failure is logged: it never holds up the
+// failover, since the next session works in the same worktree anyway.
 func (n *Node) checkpointSession(s *session) {
 	p := s.place
-	if p.repo == "" {
-		return // not a git worktree
+	if p.repo == "" || s.reviewing() {
+		return // not a git worktree, or nothing of the session's own to keep
 	}
 	if _, err := os.Stat(p.workDir); err != nil {
 		return

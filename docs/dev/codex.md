@@ -283,7 +283,9 @@ longer counts. A runtime's headroom is 1 − the largest `used` of its windows t
 measured).
 
 A runtime is limited until the reset of a window reported as limited, or after a turn stopped by a limit until that
-limit's reset. A limit with no reset, or with one already passed, backs off instead: 15 min, doubling per consecutive
+limit's reset. A limit that a window's reading set lifts early when the same window (same bucket and name) later reads
+not limited and below 100% used, as after a plan upgrade, overage turned on or an early reset, unless another window
+still reads limited; a limit that stopped a turn waits for its reset. A limit with no reset, or with one already passed, backs off instead: 15 min, doubling per consecutive
 limit up to 2 h; a transient one (a rate of requests) 1, 2, 4 … min up to 30 min. A turn that ends well starts the
 backoff over. The tracker writes `<stateDir>/quota.json` (0600, whole, on every change): per runtime the last reading of
 each window with its `read_at`, the limit and the backoff count. There is no history.
@@ -373,9 +375,10 @@ the branch instead would be a small change.
 
 ## 8. Review pairing
 
-A Ticket paired with review (`athena task --review`, the submit op's `review`, or the Policy's
-`"pairing": {"review": "on", "maxRounds": 2}` for every Ticket that names none; `--review=false` turns it off for one
-task) has each ready report of its implementer reviewed before it counts:
+A Ticket paired with review (`athena task --review`, the submit op's `review`, the New task screen's "Review each
+ready report" switch, shown with two ready runtimes or a Policy that pairs, or the Policy's
+`"pairing": {"review": "on", "maxRounds": 2}` for every Ticket that names none; `--review=false`, or the switch turned
+off, turns it off for one task) has each ready report of its implementer reviewed before it counts:
 
 1. The ready report is recorded and held (`Ticket.review`); the implementer's Assignment ends with reason `review` and a
    pending review Assignment (role `review`) starts. Nothing is said yet: no report event, no relay to the router, no
@@ -437,6 +440,11 @@ task) has each ready report of its implementer reviewed before it counts:
    verdict after one nudge) counts as a round, outcome `failed`, and applies the held report as in 5.
 7. The rounds cap is per Ticket, not per ready report: on a long-lived pull-request Ticket, follow-ups after the first
    rounds get no review once `maxRounds` is used. The Policy's `maxRounds` is read at each ready report.
+8. **A review waits for a runtime like any launch.** With the review's runtime limited (both runtimes, on a two-runtime
+   node; the one, on a node where only one can review), the review waits until the earliest reset, or 15-minute
+   backoffs when none is known, and the implementer's finished report stays held all that time. A person's message
+   that arrives meanwhile waits for the implementer, who gets it once the review ends. This is a known wait: nothing
+   fails the review after a bound yet.
 
 ## 9. Fixtures
 

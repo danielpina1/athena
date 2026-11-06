@@ -25,10 +25,14 @@ func bodies() map[string]*athenav1.Frame {
 		"welcome": f(c, func(x *athenav1.Frame) {
 			x.Body = &athenav1.Frame_Welcome{Welcome: &athenav1.Welcome{Epoch: "e", ServerVersion: "v", HeartbeatMs: 15000, SnapshotFollows: true}}
 		}),
-		"ping":   f(c, func(x *athenav1.Frame) { x.Body = &athenav1.Frame_Ping{Ping: &athenav1.Ping{AtUnixMs: 1}} }),
-		"pong":   f(c, func(x *athenav1.Frame) { x.Body = &athenav1.Frame_Pong{Pong: &athenav1.Pong{AtUnixMs: 1}} }),
-		"credit": f(c, func(x *athenav1.Frame) { x.Body = &athenav1.Frame_Credit{Credit: &athenav1.Credit{Channel: athenav1.Channel_STREAM, Items: 256}} }),
-		"error":  f(c, func(x *athenav1.Frame) { x.Body = &athenav1.Frame_Error{Error: &athenav1.Error{Code: "invalid", Message: "m"}} }),
+		"ping": f(c, func(x *athenav1.Frame) { x.Body = &athenav1.Frame_Ping{Ping: &athenav1.Ping{AtUnixMs: 1}} }),
+		"pong": f(c, func(x *athenav1.Frame) { x.Body = &athenav1.Frame_Pong{Pong: &athenav1.Pong{AtUnixMs: 1}} }),
+		"credit": f(c, func(x *athenav1.Frame) {
+			x.Body = &athenav1.Frame_Credit{Credit: &athenav1.Credit{Channel: athenav1.Channel_STREAM, Items: 256}}
+		}),
+		"error": f(c, func(x *athenav1.Frame) {
+			x.Body = &athenav1.Frame_Error{Error: &athenav1.Error{Code: "invalid", Message: "m"}}
+		}),
 		"resync": f(c, func(x *athenav1.Frame) { x.Body = &athenav1.Frame_Resync{Resync: &athenav1.Resync{}} }),
 		"command": f(c, func(x *athenav1.Frame) {
 			x.Body = &athenav1.Frame_Command{Command: &athenav1.Command{Id: "1", Action: &athenav1.Command_Reply{Reply: &athenav1.Reply{TicketId: "T-1", Text: "hi"}}}}

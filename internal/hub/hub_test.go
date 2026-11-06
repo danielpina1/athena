@@ -1045,8 +1045,13 @@ func quotaNode(used float64) node.Status {
 func TestQuotaDeltaThrottled(t *testing.T) {
 	f := newFake()
 	f.node = quotaNode(0.1)
-	h := start(t, f)
-	h.quotaEvery = 150 * time.Millisecond
+	// Set before the Hub runs, and wide enough that a stalled test goroutine (-race, packages in parallel) still checks
+	// none (50 ms) well inside the hold.
+	h := New(f, quiet())
+	h.quotaEvery = 400 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	h.Start(ctx)
 	sub, _ := h.Subscribe(0, h.Epoch())
 	set := func(n node.Status) { f.mu.Lock(); f.node = n; f.mu.Unlock(); h.NodeChanged() }
 	used := func(d *athenav1.Delta) float32 { return d.GetNode().GetRuntimes()[0].GetWindows()[0].GetUsed() }

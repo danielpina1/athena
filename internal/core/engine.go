@@ -879,10 +879,18 @@ func (o *op) newAssignment(t *Ticket) string {
 	return a.ID
 }
 
+// closeInterruption closes the open Interruption of a, which ends now: its session never started again.
+func (o *op) closeInterruption(a *Assignment) {
+	if open := a.OpenInterruption(); open != nil {
+		open.EndedAt = o.timestamp()
+	}
+}
+
 func (o *op) endAssignment(t *Ticket, a *Assignment, reason string) {
 	a.State = AssignmentEnded
 	a.EndedAt = o.timestamp()
 	a.EndedReason = reason
+	o.closeInterruption(a)
 	o.event(EventAssignmentEnded, t, a.ID, map[string]any{"reason": reason})
 }
 
@@ -976,6 +984,7 @@ func (o *op) endAt(t *Ticket, by TicketEndBy, outcome TicketOutcome, reason stri
 		if a := &t.Assignments[i]; a.State != AssignmentEnded {
 			a.State = AssignmentEnded
 			a.EndedAt = o.timestamp()
+			o.closeInterruption(a)
 			stopping = append(stopping, a.ID)
 		}
 	}
@@ -1150,6 +1159,7 @@ func cloneTicket(t *Ticket) Ticket {
 				a.Interruptions = slices.Clone(a.Interruptions)
 				for j := range a.Interruptions {
 					a.Interruptions[j].ResumedAt = clonePtr(a.Interruptions[j].ResumedAt)
+					a.Interruptions[j].EndedAt = clonePtr(a.Interruptions[j].EndedAt)
 				}
 			}
 			c.Assignments[i] = a

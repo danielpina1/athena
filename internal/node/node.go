@@ -1939,9 +1939,7 @@ func (r *runner) usageLimited(e rt.TurnEnd) {
 // nothing has to exit first. When the Engine cannot take the fact, the launch waits for the reset instead.
 func (r *runner) failOver(c Choice) {
 	s, n := r.s, r.n
-	if !s.reviewing() {
-		n.checkpointSession(s)
-	}
+	n.checkpointSession(s)
 	reset := c.Until.UTC()
 	if err := r.eng.UsageLimited(s.t.ID, s.a.ID, core.UsageLimit{Runtime: c.Runtime, ResetsAt: &reset}); err != nil {
 		r.log.Error("record the usage limit; the launch waits for the reset", "error", err)

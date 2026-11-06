@@ -649,11 +649,25 @@ func TestNodeStatusRuntimesWithQuota(t *testing.T) {
 		!x.LimitedUntil.AsTime().Equal(until) || !x.ReadAt.AsTime().Equal(epoch0) || len(x.Windows) != 2 {
 		t.Fatalf("codex = %v", x)
 	}
-	if w := x.Windows[0]; w.Name != "codex 5h" || w.Used != 0.5 || !w.ResetsAt.AsTime().Equal(reset) || w.Stale {
+	// One bucket: its windows are named by themselves.
+	if w := x.Windows[0]; w.Name != "5h" || w.Used != 0.5 || !w.ResetsAt.AsTime().Equal(reset) || w.Stale {
 		t.Errorf("window 0 = %v", w)
 	}
 	if w := x.Windows[1]; w.Name != "7d" || w.Used != 0.25 || w.ResetsAt != nil || !w.Stale {
 		t.Errorf("window 1 = %v", w)
+	}
+}
+
+// A runtime that reports windows of more than one bucket (a Codex per-model limit) names each by its bucket too.
+func TestWindowBucketOnlyWhenSeveral(t *testing.T) {
+	v := runtimeStatus(node.RuntimeStatus{Name: "codex", Quota: quota.State{Measured: true, Windows: []quota.Window{
+		{Bucket: "codex", Name: "5h"}, {Bucket: "codex", Name: "7d"}, {Bucket: "codex_mini", Name: "5h"}}}})
+	var names []string
+	for _, w := range v.Windows {
+		names = append(names, w.Name)
+	}
+	if got := strings.Join(names, ","); got != "codex 5h,codex 7d,codex_mini 5h" {
+		t.Errorf("names = %s", got)
 	}
 }
 

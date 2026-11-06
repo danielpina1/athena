@@ -80,16 +80,19 @@ const RoleReview = "review"
 const InterruptRestart = "server restart"
 
 // Interruption is a time an Assignment's session was cut short while it worked. ResumedAt is when the session started
-// again, nil while the Interruption is open.
+// again, and EndedAt when the Assignment ended before it did (a stop, a failover, a review); both are nil while the
+// Interruption is open.
 type Interruption struct {
 	At        time.Time  `json:"at"`
 	Reason    string     `json:"reason"`
 	ResumedAt *time.Time `json:"resumedAt,omitempty"`
+	EndedAt   *time.Time `json:"endedAt,omitempty"`
 }
 
-// OpenInterruption returns the Assignment's last Interruption when its session has not started again since, else nil.
+// OpenInterruption returns the Assignment's last Interruption when its session has not started again since and the
+// Assignment has not ended, else nil.
 func (a *Assignment) OpenInterruption() *Interruption {
-	if n := len(a.Interruptions); n > 0 && a.Interruptions[n-1].ResumedAt == nil {
+	if n := len(a.Interruptions); n > 0 && a.Interruptions[n-1].ResumedAt == nil && a.Interruptions[n-1].EndedAt == nil {
 		return &a.Interruptions[n-1]
 	}
 	return nil
@@ -220,6 +223,19 @@ const (
 	RuntimeCodex  = "codex"
 	RuntimeAuto   = "auto"
 )
+
+// RuntimeLabel is how a runtime is named to a person: "Claude Code", "Codex", "Auto"; another name as it is.
+func RuntimeLabel(name string) string {
+	switch name {
+	case RuntimeClaude:
+		return "Claude Code"
+	case RuntimeCodex:
+		return "Codex"
+	case RuntimeAuto:
+		return "Auto"
+	}
+	return name
+}
 
 // Execution is what a Ticket's Executor chose. Runtime is the Ticket's choice (RuntimeClaude, RuntimeCodex or
 // RuntimeAuto); each Assignment records the runtime it actually ran on.

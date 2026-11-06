@@ -426,14 +426,14 @@ type TicketSummary struct {
 	AttentionQuestion string                 `protobuf:"bytes,16,opt,name=attention_question,json=attentionQuestion,proto3" json:"attention_question,omitempty"`
 	// branch is the worktree branch, athena/<lowercased id>; empty when the Ticket has no repository.
 	Branch string `protobuf:"bytes,17,opt,name=branch,proto3" json:"branch,omitempty"`
-	// runtime is the runtime of the latest Assignment that started (claude or codex), else the Ticket's choice
-	// (runtime_choice: claude, codex or auto).
+	// runtime is the runtime of the latest Assignment that started (claude or codex), a review's included, so it shows
+	// the reviewer's runtime while a review runs; else the Ticket's choice (runtime_choice: claude, codex or auto).
 	Runtime string `protobuf:"bytes,18,opt,name=runtime,proto3" json:"runtime,omitempty"`
 	// runtime_choice is what the Ticket asked for: claude, codex or auto.
 	RuntimeChoice string `protobuf:"bytes,19,opt,name=runtime_choice,json=runtimeChoice,proto3" json:"runtime_choice,omitempty"`
 	// pairing is how the Ticket's work is paired: review, or empty for none.
 	Pairing string `protobuf:"bytes,20,opt,name=pairing,proto3" json:"pairing,omitempty"`
-	// review_rounds is how many rounds of changes a review sent back to the implementer.
+	// review_rounds is how many reviews of its ready reports ended (approved, changes or failed).
 	ReviewRounds  uint32 `protobuf:"varint,21,opt,name=review_rounds,json=reviewRounds,proto3" json:"review_rounds,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -721,8 +721,9 @@ type TimelineEntry struct {
 	// subject is what the entry is about, short: an Approval's tool and command (Bash: npm test), an Assignment's
 	// model, a Report's pull request (PR #12), or the GitHub login of a reply.
 	Subject string `protobuf:"bytes,6,opt,name=subject,proto3" json:"subject,omitempty"`
-	// runtime is the runtime of the session, set on assignment and review entries (claude or codex); empty when the
-	// Assignment never ran.
+	// runtime is the runtime of the Assignment, set on assignment and review entries (claude or codex): the one it ran
+	// on, or, for a queued Assignment pinned to one, the one it will run on; empty when it names none yet (an unpinned
+	// queued Assignment, or a review that never started).
 	Runtime       string `protobuf:"bytes,7,opt,name=runtime,proto3" json:"runtime,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

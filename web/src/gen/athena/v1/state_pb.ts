@@ -276,8 +276,8 @@ export type TicketSummary = Message<"athena.v1.TicketSummary"> & {
   branch: string;
 
   /**
-   * runtime is the runtime of the latest Assignment that started (claude or codex), else the Ticket's choice
-   * (runtime_choice: claude, codex or auto).
+   * runtime is the runtime of the latest Assignment that started (claude or codex), a review's included, so it shows
+   * the reviewer's runtime while a review runs; else the Ticket's choice (runtime_choice: claude, codex or auto).
    *
    * @generated from field: string runtime = 18;
    */
@@ -298,7 +298,7 @@ export type TicketSummary = Message<"athena.v1.TicketSummary"> & {
   pairing: string;
 
   /**
-   * review_rounds is how many rounds of changes a review sent back to the implementer.
+   * review_rounds is how many reviews of its ready reports ended (approved, changes or failed).
    *
    * @generated from field: uint32 review_rounds = 21;
    */
@@ -411,8 +411,9 @@ export type TimelineEntry = Message<"athena.v1.TimelineEntry"> & {
   subject: string;
 
   /**
-   * runtime is the runtime of the session, set on assignment and review entries (claude or codex); empty when the
-   * Assignment never ran.
+   * runtime is the runtime of the Assignment, set on assignment and review entries (claude or codex): the one it ran
+   * on, or, for a queued Assignment pinned to one, the one it will run on; empty when it names none yet (an unpinned
+   * queued Assignment, or a review that never started).
    *
    * @generated from field: string runtime = 7;
    */

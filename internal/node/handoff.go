@@ -3,6 +3,7 @@ package node
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -90,21 +91,10 @@ func handoffNote(h Handoff) string {
 		orNone(keepStart(quoteText(redact.String(h.DiffStat)), handoffGitMax)), quoteText(untracked))
 	fmt.Fprintf(&rest, "\nWhat it said last:\n%s\n", orNone(quotedEnd(quoteText(redact.String(strings.TrimSpace(h.LastTurn))), handoffLastTurnMax)))
 
-	head := fmt.Sprintf(opening, runtimeLabel(runtime)) + "\n\nThe Ticket's latest messages, quoted:\n"
+	head := fmt.Sprintf(opening, core.RuntimeLabel(runtime)) + "\n\nThe Ticket's latest messages, quoted:\n"
 	room := handoffMax - len(head) - rest.Len()
 	inputs := orNone(quoteText(strings.TrimRight(h.Inputs, "\n")))
 	return keepStart(head+quotedEnd(inputs, max(room, len(cutMark)+1))+rest.String(), handoffMax)
-}
-
-// runtimeLabel is a runtime's name for people: Claude Code, Codex.
-func runtimeLabel(name string) string {
-	switch name {
-	case core.RuntimeClaude:
-		return "Claude Code"
-	case core.RuntimeCodex:
-		return "Codex"
-	}
-	return name
 }
 
 func orNone(s string) string {
@@ -266,8 +256,9 @@ func (n *Node) branchBase(ctx context.Context, p placement, wenv []string) strin
 	return out
 }
 
-// lastSay is the text of the last "say" item (render.Items) in the transcript's last lastTurnScan bytes: what the
-// previous session said last, redacted; "" when there is none.
+// lastSay is the text of the last "say" item (render.Items) of an implementer in the transcript's last lastTurnScan
+// bytes: what the previous worker session said last, redacted; "" when there is none. What follows a review's session
+// marker (role review) is the reviewer's, until the next marker of another role.
 func lastSay(path string) string {
 	f, err := os.Open(path)
 	if err != nil {
@@ -287,9 +278,16 @@ func lastSay(path string) string {
 	if off > 0 {
 		lines = lines[1:] // the first line is cut
 	}
-	last := ""
+	last, review := "", false
 	for _, line := range lines {
 		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+		if role, ok := markerRole(line); ok {
+			review = role == core.RoleReview
+			continue
+		}
+		if review {
 			continue
 		}
 		for _, it := range render.Items(line, 0) {
@@ -299,4 +297,20 @@ func lastSay(path string) string {
 		}
 	}
 	return last
+}
+
+// markerRole is the role of a session marker line (render.MarkerLine); ok is false for any other line. Only a top-level
+// "athena":"session" is a marker, as for render.
+func markerRole(line []byte) (role string, ok bool) {
+	if !bytes.Contains(line, []byte(`"athena"`)) {
+		return "", false
+	}
+	var m struct {
+		Athena json.RawMessage `json:"athena"`
+		Role   string          `json:"role"`
+	}
+	if json.Unmarshal(line, &m) != nil || string(m.Athena) != `"session"` {
+		return "", false
+	}
+	return m.Role, true
 }

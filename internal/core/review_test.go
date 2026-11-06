@@ -231,7 +231,7 @@ func TestChangesResumesImplementerWithFindings(t *testing.T) {
 	eq(t, "started", h.exec.last("start").AssignmentID, next.ID)
 	in := tk.Inputs[len(tk.Inputs)-1]
 	eq(t, "kind", in.Kind, InputReview)
-	eq(t, "text", in.Text, "Review (round 1, codex) requested changes:\n"+findings)
+	eq(t, "text", in.Text, "Review (round 1, Codex) requested changes:\n"+findings)
 	eq(t, "waiting for it", tk.Undelivered[len(tk.Undelivered)-1], in.ID)
 	eq(t, "outcome", *findAssignment(tk, rv).ReviewOutcome, ReviewOutcome{Verdict: ReviewChanges, First: "- [high] login.go:12 — the password is logged"})
 	eq(t, "stage", TicketStage(tk).Stage, "working")

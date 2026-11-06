@@ -124,8 +124,9 @@ type Hub struct {
 	health      *athenav1.Health
 	healthSince map[string]healthState
 	node        *athenav1.NodeStatus
-	// quotaAt is when a node delta last went out because only a quota reading differed; quotaEvery the least between
-	// two such deltas (quotaEvery); quotaLater says a timer will publish the node again.
+	// quotaAt is when a node delta last went out because only a quota reading differed; quotaEvery is the least time
+	// between two such deltas (the const quotaEvery, which a test may set before Start); quotaLater says a timer will
+	// publish the node again.
 	quotaAt    time.Time
 	quotaEvery time.Duration
 	quotaLater bool

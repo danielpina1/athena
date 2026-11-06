@@ -239,3 +239,43 @@ func TestReloadAfterRestart(t *testing.T) {
 		t.Fatalf("corrupt file: %v, %+v", err, bad)
 	}
 }
+
+// A limit a window's reading set lifts early once the same window reads not limited and not used up (a plan upgrade,
+// overage turned on, an early reset). Another window that is still limited keeps the runtime limited, and a limit a
+// turn hit is never lifted by a reading.
+func TestNotLimitedReadingLiftsItsWindowsLimit(t *testing.T) {
+	c := &clock{t: base}
+	tr := newTracker(t, "", c)
+	reset := base.Add(5 * time.Hour)
+	tr.Observe("claude", []rt.Window{{Name: "7d_opus", Used: 1, Limited: true, ResetsAt: at(base.Add(72 * time.Hour))}})
+	if !tr.State("claude").Limited(c.t) {
+		t.Fatal("the limited window does not limit")
+	}
+	// Another window's reading lifts nothing; neither does the same window still used up.
+	tr.Observe("claude", []rt.Window{{Name: "5h", Used: 0.2, ResetsAt: &reset}})
+	tr.Observe("claude", []rt.Window{{Name: "7d_opus", Used: 1, ResetsAt: at(base.Add(72 * time.Hour))}})
+	if !tr.State("claude").Limited(c.t) {
+		t.Fatal("lifted by another window, or by a used-up one")
+	}
+	tr.Observe("claude", []rt.Window{{Name: "7d_opus", Used: 0.4, ResetsAt: at(base.Add(72 * time.Hour))}})
+	if s := tr.State("claude"); s.Limited(c.t) {
+		t.Fatalf("still limited until %v after its window read not limited", s.LimitedUntil)
+	}
+
+	// Two limited windows: one lifting leaves the other's limit.
+	tr.Observe("codex", []rt.Window{
+		{Bucket: "codex", Name: "5h", Used: 1, Limited: true, ResetsAt: &reset},
+		{Bucket: "codex", Name: "7d", Used: 1, Limited: true, ResetsAt: at(base.Add(48 * time.Hour))},
+	})
+	tr.Observe("codex", []rt.Window{{Bucket: "codex", Name: "7d", Used: 0.5, ResetsAt: at(base.Add(48 * time.Hour))}})
+	if s := tr.State("codex"); s.LimitedUntil == nil || !s.LimitedUntil.Equal(reset) {
+		t.Fatalf("codex limited until %v, want the 5h window's reset", s.LimitedUntil)
+	}
+
+	// A limit a turn hit stays until its reset whatever the readings say.
+	tr.Hit("other", rt.LimitHit{Runtime: "other", ResetsAt: &reset})
+	tr.Observe("other", []rt.Window{{Name: "5h", Used: 0.1, ResetsAt: &reset}})
+	if !tr.State("other").Limited(c.t) {
+		t.Fatal("a reading lifted a turn's limit")
+	}
+}

@@ -169,3 +169,21 @@ func TestCleanupRemovesTheCheckpointRef(t *testing.T) {
 		}
 	}
 }
+
+// A review session that stops at its limit writes nothing to checkpoint: its checkpoint would only re-add the
+// implementer's tree and move the Ticket's side ref. A worker's session is checkpointed.
+func TestReviewSessionIsNotCheckpointed(t *testing.T) {
+	h := newHarness(t, nil)
+	repo, dir := wipWorktree(t)
+	p := placement{workDir: dir, repo: repo, common: filepath.Join(repo, ".git")}
+	tk := core.Ticket{ID: "T-1"}
+	ref := checkpointRef(tk.ID)
+	h.n.checkpointSession(h.n.newSession(tk, core.Assignment{ID: "r1", Role: core.RoleReview}, p))
+	if refs := git(t, repo, "for-each-ref", ref); refs != "" {
+		t.Fatalf("a review was checkpointed: %q", refs)
+	}
+	h.n.checkpointSession(h.n.newSession(tk, core.Assignment{ID: "a1"}, p))
+	if refs := git(t, repo, "for-each-ref", ref); refs == "" {
+		t.Fatal("the worker was not checkpointed")
+	}
+}

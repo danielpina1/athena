@@ -215,7 +215,7 @@ func (e *Engine) FileReview(ticketID, assignmentID, verdict, findings string) er
 			return o.tx.PutTicket(t)
 		}
 		next := o.newImplementer(t, held)
-		runtime := a.Runtime
+		runtime := RuntimeLabel(a.Runtime)
 		if runtime == "" {
 			runtime = "unknown runtime"
 		}

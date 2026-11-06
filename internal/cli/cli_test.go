@@ -498,3 +498,11 @@ func TestTaskReviewFlag(t *testing.T) {
 		}
 	}
 }
+
+// Each usage line names every flag its command takes: a flag of task's is in its usage.
+func TestTaskUsageNamesReview(t *testing.T) {
+	code, _, errOut := athena(context.Background(), "task", "--state-dir", newStateDir(t))
+	if code != 2 || !strings.Contains(errOut, "[--review[=false]]") {
+		t.Fatalf("task usage: exit %d, %q", code, errOut)
+	}
+}

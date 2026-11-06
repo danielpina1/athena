@@ -86,9 +86,17 @@ type Tracker struct {
 type runtimeState struct {
 	Windows      []fileWindow `json:"windows,omitempty"`
 	LimitedUntil *time.Time   `json:"limited_until,omitempty"`
+	// LimitedBy is the window whose reading set LimitedUntil; nil when a turn's limit (Hit) did, or none.
+	LimitedBy *windowKey `json:"limited_by,omitempty"`
 	// Hits and TransientHits count the consecutive limits that named no reset, since the last good turn.
 	Hits          int `json:"hits,omitempty"`
 	TransientHits int `json:"transient_hits,omitempty"`
+}
+
+// windowKey names a window of a runtime: its bucket and name.
+type windowKey struct {
+	Bucket string `json:"bucket,omitempty"`
+	Name   string `json:"name"`
 }
 
 type fileWindow struct {
@@ -144,7 +152,9 @@ func (t *Tracker) OnChange(f func()) {
 // Observe records a runtime's reading of its windows. Each window replaces the earlier reading of its own bucket and
 // name only (Claude Code reports some of its windows at a time); a window without a name is ignored. Used is kept in
 // [0, 1]. A Limited window limits the runtime until its reset; one with no reset ahead limits it for the first unknown
-// backoff (15 min) unless it is already limited, without counting as a hit.
+// backoff (15 min) unless it is already limited, without counting as a hit. The window whose reading set the limit
+// lifts it once it reads not limited with Used below 1 (a plan upgrade, overage, an early reset), unless another
+// window is still read as limited; a limit a turn hit (Hit) is never lifted by a reading.
 func (t *Tracker) Observe(runtime string, ws []rt.Window) {
 	t.change(func(now time.Time) bool {
 		rs := t.state(runtime)
@@ -165,14 +175,22 @@ func (t *Tracker) Observe(runtime string, ws []rt.Window) {
 				rs.Windows[i] = fw
 			}
 			changed = true
-			if w.Limited {
+			key := windowKey{Bucket: w.Bucket, Name: w.Name}
+			switch {
+			case w.Limited:
 				until := now.Add(unknownBase)
 				if fw.ResetsAt != nil && fw.ResetsAt.After(now) {
 					until = *fw.ResetsAt
 				} else if limitedAt(rs, now) {
 					continue
 				}
-				extend(rs, until)
+				if extend(rs, until) {
+					rs.LimitedBy = &key
+				}
+			case fw.Used < 1 && rs.LimitedBy != nil && *rs.LimitedBy == key:
+				// The window that limited the runtime no longer does: lift its limit, less any other window's.
+				rs.LimitedUntil, rs.LimitedBy = nil, nil
+				relimit(rs, now)
 			}
 		}
 		slices.SortFunc(rs.Windows, func(a, b fileWindow) int {
@@ -199,7 +217,9 @@ func (t *Tracker) Hit(runtime string, h rt.LimitHit) {
 			rs.Hits++
 			until = now.Add(backoff(unknownBase, unknownMax, rs.Hits))
 		}
-		extend(rs, until)
+		if extend(rs, until) {
+			rs.LimitedBy = nil
+		}
 		return true
 	})
 }
@@ -314,11 +334,30 @@ func limitedAt(rs *runtimeState, now time.Time) bool {
 	return rs.LimitedUntil != nil && now.Before(*rs.LimitedUntil)
 }
 
-// extend limits rs until until, unless it is already limited for longer.
-func extend(rs *runtimeState, until time.Time) {
+// extend limits rs until until, unless it is already limited for longer; it reports whether it did.
+func extend(rs *runtimeState, until time.Time) bool {
 	until = until.UTC()
 	if rs.LimitedUntil == nil || until.After(*rs.LimitedUntil) {
 		rs.LimitedUntil = &until
+		return true
+	}
+	return false
+}
+
+// relimit limits rs again by the windows still read as limited: until a reset ahead, or the first unknown backoff
+// from its reading for one with none.
+func relimit(rs *runtimeState, now time.Time) {
+	for _, w := range rs.Windows {
+		if !w.Limited {
+			continue
+		}
+		until := w.ReadAt.Add(unknownBase)
+		if w.ResetsAt != nil && w.ResetsAt.After(now) {
+			until = *w.ResetsAt
+		}
+		if until.After(now) && extend(rs, until) {
+			rs.LimitedBy = &windowKey{Bucket: w.Bucket, Name: w.Name}
+		}
 	}
 }
 

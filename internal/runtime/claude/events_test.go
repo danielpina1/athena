@@ -432,7 +432,7 @@ func TestUsageLimitResultTextSetsLimit(t *testing.T) {
 	for line, w := range map[string]want{
 		`{"type":"result","subtype":"success","is_error":true,"result":"Claude AI usage limit reached|1794000000"}`:        {true, false, 1794000000},
 		`{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["API Error: Rate limit exceeded"]}`: {true, true, 0},
-		`{"type":"result","subtype":"success","is_error":true,"result":"API Error: 429 rate limit · usage limit reached"}`:  {true, false, 0},
+		`{"type":"result","subtype":"success","is_error":true,"result":"API Error: 429 rate limit · usage limit reached"}`: {true, false, 0},
 		`{"type":"result","subtype":"success","is_error":true,"result":"You've hit your limit · resets 3pm"}`:              {true, false, 0},
 		`{"type":"result","subtype":"success","is_error":true,"result":"5-hour limit reached ∙ resets 3pm"}`:               {true, false, 0},
 		`{"type":"result","subtype":"error_max_turns","is_error":true,"errors":["Reached maximum number of turns (1)"]}`:   {},

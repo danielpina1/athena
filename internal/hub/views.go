@@ -220,9 +220,16 @@ func runtimeStatus(r node.RuntimeStatus) *athenav1.RuntimeStatus {
 	v := &athenav1.RuntimeStatus{Name: r.Name, Version: r.Version, Ready: r.Ready, Tested: r.Tested,
 		Why: clip(oneLine(redact.String(r.Why)), WhyMaxRunes), Live: uint32(max(r.Live, 0)),
 		LimitedUntil: tsp(q.LimitedUntil), ReadAt: ts(q.ReadAt), Measured: q.Measured}
+	// A window is named by its bucket too only when the runtime reports several (a Codex per-model limit).
+	buckets := map[string]bool{}
+	for _, w := range q.Windows {
+		if w.Bucket != "" {
+			buckets[w.Bucket] = true
+		}
+	}
 	for _, w := range q.Windows {
 		name := w.Name
-		if w.Bucket != "" {
+		if w.Bucket != "" && len(buckets) > 1 {
 			name = w.Bucket + " " + name
 		}
 		v.Windows = append(v.Windows, &athenav1.QuotaWindow{Name: name, Used: float32(w.Used), ResetsAt: tsp(w.ResetsAt), Stale: w.Stale})
