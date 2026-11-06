@@ -2,6 +2,7 @@ package node
 
 import (
 	"bufio"
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -78,12 +79,40 @@ func RunGitCredential(args []string, stdin io.Reader, stdout, stderr io.Writer, 
 
 // RunGh implements `athena gh <args>`: it runs the real gh with the session's token in gh's environment only
 // (GH_TOKEN, GH_HOST=github.com, GH_CONFIG_DIR=<TicketDir>/.athena/gh, GH_PROMPT_DISABLED=1). It refuses gh auth and
-// the other subcommands in ghRefused, and returns gh's exit code. env is the session's environment.
+// the other subcommands in ghRefused, and returns gh's exit code. A `gh pr create` asks the node first: in a repository
+// in shadow mode it is held for the owner as a Proposal, and gh does not run (exit 0). env is the session's
+// environment.
 func RunGh(args []string, stdin io.Reader, stdout, stderr io.Writer, env []string) int {
 	getenv := envLookup(env)
 	if sub := firstArg(args); ghRefused[sub] {
 		fmt.Fprintf(stderr, "athena gh: gh %s is not available in an Athena session; Athena authenticates gh for this ticket's repository\n", sub)
 		return 1
+	}
+	// A pull request in a repository in shadow mode is held for the owner. In a live one gh runs as it always did: the
+	// same arguments, and whatever stdin a body file of - consumed given back to it.
+	var consumed bytes.Buffer
+	if pr, ok, perr := prCreateArgs(args, io.TeeReader(stdin, &consumed)); ok {
+		if perr != nil {
+			pr = nil // the node holds nothing it cannot read; a live gh reports the error itself
+		}
+		var held ProposeResponse
+		err := callNode(getenv("ATHENA_SOCKET"), ProposeRequest{Op: OpPropose, Ticket: getenv("ATHENA_TICKET"),
+			Assignment: getenv("ATHENA_ASSIGNMENT"), Args: pr}, &held)
+		switch {
+		case err != nil:
+			fmt.Fprintf(stderr, "athena gh: the athena node is unreachable: %v\n", err)
+			return 1
+		case !held.OK && perr != nil:
+			fmt.Fprintf(stderr, "athena gh: %v\n", perr)
+			return 1
+		case !held.OK:
+			fmt.Fprintf(stderr, "athena gh: %s\n", held.Error)
+			return 1
+		case held.Held:
+			fmt.Fprintln(stdout, shadowPullHeld)
+			return 0
+		}
+		stdin = io.MultiReader(&consumed, stdin)
 	}
 	real, err := realGh(getenv("PATH"))
 	if err != nil {

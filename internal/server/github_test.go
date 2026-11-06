@@ -298,7 +298,7 @@ func TestCredentialsFromApp(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := &appCredentials{app: app}
-	tok, exp, err := c.Token(context.Background(), fakeRepo)
+	tok, exp, err := c.Token(context.Background(), fakeRepo, true)
 	if err != nil || !strings.HasPrefix(tok, "ghs_") || time.Until(exp) < 30*time.Minute {
 		t.Fatalf("token = %q %v %v", tok, exp, err)
 	}

@@ -165,3 +165,35 @@ func TestLiveReplyUnchanged(t *testing.T) {
 	eq(t, "enqueued", len(h.replyEffects()), 1)
 	eq(t, "no proposals", len(h.proposals(a)), 0)
 }
+
+// A repository switched to shadow holds the replies still waiting to go out: each becomes held with a reply Proposal,
+// and a switch of another repository holds nothing.
+func TestHoldWaitingHoldsRepoReplies(t *testing.T) {
+	h := newEvals(t)
+	a := h.shadowed("c:1", false)
+	id := h.reply(ReplyRequest{TicketID: a, TriggerID: "c:1", Purpose: PurposeAnswer, Text: "Done."})
+	h.must(h.eng.HoldWaiting("o/s"))
+	eq(t, "another repository's switch leaves it waiting", h.receipt(id).State, ReceiptWaiting)
+	eq(t, "no proposal yet", len(h.proposals(a)), 0)
+
+	h.pol.shadow = map[string]bool{"o/r": true}
+	h.must(h.eng.HoldWaiting("O/R"))
+	eq(t, "held", h.receipt(id).State, ReceiptHeld)
+	ps := h.proposals(a)
+	eq(t, "one proposal", len(ps), 1)
+	eq(t, "kind", ps[0].Kind, ProposalReply)
+	var pl struct {
+		ReceiptID string `json:"receiptId"`
+	}
+	h.must(json.Unmarshal(ps[0].Payload, &pl))
+	eq(t, "payload names the receipt", pl.ReceiptID, id)
+	eq(t, "stage", TicketStage(h.ticket(a)), Stage{"person", "proposal"})
+
+	// Again: nothing more is held.
+	h.must(h.eng.HoldWaiting("o/r"))
+	eq(t, "still one proposal", len(h.proposals(a)), 1)
+	// Applied, the reply waits to go out again.
+	_, err := h.eng.ApplyProposal(ps[0].ID)
+	h.must(err)
+	eq(t, "released", h.receipt(id).State, ReceiptWaiting)
+}

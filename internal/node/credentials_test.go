@@ -40,14 +40,16 @@ type fakeCreds struct {
 	noIdentity atomic.Bool
 	mu         sync.Mutex
 	repos      []string
+	writes     []bool // each request's write flag
 	revoked    []string
 	revokeErr  error
 }
 
-func (f *fakeCreds) Token(_ context.Context, repo string) (string, time.Time, error) {
+func (f *fakeCreds) Token(_ context.Context, repo string, write bool) (string, time.Time, error) {
 	n := f.calls.Add(1)
 	f.mu.Lock()
 	f.repos = append(f.repos, repo)
+	f.writes = append(f.writes, write)
 	f.mu.Unlock()
 	if f.fail.Add(-1) >= 0 {
 		return "", time.Time{}, f.failErr
@@ -65,6 +67,13 @@ func (f *fakeCreds) Revoke(_ context.Context, token string) error {
 	defer f.mu.Unlock()
 	f.revoked = append(f.revoked, token)
 	return f.revokeErr
+}
+
+// asked returns each request's write flag, in order.
+func (f *fakeCreds) asked() []bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]bool(nil), f.writes...)
 }
 
 func (f *fakeCreds) revokedTokens() []string {

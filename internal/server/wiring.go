@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,6 +21,7 @@ import (
 	"github.com/danielpina1/athena/internal/hub"
 	"github.com/danielpina1/athena/internal/metrics"
 	"github.com/danielpina1/athena/internal/node"
+	"github.com/danielpina1/athena/internal/outbox"
 	"github.com/danielpina1/athena/internal/policy"
 	"github.com/danielpina1/athena/internal/runtime/codex"
 	"github.com/danielpina1/athena/internal/sources"
@@ -224,9 +226,13 @@ type appCredentials struct {
 	login, email string
 }
 
-// Token mints a token for repo alone, with github.WorkerPermissions().
-func (c *appCredentials) Token(ctx context.Context, repo string) (string, time.Time, error) {
-	t, err := c.app.ScopedToken(ctx, repo, github.WorkerPermissions())
+// Token mints a token for repo alone, with github.WorkerPermissions(), or github.ReaderPermissions() unless write.
+func (c *appCredentials) Token(ctx context.Context, repo string, write bool) (string, time.Time, error) {
+	perms := github.ReaderPermissions()
+	if write {
+		perms = github.WorkerPermissions()
+	}
+	t, err := c.app.ScopedToken(ctx, repo, perms)
 	if err != nil {
 		return "", time.Time{}, err
 	}
@@ -255,7 +261,7 @@ func (c *appCredentials) seed(login string, id int64) {
 // configuration.
 type unavailableCredentials struct{ err error }
 
-func (u unavailableCredentials) Token(context.Context, string) (string, time.Time, error) {
+func (u unavailableCredentials) Token(context.Context, string, bool) (string, time.Time, error) {
 	return "", time.Time{}, fmt.Errorf("github app unavailable: %v", u.err)
 }
 
@@ -833,3 +839,61 @@ func checkCodexApprovalTimeout(approvalTimeout time.Duration) error {
 
 // Executable is this program's path with symlinks resolved: the athena binary hooks and MCP servers run.
 func Executable() (string, error) { return executable() }
+
+// applyProposals is the apply_proposal effect handler: the node pushes the branch or opens the pull request the owner
+// applied (node.ApplyProposal), and the Proposal is settled with the result. It is never retried: applying an outward
+// effect twice is worse than asking again, so a failure settles the Proposal failed and the owner applies it again if
+// they still want it. While Athena is paused it waits, like a reply.
+func applyProposals(st *store.Store, eng *core.Engine, n *node.Node, paused func() bool, log *slog.Logger) effects.Handler {
+	return func(ctx context.Context, key string, _ []byte) error {
+		if paused != nil && paused() {
+			return effects.Later(outbox.PausedWait)
+		}
+		var p *core.Proposal
+		if err := st.Tx(func(tx *store.Tx) error {
+			var err error
+			p, err = tx.GetProposal(key)
+			return err
+		}); err != nil {
+			return err
+		}
+		if p == nil || p.State != core.ProposalPending {
+			return nil
+		}
+		applyErr := n.ApplyProposal(ctx, *p)
+		if applyErr != nil {
+			log.Warn("applying a proposal failed", "proposal", p.ID, "ticket", p.TicketID, "kind", p.Kind, "error", applyErr)
+		}
+		if err := eng.SettleProposal(p.ID, applyErr); err != nil {
+			log.Error("settle an applied proposal; it stays pending", "proposal", p.ID, "error", err)
+		}
+		return nil
+	}
+}
+
+// heldRepos are the repositories a settings change switched to shadow mode.
+func heldRepos(from, to policy.Settings) []string {
+	var out []string
+	for repo, r := range to.Repos {
+		if r.Mode == policy.RepoShadow && from.Repos[repo].Mode != policy.RepoShadow {
+			out = append(out, repo)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// holdSwitched holds back the work of the repositories a settings change switched to shadow mode: the node drops their
+// write tokens (revoked, so a copy a worker kept stops working), and their replies waiting to go out are held for the
+// owner. Both are safe to repeat (a change told again).
+func holdSwitched(eng *core.Engine, n *node.Node, from, to policy.Settings) error {
+	for _, repo := range heldRepos(from, to) {
+		if n != nil {
+			n.DropTokens(repo)
+		}
+		if err := eng.HoldWaiting(repo); err != nil {
+			return err
+		}
+	}
+	return nil
+}

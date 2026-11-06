@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"slices"
+	"strings"
 	"time"
 	"unicode/utf8"
 )
@@ -206,6 +207,43 @@ func (e *Engine) SettleProposal(id string, applyErr error) error {
 			return err
 		}
 		return o.syncProposals(p.TicketID)
+	})
+}
+
+// HoldWaiting holds back the replies of repo's Tickets that wait to go out, for a repository just switched to shadow:
+// each waiting Receipt becomes held with a reply Proposal, and its queued send finds it no longer waiting. A send
+// already under way is not called back.
+func (e *Engine) HoldWaiting(repo string) error {
+	if repo == "" {
+		return nil
+	}
+	return e.command(cmdHoldWaiting, func(o *op) error {
+		all, err := o.tx.AllTickets()
+		if err != nil {
+			return err
+		}
+		for _, t := range all {
+			if !strings.EqualFold(t.Repo, repo) {
+				continue
+			}
+			receipts, err := o.tx.TicketReceipts(t.ID)
+			if err != nil {
+				return err
+			}
+			for _, rc := range receipts {
+				if rc.State != ReceiptWaiting {
+					continue
+				}
+				rc.State = ReceiptHeld
+				if err := o.tx.PutReceipt(rc); err != nil {
+					return err
+				}
+				if err := o.holdReply(t, rc); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
 	})
 }
 

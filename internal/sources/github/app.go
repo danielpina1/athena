@@ -86,6 +86,15 @@ func WorkerPermissions() map[string]string {
 	}
 }
 
+// ReaderPermissions are the permissions of a read-only worker token, for a repository in shadow mode: everything a
+// worker reads, nothing it could change. It returns a new map each time.
+func ReaderPermissions() map[string]string {
+	return map[string]string{
+		"contents": "read", "pull_requests": "read", "issues": "read",
+		"checks": "read", "actions": "read", "metadata": "read",
+	}
+}
+
 // App authenticates as a GitHub App. It is safe for concurrent use.
 type App struct {
 	cfg  AppConfig

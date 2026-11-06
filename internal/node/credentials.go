@@ -21,9 +21,10 @@ import (
 // It never enters a session's environment, a prompt, a transcript or a log line.
 
 // Credentials is the server's GitHub port, given to the node: a token for one repository (owner/name) with its expiry,
-// and the commit identity of the App's bot.
+// able to push and open pull requests when write is set and only to read otherwise (a repository in shadow mode), and
+// the commit identity of the App's bot.
 type Credentials interface {
-	Token(ctx context.Context, repo string) (string, time.Time, error)
+	Token(ctx context.Context, repo string, write bool) (string, time.Time, error)
 	Identity() (login, email string)
 }
 
@@ -85,6 +86,9 @@ type tokenStore struct {
 	creds Credentials
 	now   func() time.Time
 	log   *slog.Logger
+	// writable reports whether a repository's sessions get a token that writes (nil: every one does); asked whenever a
+	// token is fetched, so a repository switched to shadow gets read-only tokens from then on.
+	writable func(repo string) bool
 
 	mu   sync.Mutex
 	held map[string]*heldToken // by Assignment ID
@@ -98,6 +102,7 @@ type tokenStore struct {
 type heldToken struct {
 	mu      sync.Mutex
 	repo    string
+	write   bool
 	value   secret
 	expires time.Time
 	dropped bool
@@ -108,8 +113,8 @@ func newTokenStore(c Credentials) *tokenStore {
 		dead: map[string]bool{}}
 }
 
-// token returns the Assignment's token for repo, fetching one when it holds none, holds one for another repository,
-// or holds one that expires within tokenRefreshMargin.
+// token returns the Assignment's token for repo, fetching one when it holds none, holds one for another repository or
+// of the other kind (write or read-only, as writable says now), or holds one that expires within tokenRefreshMargin.
 func (ts *tokenStore) token(ctx context.Context, assignmentID, repo string) (string, error) {
 	if ts.creds == nil {
 		return "", errors.New("this node has no GitHub credentials")
@@ -131,12 +136,14 @@ func (ts *tokenStore) token(ctx context.Context, assignmentID, repo string) (str
 	if h.dropped {
 		return "", errors.New("the assignment has ended")
 	}
-	if h.value != "" && strings.EqualFold(h.repo, repo) && ts.now().Before(h.expires.Add(-tokenRefreshMargin)) {
+	// Asked under the token's own lock: a DropTokens of the repository waits for a fetch in flight and drops what it got.
+	write := ts.writable == nil || ts.writable(repo)
+	if h.value != "" && strings.EqualFold(h.repo, repo) && h.write == write && ts.now().Before(h.expires.Add(-tokenRefreshMargin)) {
 		return string(h.value), nil
 	}
 	fctx, cancel := context.WithTimeout(ctx, tokenFetchTimeout)
 	defer cancel()
-	v, exp, err := ts.creds.Token(fctx, repo)
+	v, exp, err := ts.creds.Token(fctx, repo, write)
 	if err != nil {
 		// Only the message crosses (masked): the class says whether a launch waits for it or fails.
 		return "", &credentialError{msg: fmt.Sprintf("github token for %s: %s", repo, redact.String(err.Error())),
@@ -156,8 +163,36 @@ func (ts *tokenStore) token(ctx context.Context, assignmentID, repo string) (str
 		ts.revoke(assignmentID, v)
 		return "", errors.New("the assignment has ended")
 	}
-	h.repo, h.value, h.expires = repo, secret(v), exp
+	h.repo, h.write, h.value, h.expires = repo, write, secret(v), exp
 	return v, nil
+}
+
+// dropWrite forgets and revokes the write tokens held for repo, of every Assignment; their sessions go on, and their
+// next request fetches a token as writable says then. A fetch in flight is waited for, and what it got dropped.
+func (ts *tokenStore) dropWrite(repo string) {
+	ts.mu.Lock()
+	held := make(map[string]*heldToken, len(ts.held))
+	for id, h := range ts.held {
+		held[id] = h
+	}
+	ts.mu.Unlock()
+	for id, h := range held {
+		h.mu.Lock()
+		v := ""
+		if h.value != "" && h.write && strings.EqualFold(h.repo, repo) {
+			v = string(h.value)
+			h.value, h.expires = "", time.Time{}
+		}
+		h.mu.Unlock()
+		ts.revoke(id, v)
+	}
+}
+
+// DropTokens revokes and forgets the write tokens the node holds for repo (owner/name), for a repository just switched
+// to shadow mode: its sessions get read-only tokens from their next request on.
+func (n *Node) DropTokens(repo string) {
+	n.tokens.dropWrite(repo)
+	n.log.Info("dropped the write tokens of a repository held for the owner", "repo", repo)
 }
 
 // drop forgets the Assignment's token, and revokes it; later requests for it are refused until revive.
@@ -194,7 +229,7 @@ func (ts *tokenStore) revoke(assignmentID, token string) {
 				"error", redact.String(err.Error()))
 			return
 		}
-		ts.log.Info("revoked the github token of an ended assignment", "assignment", assignmentID)
+		ts.log.Info("revoked a dropped github token", "assignment", assignmentID)
 	}()
 }
 

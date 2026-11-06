@@ -267,14 +267,19 @@ const staleSettings = "the settings changed meanwhile; show them and try again"
 // resumePolicyChange tells the Engine of a change saved but not told before (a failed tell or a crash), at startup.
 func (c *control) resumePolicyChange() error { return c.policy.resume(c.tell) }
 
-// tell tells the Engine of a settings change (tellEngine), after the test hook.
+// tell tells the Engine of a settings change (tellEngine), after the test hook, and holds back the work of the
+// repositories it switched to shadow mode (holdSwitched).
 func (c *control) tell(from, to policy.Settings) (map[string]string, error) {
 	if c.onPolicyChange != nil {
 		if err := c.onPolicyChange(from, to); err != nil {
 			return nil, err
 		}
 	}
-	return tellEngine(c.eng, from, to)
+	notices, err := tellEngine(c.eng, from, to)
+	if err != nil {
+		return nil, err
+	}
+	return notices, holdSwitched(c.eng, c.node, from, to)
 }
 
 // tellEngine tells the Engine of a settings change: each open Ticket it bears on gets its notice, and the Evals in

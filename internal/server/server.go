@@ -287,6 +287,9 @@ func Run(ctx context.Context, cfg Config) (err error) {
 		registerSource()
 	}
 	fx.Handle(core.EffectReply, outbox.Handler(sourceReg, st, killSwitch.Paused), outbox.Options)
+	// An applied push or pull request runs on the node, once: a failure settles it failed, never retried.
+	fx.Handle(core.EffectApplyProposal, applyProposals(st, eng, n, killSwitch.Paused, logger.With("component", "proposals")),
+		effects.Options{Concurrency: 1})
 	var host *router.Host
 	if routerOn {
 		host = router.New(router.Config{Bin: ncfg.AthenaBin, StateDir: stateDir, Model: fileCfg.Router.Model,
@@ -313,7 +316,8 @@ func Run(ctx context.Context, cfg Config) (err error) {
 		}
 		if !s.Paused {
 			// Held effects were put off by their delay; run them now, not when the delay ends.
-			if _, err := st.ReleaseEffects(st.Now(), core.EffectReply, core.EffectAssessment, core.EffectRelay); err != nil {
+			if _, err := st.ReleaseEffects(st.Now(), core.EffectReply, core.EffectAssessment, core.EffectRelay,
+				core.EffectApplyProposal); err != nil {
 				logger.Error("resume: release held effects", "error", err)
 			}
 		}

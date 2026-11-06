@@ -166,6 +166,13 @@ func (n *Node) handleConn(ctx context.Context, conn net.Conn) {
 			} else {
 				resp = n.handleCredential(ctx, req)
 			}
+		case OpPropose:
+			var req ProposeRequest
+			if err := json.Unmarshal(line, &req); err != nil {
+				resp = ProposeResponse{Error: "malformed propose request"}
+			} else {
+				resp = n.handlePropose(req)
+			}
 		case OpPing:
 			resp = Response{OK: true}
 		default:
@@ -264,7 +271,8 @@ func hookRuntime(s *session) string { return s.currentRuntime() }
 func (n *Node) ruleContext(s *session, runtime string) RuleContext {
 	home, _ := os.UserHomeDir()
 	c := RuleContext{TicketDir: s.place.workDir, Blocked: n.cfg.Blocked, Home: home, StateDir: n.cfg.StateDir,
-		AthenaBin: n.cfg.AthenaBin, VenvActive: false, ReadOnly: s.reviewing(), Restricted: s.restricted()}
+		AthenaBin: n.cfg.AthenaBin, VenvActive: false, ReadOnly: s.reviewing(), Restricted: s.restricted(),
+		Shadow: n.shadow(s.t.Repo)}
 	if runtime == core.RuntimeCodex {
 		c.Protected = ProtectedPaths(s.place.workDir)
 	}
@@ -703,6 +711,10 @@ func (n *Node) handleReport(req ReportRequest) Response {
 			return Response{Error: "binding pull request #" + strconv.Itoa(req.Pull) + ": " + err.Error()}
 		}
 		s.log.Info("pull request bound", "thread", thread)
+	}
+	// In shadow mode the branch is proposed as a push before the Report is filed, which may end the Ticket.
+	if err := n.proposeBranch(s); err != nil {
+		s.log.Warn("branch not proposed", "error", err)
 	}
 	err := n.engine().FileReport(req.Ticket, core.ReportInput{
 		AssignmentID: req.Assignment, State: core.ReportState(req.Status), Summary: req.Summary, Question: req.Question,

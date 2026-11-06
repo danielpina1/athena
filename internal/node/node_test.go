@@ -1292,8 +1292,11 @@ func (b blockingEngine) MarkUnrelated(string, string, string) error {
 	b.wait()
 	return nil
 }
-func (b blockingEngine) Handback(string, string, string) (bool, error) { b.wait(); return false, nil }
-func (b blockingEngine) BindThread(string, string, bool) error         { b.wait(); return nil }
+func (b blockingEngine) Handback(string, string, string) (bool, error)  { b.wait(); return false, nil }
+func (b blockingEngine) BindThread(string, string, bool) error          { b.wait(); return nil }
+func (b blockingEngine) Propose(p core.Proposal) (core.Proposal, error) { b.wait(); return p, nil }
+func (b blockingEngine) PendingProposals() ([]core.Proposal, error)     { b.wait(); return nil, nil }
+func (b blockingEngine) SettleProposal(string, error) error             { b.wait(); return nil }
 func (b blockingEngine) RecordUsage(string, string, core.UsageDelta) error {
 	b.wait()
 	return nil

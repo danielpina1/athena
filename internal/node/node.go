@@ -158,6 +158,11 @@ type EngineCallbacks interface {
 	MarkUnrelated(ticketID, thread, reason string) error
 	Handback(ticketID, triggerID, reason string) (bool, error)
 	BindThread(ticketID, thread string, own bool) error
+	// The Proposals of a repository in shadow mode (shadow.go): the node proposes a Ticket's branch and pull request,
+	// and settles the push it applies with a pull request.
+	Propose(p core.Proposal) (core.Proposal, error)
+	PendingProposals() ([]core.Proposal, error)
+	SettleProposal(id string, applyErr error) error
 	// RecordUsage adds what the node observed to the Ticket's stats. It takes the Engine's lock: never call it while
 	// holding a node lock that Start, Deliver or Stop also take.
 	RecordUsage(ticketID, assignmentID string, u core.UsageDelta) error
@@ -281,6 +286,8 @@ func New(cfg Config, eng EngineCallbacks) *Node {
 		slotsGauge:   cfg.Metrics.Gauge("slots_in_use"),
 	}
 	n.tokens.log = log
+	// A repository in shadow mode gets read-only tokens: what holds its work for the owner, whatever a session runs.
+	n.tokens.writable = func(repo string) bool { return !n.shadow(repo) }
 	n.infos = map[string]rt.Info{}
 	n.chooser = cfg.Chooser
 	if n.chooser == nil {

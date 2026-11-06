@@ -56,6 +56,9 @@ type RuleContext struct {
 	// denied, since nobody is asked, and so are the web tools (restrictRule).
 	Restricted bool
 
+	// Shadow is set for a session of a repository in shadow mode (shadow.go): a git push is denied (shadowPushRule).
+	Shadow bool
+
 	// tainted names the expandable variables a Bash command assigns or may change; set by bashWriteRule.
 	tainted map[string]bool
 }
@@ -101,8 +104,8 @@ func escalate(rule, reason string) Decision {
 }
 
 // Evaluate applies the hook rules in order: credential reads (deny), any write of a
-// read-only session (deny), blocked commands (deny), an AI attribution in a commit or pull request (deny), writes
-// to a protected path (deny) or outside the ticket dir (escalate; for Bash the
+// read-only session (deny), a git push in shadow mode (deny), blocked commands (deny), an AI attribution in a commit or
+// pull request (deny), writes to a protected path (deny) or outside the ticket dir (escalate; for Bash the
 // redirections and file commands that name a target), risky Bash commands
 // (escalate); anything else is allowed. Malformed input is denied. A Bash
 // input's "workdir", when set, is the directory the command runs in. A restricted session's verdict then goes
@@ -142,6 +145,9 @@ func evaluate(ctx RuleContext, tool string, input json.RawMessage) Decision {
 		return d
 	}
 	if tool == "Bash" {
+		if d, ok := shadowPushRule(ctx, str(in, "command")); ok {
+			return d
+		}
 		if d, ok := blockedRule(ctx, str(in, "command")); ok {
 			return d
 		}
