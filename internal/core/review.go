@@ -210,12 +210,7 @@ func (e *Engine) FileReview(ticketID, assignmentID, verdict, findings string) er
 			}
 			return o.tx.PutTicket(t)
 		}
-		next := o.newAssignment(t)
-		n := findAssignment(t, next)
-		if x := t.Execution; x != nil && (x.Runtime == RuntimeClaude || x.Runtime == RuntimeCodex) {
-			// An auto Ticket's is left to the Executor, whose warm rule keeps the implementer's runtime (F-26).
-			n.Runtime = held.Runtime
-		}
+		next := o.newImplementer(t, held)
 		runtime := a.Runtime
 		if runtime == "" {
 			runtime = "unknown runtime"
@@ -308,10 +303,19 @@ func ownedInputWaits(t *Ticket) bool {
 }
 
 // resumeImplementer drops a review's held report and resumes its implementer instead: a new pending implement
-// Assignment, pinned to the runtime the implementer ran on, takes the Inputs that wait. Its next ready report settles
+// Assignment (newImplementer, as for a changes round) takes the Inputs that wait. Its next ready report settles
 // the Ticket, reviewed again while rounds remain.
 func (o *op) resumeImplementer(t *Ticket, held ReviewState) {
+	o.start(t, o.newImplementer(t, held))
+}
+
+// newImplementer is a new pending implement Assignment after the review held: pinned to the implementer's runtime on
+// a Ticket that names a runtime; an auto Ticket's is left to the Executor, whose warm rule keeps the implementer's
+// runtime (F-26).
+func (o *op) newImplementer(t *Ticket, held ReviewState) string {
 	next := o.newAssignment(t)
-	findAssignment(t, next).Runtime = held.Runtime
-	o.start(t, next)
+	if x := t.Execution; x != nil && (x.Runtime == RuntimeClaude || x.Runtime == RuntimeCodex) {
+		findAssignment(t, next).Runtime = held.Runtime
+	}
+	return next
 }

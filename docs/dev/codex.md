@@ -331,10 +331,14 @@ task) has each ready report of its implementer reviewed before it counts:
      `--ext-diff` or grep's `-O`), `cat`, `ls`, `rg` (no `--pre` or `--hostname-bin`), `grep`, `find` (no `-delete`,
      `-exec`, `-ok`, `-fprint`, `-fls`), `head`, `tail`, `wc`, `file` (no `-C`), `stat`, `cd`, `pwd`, `echo`, `true`,
      and the repository's test and vet runners (`go test|vet`, `cargo test|check`, `make test|check`, `npm|pnpm|yarn
-     test` or `run test`, `pytest`, `python -m pytest`; no output or profile flags). Everything else, `gh` and `curl`
-     included, is denied, and so is a variable assignment before a command (`GIT_PAGER=… git log`). **Accepted
-     residual:** a test runner runs the repository's own code, which can do anything the reviewer's OS user can; only
-     the sandbox, when on, confines that.
+     test` or `run test`, `pytest`, `python -m pytest`) without output or profile flags or an option that names a
+     program or build file: go's `-exec`, `-toolexec`, `-vettool`; make's `NAME=value`, `-f`, `--file`, `--makefile`,
+     `-e`, `--eval`, `-C`, `--directory`; cargo's `--config`, `-Z`; npm's, pnpm's and yarn's `--script-shell`,
+     `--node-options`; pytest's `-p`, `-c`, `--config-file`, `-o`, `--override-ini`. A command named by a path runs
+     only from `/bin`, `/usr/bin`, `/usr/local/bin`, `/opt/homebrew/bin`, `/usr/sbin` or `/sbin` (`./bin/cat` is
+     denied). Everything else, `gh`, `curl` and `sudo` included, is denied, and so is a variable assignment before a
+     command (`GIT_PAGER=… git log`). **Accepted residual:** a test runner runs the repository's own code, which can do
+     anything the reviewer's OS user can; only the sandbox, when on, confines that.
    - **Always: no escalation.** Whatever would ask the owner (a rules escalation, a Codex approval request for a
      command, a file or permissions, whether or not `sandbox` is configured) is denied: a review never makes a person
      stage.
@@ -358,8 +362,8 @@ task) has each ready report of its implementer reviewed before it counts:
    with the usual result reply; with one it waits handed off, and the next Input resumes the implementer's session (one
    that arrived during the review resumes it at once).
    - **Unless a person's or a Thread's message arrived during the review** and the report would end the Ticket: then the
-     held report is dropped (no report event, no reply) and a new implement Assignment, pinned to the implementer's
-     runtime, resumes the implementer's session with those messages; its next ready report settles the Ticket, and is
+     held report is dropped (no report event, no reply) and a new implement Assignment, placed as in a `changes`
+     round, resumes the implementer's session with those messages; its next ready report settles the Ticket, and is
      reviewed again while rounds remain.
    - `changes` within the rounds: a new implement Assignment (pinned to the implementer's runtime when the Ticket names
      one) resumes the implementer's session with the findings as a `review` Input; its next ready starts the next round.

@@ -405,8 +405,8 @@ func TestInputDuringReviewResumesImplementer(t *testing.T) {
 			t.Fatalf("fail=%v: the ticket ended over a person's message: %+v", fail, tk.Ended)
 		}
 		next := tk.LatestAssignment()
-		if next.Role != "" || next.State != AssignmentPending || next.Runtime != RuntimeClaude || next.Report != nil {
-			t.Fatalf("fail=%v: next = %+v, want a pending implementer pinned to claude", fail, next)
+		if next.Role != "" || next.State != AssignmentPending || next.Runtime != "" || next.Report != nil {
+			t.Fatalf("fail=%v: next = %+v, want a pending implementer left to the chooser on an auto ticket", fail, next)
 		}
 		eq(t, "started", h.exec.last("start").AssignmentID, next.ID)
 		msg := tk.Inputs[len(tk.Inputs)-1]
@@ -420,6 +420,20 @@ func TestInputDuringReviewResumesImplementer(t *testing.T) {
 		if tk := h.ticket(id); tk.Review == nil || tk.Review.Round != 2 {
 			t.Fatalf("fail=%v: the next ready is not reviewed again: %+v", fail, tk.Review)
 		}
+	}
+}
+
+// The resumed implementer follows the changes round's rule: a Ticket that names a runtime pins it to the implementer's,
+// an auto one leaves it to the chooser, whose warm rule keeps it there (F-26).
+func TestInputDuringReviewPinsLikeChanges(t *testing.T) {
+	for _, tc := range []struct{ runtime, want string }{{RuntimeCodex, RuntimeCodex}, {RuntimeAuto, ""}} {
+		h := newHarness(t)
+		id, impl := h.pairedTicket(tc.runtime, RuntimeCodex)
+		h.ready(id, impl, "done")
+		rv := h.launch(id, RuntimeClaude)
+		h.must(h.eng.AddPersonInput(id, "one more thing"))
+		h.must(h.eng.FileReview(id, rv, ReviewApproved, "- none"))
+		eq(t, tc.runtime+" ticket: resumed implementer's runtime", h.ticket(id).LatestAssignment().Runtime, tc.want)
 	}
 }
 

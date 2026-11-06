@@ -756,7 +756,7 @@ func readOnlyScript(command string, depth int) string {
 	command = strings.NewReplacer(">|", ">", "&>", ampOut+">", ">&", ">"+ampFd).Replace(command)
 	for _, seg := range segmentSplit.Split(command, -1) {
 		seg = strings.NewReplacer(ampOut, "&", ampFd, "&").Replace(seg)
-		if a := assignment(seg); a != "" {
+		if a := readOnlyPrefix(seg); a != "" {
 			return a
 		}
 		words := commandWords(seg)
@@ -780,9 +780,11 @@ func readOnlyScript(command string, depth int) string {
 	return ""
 }
 
-// assignment is the first variable assignment before a segment's command (GIT_PAGER=… git log, env PAGER=… git log),
-// "" without one: an assignment can name a program an allowed command runs (a pager, a diff, a preloaded library).
-func assignment(seg string) string {
+// readOnlyPrefix is the first word up to a segment's command that a read-only session may not run, "" when there is
+// none: a variable assignment (GIT_PAGER=… git log, env PAGER=… git log), which can name a program an allowed
+// command runs; sudo; and a wrapper or command named by a path outside the system's bin directories (./bin/cat,
+// /tmp/x/git), which the allowlist judges by base name only (systemPath).
+func readOnlyPrefix(seg string) string {
 	words := cleanWords(strings.Fields(seg))
 	for len(words) > 0 {
 		w := words[0]
@@ -791,16 +793,28 @@ func assignment(seg string) string {
 			return w
 		case reservedWords[w]:
 			words = words[1:]
+			continue
+		case strings.Contains(w, "/") && !systemPath(w), baseName(w) == "sudo":
+			return w
 		case wrapperCmds[baseName(w)]:
 			words = words[1:]
 			for len(words) > 0 && strings.HasPrefix(words[0], "-") {
 				words = words[1:]
 			}
-		default:
-			return ""
+			continue
 		}
+		return ""
 	}
 	return ""
+}
+
+// systemBins are the directories a read-only session may name a command in by its path.
+var systemBins = map[string]bool{"/bin": true, "/usr/bin": true, "/usr/local/bin": true, "/opt/homebrew/bin": true,
+	"/usr/sbin": true, "/sbin": true}
+
+// systemPath reports whether w is an absolute path to a program directly in one of systemBins.
+func systemPath(w string) bool {
+	return filepath.IsAbs(w) && filepath.Clean(w) == w && systemBins[filepath.Dir(w)]
 }
 
 // gitRuns are the git options that run a program a read-only session did not name as a command: a configuration
@@ -844,7 +858,8 @@ func readOnlyCommand(words []string) bool {
 }
 
 // testRunner reports whether words run a repository's tests or vet (go test|vet, cargo test|check, make test|check,
-// npm|pnpm|yarn test, pytest), without an option that names an output file.
+// npm|pnpm|yarn test, pytest, python -m pytest), without an option that names an output file, or a program or build
+// file of its own (runnerRuns).
 func testRunner(words []string) bool {
 	if slices.ContainsFunc(words[1:], func(a string) bool {
 		return a == "-o" || strings.HasPrefix(a, "-o=") || strings.HasPrefix(a, "-outputdir") ||
@@ -853,21 +868,58 @@ func testRunner(words []string) bool {
 		return false
 	}
 	sub := firstArg(words[1:])
+	ok := false
 	switch words[0] {
 	case "go":
-		return sub == "test" || sub == "vet"
+		ok = sub == "test" || sub == "vet"
 	case "cargo":
-		return sub == "test" || sub == "check"
+		ok = sub == "test" || sub == "check"
 	case "make":
-		return sub == "test" || sub == "check"
+		ok = sub == "test" || sub == "check"
 	case "npm", "pnpm", "yarn":
-		return sub == "test" || (sub == "run" && len(words) > 2 && words[2] == "test")
+		ok = sub == "test" || (sub == "run" && len(words) > 2 && words[2] == "test")
 	case "pytest":
-		return true
+		ok = true
 	case "python", "python3":
-		return len(words) > 2 && words[1] == "-m" && words[2] == "pytest"
+		ok = len(words) > 2 && words[1] == "-m" && words[2] == "pytest"
 	}
-	return false
+	return ok && !runnerRuns(words)
+}
+
+// runnerRuns reports whether a test runner's words carry an option that names a program for it to run or a build or
+// configuration file of the session's choosing, in the --opt value and --opt=value forms (and short options run
+// together, -fX): go's -exec, -toolexec and -vettool; make's NAME=value, -f, --file, --makefile, -e, --eval, -C and
+// --directory; cargo's --config and -Z; npm's, pnpm's and yarn's --script-shell and --node-options; pytest's -p, -c,
+// --config-file, -o and --override-ini.
+func runnerRuns(words []string) bool {
+	tool, args := words[0], words[1:]
+	if tool == "python" || tool == "python3" {
+		tool, args = "pytest", words[3:]
+	}
+	long := func(a string, names ...string) bool {
+		name, _, _ := strings.Cut(a, "=")
+		return slices.Contains(names, name)
+	}
+	short := func(a, letters string) bool { // a single-dash option bundle with one of letters
+		return len(a) > 1 && a[0] == '-' && a[1] != '-' && strings.ContainsAny(a[1:], letters)
+	}
+	return slices.ContainsFunc(args, func(a string) bool {
+		switch tool {
+		case "go": // Go's flags take one dash or two
+			name, _, _ := strings.Cut(strings.TrimLeft(a, "-"), "=")
+			return strings.HasPrefix(a, "-") && (name == "exec" || name == "toolexec" || name == "vettool")
+		case "make":
+			return assignRe.MatchString(a) || short(a, "fCe") ||
+				long(a, "--file", "--makefile", "--eval", "--directory", "--environment-overrides")
+		case "cargo":
+			return strings.HasPrefix(a, "-Z") || long(a, "--config")
+		case "npm", "pnpm", "yarn":
+			return long(a, "--script-shell", "--node-options")
+		case "pytest":
+			return short(a, "pco") || long(a, "--config-file", "--override-ini")
+		}
+		return false
+	})
 }
 
 // ---------------------------------------------------------------------------
