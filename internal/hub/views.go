@@ -220,6 +220,9 @@ func runtimeStatus(r node.RuntimeStatus) *athenav1.RuntimeStatus {
 	v := &athenav1.RuntimeStatus{Name: r.Name, Version: r.Version, Ready: r.Ready, Tested: r.Tested,
 		Why: clip(oneLine(redact.String(r.Why)), WhyMaxRunes), Live: uint32(max(r.Live, 0)),
 		LimitedUntil: tsp(q.LimitedUntil), ReadAt: ts(q.ReadAt), Measured: q.Measured}
+	for _, m := range r.Models {
+		v.Models = append(v.Models, &athenav1.RuntimeModel{Id: m.ID, Name: m.Name, Default: m.Default})
+	}
 	// A window is named by its bucket too only when the runtime reports several (a Codex per-model limit).
 	buckets := map[string]bool{}
 	for _, w := range q.Windows {

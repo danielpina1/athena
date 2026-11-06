@@ -165,6 +165,17 @@ they leave it as it is and say when it differs; restarting the server rewrites i
 - `binary`: the codex executable; `athena server --codex PATH` overrides it.
 - `model`: the default Codex model; empty leaves it to Codex.
 
+New task picks a Ticket's model from a dropdown of the chosen runtime's models (see the [dashboard](dashboard.md)). Codex's
+come from the readiness check of §2: once the account is logged in, the check's short-lived app-server is asked
+`model/list` (no prompt, no quota; its cursor followed for up to 5 pages, each call bounded by 5 seconds), and the models
+it does not mark hidden are kept: the id a task sends is the model's `model`, the name shown its `displayName`, and the
+default its `isDefault`, unless `model` above is set, which is then the default (added to the list when Codex does not
+list it). A `model/list` that fails or times out leaves the list empty and does not change readiness; the list is
+refreshed with the check (every 10 minutes while Codex is ready). Claude Code's list is fixed: `opus`, `sonnet`,
+`haiku`, the server's Claude model (`sonnet` unless configured) the default, added as its own entry when it is none of
+the three. Under `auto` a model still applies only when the session runs on Claude Code (§1): the dropdown lists Claude
+Code's models and says "Model on Claude Code — Codex uses its default".
+
 ## 4. Hooks and trust
 
 The server writes `<stateDir>/codex/config.toml` itself, whenever it checks Codex and the file differs; do not edit

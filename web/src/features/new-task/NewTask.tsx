@@ -2,9 +2,10 @@
 // The text is required. ⌘⏎ (Ctrl+Enter) starts it from any field; Enter in the text adds a line. The fields keep what
 // was typed until the result is ok, and a failure is said inline. With two runtimes ready, or a Policy that pairs every
 // task, "Review each ready report" pairs the task with a review: it starts at the Policy's default and is sent only
-// once the owner flips it, so an untouched switch leaves the choice to the Policy. The model suggestions are the recent
-// models of the chosen runtime; under Auto a model applies on Claude Code only. A node picker waits for a second node
-// (plan 6).
+// once the owner flips it, so an untouched switch leaves the choice to the Policy. The model is picked from the chosen
+// runtime's list (ModelPicker), Claude Code's under Auto, where a model applies on Claude Code only; a choice the next
+// runtime does not list goes back to Default. Other…'s suggestions are the recent models of the chosen runtime. A node
+// picker waits for a second node (plan 6).
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { useNavigate } from "react-router";
 import { modKeyLabel } from "@/app/shortcuts";
@@ -13,9 +14,9 @@ import { selectTickets } from "@/lib/store/selectors";
 import { useAthena } from "@/lib/store/state";
 import { reviewByDefault } from "@/lib/text/runtime";
 import { Button } from "@/ui/primitives/button";
-import { Input } from "@/ui/primitives/input";
 import { Switch } from "@/ui/primitives/switch";
 import { Textarea } from "@/ui/primitives/textarea";
+import { ModelPicker, OTHER, modelsFor, offered } from "./ModelPicker";
 import { RepoPicker, resolveRepo } from "./RepoPicker";
 import { RuntimePicker, unavailable } from "./RuntimePicker";
 
@@ -26,7 +27,9 @@ export function NewTask() {
   const navigate = useNavigate();
   const [text, setText] = useState("");
   const [repoText, setRepoText] = useState("");
+  /** The model select's value: "" (Default), OTHER, or a listed model's id; other is Other…'s text. */
   const [model, setModel] = useState("");
+  const [other, setOther] = useState("");
   const [picked, setPicked] = useState("auto");
   /** The owner's own answer to "Review on the other runtime", once they flip it; undefined leaves it to the Policy. */
   const [review, setReview] = useState<boolean>();
@@ -34,9 +37,7 @@ export function NewTask() {
   const [sending, setSending] = useState(false);
   const busy = useRef(false);
   const field = useRef<HTMLTextAreaElement>(null);
-  const models = useId();
   const reviewHint = useId();
-  const modelHint = useId();
   const repos = useAthena((s) => s.repos);
   const runtimes = useAthena((s) => s.node?.runtimes) ?? [];
   const settingsJson = useAthena((s) => s.policy?.settingsJson);
@@ -48,6 +49,10 @@ export function NewTask() {
   // Under Auto the model goes to Claude Code (Codex runs its own default): Claude Code's models, a Ticket from before
   // runtimes ran on it.
   const modelsOf = runtime === "auto" ? "claude" : runtime;
+  const models = modelsFor(runtime, runtimes);
+  // A choice the runtime's list no longer has (it changed under the form) is Default, as a runtime change makes it.
+  const choice = offered(model, models) ? model : "";
+  const sent = (choice === OTHER ? other : choice).trim();
   const suggestions = useMemo(
     () => [
       ...new Set(
@@ -60,8 +65,13 @@ export function NewTask() {
     ],
     [tickets, modelsOf],
   );
-  const choice = resolveRepo(repoText, repos);
-  const ready = text.trim() !== "" && choice.kind !== "invalid";
+  const repo = resolveRepo(repoText, repos);
+  const ready = text.trim() !== "" && repo.kind !== "invalid";
+
+  const pickRuntime = (next: string) => {
+    setPicked(next);
+    if (!offered(model, modelsFor(next, runtimes))) setModel("");
+  };
 
   // Autofocus on the desktop only: on the phone it would raise the keyboard over the form.
   useEffect(() => {
@@ -75,9 +85,9 @@ export function NewTask() {
     setSending(true);
     setError("");
     const arg: Parameters<typeof submitTask>[0] = { text: t };
-    if (choice.kind === "repo") arg.repo = choice.repo;
-    if (choice.kind === "dir") arg.dir = choice.dir;
-    if (model.trim() !== "") arg.model = model.trim();
+    if (repo.kind === "repo") arg.repo = repo.repo;
+    if (repo.kind === "dir") arg.dir = repo.dir;
+    if (sent !== "") arg.model = sent;
     arg.runtime = runtime;
     if (pairable && review !== undefined) arg.review = review;
     const r = await submitTask(arg).finally(() => {
@@ -122,36 +132,18 @@ export function NewTask() {
         <span>Repository</span>
         <RepoPicker value={repoText} onChange={setRepoText} repos={repos} />
       </div>
-      <label className="grid gap-1 text-sm font-semibold">
-        Model
-        <Input
-          role="combobox"
-          aria-expanded={false}
-          aria-autocomplete="list"
-          list={models}
-          aria-describedby={runtime === "auto" ? modelHint : undefined}
-          value={model}
-          onChange={(e) => setModel(e.target.value)}
-          placeholder="Default"
-          autoCapitalize="none"
-          autoCorrect="off"
-          spellCheck={false}
-          className="font-mono text-sm font-normal"
-        />
-        <datalist id={models}>
-          {suggestions.map((m) => (
-            <option key={m} value={m} />
-          ))}
-        </datalist>
-      </label>
-      {runtime === "auto" && (
-        <p id={modelHint} className="-mt-3 text-sm text-muted">
-          Under Auto, the model applies on Claude Code; Codex runs its own default.
-        </p>
-      )}
+      <ModelPicker
+        value={choice}
+        onChange={setModel}
+        other={other}
+        onOtherChange={setOther}
+        models={models}
+        suggestions={suggestions}
+        hint={runtime === "auto" ? "Model on Claude Code — Codex uses its default" : undefined}
+      />
       <div className="grid gap-1 text-sm font-semibold">
         <span>Runtime</span>
-        <RuntimePicker value={runtime} onChange={setPicked} runtimes={runtimes} />
+        <RuntimePicker value={runtime} onChange={pickRuntime} runtimes={runtimes} />
       </div>
       {pairable && (
         <div className="grid gap-1">

@@ -1,9 +1,17 @@
 // New task, end to end: the form with its repository picker open (free entry of owner/name), then a task without a
 // repository started on the page, landing on the new Ticket's detail; the runtime picker with a runtime that is not
-// ready, and a task pinned to Codex (fakecodex) and paired with a review, whose Facts say so. Every Ticket is stopped
-// at the end (R37).
+// ready, a task pinned to Codex (fakecodex) and paired with a review, whose Facts say so, and one on a model picked
+// from fakecodex's model/list, and the Other… field. Every Ticket is stopped at the end (R37).
+import type { Page } from "@playwright/test";
 import { athena, expect, expectAccessible, signedInPage, test, liveFeed } from "./harness";
 import { editLink, fixedNode, runtimeStatus } from "./link";
+
+const modelOptions = (page: Page) => page.getByRole("combobox", { name: "Model", exact: true }).locator("option");
+const claudeModels = [
+  { id: "opus", name: "Opus" },
+  { id: "sonnet", name: "Sonnet", default: true },
+  { id: "haiku", name: "Haiku" },
+];
 
 test("a no-repo task starts from the form and lands on its detail, light and dark", async ({ page }) => {
   await page.clock.setFixedTime(new Date("2026-11-04T10:00:00"));
@@ -21,6 +29,11 @@ test("a no-repo task starts from the form and lands on its detail, light and dar
   await expect(page.getByRole("radio", { name: "Claude Code" })).toBeEnabled();
   await expect(page.getByRole("radio", { name: "Codex" })).toBeEnabled();
   await expect(page.getByRole("switch", { name: "Review each ready report" })).toBeVisible();
+  // Under Auto the model is Claude Code's, from its list, with the node's model (sonnet) as the default.
+  await expect(modelOptions(page)).toHaveText(["Default · Sonnet", "Opus", "Sonnet", "Haiku", "Other…"]);
+  await expect(page.getByRole("combobox", { name: "Model", exact: true })).toHaveAccessibleDescription(
+    "Model on Claude Code — Codex uses its default",
+  );
 
   // Free entry offers itself; the list is open for the screenshots.
   await text.fill("Sketch the release notes");
@@ -61,7 +74,7 @@ test("a runtime that is not ready is disabled and says why, light and dark", asy
   const why = "Codex is not installed (codex not found)";
   await editLink(page, {
     node: fixedNode([
-      runtimeStatus({ name: "claude", ready: true, measured: false }),
+      runtimeStatus({ name: "claude", ready: true, measured: false, models: claudeModels }),
       runtimeStatus({ name: "codex", version: "0.160.1", ready: false, tested: true, why }),
     ]),
   });
@@ -109,6 +122,70 @@ test("a task pinned to Codex with a review says so in its Facts, light and dark"
     await page.emulateMedia({ colorScheme: "dark", reducedMotion: "reduce" });
     await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
     await expect(facts).toHaveScreenshot("facts-runtime-dark.png", { mask: [facts.locator("time")] });
+  } finally {
+    await athena("stop", id).catch(() => {});
+  }
+});
+
+test("a Codex model picked from its list shows in the Facts; Other… takes any model, light and dark", async ({ page }) => {
+  await page.clock.setFixedTime(new Date("2026-11-04T10:00:00"));
+  await page.emulateMedia({ colorScheme: "light", reducedMotion: "reduce" });
+  await signedInPage(page);
+  await page.goto("/new");
+  await page.getByRole("textbox", { name: "What should Athena do?" }).fill("Trim the lexer's lookahead");
+  await page.getByRole("radio", { name: "Codex" }).click();
+  // fakecodex's model/list, from the node's check: its hidden model is not offered.
+  await expect(modelOptions(page)).toHaveText(["Default · GPT-5 Codex", "GPT-5 Codex", "GPT-5 Codex Mini", "Other…"]);
+  const model = page.getByRole("combobox", { name: "Model", exact: true });
+  await expect(model).not.toHaveAccessibleDescription(/Codex uses its default/);
+
+  // Other…: a free-text field for a model the list lacks.
+  await model.selectOption({ label: "Other…" });
+  const other = page.getByRole("combobox", { name: "Other model" });
+  await other.fill("gpt-5-codex-preview");
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+  await expectAccessible(page);
+  const unstable = [page.locator("aside .font-mono"), page.getByRole("region", { name: "Today" }), ...liveFeed(page)];
+  await page.evaluate(() => document.fonts.ready);
+  await expect(page).toHaveScreenshot("new-task-other-light.png", { mask: unstable });
+  await page.emulateMedia({ colorScheme: "dark", reducedMotion: "reduce" });
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await expectAccessible(page);
+  await expect(page).toHaveScreenshot("new-task-other-dark.png", { mask: unstable });
+
+  // The form with both fields fits a 320 px column. A desktop crossing to the phone layout remounts the form, so it is
+  // filled again after.
+  const full = page.viewportSize()!;
+  await page.setViewportSize({ width: 320, height: full.height });
+  await expect
+    .poll(() => page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth), {
+      message: "page scrollWidth minus clientWidth at 320 px",
+    })
+    .toBe(0);
+  await page.setViewportSize(full);
+  await page.waitForTimeout(500);
+
+  // A listed model: the select alone.
+  await page.getByRole("textbox", { name: "What should Athena do?" }).fill("Trim the lexer's lookahead");
+  await page.getByRole("radio", { name: "Codex" }).click();
+  await model.selectOption({ label: "GPT-5 Codex Mini" });
+  await expect(other).toHaveCount(0);
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+  await expectAccessible(page);
+  await expect(page).toHaveScreenshot("new-task-codex-model-dark.png", { mask: unstable });
+  await page.emulateMedia({ colorScheme: "light", reducedMotion: "reduce" });
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+  await expect(page).toHaveScreenshot("new-task-codex-model-light.png", { mask: unstable });
+
+  await page.getByRole("button", { name: "Start" }).click();
+  await expect(page).toHaveURL(/\/tickets\/[^/?]+$/);
+  const id = new URL(page.url()).pathname.split("/").pop() ?? "";
+  try {
+    const facts = page.getByRole("region", { name: "Facts" });
+    const value = (label: string) => facts.locator("dt", { hasText: label }).locator("xpath=following-sibling::dd[1]");
+    await expect(value("Runtime")).toHaveText("Codex");
+    await expect(value("Model")).toHaveText("gpt-5-codex-mini");
+    await expectAccessible(page);
   } finally {
     await athena("stop", id).catch(() => {});
   }

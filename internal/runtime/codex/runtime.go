@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -26,6 +27,9 @@ const (
 	checkTTL    = 10 * time.Minute
 	notReadyTTL = time.Minute
 	timeoutTTL  = time.Minute
+	// modelsTimeout bounds the model/list calls of a Check; maxModelPages how many of its pages a Check follows.
+	modelsTimeout = 5 * time.Second
+	maxModelPages = 5
 	// NotLoggedIn is Check's Why when Athena's CODEX_HOME holds no account.
 	NotLoggedIn = "Codex is not logged in for Athena: run athena codex login"
 )
@@ -55,6 +59,8 @@ type Runtime struct {
 	ttl     time.Duration    // of cached
 	now     func() time.Time // tests
 	timeout time.Duration    // tests; zero is checkTimeout
+	// modelsTimeout is for tests; zero is modelsTimeout.
+	modelsTimeout time.Duration
 }
 
 // Status is what Check found, with what `athena codex status` shows besides.
@@ -148,8 +154,8 @@ func (r *Runtime) Invalidate() {
 }
 
 // Status runs `codex --version` and applies Supported; writes Athena's CODEX_HOME (WriteHome); starts a short-lived
-// app-server (no thread), and asks it for the account (account/read) and, through TrustHooks, for Athena's hooks in
-// the work root. It is Ready when the version is supported, an account is logged in and the hooks are Athena's alone;
+// app-server (no thread), and asks it for the account (account/read), once logged in for the models a task may pick
+// (model/list: models, which never changes readiness), and, through TrustHooks, for Athena's hooks in the work root. It is Ready when the version is supported, an account is logged in and the hooks are Athena's alone;
 // a version newer than VerifiedVersion is Ready but not Tested. A ready result is reused for 10 minutes, or until
 // Invalidate; one that is not ready, or that the check's own 30-second bound cut short, for a minute only; and one ctx
 // cut short not at all. Calls are serialised.
@@ -253,8 +259,8 @@ func (r *Runtime) check(ctx context.Context) Status {
 	return s
 }
 
-// ask runs a short-lived app-server in cwd and fills s.Account and, with hooks, s.Hooks from it; why is set when the
-// server could not be asked at all.
+// ask runs a short-lived app-server in cwd and fills s.Account, s.Models and, with hooks, s.Hooks from it; why is set
+// when the server could not be asked at all.
 func (r *Runtime) ask(ctx context.Context, home Home, cwd string, env []string, hooks bool, s *Status) (loggedIn bool, why string) {
 	p, err := rt.StartProc(ctx, rt.ProcOptions{
 		Binary: r.binary(), Args: []string{"app-server", "--listen", "stdio://", "--strict-config"},
@@ -305,6 +311,7 @@ func (r *Runtime) ask(ctx context.Context, home Home, cwd string, env []string, 
 	s.AccountAsked = true
 	if acct.Account != nil {
 		loggedIn, s.Account = true, acct.Account.Type
+		s.Models = r.models(ctx, conn)
 	}
 	if !hooks {
 		return loggedIn, ""
@@ -319,6 +326,65 @@ func (r *Runtime) ask(ctx context.Context, home Home, cwd string, env []string, 
 		s.Hooks = "trusted"
 	}
 	return loggedIn, ""
+}
+
+// models asks the server for the models a session may name (model/list, which sends no prompt), following its
+// cursor for up to maxModelPages pages, each call bounded by modelsTimeout. The hidden ones are dropped. The model of
+// Athena's config.toml (Runtime.Model) is the default whatever the list marks, and is added when the list lacks it.
+// A list that fails or times out is no list (nil): it never changes readiness.
+func (r *Runtime) models(ctx context.Context, conn *Conn) []rt.ModelInfo {
+	bound := r.modelsTimeout
+	if bound <= 0 {
+		bound = modelsTimeout
+	}
+	var out []rt.ModelInfo
+	cursor := ""
+	for range maxModelPages {
+		params := map[string]any{}
+		if cursor != "" {
+			params["cursor"] = cursor
+		}
+		var page struct {
+			Data []struct {
+				Model       string `json:"model"`
+				DisplayName string `json:"displayName"`
+				Hidden      bool   `json:"hidden"`
+				IsDefault   bool   `json:"isDefault"`
+			} `json:"data"`
+			NextCursor *string `json:"nextCursor"`
+		}
+		cctx, cancel := context.WithTimeout(ctx, bound)
+		err := conn.Call(cctx, "model/list", params, &page)
+		cancel()
+		if err != nil {
+			return nil
+		}
+		for _, m := range page.Data {
+			if m.Hidden || m.Model == "" || slices.ContainsFunc(out, func(o rt.ModelInfo) bool { return o.ID == m.Model }) {
+				continue
+			}
+			name := m.DisplayName
+			if name == "" {
+				name = m.Model
+			}
+			out = append(out, rt.ModelInfo{ID: m.Model, Name: name, Default: m.IsDefault})
+		}
+		if page.NextCursor == nil || *page.NextCursor == "" {
+			break
+		}
+		cursor = *page.NextCursor
+	}
+	if r.Model != "" {
+		found := false
+		for i := range out {
+			out[i].Default = out[i].ID == r.Model
+			found = found || out[i].Default
+		}
+		if !found {
+			out = append(out, rt.ModelInfo{ID: r.Model, Name: r.Model, Default: true})
+		}
+	}
+	return out
 }
 
 // Login runs `codex login` against Athena's CODEX_HOME, attached to stdin, stdout and stderr: Codex itself asks for

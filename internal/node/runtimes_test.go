@@ -3,6 +3,7 @@ package node
 import (
 	"context"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -506,4 +507,34 @@ func TestWatchRuntimesFollowsReadiness(t *testing.T) {
 	h.eventually("flip checked, not ready", func() bool { s := status(); return !s.Ready && s.Why == "not logged in" })
 	ready.Store(true)
 	h.eventually("flip ready without a launch", func() bool { return status().Ready })
+}
+
+// Status lists each runtime's models: Claude Code's static list with the node's model as its default (added when it is
+// not one of the three), Codex's from its Check (fakecodex's model/list, the hidden one dropped).
+func TestStatusCarriesEachRuntimesModels(t *testing.T) {
+	h := newCodexHarness(t, "", nil)
+	h.n.RefreshRuntimes(context.Background())
+	got := map[string][]rt.ModelInfo{}
+	for _, r := range h.n.Status().Runtimes {
+		got[r.Name] = r.Models
+	}
+	claudeWant := []rt.ModelInfo{{ID: "opus", Name: "Opus"}, {ID: "sonnet", Name: "Sonnet", Default: true}, {ID: "haiku", Name: "Haiku"}}
+	if !slices.Equal(got[core.RuntimeClaude], claudeWant) {
+		t.Fatalf("claude models = %+v, want %+v", got[core.RuntimeClaude], claudeWant)
+	}
+	codexWant := []rt.ModelInfo{{ID: "gpt-5-codex", Name: "GPT-5 Codex", Default: true}, {ID: "gpt-5-codex-mini", Name: "GPT-5 Codex Mini"}}
+	if !slices.Equal(got[core.RuntimeCodex], codexWant) {
+		t.Fatalf("codex models = %+v, want %+v", got[core.RuntimeCodex], codexWant)
+	}
+
+	for model, want := range map[string][]rt.ModelInfo{
+		"opus": {{ID: "opus", Name: "Opus", Default: true}, {ID: "sonnet", Name: "Sonnet"}, {ID: "haiku", Name: "Haiku"}},
+		"claude-opus-4-1": {{ID: "opus", Name: "Opus"}, {ID: "sonnet", Name: "Sonnet"}, {ID: "haiku", Name: "Haiku"},
+			{ID: "claude-opus-4-1", Name: "claude-opus-4-1", Default: true}},
+	} {
+		h := newHarness(t, func(c *Config) { c.Model = model })
+		if s := h.n.Status().Runtimes; len(s) != 1 || !slices.Equal(s[0].Models, want) {
+			t.Fatalf("model %s: status = %+v, want models %+v", model, s, want)
+		}
+	}
 }

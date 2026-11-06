@@ -93,6 +93,7 @@
       "serverName",
       "threadId"
     ],
+    "model/list": [],
     "serverRequest/resolved": [
       "requestId",
       "threadId"
@@ -156,6 +157,7 @@
     "item/tool/call",
     "item/tool/requestUserInput",
     "mcpServer/elicitation/request",
+    "model/list",
     "serverRequest/resolved",
     "thread/resume",
     "thread/start",
@@ -189,6 +191,11 @@
     "initialize": [
       "capabilities",
       "clientInfo"
+    ],
+    "model/list": [
+      "cursor",
+      "includeHidden",
+      "limit"
     ],
     "thread/resume": [
       "approvalPolicy",
