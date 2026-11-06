@@ -25,6 +25,8 @@ message Snapshot {
   Control control = 13;
   // offers are the actions the owner keeps approving, each offered as a standing allow rule.
   OfferList offers = 14;
+  // proposals are the replies, pushes and pull requests Athena holds until the owner applies or discards them.
+  repeated ProposalView proposals = 15;
 }
 
 message Delta {
@@ -46,6 +48,9 @@ message Delta {
     Control control = 22;
     // offers carries the whole list, sent only when it changed.
     OfferList offers = 23;
+    // proposal carries one Proposal in whatever state it now has; a client drops it from its pending list once it is
+    // no longer pending.
+    ProposalView proposal = 24;
   }
 }
 
@@ -312,6 +317,31 @@ message RepoView {
   string kind = 2;
   // last_used_at is unset for a configured repository no Ticket has used.
   google.protobuf.Timestamp last_used_at = 3;
+  // owed is how many things wait on the owner in this repository (Tickets in a person stage, plus Tickets with a
+  // pending approval). Set for github repositories only.
+  int32 owed = 4;
+  // ceiling is how many things may wait on the owner here before Athena stops starting work it chose itself.
+  int32 ceiling = 5;
+  // braked is how many candidates the brake holds back in this repository.
+  int32 braked = 6;
+  // mode is live, or shadow when replies, pushes and pull requests are held for the owner. Empty for non-github kinds.
+  string mode = 7;
+}
+
+// ProposalView is a reply, push or pull request held for the owner.
+message ProposalView {
+  string id = 1;
+  string ticket_id = 2;
+  string repo = 3;
+  // kind is reply, push or pull_request.
+  string kind = 4;
+  // state is pending, applied, discarded, failed or superseded.
+  string state = 5;
+  string summary = 6;
+  // detail is the held reply text, "branch @ sha7", or the pull request title and base.
+  string detail = 7;
+  google.protobuf.Timestamp created_at = 8;
+  string error = 9;
 }
 
 message RepoList {

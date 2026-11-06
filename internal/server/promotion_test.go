@@ -78,3 +78,77 @@ func TestDismissOfferHidesUntilFiveMore(t *testing.T) {
 		t.Errorf("offers at ten = %v, want one", o)
 	}
 }
+
+func TestDispatchApplyDiscard(t *testing.T) {
+	c, _, _ := newPolicyControl(t, openStore(t))
+	putTickets(t, c.st, placedTicket("T-1", "acme/web", "", time.Now()))
+	push := func(sha string) core.Proposal {
+		p, err := c.eng.Propose(core.Proposal{TicketID: "T-1", Kind: core.ProposalPush, Summary: "push",
+			Payload: []byte(`{"branch":"athena/t-1","sha":"` + sha + `"}`)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	state := func(id string) string {
+		var s string
+		if err := c.st.Tx(func(tx *store.Tx) error {
+			p, err := tx.GetProposal(id)
+			if p != nil {
+				s = p.State
+			}
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	do := func(a *athenav1.Command) *athenav1.CommandResult {
+		a.Id = fmt.Sprint(time.Now().UnixNano())
+		// Neither command is Sensitive: no recent passkey needed.
+		return c.Do(context.Background(), web.Origin{ClientID: "phone"}, a)
+	}
+
+	// The dashboard commands.
+	p := push("aaaaaaaaaa")
+	if r := do(&athenav1.Command{Action: &athenav1.Command_ApplyProposal{ApplyProposal: &athenav1.ApplyProposal{Id: p.ID}}}); !r.GetOk() {
+		t.Fatalf("apply = %v", r)
+	}
+	if fx, err := c.eng.PendingProposals(); err != nil || len(fx) != 1 || fx[0].ID != p.ID {
+		t.Errorf("an applied push waits for the node; pending = %v, %v", fx, err)
+	}
+	q := push("bbbbbbbbbb")
+	if r := do(&athenav1.Command{Action: &athenav1.Command_DiscardProposal{DiscardProposal: &athenav1.DiscardProposal{Id: q.ID}}}); !r.GetOk() {
+		t.Fatalf("discard = %v", r)
+	}
+	if got := state(q.ID); got != core.ProposalDiscarded {
+		t.Errorf("discarded proposal is %s", got)
+	}
+	if r := do(&athenav1.Command{Action: &athenav1.Command_DiscardProposal{DiscardProposal: &athenav1.DiscardProposal{Id: q.ID}}}); r.GetOk() {
+		t.Errorf("discarding twice = %v, want refused", r)
+	}
+
+	// The control ops.
+	r := push("cccccccccc")
+	if _, err := c.handleRequest(Request{Op: OpDiscard, ID: r.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if got := state(r.ID); got != core.ProposalDiscarded {
+		t.Errorf("op discard left %s", got)
+	}
+	s := push("dddddddddd")
+	if _, err := c.handleRequest(Request{Op: OpApply, ID: s.ID}); err != nil {
+		t.Fatal(err)
+	}
+	// A newer push supersedes the older pending one, so only the last is listed.
+	list, err := c.handleRequest(Request{Op: OpProposals})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rows := list.([]ProposalRow); len(rows) != 1 || rows[0].ID != s.ID || rows[0].Kind != "push" || rows[0].Repo != "acme/web" {
+		t.Errorf("proposals op = %+v", rows)
+	}
+	if _, err := c.handleRequest(Request{Op: OpApply, ID: "nope"}); err == nil {
+		t.Error("applying an unknown proposal succeeded")
+	}
+}

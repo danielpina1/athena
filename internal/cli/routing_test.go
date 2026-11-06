@@ -227,3 +227,29 @@ func TestRoutingViewsGolden(t *testing.T) {
 		}
 	}
 }
+
+func TestCLIProposals(t *testing.T) {
+	dir := startServer(t)
+	ctx := context.Background()
+	if code, out, errOut := athena(ctx, "proposals", "--state-dir", dir); code != 0 || errOut != "" || out != "nothing is held for you\n" {
+		t.Fatalf("proposals: %d %q %q", code, out, errOut)
+	}
+	for _, c := range []struct{ args []string }{{[]string{"apply", "p-1"}}, {[]string{"discard", "p-1"}}} {
+		if code, out, errOut := athena(ctx, append(c.args, "--state-dir", dir)...); code != 1 || out != "" || errOut == "" {
+			t.Errorf("%v: %d %q %q, want exit 1 for an unknown proposal", c.args, code, out, errOut)
+		}
+	}
+	if code, _, errOut := athena(ctx, "apply", "--state-dir", dir); code != 2 || errOut == "" {
+		t.Errorf("apply without an id: %d %q, want a usage error", code, errOut)
+	}
+}
+
+func TestProposalLineFormat(t *testing.T) {
+	got := proposalLine(server.ProposalRow{ID: "p-1", Repo: "acme/web", Kind: "pull_request", Summary: "Open a pull request"})
+	if want := "p-1  acme/web  pull_request  Open a pull request"; got != want {
+		t.Errorf("line = %q, want %q", got, want)
+	}
+	if got := proposalLine(server.ProposalRow{ID: "p-2", Kind: "reply", Summary: "Reply"}); got != "p-2  -  reply  Reply" {
+		t.Errorf("a proposal without a repository: %q", got)
+	}
+}

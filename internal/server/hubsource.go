@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -297,6 +298,9 @@ func (s hubSource) Repos() ([]*athenav1.RepoView, error) {
 			out[i].LastUsedAt = timestamppb.New(e.at)
 		}
 	}
+	if err := s.brakeNumbers(out); err != nil {
+		return nil, err
+	}
 	local := 0
 	for _, dir := range s.d.local.list() {
 		if local == maxLocalRepos {
@@ -308,6 +312,66 @@ func (s hubSource) Repos() ([]*athenav1.RepoView, error) {
 		}
 	}
 	return out, nil
+}
+
+// brakeNumbers fills, for each GitHub repository, what waits on the owner there, the ceiling it is held to, how many
+// candidates the brake holds and whether its work is held for the owner. Without a Policy yet the ceiling is the
+// default and the mode live.
+func (s hubSource) brakeNumbers(repos []*athenav1.RepoView) error {
+	hasGitHub := false
+	for _, r := range repos {
+		hasGitHub = hasGitHub || r.Kind == "github"
+	}
+	if !hasGitHub {
+		return nil
+	}
+	var tickets []core.Ticket
+	var approvals []core.Approval
+	var brakes []core.Brake
+	err := s.d.st.Tx(func(tx *store.Tx) error {
+		open, err := tx.OpenTickets()
+		if err != nil {
+			return err
+		}
+		for _, t := range open {
+			tickets = append(tickets, *t)
+		}
+		pending, err := tx.PendingApprovals()
+		if err != nil {
+			return err
+		}
+		for _, a := range pending {
+			approvals = append(approvals, *a)
+		}
+		brakes, err = tx.Brakes()
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	var pol core.Policy
+	if s.d.policy != nil {
+		pol = s.d.policy.policy()
+	}
+	for _, r := range repos {
+		if r.Kind != "github" {
+			continue
+		}
+		r.Owed = int32(core.OwedAttention(tickets, approvals, r.Name))
+		r.Ceiling, r.Mode = policy.DefaultWIPCeiling, "live"
+		if pol != nil {
+			r.Ceiling = int32(pol.WIPCeiling(r.Name))
+			if pol.Shadow(r.Name) {
+				r.Mode = "shadow"
+			}
+		}
+		for _, b := range brakes {
+			if strings.EqualFold(b.Repo, r.Name) {
+				r.Braked++
+			}
+		}
+	}
+	return nil
 }
 
 // Notifications returns the kinds an owner can mute and the ones they muted.

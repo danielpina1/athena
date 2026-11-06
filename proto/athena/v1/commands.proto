@@ -36,6 +36,8 @@ message Command {
     Resume resume = 32;
     AllowAction allow_action = 33;
     DismissOffer dismiss_offer = 34;
+    ApplyProposal apply_proposal = 35;
+    DiscardProposal discard_proposal = 36;
   }
 }
 
@@ -201,4 +203,14 @@ message AllowAction {
 // DismissOffer hides an offer until the owner has approved the class as many times again.
 message DismissOffer {
   string class = 1;
+}
+
+// ApplyProposal lets a held reply, push or pull request go.
+message ApplyProposal {
+  string id = 1;
+}
+
+// DiscardProposal drops a held reply, push or pull request.
+message DiscardProposal {
+  string id = 1;
 }

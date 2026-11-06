@@ -47,6 +47,9 @@ var usage = map[string]string{
 	"unsubscribe": "athena unsubscribe <thread>",
 	"pause":       "athena pause",
 	"resume":      "athena resume",
+	"proposals":   "athena proposals",
+	"apply":       "athena apply <id>",
+	"discard":     "athena discard <id>",
 	"status":      "athena status [<id>] [--all]",
 	"logs":        "athena logs <id> [-f]",
 	"reply":       `athena reply <id> "<text>"`,
@@ -105,6 +108,8 @@ func Run(ctx context.Context, cmd string, args []string, stdout, stderr io.Write
 		return c.decisions(args)
 	case "pause", "resume":
 		return c.pauseCommand(args)
+	case "proposals", "apply", "discard":
+		return c.proposalCommand(args)
 	case "reevaluate", "dismiss", "unsubscribe":
 		return c.routingCommand(args)
 	default: // approve, deny

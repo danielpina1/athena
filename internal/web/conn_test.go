@@ -59,13 +59,15 @@ func (*connSource) AnsweredApprovals(int) ([]core.Approval, error) { return nil,
 func (*connSource) TicketAnsweredApprovals(string) ([]core.Approval, error) {
 	return nil, nil
 }
-func (*connSource) Repos() ([]*athenav1.RepoView, error)       { return nil, nil }
-func (*connSource) GitFolder(string) bool                      { return false }
-func (*connSource) Trust(core.Trigger) string                  { return "" }
-func (*connSource) Notifications() ([]string, []string, error) { return nil, nil, nil }
-func (*connSource) Prompts() (*athenav1.PromptsView, error)    { return &athenav1.PromptsView{}, nil }
-func (*connSource) Control() pause.State                       { return pause.State{} }
-func (*connSource) Offers() ([]hub.Offer, error)               { return nil, nil }
+func (*connSource) Repos() ([]*athenav1.RepoView, error)            { return nil, nil }
+func (*connSource) GitFolder(string) bool                           { return false }
+func (*connSource) Trust(core.Trigger) string                       { return "" }
+func (*connSource) Notifications() ([]string, []string, error)      { return nil, nil, nil }
+func (*connSource) Prompts() (*athenav1.PromptsView, error)         { return &athenav1.PromptsView{}, nil }
+func (*connSource) Control() pause.State                            { return pause.State{} }
+func (*connSource) Offers() ([]hub.Offer, error)                    { return nil, nil }
+func (*connSource) Proposals() ([]*athenav1.ProposalView, error)    { return nil, nil }
+func (*connSource) Proposal(string) (*athenav1.ProposalView, error) { return nil, nil }
 func (*connSource) Approval(string) (core.Approval, error) {
 	return core.Approval{}, errors.New("none")
 }

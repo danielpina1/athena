@@ -800,3 +800,11 @@ func TestViewsCarryTrust(t *testing.T) {
 		t.Errorf("trigger trust = %q", v.Trust)
 	}
 }
+
+func TestTicketSummaryNeedsYouForProposal(t *testing.T) {
+	tk := core.Ticket{ID: "T-1", Title: "x", PendingProposals: 1}
+	v := ticketSummary(&tk, core.TicketStage(&tk), nil)
+	if !v.NeedsYou || v.Stage != "person" || v.Action != "proposal" {
+		t.Errorf("summary = %v, want needs_you with stage person and action proposal", v)
+	}
+}

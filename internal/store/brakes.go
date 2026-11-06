@@ -19,13 +19,18 @@ func (tx *Tx) PutBrake(b core.Brake) error {
 	if err != nil {
 		return fmt.Errorf("store: put brake %q: %w", b.TriggerID, err)
 	}
+	tx.changes.Brakes = true
 	return nil
 }
 
 // DeleteBrake removes the Brake of a Trigger; none is not an error.
 func (tx *Tx) DeleteBrake(triggerID string) error {
-	if _, err := tx.sql.Exec(`DELETE FROM brakes WHERE trigger_id = ?`, triggerID); err != nil {
+	res, err := tx.sql.Exec(`DELETE FROM brakes WHERE trigger_id = ?`, triggerID)
+	if err != nil {
 		return fmt.Errorf("store: delete brake %q: %w", triggerID, err)
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		tx.changes.Brakes = true
 	}
 	return nil
 }

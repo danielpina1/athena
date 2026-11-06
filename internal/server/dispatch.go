@@ -195,6 +195,13 @@ func (d *Dispatcher) handleRequest(req Request) (any, error) {
 		return out, nil
 	case OpPause, OpResume:
 		return nil, d.setPaused(req.Op == OpPause, "cli")
+	case OpProposals:
+		return d.proposals()
+	case OpApply:
+		_, err := d.eng.ApplyProposal(req.ID)
+		return nil, err
+	case OpDiscard:
+		return nil, d.eng.DiscardProposal(req.ID)
 	case OpReevaluate:
 		return nil, d.eng.Reevaluate(req.ID)
 	case OpDismiss:
@@ -396,6 +403,14 @@ func (d *Dispatcher) act(o web.Origin, c *athenav1.Command) *athenav1.CommandRes
 			return proto.Clone(reauthRequired).(*athenav1.CommandResult)
 		}
 		if err := d.setPaused(false, "web"); err != nil {
+			return d.failure(err)
+		}
+	case *athenav1.Command_ApplyProposal:
+		if _, err := d.eng.ApplyProposal(a.ApplyProposal.GetId()); err != nil {
+			return d.failure(err)
+		}
+	case *athenav1.Command_DiscardProposal:
+		if err := d.eng.DiscardProposal(a.DiscardProposal.GetId()); err != nil {
 			return d.failure(err)
 		}
 	case *athenav1.Command_AllowAction:

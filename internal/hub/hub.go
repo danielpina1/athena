@@ -99,6 +99,10 @@ type Source interface {
 	Control() pause.State
 	// Offers returns the standing allow rules on offer (see Offers).
 	Offers() ([]Offer, error)
+	// Proposals returns the pending Proposals, oldest first.
+	Proposals() ([]*athenav1.ProposalView, error)
+	// Proposal returns one Proposal in whatever state it has.
+	Proposal(id string) (*athenav1.ProposalView, error)
 }
 
 type ringEntry struct {
@@ -123,6 +127,7 @@ type Hub struct {
 	healthTick time.Duration
 
 	mu        sync.Mutex
+	owing     map[string]bool // the Tickets last seen in a person stage (see owedMoved)
 	seq       uint64
 	floor     uint64 // the oldest cursor a resume can start from: ring[0].seq-1, or seq when the ring is empty
 	ring      []ringEntry
@@ -169,7 +174,7 @@ func New(src Source, log *slog.Logger) *Hub {
 	return &Hub{
 		src: src, log: log, epoch: hex.EncodeToString(b[:]), now: time.Now,
 		in: make(chan store.Changes, changeBuffer), wake: make(chan struct{}, 1), nodeWake: make(chan struct{}, 1),
-		reposWake: make(chan struct{}, 1), healthTick: healthEvery, subs: map[*Sub]struct{}{}, healthSince: map[string]healthState{},
+		reposWake: make(chan struct{}, 1), healthTick: healthEvery, subs: map[*Sub]struct{}{}, healthSince: map[string]healthState{}, owing: map[string]bool{},
 		folders: map[string]bool{}, actors: map[string]string{}, quotaEvery: quotaEvery,
 	}
 }
@@ -227,8 +232,17 @@ func (h *Hub) Start(ctx context.Context) {
 	}
 	notifs, _ := h.notificationsView()
 	offers, _ := h.offersView()
+	owing := map[string]bool{}
+	if open, err := h.src.Tickets(0); err == nil {
+		for i := range open {
+			if core.TicketStage(&open[i]).Stage == "person" {
+				owing[open[i].ID] = true
+			}
+		}
+	}
 	h.mu.Lock()
 	h.health, h.node, h.repos, h.notifs, h.offers = health, n, repos, notifs, offers
+	h.owing = owing
 	h.mu.Unlock()
 	h.running.Add(2) // the loop and its probe
 	go h.run(ctx)
@@ -326,12 +340,15 @@ func (h *Hub) apply(c store.Changes) {
 			h.lost("read ticket", "id", id, "error", err)
 			return
 		}
-		reposStale = reposStale || h.placementNew(&t)
+		reposStale = h.owedMoved(&t, st) || reposStale || h.placementNew(&t)
 		h.publish(&athenav1.Delta{Change: &athenav1.Delta_Ticket{Ticket: ticketSummary(&t, st, h.src.GitFolder)}})
 		if h.watched(id) {
 			h.sendDetail(id, h.detail(&t, st))
 		}
 	}
+	// A repository's owed, ceiling, braked and mode move with a Ticket of a repository, an Approval, a held or released
+	// candidate (Brakes) and a Policy revision: the commits that cannot change them do not read the Source again.
+	reposStale = reposStale || c.Brakes || c.Policy || len(c.Approvals) > 0
 	if reposStale {
 		if !h.publishRepos() {
 			return
@@ -382,6 +399,14 @@ func (h *Hub) apply(c store.Changes) {
 		}
 		h.publish(&athenav1.Delta{Change: &athenav1.Delta_Prompts{Prompts: p}})
 	}
+	for _, id := range c.Proposals {
+		p, err := h.src.Proposal(id)
+		if err != nil {
+			h.lost("read proposal", "id", id, "error", err)
+			return
+		}
+		h.publish(&athenav1.Delta{Change: &athenav1.Delta_Proposal{Proposal: p}})
+	}
 	if c.Offers || c.Policy || len(c.Approvals) > 0 {
 		if !h.publishOffers() {
 			return
@@ -413,6 +438,21 @@ func (h *Hub) policyView() (*athenav1.PolicyView, error) {
 		return nil, err
 	}
 	return &athenav1.PolicyView{Revision: uint32(rev), Version: version, SettingsJson: settings}, nil
+}
+
+// owedMoved records whether the Ticket waits on the owner (a person stage) and reports whether that changed for a
+// Ticket of a repository: only then did the repository's owed count move, so a progress commit does not read the repos.
+func (h *Hub) owedMoved(t *core.Ticket, st core.Stage) bool {
+	owing := st.Stage == "person"
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	was := h.owing[t.ID]
+	if owing {
+		h.owing[t.ID] = true
+	} else {
+		delete(h.owing, t.ID)
+	}
+	return t.Repo != "" && was != owing
 }
 
 // placementNew reports whether the Ticket can change the known repositories: its repository or folder is not in the
@@ -841,6 +881,9 @@ func (h *Hub) Snapshot() (*athenav1.Snapshot, error) {
 	}
 	s.Control = controlView(h.src.Control())
 	if s.Offers, err = h.offersView(); err != nil {
+		return nil, err
+	}
+	if s.Proposals, err = h.src.Proposals(); err != nil {
 		return nil, err
 	}
 	return s, nil
