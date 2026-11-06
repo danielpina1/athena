@@ -221,9 +221,13 @@ func TestRestartWhilePausedStaysParked(t *testing.T) {
 	}
 }
 
-// Pause parks a session at the end of its turn; resume starts it again on the same Assignment. The Ticket records the
-// pause (Paused by the owner) and the resume (Resumed).
-func TestResumeRelaunchesParked(t *testing.T) {
+// pausedText opens the first message of a session started again after the pause parked it.
+const pausedText = "Athena was paused by its owner at the end of your last turn"
+
+// parkedServer starts a server whose session parks under the pause at the end of its first turn, after filing a
+// progress Report when report is set; it returns the server, the fake's logs, the Ticket and its Assignment.
+func parkedServer(t *testing.T, report bool) (*testServer, fakeEnv, string, core.Assignment) {
+	t.Helper()
 	fake := newFakeEnv(t, claudeFixture(t, "simple-turn.jsonl"))
 	hold := filepath.Join(t.TempDir(), "turn-may-end")
 	t.Setenv("ATHENA_FAKE_HOLD_RESULT", hold)
@@ -231,10 +235,12 @@ func TestResumeRelaunchesParked(t *testing.T) {
 	s := startServerWith(t, dir, fastClose)
 	id := s.submit("Task\nbody-r3s4")
 	a := s.running(id)
-	var resp node.Response
-	nodeCall(t, dir, node.ReportRequest{Op: node.OpReport, Ticket: id, Assignment: a.ID, Status: "progress", Summary: "going"}, &resp)
-	if !resp.OK {
-		t.Fatalf("report = %+v", resp)
+	if report {
+		var resp node.Response
+		nodeCall(t, dir, node.ReportRequest{Op: node.OpReport, Ticket: id, Assignment: a.ID, Status: "progress", Summary: "going"}, &resp)
+		if !resp.OK {
+			t.Fatalf("report = %+v", resp)
+		}
 	}
 	s.ok(Request{Op: OpPause}, nil)
 	if err := os.WriteFile(hold, nil, 0o600); err != nil { // the turn ends
@@ -242,19 +248,58 @@ func TestResumeRelaunchesParked(t *testing.T) {
 	}
 	eventually(t, "the session parked", func() bool {
 		got := s.interruptions(id)
-		return len(got) == 1 && got[0].Reason == core.InterruptPaused && got[0].ResumedAt == nil
+		return len(got) == 1 && got[0].Reason == core.InterruptPaused && got[0].ResumedAt == nil && got[0].ReportOwed == !report
 	})
 	time.Sleep(200 * time.Millisecond)
 	if n := len(fake.invocations(t)); n != 1 {
 		t.Fatalf("claude started %d times while paused, want 1", n)
 	}
+	return s, fake, id, a
+}
 
+// Controller ruling R6: an idle session the pause parked, with nothing waiting for it, is not started on resume. The
+// pause closes (Paused by the owner, then Resumed) and the Assignment waits, running, for its next Input, which resumes
+// its session.
+func TestResumeLeavesIdleParkedUntilInput(t *testing.T) {
+	s, fake, id, a := parkedServer(t, true)
+	s.ok(Request{Op: OpResume}, nil)
+	eventually(t, "the pause closed by the resume", func() bool {
+		got := s.interruptions(id)
+		return len(got) == 1 && got[0].Reason == core.InterruptPaused && got[0].ResumedAt != nil
+	})
+	time.Sleep(300 * time.Millisecond)
+	if n := len(fake.invocations(t)); n != 1 {
+		t.Fatalf("claude started %d times after the resume of an idle session, want 1", n)
+	}
+	if d := s.detail(id); len(d.Assignments) != 1 || d.Assignments[0].ID != a.ID || d.Assignments[0].State != core.AssignmentRunning {
+		t.Fatalf("after the resume: %+v, want the same Assignment running", d.Assignments)
+	}
+
+	s.ok(Request{Op: OpReply, ID: id, Text: "after-resume-5d6e"}, nil)
+	eventually(t, "the input resumed the session", func() bool { return len(fake.invocations(t)) == 2 })
+	if rid, ok := argValue(fake.invocations(t)[1], "--resume"); !ok || rid != fixtureSessionID {
+		t.Fatalf("second start args = %v, want --resume %s", fake.invocations(t)[1], fixtureSessionID)
+	}
+	eventually(t, "the input sent", func() bool { return strings.Contains(fake.stdin(t), "after-resume-5d6e") })
+	if in := fake.stdin(t); !strings.Contains(in, resumeText) || strings.Contains(in, pausedText) {
+		t.Fatalf("stdin = %q, want the resume note of an idle session, not the pause note", in)
+	}
+	if d := s.detail(id); len(d.Assignments) != 1 || d.Assignments[0].ID != a.ID || d.Stage != "working" {
+		t.Fatalf("after the input: stage %q, assignments %+v, want the same Assignment working", d.Stage, d.Assignments)
+	}
+}
+
+// A session parked owing its Report (its turn ended without one while paused) is started again on resume, on the same
+// Assignment, with the pause note asking for it. The pause closes as resumed.
+func TestResumeRelaunchesParkedOwingReport(t *testing.T) {
+	s, fake, id, a := parkedServer(t, false)
 	s.ok(Request{Op: OpResume}, nil)
 	eventually(t, "the session started again", func() bool { return len(fake.invocations(t)) == 2 })
 	if rid, ok := argValue(fake.invocations(t)[1], "--resume"); !ok || rid != fixtureSessionID {
 		t.Fatalf("second start args = %v, want --resume %s", fake.invocations(t)[1], fixtureSessionID)
 	}
-	eventually(t, "the pause closed by the resume", func() bool {
+	eventually(t, "the pause note sent", func() bool { return strings.Contains(fake.stdin(t), pausedText) })
+	eventually(t, "the pause closed by the start", func() bool {
 		got := s.interruptions(id)
 		return len(got) == 1 && got[0].Reason == core.InterruptPaused && got[0].ResumedAt != nil
 	})

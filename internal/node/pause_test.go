@@ -89,6 +89,46 @@ func TestPauseParksAtTurnEnd(t *testing.T) {
 	})
 }
 
+// A turn that ends without a Report while paused is not nudged into a new turn: the session parks owing the Report,
+// which the pause records so the resume asks for it.
+func TestPausedTurnWithoutReportParksUnnudged(t *testing.T) {
+	hold := filepath.Join(t.TempDir(), "turn-may-end")
+	t.Setenv("ATHENA_FAKE_HOLD_RESULT", hold)
+	h := newHarness(t, func(c *Config) { c.CloseGrace = 300 * time.Millisecond })
+	tk := h.submit("Task", t.TempDir())
+	h.running(tk.ID)
+	h.n.SetPaused(true)
+	if err := os.WriteFile(hold, nil, 0o600); err != nil { // the turn ends, no Report filed
+		t.Fatal(err)
+	}
+	h.eventually("the session parked", func() bool { return h.n.liveSession(tk.ID) == nil && h.parkedByPause(tk.ID) })
+	if strings.Contains(h.stdin(), nudgeText) {
+		t.Fatalf("stdin = %q, want no nudge while paused", h.stdin())
+	}
+	if n, _ := h.starts(tk.ID); n != 1 {
+		t.Fatalf("claude started %d times, want 1", n)
+	}
+	got, _ := h.ticket(tk.ID)
+	if i := got.LatestAssignment().OpenInterruption(); i == nil || !i.ReportOwed {
+		t.Fatalf("interruption = %+v, want the pause owing a Report", i)
+	}
+}
+
+// A Start that arrives while the session the pause parked is still leaving starts it again once it left.
+func TestStartWhileParkedSessionLeavesRelaunches(t *testing.T) {
+	h := newHarness(t, nil)
+	tk := h.submit("Task", t.TempDir())
+	h.running(tk.ID)
+	s := h.n.liveSession(tk.ID)
+	s.markPauseParked()
+	got, _ := h.ticket(tk.ID)
+	h.n.Start(got, *got.LatestAssignment())
+	h.eventually("the start noted on the live session", func() bool { return s.startsWhenLeft() })
+	if n, _ := h.starts(tk.ID); n != 1 {
+		t.Fatalf("claude started %d times while the session was live, want 1", n)
+	}
+}
+
 // An idle session (its turn ended well, nothing sent since) parks as soon as the node pauses. An Input that arrives
 // while it is parked waits for the resume, then reaches the relaunched session.
 func TestPauseParksIdleSessionAtOnce(t *testing.T) {

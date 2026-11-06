@@ -129,6 +129,9 @@ type EngineCallbacks interface {
 	TurnEnded(ticketID, assignmentID string) error
 	// AssignmentInterrupted records that the session of a busy Assignment is cut short from outside (a shutdown).
 	AssignmentInterrupted(ticketID, assignmentID, reason string) error
+	// AssignmentPaused records that the owner's pause parked the session at the end of its turn (reportOwed: the turn
+	// ended without the Report the worker owed).
+	AssignmentPaused(ticketID, assignmentID string, reportOwed bool) error
 	// UsageLimited records that the session of a running Assignment stopped at its usage limit: a new Assignment takes
 	// over, with no person stage.
 	UsageLimited(ticketID, assignmentID string, l core.UsageLimit) error
@@ -491,6 +494,7 @@ func (n *Node) onStart(st *loopState, t core.Ticket, a core.Assignment) {
 		return
 	}
 	if s := n.liveSession(t.ID); s != nil && s.a.ID == a.ID {
+		s.startWhenLeft() // a session the pause parked, still leaving, starts again once it left
 		return
 	}
 	for i, q := range st.queue {
@@ -597,9 +601,9 @@ func (n *Node) onEnded(st *loopState, s *session) {
 			}
 			st.queue = append(st.queue, ns)
 		}
-	} else if !st.shutting && !s.isStopped() && (len(s.deliverCh) > 0 || n.relaunchAfterPause(s)) {
-		// Inputs arrived after the runner stopped listening, or the pause that parked it was lifted before it left:
-		// launch the Assignment again.
+	} else if !st.shutting && !s.isStopped() && (len(s.deliverCh) > 0 || s.startsWhenLeft()) {
+		// Inputs arrived after the runner stopped listening, or the resume started it while the pause that parked it
+		// still closed it: launch the Assignment again.
 		a := s.a
 		a.State = core.AssignmentRunning
 		if id := s.currentSessionID(); id != "" {
@@ -729,8 +733,10 @@ type session struct {
 	// request); parked once its runner ended the process for it, the Assignment running on with its session.
 	handoff bool
 	parked  bool
-	// pauseParked is set once the node's pause parked the session (pause.go).
+	// pauseParked is set once the node's pause parked the session; startAgain once a Start came for it while it was
+	// still leaving (pause.go).
 	pauseParked bool
+	startAgain  bool
 	// wait is set when the launch cannot go yet (GitHub credentials, its runtime limited or at its session cap): it
 	// is queued again, without a slot, to be tried after the pause.
 	wait launchWait
@@ -1075,6 +1081,8 @@ type runner struct {
 	paused bool
 	// restarted is set when the first process resumes a session a server restart cut short.
 	restarted bool
+	// reportOwed is set when a turn ended while paused without the Report the worker owed (pause.go).
+	reportOwed bool
 	// redeliver is set when sending waiting Inputs failed while the process ran: the next turn end tries again.
 	redeliver bool
 	// handoff is the handoff note (handoff.go) the first message of the Assignment's first process carries, if any.
@@ -1125,7 +1133,7 @@ func (r *runner) run() {
 	// The runtime first: a launch whose runtime is limited (or at its session cap) waits without a slot, like one
 	// waiting for credentials; one whose runtime cannot run it fails with why.
 	rtm, ok := r.chooseRuntime()
-	if !ok || r.putOffForPause() {
+	if !ok {
 		return
 	}
 	// GitHub credentials that cannot be had yet (GitHub unreachable, the bot not known yet) delay the launch; they are
@@ -1193,6 +1201,9 @@ func (r *runner) run() {
 		r.handoff, failover = r.handoffFor(rtm.Name(), resumeID)
 	}
 	for crashes := 0; ; {
+		if crashes == 0 && r.putOffForPause() {
+			return // paused while it prepared: its first turn waits for the resume
+		}
 		spawnStart := time.Now()
 		// One transcript per process: the session appends every line it prints, and it is closed after the process.
 		tr, err := rt.OpenTranscript(trPath, func(off int64, line []byte) { n.streams.add(s.t.ID, off, line) })
@@ -1737,7 +1748,9 @@ func (r *runner) onEvent(ev rt.Event) {
 		// The turn that took in everything sent before its end is over.
 		r.markRead(-1)
 		r.idle = true
-		r.turnEnded()
+		if !r.owesReportAtPause() { // paused, the session parks owing its Report instead of a nudged turn
+			r.turnEnded()
+		}
 		r.parkIfHandedOff()
 		r.parkIfPaused()
 	}

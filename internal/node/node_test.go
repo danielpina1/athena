@@ -1256,6 +1256,7 @@ func (b blockingEngine) FileReview(string, string, string, string) error {
 	b.wait()
 	return nil
 }
+func (b blockingEngine) AssignmentPaused(string, string, bool) error { b.wait(); return nil }
 func (b blockingEngine) AssignmentInterrupted(string, string, string) error {
 	b.wait()
 	return nil

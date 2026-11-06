@@ -45,45 +45,65 @@ func (s *session) pokePause() {
 
 func (s *session) markPauseParked() {
 	s.mu.Lock()
-	s.pauseParked = true
-	s.parked = true
+	s.pauseParked, s.parked = true, true
 	s.mu.Unlock()
 }
 
-func (s *session) parkedForPause() bool {
+func (s *session) unmarkPauseParked() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.pauseParked
+	s.pauseParked, s.parked = false, false
+	s.mu.Unlock()
 }
 
-// relaunchAfterPause reports whether a session the pause parked is to start again as it leaves: the node was resumed
-// before its runner ended, so the resume's Start found it still live and changed nothing.
-func (n *Node) relaunchAfterPause(s *session) bool {
-	return s.parkedForPause() && !n.Paused()
+// startWhenLeft notes a Start of the session's Assignment while the session is live: one the pause parked is closing,
+// so it starts again once it left (onEnded). It changes nothing for any other session.
+func (s *session) startWhenLeft() {
+	s.mu.Lock()
+	if s.pauseParked {
+		s.startAgain = true
+	}
+	s.mu.Unlock()
+}
+
+func (s *session) startsWhenLeft() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.startAgain
+}
+
+// owesReportAtPause decides, at a turn end, whether the session parks owing its Report: while paused, a turn that ended
+// without the Report it owed, and was not nudged yet, is not nudged into a new turn. It reports whether the nudge is
+// skipped; the pause records the Report owed, and the relaunch's pause note asks for it.
+func (r *runner) owesReportAtPause() bool {
+	r.reportOwed = r.n.Paused() && !r.nudged && r.s.reportCount() <= r.inputReports
+	return r.reportOwed
 }
 
 // parkIfPaused parks the session while the node is paused and its turn is over with nothing sent since: it records the
-// turn's end and the paused Interruption (in that order, so a restart sees the Interruption after the idle turn), and
-// the runner ends the process. A turn that waits on an Approval is not over: it parks when it ends.
+// turn's end, then the pause (AssignmentPaused, with whether the turn owed a Report), so a restart sees the Interruption
+// after the idle turn; the runner ends the process. A turn that waits on an Approval is not over: it parks when it ends.
 func (r *runner) parkIfPaused() {
 	s := r.s
 	if !r.n.Paused() || !r.idle || r.park || !r.initSeen || !r.started || s.isStopped() {
 		return
 	}
+	// Marked first: a resume's Start that comes once the pause is recorded finds the session parked (startWhenLeft).
+	s.markPauseParked()
 	if err := r.eng.TurnEnded(s.t.ID, s.a.ID); err != nil {
 		r.log.Error("record turn end", "error", err)
+		s.unmarkPauseParked()
 		return
 	}
-	if err := r.eng.AssignmentInterrupted(s.t.ID, s.a.ID, core.InterruptPaused); err != nil {
-		r.log.Error("record interruption", "error", err)
+	if err := r.eng.AssignmentPaused(s.t.ID, s.a.ID, r.reportOwed); err != nil {
+		r.log.Error("record pause", "error", err)
+		s.unmarkPauseParked()
 		return
 	}
-	r.log.Info("athena is paused; session parked at the end of its turn")
-	s.markPauseParked()
+	r.log.Info("athena is paused; session parked at the end of its turn", "reportOwed", r.reportOwed)
 	r.park = true
 }
 
-// putOffForPause puts off a launch about to start its process while the node is paused: the runner ends and the loop
+// putOffForPause puts off a launch about to start its first process while the node is paused: the runner ends and the loop
 // queues it again, held until the resume.
 func (r *runner) putOffForPause() bool {
 	if !r.n.Paused() {

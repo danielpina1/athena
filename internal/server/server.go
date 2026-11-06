@@ -524,6 +524,9 @@ func recoverAssignments(eng *core.Engine, n *node.Node, log *slog.Logger) {
 			continue
 		}
 		if a.State == core.AssignmentRunning && !interrupted(&t, a) {
+			if !n.Paused() {
+				liftPause(eng, &t, a, log) // a resume the server stopped before it got to
+			}
 			log.Info("idle assignment resumes on its next input", "ticket", t.ID, "assignment", a.ID)
 			continue
 		}
@@ -546,9 +549,10 @@ func recoverAssignments(eng *core.Engine, n *node.Node, log *slog.Logger) {
 }
 
 // resumeParked starts again, on resume, what the pause held, as recovery does: of every open Ticket, a pending latest
-// Assignment and a running one that was interrupted (its session parked by the pause or cut short by a restart, or
+// Assignment and a running one that was interrupted (cut short by a restart, parked by the pause owing its Report, or
 // Inputs wait for it). The node resumes a session with the pause or restart note. A Start of one that is queued or
-// still live changes nothing.
+// still live changes nothing. An idle session the pause parked with nothing waiting is not started: its pause closes
+// (liftPause) and its next Input resumes it, as after a restart.
 func resumeParked(eng *core.Engine, n *node.Node, log *slog.Logger) {
 	tickets, err := eng.Tickets(false)
 	if err != nil {
@@ -557,7 +561,14 @@ func resumeParked(eng *core.Engine, n *node.Node, log *slog.Logger) {
 	}
 	for _, t := range tickets {
 		a := t.LatestAssignment()
-		if a == nil || !(a.State == core.AssignmentPending || a.State == core.AssignmentRunning && interrupted(&t, a)) {
+		if a == nil {
+			continue
+		}
+		if a.State == core.AssignmentRunning && !interrupted(&t, a) {
+			liftPause(eng, &t, a, log)
+			continue
+		}
+		if a.State != core.AssignmentPending && a.State != core.AssignmentRunning {
 			continue
 		}
 		log.Info("resuming assignment", "ticket", t.ID, "assignment", a.ID, "state", a.State, "undelivered", len(t.Undelivered))
@@ -565,10 +576,23 @@ func resumeParked(eng *core.Engine, n *node.Node, log *slog.Logger) {
 	}
 }
 
+// liftPause closes the open pause of an idle running Assignment that is not started again (PauseLifted: resumed
+// without a start); anything else is left alone.
+func liftPause(eng *core.Engine, t *core.Ticket, a *core.Assignment, log *slog.Logger) {
+	if i := a.OpenInterruption(); i == nil || i.Reason != core.InterruptPaused {
+		return
+	}
+	if err := eng.PauseLifted(t.ID, a.ID); err != nil {
+		log.Error("resume: close the pause", "ticket", t.ID, "assignment", a.ID, "error", err)
+		return
+	}
+	log.Info("pause closed; the idle assignment resumes on its next input", "ticket", t.ID, "assignment", a.ID)
+}
+
 // interrupted reports whether a running Assignment was busy when the server stopped: no turn of its worker ended
 // since it started, an Input (or the nudge to report) reached it after its turn last ended, Inputs wait for it, a
 // shutdown recorded an interruption that no start has closed and no turn ended after, or the owner's pause parked its
-// session (one that handed off waits for its next Input).
+// session at the end of a turn that owed a Report.
 // A Ticket whose latest Report is failed or blocked, with no person's message since, waits for a person instead: a
 // failed turn may skip the Stop hook, but nothing is to run until someone answers (plan 1 R34).
 func interrupted(t *core.Ticket, a *core.Assignment) bool {
@@ -576,8 +600,8 @@ func interrupted(t *core.Ticket, a *core.Assignment) bool {
 		return false
 	}
 	if i := a.OpenInterruption(); i != nil && i.Reason == core.InterruptPaused {
-		// The pause parked it at the end of a turn; one that handed off starts again on its next Input instead.
-		return !t.HandedOff() || len(t.Undelivered) > 0
+		// The pause parked it at the end of a turn: it starts again only to give the Report it owed or to take Inputs.
+		return i.ReportOwed || len(t.Undelivered) > 0
 	}
 	if i := a.OpenInterruption(); i != nil && (a.IdleAt == nil || !a.IdleAt.After(i.At)) {
 		return true

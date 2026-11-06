@@ -90,6 +90,9 @@ type Interruption struct {
 	Reason    string     `json:"reason"`
 	ResumedAt *time.Time `json:"resumedAt,omitempty"`
 	EndedAt   *time.Time `json:"endedAt,omitempty"`
+	// ReportOwed is set on a pause (InterruptPaused) whose turn ended without the Report the worker owed: it was not
+	// nudged into a new turn while paused, so the resume starts its session again to ask for it.
+	ReportOwed bool `json:"reportOwed,omitempty"`
 }
 
 // OpenInterruption returns the Assignment's last Interruption when its session has not started again since and the
