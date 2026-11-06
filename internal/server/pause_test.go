@@ -123,3 +123,56 @@ func TestResumeNeedsReauth(t *testing.T) {
 		t.Fatalf("resume with reauth = %v", r)
 	}
 }
+
+// Resume releases the work that was put off at once, even with the production hold (30 s): a reply deferred while paused
+// is sent within seconds of the resume, not when its delay ends.
+func TestResumeReleasesHeldReplyAtOnce(t *testing.T) {
+	fake := newFakeEnv(t, openTurnFixture(t))
+	fastEvaluate(t)
+	if outbox.PausedWait != 30*time.Second {
+		t.Fatalf("PausedWait = %v, want the production 30 s", outbox.PausedWait)
+	}
+	g := newFakeGitHub(t)
+	dir := newStateDir(t)
+	g.configure(t, dir, 600)
+	if err := os.MkdirAll(node.TicketDir(filepath.Join(dir, "work"), core.Ticket{ID: "T-0001", Title: "Fix the flaky test"}), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	s := startServer(t, dir)
+	token := routerToken(t, fake)
+	eventually(t, "router running and github healthy", func() bool {
+		h := s.health()
+		return h.Router.State == "running" && len(h.Sources) == 1 && h.Sources[0].Error == ""
+	})
+	cid := g.addComment(3, "o", "@athena-bot the login test is flaky, please fix it")
+	triggerID := fmt.Sprintf("github:issuecomment:%d", cid)
+	thread := github.ThreadKey(fakeRepo, 3)
+	eventually(t, "the candidate reached the router", func() bool {
+		for _, th := range s.threads() {
+			if th.Key == thread && th.Eval != nil && th.Eval.DeliveredAt != nil {
+				return true
+			}
+		}
+		return false
+	})
+	s.ok(Request{Op: OpPause}, nil)
+	args, _ := json.Marshal(map[string]any{"decisions": []map[string]any{{"trigger_id": triggerID, "kind": "accept",
+		"title": "Fix the flaky test", "ack": "On it: I will fix the flaky login test."}}})
+	var rr node.RouterResponse
+	nodeCall(t, dir, node.RouterRequest{Op: node.OpRouter, Token: token, Tool: "route", Args: args}, &rr)
+	if !rr.OK {
+		t.Fatalf("route = %+v %s", rr, rr.Result)
+	}
+	time.Sleep(1500 * time.Millisecond) // the reply ran once and was put off 30 s
+	if n := len(g.postedComments()); n != 0 {
+		t.Fatalf("%d comments posted while paused", n)
+	}
+	s.ok(Request{Op: OpResume}, nil)
+	deadline := time.Now().Add(4 * time.Second)
+	for len(g.postedComments()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if n := len(g.postedComments()); n != 1 {
+		t.Fatalf("%d comments posted 4 s after resume, want the held reply", n)
+	}
+}

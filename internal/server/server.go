@@ -298,9 +298,15 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	}
 	// The one seam a change of the switch goes through: the dashboard hears of it here, and the effects that were put off
 	// while paused run again at once. (Task 5 adds the node's parking here.)
-	killSwitch.OnChange(func(pause.State) {
+	killSwitch.OnChange(func(s pause.State) {
 		if h := hubRef.Load(); h != nil {
 			h.OnCommit(store.Changes{Control: true})
+		}
+		if !s.Paused {
+			// Held effects were put off by their delay; run them now, not when the delay ends.
+			if _, err := st.ReleaseEffects(st.Now(), core.EffectReply, core.EffectAssessment, core.EffectRelay); err != nil {
+				logger.Error("resume: release held effects", "error", err)
+			}
 		}
 		fx.Wake()
 	})

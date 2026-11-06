@@ -31,8 +31,11 @@ func TestSwitchPersistsAndIsIdempotent(t *testing.T) {
 	now := at
 	clock := func() time.Time { return now }
 	s, err := Open(kv, clock)
-	if err != nil || s.Paused() {
-		t.Fatalf("fresh switch: paused=%v err=%v", s.Paused(), err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Paused() {
+		t.Fatal("fresh switch is paused")
 	}
 	var changes []State
 	s.OnChange(func(st State) { changes = append(changes, st) })
@@ -63,5 +66,34 @@ func TestSwitchPersistsAndIsIdempotent(t *testing.T) {
 	}
 	if s3, _ := Open(kv, clock); s3.Paused() {
 		t.Fatal("reopened after resume: still paused")
+	}
+}
+
+// Callbacks run in the order of the changes even when pause and resume race: the last one sees the final state.
+func TestOnChangeOrderedUnderRace(t *testing.T) {
+	kv := &memKV{m: map[string]string{}}
+	s, err := Open(kv, time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var last State
+	s.OnChange(func(st State) {
+		time.Sleep(time.Millisecond)
+		mu.Lock()
+		last = st
+		mu.Unlock()
+	})
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(2)
+		go func() { defer wg.Done(); s.Pause("cli") }()
+		go func() { defer wg.Done(); s.Resume("cli") }()
+	}
+	wg.Wait()
+	mu.Lock()
+	defer mu.Unlock()
+	if last.Paused != s.Paused() {
+		t.Fatalf("last callback saw paused=%v, final state paused=%v", last.Paused, s.Paused())
 	}
 }

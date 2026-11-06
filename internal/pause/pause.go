@@ -32,7 +32,8 @@ type Switch struct {
 
 	paused atomic.Bool
 
-	mu       sync.Mutex // serializes writes and the state
+	cbMu     sync.Mutex // serializes changes with their callbacks, so callbacks run in the order of the changes
+	mu       sync.Mutex // guards the state
 	state    State
 	onChange func(State)
 }
@@ -66,7 +67,7 @@ func (s *Switch) State() State {
 // Paused reports whether the switch is set, without taking a lock.
 func (s *Switch) Paused() bool { return s.paused.Load() }
 
-// OnChange sets the function called after each real change is saved, outside the lock. Set it before the switch is
+// OnChange sets the function called after each real change is saved, outside the state lock and in the order of the changes. Set it before the switch is
 // used by other goroutines.
 func (s *Switch) OnChange(f func(State)) {
 	s.mu.Lock()
@@ -83,6 +84,8 @@ func (s *Switch) Pause(by string) (State, error) {
 func (s *Switch) Resume(by string) (State, error) { return s.set(State{}) }
 
 func (s *Switch) set(next State) (State, error) {
+	s.cbMu.Lock()
+	defer s.cbMu.Unlock()
 	s.mu.Lock()
 	if s.state.Paused == next.Paused {
 		cur := s.state

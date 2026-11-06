@@ -210,6 +210,24 @@ func (s *Store) DelayEffect(kind, key string, payload []byte, due time.Time) (do
 	return done, err
 }
 
+// ReleaseEffects makes the effects of the given kinds that are due later than now due now (a held effect need not wait
+// out its delay) and reports how many it moved. Attempts and errors are untouched.
+func (s *Store) ReleaseEffects(now time.Time, kinds ...string) (moved int, err error) {
+	err = s.Tx(func(tx *Tx) error {
+		for _, k := range kinds {
+			res, err := tx.sql.Exec(`UPDATE effects SET due_at = ? WHERE kind = ? AND due_at > ?`,
+				now.UTC().Format(timeLayout), k, now.UTC().Format(timeLayout))
+			if err != nil {
+				return fmt.Errorf("store: release effects %s: %w", k, err)
+			}
+			n, _ := res.RowsAffected()
+			moved += int(n)
+		}
+		return nil
+	})
+	return moved, err
+}
+
 // FailEffect records a failed run of the effect (kind, key): attempts goes up by one, last_error is set and the effect
 // becomes due at now + delay(attempts) (attempts counting this failure, 1-based). It returns the new attempts and
 // due time, and attempts 0 if the effect was replaced or deleted meanwhile.
