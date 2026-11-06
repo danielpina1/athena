@@ -278,7 +278,7 @@ func (o *op) applyHeld(t *Ticket, held ReviewState) error {
 	n := findAssignment(t, next)
 	n.State = AssignmentRunning
 	n.StartedAt, n.IdleAt = o.timestamp(), o.timestamp()
-	n.Runtime = held.Runtime
+	n.Runtime, n.Continues = held.Runtime, held.Implementer
 	if impl := findAssignment(t, held.Implementer); impl != nil {
 		n.SessionID, n.Model = impl.SessionID, impl.Model
 	}

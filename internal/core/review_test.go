@@ -201,7 +201,8 @@ func TestApprovedWithPRParksImplementer(t *testing.T) {
 	a := tk.LatestAssignment()
 	ia := findAssignment(tk, impl)
 	if a.State != AssignmentRunning || a.Role != "" || a.SessionID != ia.SessionID || a.Runtime != RuntimeClaude ||
-		a.IdleAt == nil || a.DeliveredAt != nil || a.StartedAt == nil || a.Report == nil || a.Report.State != ReportReady {
+		a.IdleAt == nil || a.DeliveredAt != nil || a.StartedAt == nil || a.Report == nil || a.Report.State != ReportReady ||
+		a.Continues != impl {
 		t.Fatalf("parked implementer = %+v", a)
 	}
 	eq(t, "stage", TicketStage(tk), Stage{"person", "review"})

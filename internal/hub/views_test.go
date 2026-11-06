@@ -667,3 +667,79 @@ func TestRuntimeWhyRedactedAndCut(t *testing.T) {
 		t.Errorf("why has %d runes", n)
 	}
 }
+
+// A review holds the implementer's ready report: it is not "ready" while the review runs, nor after a review that sent
+// it back, and once applied (applyHeld) it reads once, from the Assignment that applied it, which itself started no
+// session and so has no start of its own.
+func TestHeldReportShowsOnceWhenApplied(t *testing.T) {
+	at := func(d time.Duration) *time.Time { v := epoch0.Add(d); return &v }
+	held := &core.Report{State: core.ReportReady, Summary: "Login done", At: epoch0.Add(5 * time.Minute)}
+	impl := core.Assignment{ID: "a1", State: core.AssignmentEnded, Runtime: core.RuntimeCodex, Model: "gpt", CreatedAt: epoch0,
+		StartedAt: at(time.Minute), EndedAt: at(5 * time.Minute), EndedReason: core.ReasonReview, Report: held}
+	review := core.Assignment{ID: "r1", State: core.AssignmentRunning, Role: core.RoleReview, Runtime: core.RuntimeClaude,
+		CreatedAt: epoch0.Add(5 * time.Minute), StartedAt: at(6 * time.Minute)}
+
+	detail := func(as ...core.Assignment) *athenav1.TicketDetail {
+		t.Helper()
+		tk := ticket("T-1")
+		tk.Assignments = as
+		f := newFake()
+		f.put(tk)
+		d, err := New(f, quiet()).Detail("T-1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+
+	// During the review: no ready anywhere.
+	d := detail(impl, review)
+	if got := entries(d.Timeline); strings.Contains(got, "report/") {
+		t.Errorf("during the review the timeline shows a report: %q", got)
+	}
+	if len(d.Reports) != 0 {
+		t.Errorf("during the review the reports are %v", d.Reports)
+	}
+
+	// After changes were requested: still none; the next round has not reported.
+	sent := review
+	sent.State, sent.EndedAt, sent.EndedReason = core.AssignmentEnded, at(7*time.Minute), core.ReasonReviewed
+	sent.ReviewOutcome = &core.ReviewOutcome{Verdict: core.ReviewChanges, First: "- [high] a.go:1 — racy"}
+	next := core.Assignment{ID: "a2", State: core.AssignmentPending, CreatedAt: epoch0.Add(7 * time.Minute)}
+	d = detail(impl, sent, next)
+	if got := entries(d.Timeline); strings.Contains(got, "report/") {
+		t.Errorf("after changes the timeline shows a report: %q", got)
+	}
+	if len(d.Reports) != 0 {
+		t.Errorf("after changes the reports are %v", d.Reports)
+	}
+
+	// Approved: the report applies once, on the continuing Assignment, which started no session of its own.
+	approved := review
+	approved.State, approved.EndedAt, approved.EndedReason = core.AssignmentEnded, at(7*time.Minute), core.ReasonReviewed
+	approved.ReviewOutcome = &core.ReviewOutcome{Verdict: core.ReviewApproved, First: "- none"}
+	applied := *held
+	applied.At = epoch0.Add(7 * time.Minute)
+	cont := core.Assignment{ID: "a2", State: core.AssignmentRunning, Runtime: core.RuntimeCodex, Model: "gpt",
+		CreatedAt: epoch0.Add(7 * time.Minute), StartedAt: at(7 * time.Minute), IdleAt: at(7 * time.Minute),
+		Continues: "a1", Report: &applied}
+	d = detail(impl, approved, cont)
+	want := "assignment/started gpt · |assignment/ended  · review|assignment/review  · |review/approved claude · - none|" +
+		"report/ready  · Login done"
+	if got := entries(d.Timeline); got != want {
+		t.Errorf("applied timeline:\n got %q\nwant %q", got, want)
+	}
+	if len(d.Reports) != 1 || d.Reports[0].AssignmentId != "a2" || d.Reports[0].State != "ready" {
+		t.Errorf("applied reports = %v", d.Reports)
+	}
+
+	// Once a later message resumes that session, its start reads at the delivery.
+	cont.DeliveredAt = at(30 * time.Minute)
+	d = detail(impl, approved, cont)
+	if got := entries(d.Timeline); got != want+"|assignment/started gpt · " {
+		t.Errorf("resumed timeline: %q", got)
+	}
+	if e := d.Timeline[len(d.Timeline)-1]; !e.At.AsTime().Equal(epoch0.Add(30 * time.Minute)) {
+		t.Errorf("resumed start at %v, want the delivery", e.At.AsTime())
+	}
+}

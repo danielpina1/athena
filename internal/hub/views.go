@@ -408,7 +408,9 @@ func originEcho(t *core.Ticket, origin *core.Trigger) int {
 //
 // It reads as a story: an Assignment has a start entry, a restart entry for each time its session was cut short (and a
 // resumed one when it started again) and, once it ended, an end entry at its end; an Input that is
-// the origin Trigger recorded again is left out; an owner's own task has no router Decision.
+// the origin Trigger recorded again is left out; an owner's own task has no router Decision. A ready report a review
+// holds reads only once applied, on the Assignment that continues the implementer's session, whose start is when an
+// Input first reached it (none before).
 func ticketTimeline(t *core.Ticket, origin *core.Trigger, pending *core.Approval, answered []core.Approval,
 	actors map[string]string) []*athenav1.TimelineEntry {
 	var out []*athenav1.TimelineEntry
@@ -430,8 +432,14 @@ func ticketTimeline(t *core.Ticket, origin *core.Trigger, pending *core.Approval
 		if a.Role == core.RoleReview && sub == "started" {
 			sub = "review"
 		}
-		out = append(out, withRuntime(timelineEntry(start, "assignment", sub, a.Model, "", a.ID), a.Runtime))
-		if r := a.Report; r != nil {
+		switch {
+		case a.Continues == "":
+			out = append(out, withRuntime(timelineEntry(start, "assignment", sub, a.Model, "", a.ID), a.Runtime))
+		case a.DeliveredAt != nil:
+			// It applied a held report in the implementer's session; that session starts again once an Input reaches it.
+			out = append(out, withRuntime(timelineEntry(*a.DeliveredAt, "assignment", sub, a.Model, "", a.ID), a.Runtime))
+		}
+		if r := a.Report; r != nil && !heldForReview(a) {
 			subject := ""
 			if r.Pull > 0 {
 				subject = "PR #" + strconv.Itoa(r.Pull)
@@ -511,14 +519,21 @@ func clipBytes(s string, n int) string {
 	return s[:cut] + "…"
 }
 
-// ticketReports are the Ticket's Reports in full, newest last, the last reportsKept of them. The latest one's question
-// is the Ticket's open question when the Report has none of its own (a Report stored before Reports kept it).
+// heldForReview reports whether a's Report is a ready report a review held: it is not the Ticket's until the review
+// applies it, on the Assignment that continues a (core.Assignment.Continues), which then shows it once.
+func heldForReview(a *core.Assignment) bool {
+	return a.Role != core.RoleReview && a.EndedReason == core.ReasonReview
+}
+
+// ticketReports are the Ticket's Reports in full, newest last, the last reportsKept of them, less a report a review
+// holds (heldForReview). The latest one's question is the Ticket's open question when the Report has none of its own
+// (a Report stored before Reports kept it).
 func ticketReports(t *core.Ticket) []*athenav1.ReportView {
 	// The last reportsKept first, so only those are redacted.
 	var with []*core.Assignment
 	for i := range t.Assignments {
-		if t.Assignments[i].Report != nil {
-			with = append(with, &t.Assignments[i])
+		if a := &t.Assignments[i]; a.Report != nil && !heldForReview(a) {
+			with = append(with, a)
 		}
 	}
 	if len(with) > reportsKept {

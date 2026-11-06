@@ -68,6 +68,9 @@ type Assignment struct {
 	Limit *UsageLimit `json:"limit,omitempty"`
 	// ReviewOutcome is what a review Assignment (RoleReview) concluded, once it ended with ReasonReviewed.
 	ReviewOutcome *ReviewOutcome `json:"reviewOutcome,omitempty"`
+	// Continues is the implement Assignment whose held ready report this one applied after its review (applyHeld): it
+	// continues that Assignment's session and launched none of its own until an Input reaches it.
+	Continues string `json:"continues,omitempty"`
 }
 
 // RoleReview is the Role of an Assignment that reviews the Ticket's work.
