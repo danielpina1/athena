@@ -931,3 +931,42 @@ func TestReportFiledSaysWhatFollows(t *testing.T) {
 		t.Errorf("waiting: %q", got)
 	}
 }
+
+// A review session of a GitHub Ticket gets no GitHub credentials: the node refuses it a token, and its environment has
+// no credential helper of Athena's or the owner's.
+func TestReviewSessionHasNoGitHubCredentials(t *testing.T) {
+	h := newGHHarness(t, &fakeCreds{}, nil)
+	t.Setenv("ATHENA_FAKE_FIXTURE", openTurnFixture(t))
+	tk, a := h.accept("github:issuecomment:1", "o/r", 12, "")
+	if err := h.st.Repos().Tx(func(tx core.Tx) error {
+		cur, err := tx.GetTicket(tk.ID)
+		if err != nil {
+			return err
+		}
+		cur.Pairing = core.PairingReview
+		return tx.PutTicket(cur)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if r := h.report(tk.ID, a.ID, core.ReportReady, "done"); !r.OK {
+		t.Fatalf("ready = %+v", r)
+	}
+	var rv core.Assignment
+	h.eventually("the review runs", func() bool {
+		cur, _ := h.ticket(tk.ID)
+		rv = *cur.LatestAssignment()
+		return rv.Role == core.RoleReview && rv.State == core.AssignmentRunning && h.n.lookup(tk.ID, rv.ID) != nil
+	})
+	if got := h.gitCredential(tk.ID, rv.ID, "protocol=https\nhost=github.com\npath=o/r.git\n"); got != "" {
+		t.Fatalf("the review got git credentials %q", got)
+	}
+	var resp CredentialResponse
+	if err := callNode(h.cfg.SocketPath, CredentialRequest{Op: OpCredential, Ticket: tk.ID, Assignment: rv.ID, Purpose: CredentialGh}, &resp); err != nil ||
+		resp.OK || !strings.Contains(resp.Error, "review") {
+		t.Fatalf("gh token for a review: %+v %v", resp, err)
+	}
+	env := strings.Join(h.n.githubEnv(h.n.lookup(tk.ID, rv.ID)), "\n")
+	if strings.Contains(env, "git-credential") || strings.Contains(env, "GIT_AUTHOR_NAME") || !strings.Contains(env, "credential.helper") {
+		t.Fatalf("review env:\n%s", env)
+	}
+}

@@ -323,24 +323,50 @@ task) has each ready report of its implementer reviewed before it counts:
 2. The chooser places the review on the other runtime than the implementer's when that one is ready (a pinned Ticket
    pins its implementer, not its reviews); with one runtime, it reviews on that one. A limit on a review fails over
    like any session's, with no handoff note.
-3. The review session is read-only and starts fresh, in the implementer's directory, after the implementer's process
-   has exited. Codex runs it with the `read-only` sandbox; Claude Code with no writable path (its working directory
-   denied too) and without its file-writing tools. The hook rules deny every write it names (rule `read_only`: write
-   tools, Bash write targets, `git commit|push|merge|rebase|reset|checkout|switch|stash|…`, `gh pr create|edit|merge|…`,
-   `gh api`, Codex's `write_stdin`), and anything that would ask the owner is denied: a review never makes a person
-   stage. Its MCP server (`athena mcp --ticket <id> --role review`) has only the `review` tool. Its first message names
-   the round, the branch, its base, `git diff --stat <base>...HEAD` and the held report's summary; its system prompt is
-   the `reviewer` prompt part. Inputs that reach the Ticket meanwhile wait for the implementer.
+3. The review session starts fresh, in the implementer's directory, after the implementer's process has exited, and
+   is read-only as far as these layers make it:
+   - **Always: the hook rules** (rule `read_only`). Write tools, Bash write targets and Codex's `write_stdin` are
+     denied, and a Bash command runs only when every command in it is on an allowlist: `git status|diff|log|show|
+     blame|grep|rev-parse|ls-files|merge-base|cat-file` (no `--output`, `-c`, `--config-env`, `--exec-path`,
+     `--ext-diff` or grep's `-O`), `cat`, `ls`, `rg` (no `--pre` or `--hostname-bin`), `grep`, `find` (no `-delete`,
+     `-exec`, `-ok`, `-fprint`, `-fls`), `head`, `tail`, `wc`, `file` (no `-C`), `stat`, `cd`, `pwd`, `echo`, `true`,
+     and the repository's test and vet runners (`go test|vet`, `cargo test|check`, `make test|check`, `npm|pnpm|yarn
+     test` or `run test`, `pytest`, `python -m pytest`; no output or profile flags). Everything else, `gh` and `curl`
+     included, is denied, and so is a variable assignment before a command (`GIT_PAGER=… git log`). **Accepted
+     residual:** a test runner runs the repository's own code, which can do anything the reviewer's OS user can; only
+     the sandbox, when on, confines that.
+   - **Always: no escalation.** Whatever would ask the owner (a rules escalation, a Codex approval request for a
+     command, a file or permissions, whether or not `sandbox` is configured) is denied: a review never makes a person
+     stage.
+   - **Always: no GitHub credentials.** A review gets no token: `athena git-credential` and `athena gh` refuse it, and
+     its git has no credential helper. It reviews the local branch.
+   - **Codex:** the `read-only` sandbox, always.
+   - **Claude Code:** started without its file-writing tools, and, only when the node's `sandbox` is configured and
+     Claude Code's sandbox starts (see `required`), a sandbox that keeps the owner's `allowWrite` paths outside the
+     working directory (build caches, so tests can run), not the git directory, and denies the working directory.
+     Without a started sandbox, the hook rules are its only confinement.
+
+   Its MCP server (`athena mcp --ticket <id> --role review`) has only the `review` tool. Its first message names the
+   round, the branch, its base, `git diff --stat <base>...HEAD` and the held report's summary; its system prompt is the
+   `reviewer` prompt part. What the implementer received before its ready report counts as read then. Inputs that
+   reach the Ticket during the review wait for the implementer.
 4. `review(verdict, findings)`: findings are lines `- [high|medium|low] <file>:<line> — <what>`, or `- none`; a high or
    medium finding needs `changes`, `- none` needs `approved`, and anything else is refused for the reviewer to correct.
    The review ends with reason `reviewed` and its outcome (verdict and first finding).
 5. `approved`, or `changes` once `maxRounds` rounds are used: the held report applies as if the implementer filed it
    now, on a new Assignment that continues the implementer's session. Without a pull request the Ticket ends completed
-   with the usual result reply; with one it waits handed off, and the next Input resumes the implementer's session.
-   `changes` within the rounds: a new implement Assignment (pinned to the implementer's runtime when the Ticket names
-   one) resumes the implementer's session with the findings as a `review` Input; its next ready starts the next round.
+   with the usual result reply; with one it waits handed off, and the next Input resumes the implementer's session (one
+   that arrived during the review resumes it at once).
+   - **Unless a person's or a Thread's message arrived during the review** and the report would end the Ticket: then the
+     held report is dropped (no report event, no reply) and a new implement Assignment, pinned to the implementer's
+     runtime, resumes the implementer's session with those messages; its next ready report settles the Ticket, and is
+     reviewed again while rounds remain.
+   - `changes` within the rounds: a new implement Assignment (pinned to the implementer's runtime when the Ticket names
+     one) resumes the implementer's session with the findings as a `review` Input; its next ready starts the next round.
 6. A review that reports failure (it crashed past its restarts, its launch failed, or it ended two turns without a
-   verdict after one nudge) applies the held report too, outcome `failed`.
+   verdict after one nudge) counts as a round, outcome `failed`, and applies the held report as in 5.
+7. The rounds cap is per Ticket, not per ready report: on a long-lived pull-request Ticket, follow-ups after the first
+   rounds get no review once `maxRounds` is used. The Policy's `maxRounds` is read at each ready report.
 
 ## 9. Fixtures
 

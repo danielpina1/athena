@@ -988,6 +988,8 @@ func (o *op) endAt(t *Ticket, by TicketEndBy, outcome TicketOutcome, reason stri
 	t.UpdatedAt = o.at
 	t.Attention = nil
 	t.Delivery = nil
+	// A review in progress ends with the Ticket: nothing applies its held report any more.
+	t.Review = nil
 	if err := o.letGo(t, waiting, left); err != nil {
 		return err
 	}

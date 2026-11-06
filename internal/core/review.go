@@ -3,6 +3,7 @@ package core
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -150,6 +151,13 @@ func (o *op) holdsForReview(t *Ticket, a *Assignment) bool {
 func (o *op) startReview(t *Ticket, a *Assignment) {
 	t.Review = &ReviewState{Round: t.Stats.ReviewRounds + 1, Implementer: a.ID, Runtime: implementerRuntime(t, a),
 		Held: *a.Report}
+	// What reached the implementer before its ready report was read by then, as the node records once a report is
+	// filed; its session stops now, maybe before the node does, and a message the implementer read waits for nobody.
+	for i := range t.Inputs {
+		if in := &t.Inputs[i]; in.Kind == InputTrigger && in.ReadAt == nil && in.DeliveredTo == a.ID {
+			in.ReadAt = o.timestamp()
+		}
+	}
 	o.endAssignment(t, a, ReasonReview)
 	review := o.newAssignment(t)
 	findAssignment(t, review).Role = RoleReview
@@ -251,8 +259,17 @@ func (o *op) reviewFailed(t *Ticket, a *Assignment) error {
 // that continues the implementer's session (its runtime, session and model) already running and idle, the report filed
 // now, then what a ready report brings (settleReport): the report's Event and relay, and the Ticket's end when it
 // follows no Threads or is done with them. Otherwise the Ticket waits handed off (HandedOff) for its Threads, and the
-// next Input resumes the session as a paused one; one that waits already is delivered now.
+// next Input resumes the session as a paused one; one that waits already launches it now (a start, not a deliver: the
+// review's session may still be live and the node launches the implementer once it is gone).
+//
+// A report that would end the Ticket while a person's or a Thread's message waits for it (one that reached the Ticket
+// during the review) is dropped instead (resumeImplementer): the Ticket does not end over a message nobody read.
 func (o *op) applyHeld(t *Ticket, held ReviewState) error {
+	o.requeueUntaken(t, held.Implementer)
+	if endsTicket(t, held.Held) && ownedInputWaits(t) {
+		o.resumeImplementer(t, held)
+		return nil
+	}
 	next := o.newAssignment(t)
 	n := findAssignment(t, next)
 	n.State = AssignmentRunning
@@ -264,12 +281,37 @@ func (o *op) applyHeld(t *Ticket, held ReviewState) error {
 	report := held.Held
 	report.At = o.at
 	n.Report = &report
-	o.requeueUntaken(t, held.Implementer)
 	if err := o.settleReport(t, n, nil); err != nil {
 		return err
 	}
 	if t.Ended == nil && len(t.Undelivered) > 0 {
-		o.deliver(t, n.ID)
+		o.start(t, n.ID)
 	}
 	return nil
+}
+
+// endsTicket reports whether report r, settled now, would end the Ticket (settleReport's end cases).
+func endsTicket(t *Ticket, r Report) bool {
+	_, isDone := t.FollowsDone()
+	return r.State == ReportDropped || (r.State == ReportReady && (len(t.Follows) == 0 || isDone))
+}
+
+// ownedInputWaits reports whether a person's or a Thread's message the Ticket owns (not one it reads for context)
+// waits undelivered.
+func ownedInputWaits(t *Ticket) bool {
+	for _, in := range t.Inputs {
+		if in.Kind == InputTrigger && !in.Context && slices.Contains(t.Undelivered, in.ID) {
+			return true
+		}
+	}
+	return false
+}
+
+// resumeImplementer drops a review's held report and resumes its implementer instead: a new pending implement
+// Assignment, pinned to the runtime the implementer ran on, takes the Inputs that wait. Its next ready report settles
+// the Ticket, reviewed again while rounds remain.
+func (o *op) resumeImplementer(t *Ticket, held ReviewState) {
+	next := o.newAssignment(t)
+	findAssignment(t, next).Runtime = held.Runtime
+	o.start(t, next)
 }

@@ -2,6 +2,7 @@ package core
 
 import (
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -31,7 +32,27 @@ func (h *harness) launch(ticketID, runtime string) string {
 	}
 	c := execCall{TicketID: ticketID, AssignmentID: a.ID}
 	h.must(h.eng.AssignmentStarted(c.TicketID, c.AssignmentID, "session-"+c.AssignmentID, "", runtime))
+	// As the node does, an implementer's session takes what waits for it into its first step; a review takes nothing.
+	if a.Role != RoleReview {
+		h.takeWaiting(ticketID, a.ID)
+	}
 	return c.AssignmentID
+}
+
+// takeWaiting delivers what waits for the Ticket to its running Assignment, whose session reads it with what was
+// delivered before.
+func (h *harness) takeWaiting(ticketID, assignmentID string) {
+	h.t.Helper()
+	if waiting := h.ticket(ticketID).Undelivered; len(waiting) > 0 {
+		h.must(h.eng.InputsDelivered(ticketID, assignmentID, waiting))
+	}
+	var unread []string
+	for _, in := range h.ticket(ticketID).Inputs {
+		if in.ReadAt == nil && in.DeliveredTo == assignmentID {
+			unread = append(unread, in.ID)
+		}
+	}
+	h.must(h.eng.InputsRead(ticketID, unread))
 }
 
 // pairedTicket submits a task paired with review on runtime and starts its implementer on implRuntime.
@@ -136,7 +157,7 @@ func TestReadyPassesThroughWithoutPairing(t *testing.T) {
 func TestApprovedAppliesHeldReadyWithoutPR(t *testing.T) {
 	h := newPairedRouter(t)
 	id := h.acceptRequest("c:1", issue)
-	impl := h.ticket(id).LatestAssignment().ID
+	impl := h.ticket(id).LatestAssignment().ID // its request reached it, unread when it reports: read by then
 	h.ready(id, impl, "login fixed")
 	rv := h.launch(id, RuntimeCodex)
 	h.tick(5)
@@ -360,5 +381,76 @@ func TestInconsistentVerdictRejected(t *testing.T) {
 	}
 	if err := h.eng.FileReview("T-9999", rv, ReviewApproved, "- none"); !errors.As(err, &ue) {
 		t.Fatalf("a verdict on no ticket: %v", err)
+	}
+}
+
+// A person's message that reaches the Ticket during its review is not ended over: the held report is dropped and the
+// implementer resumes, on its own runtime, with the message; its next ready report is reviewed again while rounds
+// remain. The same holds when the review fails.
+func TestInputDuringReviewResumesImplementer(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		h := newHarness(t)
+		id, impl := h.pairedTicket(RuntimeAuto, RuntimeClaude)
+		h.ready(id, impl, "done")
+		rv := h.launch(id, RuntimeCodex)
+		h.must(h.eng.AddPersonInput(id, "please also fix the footer"))
+		events := countType(h.events.types(), EventReportFiled)
+		if fail {
+			h.must(h.eng.FileReport(id, ReportInput{AssignmentID: rv, State: ReportFailed, Summary: "crashed"}))
+		} else {
+			h.must(h.eng.FileReview(id, rv, ReviewApproved, "- none"))
+		}
+		tk := h.ticket(id)
+		if tk.Ended != nil {
+			t.Fatalf("fail=%v: the ticket ended over a person's message: %+v", fail, tk.Ended)
+		}
+		next := tk.LatestAssignment()
+		if next.Role != "" || next.State != AssignmentPending || next.Runtime != RuntimeClaude || next.Report != nil {
+			t.Fatalf("fail=%v: next = %+v, want a pending implementer pinned to claude", fail, next)
+		}
+		eq(t, "started", h.exec.last("start").AssignmentID, next.ID)
+		msg := tk.Inputs[len(tk.Inputs)-1]
+		if msg.Text != "please also fix the footer" || !slices.Contains(tk.Undelivered, msg.ID) {
+			t.Fatalf("fail=%v: the message does not wait for the implementer: %+v %v", fail, msg, tk.Undelivered)
+		}
+		eq(t, "the held report is dropped: no report event", countType(h.events.types(), EventReportFiled), events)
+		eq(t, "stage", TicketStage(tk).Stage, "working")
+		impl2 := h.launch(id, RuntimeClaude)
+		h.ready(id, impl2, "footer fixed too")
+		if tk := h.ticket(id); tk.Review == nil || tk.Review.Round != 2 {
+			t.Fatalf("fail=%v: the next ready is not reviewed again: %+v", fail, tk.Review)
+		}
+	}
+}
+
+// On a Ticket with a pull request, a message that arrived during the review is sent: the parked implementer is
+// launched (it resumes its paused session once the review's session is gone), not merely delivered to.
+func TestInputDuringReviewWithPRLaunchesImplementer(t *testing.T) {
+	h := newIntake(t)
+	id, impl := h.pairedTicket(RuntimeAuto, RuntimeClaude)
+	h.must(h.eng.BindThread(id, pull1, true))
+	h.ready(id, impl, "PR opened")
+	rv := h.launch(id, RuntimeCodex)
+	h.must(h.eng.AddPersonInput(id, "please also fix the footer"))
+	h.must(h.eng.FileReview(id, rv, ReviewApproved, "- none"))
+	tk := h.ticket(id)
+	a := tk.LatestAssignment()
+	if !tk.HandedOff() || a.State != AssignmentRunning {
+		t.Fatalf("not handed off: %+v", a)
+	}
+	eq(t, "the parked implementer is launched", h.exec.last("start").AssignmentID, a.ID)
+	if len(tk.Undelivered) == 0 {
+		t.Fatal("nothing waits for it")
+	}
+}
+
+// A Ticket that ends during its review keeps no review in progress.
+func TestEndDuringReviewClearsIt(t *testing.T) {
+	h := newHarness(t)
+	id, impl := h.pairedTicket(RuntimeClaude, RuntimeClaude)
+	h.ready(id, impl, "done")
+	h.must(h.eng.StopTicket(id, "enough"))
+	if tk := h.ticket(id); tk.Review != nil {
+		t.Fatalf("review = %+v", tk.Review)
 	}
 }

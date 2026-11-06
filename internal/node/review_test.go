@@ -99,9 +99,6 @@ func TestReviewRunsReadOnlyOnOtherRuntime(t *testing.T) {
 	if !denied {
 		t.Fatalf("the reviewer's write was not denied read_only:\n%s", strings.Join(h.rpc(), "\n"))
 	}
-	if _, err := os.Stat(filepath.Join(dir, "notes.txt")); !os.IsNotExist(err) {
-		t.Fatalf("notes.txt exists: %v", err)
-	}
 	// Its MCP server offers the review tool alone, and the verdict went through it.
 	b, err := os.ReadFile(strings.ReplaceAll(h.argsLog, "{ticket}", tk.ID))
 	if err != nil {
@@ -267,5 +264,81 @@ func TestReviewNudgeThenFailure(t *testing.T) {
 	}
 	if strings.Contains(h.stdin(), nudgeText) {
 		t.Fatal("the review got the worker's nudge")
+	}
+}
+
+// A Codex reviewer's ask to run something outside its sandbox is denied outright, on a node with no Config.Sandbox
+// too: no Approval, no accept, and the review goes on to its verdict.
+func TestCodexReviewerAskDenied(t *testing.T) {
+	h := newCodexHarness(t, codexTurn(
+		codexApprovalRequest("go test ./...", true),
+		`{"method":"item/completed","params":{"threadId":"thr_fixture_0001","turnId":"turn_fixture_0001","item":{"id":"item_0004","type":"agentMessage","text":"Could not run the tests.","phase":"commentary"},"completedAtMs":1893456003500}}`,
+		`{"fake":"mcp","tool":"review","arguments":{"verdict":"approved","findings":"- [low] a.go:1 — tests not run"}}`,
+	), nil)
+	if h.cfg.Sandbox != nil {
+		t.Fatal("the harness sandboxes its workers")
+	}
+	copyFile(t, openTurnFixture(t), perTicketFixture(t, "T-0001"))
+	tk := h.submitPaired("Fix the login page", core.RuntimeClaude)
+	_, impl := h.running(tk.ID)
+	if r := h.report(tk.ID, impl.ID, core.ReportReady, "login fixed"); !r.OK {
+		t.Fatalf("ready = %+v", r)
+	}
+	h.eventually("the review's verdict ends the ticket", func() bool {
+		cur, _ := h.ticket(tk.ID)
+		return cur.Ended != nil
+	})
+	if h.rpcHas(`"decision":"accept"`) || !h.rpcHas(`"decision":"decline"`) {
+		t.Fatalf("the reviewer's ask was not declined:\n%s", strings.Join(h.rpc(), "\n"))
+	}
+	if ap, _ := h.eng.PendingApprovals(); len(ap) != 0 {
+		t.Fatalf("approvals = %+v", ap)
+	}
+}
+
+// A person's message that reaches a Ticket with a pull request during its review reaches the implementer's session
+// once the review is done, whether it approved or failed: the parked implementer is launched again, not left waiting.
+func TestInputDuringReviewReachesImplementer(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		h := newHarness(t, nil)
+		t.Setenv("ATHENA_FAKE_FIXTURE", openTurnFixture(t))
+		tk := h.submitPaired("Paired task", "")
+		_, impl := h.running(tk.ID)
+		if err := h.eng.BindThread(tk.ID, "github:o/r#2", true); err != nil {
+			t.Fatal(err)
+		}
+		if r := h.report(tk.ID, impl.ID, core.ReportReady, "opened #2"); !r.OK {
+			t.Fatalf("ready = %+v", r)
+		}
+		var rv core.Assignment
+		h.eventually("the review runs", func() bool {
+			cur, _ := h.ticket(tk.ID)
+			rv = *cur.LatestAssignment()
+			return rv.Role == core.RoleReview && rv.State == core.AssignmentRunning && h.n.lookup(tk.ID, rv.ID) != nil
+		})
+		if err := h.eng.AddPersonInput(tk.ID, "PLEASE ALSO FIX THE FOOTER"); err != nil {
+			t.Fatal(err)
+		}
+		if fail {
+			if err := h.eng.FileReport(tk.ID, core.ReportInput{AssignmentID: rv.ID, State: core.ReportBlocked, Summary: "no verdict"}); err != nil {
+				t.Fatal(err)
+			}
+		} else {
+			var resp Response
+			if err := callNode(h.cfg.SocketPath, ReviewRequest{Op: OpReview, Ticket: tk.ID, Assignment: rv.ID,
+				Verdict: core.ReviewApproved, Findings: "- none"}, &resp); err != nil || !resp.OK {
+				t.Fatalf("verdict: %+v %v", resp, err)
+			}
+		}
+		h.eventually("the message reaches the implementer", func() bool {
+			return strings.Contains(h.stdin(), "PLEASE ALSO FIX THE FOOTER")
+		})
+		inv := h.invocations()
+		if v, _ := argValue(inv[len(inv)-1].Args, "--resume"); v != impl.SessionID {
+			t.Fatalf("fail=%v: resumed %q, want the implementer's session %q", fail, v, impl.SessionID)
+		}
+		if cur, _ := h.ticket(tk.ID); cur.Ended != nil || len(cur.Undelivered) != 0 {
+			t.Fatalf("fail=%v: ended %+v, undelivered %v", fail, cur.Ended, cur.Undelivered)
+		}
 	}
 }

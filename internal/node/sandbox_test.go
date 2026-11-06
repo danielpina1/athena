@@ -555,3 +555,21 @@ func TestUnrecordedProbeRepoViewedRunsNothing(t *testing.T) {
 		t.Fatalf("a view recorded the placement: %v", err)
 	}
 }
+
+// A read-only session's sandbox keeps the owner's writable paths outside its working directory (a build cache, so
+// its tests can run) and drops the rest: the working directory and what holds it or lies in it are denied.
+func TestReadOnlySandboxKeepsOutsideCaches(t *testing.T) {
+	work := t.TempDir()
+	cache := filepath.Join(t.TempDir(), "gocache")
+	n := &Node{cfg: Config{Sandbox: &SandboxConfig{AllowWrite: []string{cache, filepath.Join(work, "build"), filepath.Dir(work)}}}}
+	sb, _ := n.sessionSandbox(work, true)
+	if !slices.Equal(sb.AllowWrite, []string{cache}) {
+		t.Fatalf("allowWrite = %v, want only the cache %s", sb.AllowWrite, cache)
+	}
+	if !slices.Contains(sb.DenyWrite, work) {
+		t.Fatalf("denyWrite %v lacks the working directory", sb.DenyWrite)
+	}
+	if sb, _ := n.sessionSandbox(work, false); !slices.Contains(sb.AllowWrite, work) || !slices.Contains(sb.AllowWrite, cache) {
+		t.Fatalf("worker allowWrite = %v", sb.AllowWrite)
+	}
+}

@@ -265,6 +265,10 @@ SSH agent, if one is reachable); macOS allows the node socket alone.
     `claude code sandbox is on for workers` at every start.
   - For a real boundary, run the whole server as a **dedicated, restricted OS user** that owns only `~/.athena` and its
     own `claude` login and nothing else you care about, or in a **VM or container**.
+- **A review session (pairing, see [codex.md §8](codex.md#8-review-pairing)) is read-only only as far as these layers
+  go.** Athena's rules always confine it to an allowlist of reading commands and the repository's test runners, deny
+  every escalation and give it no GitHub token. The sandbox confines it further only when it is on and starts. A test
+  runner runs the repository's code, which can do anything your OS user can outside the sandbox.
 - **A worker can obtain its own Assignment's token.** To push and open its pull request, a worker asks Athena for a
   token through a credential helper. It is short-lived (about an hour at most), limited to the single repository of the
   Ticket and to the worker permissions above, minted per Assignment, held in memory and never written to SQLite, logs,

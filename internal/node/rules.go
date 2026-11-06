@@ -701,24 +701,26 @@ func writeRule(ctx RuleContext, in map[string]any) (Decision, bool) {
 // ---------------------------------------------------------------------------
 // read-only sessions
 
-// readOnlyGit are the git subcommands that change a repository, its working tree or a remote.
+// readOnlyGit are the git subcommands a read-only session may run: they read the repository and change nothing.
 var readOnlyGit = map[string]bool{
-	"commit": true, "push": true, "merge": true, "rebase": true, "reset": true, "checkout": true, "switch": true,
-	"stash": true, "add": true, "rm": true, "mv": true, "restore": true, "clean": true, "cherry-pick": true,
-	"revert": true, "am": true, "apply": true, "pull": true, "tag": true, "worktree": true, "init": true,
+	"status": true, "diff": true, "log": true, "show": true, "blame": true, "grep": true, "rev-parse": true,
+	"ls-files": true, "merge-base": true, "cat-file": true,
 }
 
-// readOnlyGh are the gh commands that change a pull request or an issue, or post on one; "api" reaches anything.
-var readOnlyGh = map[string]bool{
-	"pr create": true, "pr edit": true, "pr merge": true, "pr close": true, "pr reopen": true, "pr comment": true,
-	"pr review": true, "pr ready": true, "issue create": true, "issue edit": true, "issue comment": true,
-	"issue close": true, "issue reopen": true, "api": true,
+// readOnlyCmds are the other commands a read-only session may run, besides the test and vet runners (testRunner).
+var readOnlyCmds = map[string]bool{
+	"cat": true, "ls": true, "rg": true, "grep": true, "find": true, "head": true, "tail": true, "wc": true,
+	"file": true, "stat": true, "cd": true, "pwd": true, "echo": true, "true": true,
 }
 
-// readOnlyRule denies, in a read-only session (ctx.ReadOnly), every write it can see: a write tool, a Bash command
-// that names a write target (bashWriteTargets) or runs a git or gh command that changes a repository or a pull
-// request (readOnlyGit, readOnlyGh). It is best effort, like the write rules: the session's sandbox is the complete
-// answer (Codex's read-only sandbox; Claude Code's with no writable path).
+// findWrites are find's actions that run a program or write a file.
+var findWrites = map[string]bool{"-delete": true, "-exec": true, "-execdir": true, "-ok": true, "-okdir": true,
+	"-fprint": true, "-fprint0": true, "-fprintf": true, "-fls": true}
+
+// readOnlyRule denies, in a read-only session (ctx.ReadOnly), what may change anything: a write tool, any Bash write
+// target (bashWriteTargets), and any command but a short list (readOnlyCommand): read-only git subcommands, reading
+// commands, and the test and vet runners. A test runner runs the repository's code, which may write; that residual is
+// accepted (a review must be able to run the tests), and the session's sandbox, when it has one, bounds it.
 func readOnlyRule(ctx RuleContext, tool string, in map[string]any) (Decision, bool) {
 	if !ctx.ReadOnly {
 		return Decision{}, false
@@ -735,39 +737,137 @@ func readOnlyRule(ctx RuleContext, tool string, in map[string]any) (Decision, bo
 	if targets := ctx.bashWriteTargets(command, "", 0); len(targets) > 0 {
 		return deny(ruleReadOnly, why+"; the command writes to "+targets[0].path), true
 	}
-	match := func(words []string) (string, string) {
-		switch words[0] {
-		case "git":
-			if sub := gitSubcommand(words[1:]); readOnlyGit[sub] {
-				return "git " + sub, why + "; git " + sub + " changes the repository"
-			}
-		case "gh":
-			if sub := ghCommand(words[1:]); readOnlyGh[sub] || readOnlyGh[strings.SplitN(sub, " ", 2)[0]] {
-				return "gh " + sub, why + "; gh " + sub + " changes GitHub"
-			}
-		}
-		return "", ""
-	}
-	if hit, reason := findBlocked(command, match, 0); hit != "" {
-		return deny(ruleReadOnly, reason), true
+	if bad := readOnlyScript(command, 0); bad != "" {
+		return deny(ruleReadOnly, why+"; it may run only read-only git (status, diff, log, show, blame, grep, rev-parse, "+
+			"ls-files, merge-base, cat-file), cat, ls, rg, grep, find, head, tail, wc, file, stat and the test and vet "+
+			"runners, not "+bad), true
 	}
 	return Decision{}, false
 }
 
-// ghCommand is the command gh's arguments run: its first two words that are neither flags nor a flag's value (the
-// repository of -R/--repo, the host of --hostname), joined by a space.
-func ghCommand(args []string) string {
-	var words []string
-	for i := 0; i < len(args) && len(words) < 2; i++ {
-		switch a := args[i]; {
-		case a == "-R" || a == "--repo" || a == "--hostname":
-			i++
-		case strings.HasPrefix(a, "-"):
-		default:
-			words = append(words, a)
+// readOnlyScript is the first command of a shell script a read-only session may not run (readOnlyCommand), "" when
+// it may run them all. The script splits into segments as findBlocked splits it (quoting ignored, so over-split), and
+// the script of a shell's -c is judged the same way.
+func readOnlyScript(command string, depth int) string {
+	if depth > 3 {
+		return "a script nested this deep"
+	}
+	// The & of a redirection (&>file, 2>&1) splits nothing, as in bashWriteTargets.
+	command = strings.NewReplacer(">|", ">", "&>", ampOut+">", ">&", ">"+ampFd).Replace(command)
+	for _, seg := range segmentSplit.Split(command, -1) {
+		seg = strings.NewReplacer(ampOut, "&", ampFd, "&").Replace(seg)
+		if a := assignment(seg); a != "" {
+			return a
+		}
+		words := commandWords(seg)
+		if len(words) == 0 {
+			continue
+		}
+		if shellCmds[words[0]] {
+			script, ok := shellScript(words)
+			if !ok {
+				return words[0]
+			}
+			if bad := readOnlyScript(script, depth+1); bad != "" {
+				return bad
+			}
+			continue
+		}
+		if !readOnlyCommand(words) {
+			return strings.Join(words[:min(len(words), 2)], " ")
 		}
 	}
-	return strings.Join(words, " ")
+	return ""
+}
+
+// assignment is the first variable assignment before a segment's command (GIT_PAGER=… git log, env PAGER=… git log),
+// "" without one: an assignment can name a program an allowed command runs (a pager, a diff, a preloaded library).
+func assignment(seg string) string {
+	words := cleanWords(strings.Fields(seg))
+	for len(words) > 0 {
+		w := words[0]
+		switch {
+		case assignRe.MatchString(w):
+			return w
+		case reservedWords[w]:
+			words = words[1:]
+		case wrapperCmds[baseName(w)]:
+			words = words[1:]
+			for len(words) > 0 && strings.HasPrefix(words[0], "-") {
+				words = words[1:]
+			}
+		default:
+			return ""
+		}
+	}
+	return ""
+}
+
+// gitRuns are the git options that run a program a read-only session did not name as a command: a configuration
+// value (-c, --config-env), another exec path, a pager for grep's matches, an external diff.
+func gitRuns(a string) bool {
+	return a == "-c" || strings.HasPrefix(a, "--config-env") || strings.HasPrefix(a, "--exec-path") ||
+		strings.HasPrefix(a, "-O") || strings.HasPrefix(a, "--open-files-in-pager") || a == "--ext-diff"
+}
+
+// shellScript is the script of a shell's words (sh -c '<script>'); ok is false when they run no -c script.
+func shellScript(words []string) (string, bool) {
+	for i, w := range words[1:] {
+		if w == "-c" || (strings.HasPrefix(w, "-") && strings.HasSuffix(w, "c") && !strings.HasPrefix(w, "--")) {
+			return strings.Join(words[i+2:], " "), true
+		}
+	}
+	return "", false
+}
+
+// readOnlyCommand reports whether a read-only session may run one command segment's words: a read-only git subcommand
+// without an output file, a reading command (find without actions that run or write, rg without a preprocessor), or a
+// test or vet runner.
+func readOnlyCommand(words []string) bool {
+	args := words[1:]
+	has := func(pred func(string) bool) bool { return slices.ContainsFunc(args, pred) }
+	switch w0 := words[0]; {
+	case w0 == "git":
+		return readOnlyGit[gitSubcommand(args)] && !has(func(a string) bool { return strings.HasPrefix(a, "--output") || gitRuns(a) })
+	case w0 == "find":
+		return !has(func(a string) bool { return findWrites[a] })
+	case w0 == "rg":
+		return !has(func(a string) bool {
+			return a == "--pre" || strings.HasPrefix(a, "--pre=") || strings.HasPrefix(a, "--hostname-bin")
+		})
+	case w0 == "file":
+		return !has(func(a string) bool { return a == "-C" || a == "--compile" })
+	case readOnlyCmds[w0]:
+		return true
+	}
+	return testRunner(words)
+}
+
+// testRunner reports whether words run a repository's tests or vet (go test|vet, cargo test|check, make test|check,
+// npm|pnpm|yarn test, pytest), without an option that names an output file.
+func testRunner(words []string) bool {
+	if slices.ContainsFunc(words[1:], func(a string) bool {
+		return a == "-o" || strings.HasPrefix(a, "-o=") || strings.HasPrefix(a, "-outputdir") ||
+			(strings.HasPrefix(a, "-") && strings.Contains(a, "profile"))
+	}) {
+		return false
+	}
+	sub := firstArg(words[1:])
+	switch words[0] {
+	case "go":
+		return sub == "test" || sub == "vet"
+	case "cargo":
+		return sub == "test" || sub == "check"
+	case "make":
+		return sub == "test" || sub == "check"
+	case "npm", "pnpm", "yarn":
+		return sub == "test" || (sub == "run" && len(words) > 2 && words[2] == "test")
+	case "pytest":
+		return true
+	case "python", "python3":
+		return len(words) > 2 && words[1] == "-m" && words[2] == "pytest"
+	}
+	return false
 }
 
 // ---------------------------------------------------------------------------
@@ -803,8 +903,9 @@ const (
 )
 
 // redirectRe finds an output redirection and its target: >, >>, >|, &> and N>, as in `echo x > file` or `cmd 2>>log`.
-// A target that starts with ampFd is a file descriptor (2>&1) unless it names a file (>&file).
-var redirectRe = regexp.MustCompile(`(?:\d*|` + ampOut + `)>>?\s*(` + ampFd + `?\S+)`)
+// Its groups: the ampFd of a >& (if any), the space before the target, the target. A >& followed at once by a number or
+// - names a file descriptor (2>&1, >&-); followed by a space, or by anything else, it names a file (`>& file`, >&file).
+var redirectRe = regexp.MustCompile(`(?:\d*|` + ampOut + `)>>?(` + ampFd + `)?(\s*)(\S+)`)
 
 // writeTargetCmds are commands whose arguments name the files they create or change: every argument for
 // the first group, the last one for the second (cp a b, mv a b, ln -s a b).
@@ -892,12 +993,10 @@ func (c RuleContext) bashWriteTargets(command, dir string, depth int) []writeTar
 	add := func(p, d string) { out = append(out, writeTarget{p, d}) }
 	for _, seg := range segmentSplit.Split(command, -1) {
 		for _, m := range redirectRe.FindAllStringSubmatch(seg, -1) {
-			t := m[1]
-			if strings.HasPrefix(t, ampFd) {
-				t = t[1:]
-				if t == "-" || (t != "" && strings.Trim(t, "0123456789") == "") {
-					continue
-				}
+			// A descriptor follows >& at once (2>&1, >&2, >&-); after a space, or not a number, it is a file.
+			t := m[3]
+			if m[1] != "" && m[2] == "" && (t == "-" || strings.Trim(t, "0123456789") == "") {
+				continue
 			}
 			if t = strings.Trim(t, `"'`); t != "" && !strings.HasPrefix(t, "(") && !harmlessTarget(t) {
 				add(t, dir)

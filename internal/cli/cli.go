@@ -206,7 +206,7 @@ func (c *command) task(args []string) int {
 	model := c.fs.String("model", "", "model for this task")
 	runtime := c.fs.String("runtime", "", "runtime the task runs on: claude, codex or auto (default: runtimes.default of config.json)")
 	var review optionalBool
-	c.fs.Var(&review, "review", "have a read-only session review each ready report first (--review=false: none; default: the policy's pairing)")
+	c.fs.Var(&review, "review", "have a read-only session review each ready report first; --review=false (with the =) for none; default: the policy's pairing")
 	pos, code, ok := c.parse(args, 1, -1)
 	if !ok {
 		return code

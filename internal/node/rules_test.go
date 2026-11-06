@@ -1080,6 +1080,37 @@ func TestReadOnlyDeniesEveryWrite(t *testing.T) {
 		{"Bash", map[string]any{"command": "gh -R o/r pr edit 3 --title x"}},
 		{"Bash", map[string]any{"command": "gh pr merge 3"}},
 		{"Bash", map[string]any{"command": "sh -c 'git commit -m x'"}},
+		{"Bash", map[string]any{"command": "sed -i s/a/b/ a.go"}},
+		{"Bash", map[string]any{"command": "rm a.go"}},
+		{"Bash", map[string]any{"command": "rm -rf ."}},
+		{"Bash", map[string]any{"command": `python3 -c "open('a.go','w').write('x')"`}},
+		{"Bash", map[string]any{"command": "gofmt -w ."}},
+		{"Bash", map[string]any{"command": "git update-ref refs/heads/main HEAD~1"}},
+		{"Bash", map[string]any{"command": "git config core.hooksPath ."}},
+		{"Bash", map[string]any{"command": "cat a.go | tee b.go"}},
+		{"Bash", map[string]any{"command": "go mod tidy"}},
+		{"Bash", map[string]any{"command": "find . -name '*.go' -delete"}},
+		{"Bash", map[string]any{"command": "find . -exec rm {} ;"}},
+		{"Bash", map[string]any{"command": "rg --pre ./x foo"}},
+		{"Bash", map[string]any{"command": "git diff --output=patch.txt"}},
+		{"Bash", map[string]any{"command": "go test -coverprofile=c.out ./..."}},
+		{"Bash", map[string]any{"command": "$(echo git) push"}},
+		{"Bash", map[string]any{"command": "bash -lc 'go test ./... && rm -rf .'"}},
+		{"Bash", map[string]any{"command": "gh pr view 3"}},
+		{"Bash", map[string]any{"command": "gh release create v1"}},
+		{"Bash", map[string]any{"command": "curl -X POST https://api.github.com/repos/o/r/issues"}},
+		// A program run through git's or the environment's configuration.
+		{"Bash", map[string]any{"command": "git -c core.pager='rm -rf .' log"}},
+		{"Bash", map[string]any{"command": "git --config-env=core.pager=X log"}},
+		{"Bash", map[string]any{"command": "git grep -Orm foo"}},
+		{"Bash", map[string]any{"command": "git grep --open-files-in-pager=rm foo"}},
+		{"Bash", map[string]any{"command": "git diff --ext-diff"}},
+		{"Bash", map[string]any{"command": "git --exec-path=. status"}},
+		{"Bash", map[string]any{"command": "GIT_PAGER='rm -rf .' git log"}},
+		{"Bash", map[string]any{"command": "GIT_EXTERNAL_DIFF=./x git diff"}},
+		{"Bash", map[string]any{"command": "env PAGER=./x git log"}},
+		{"Bash", map[string]any{"command": "rg --hostname-bin=./x foo"}},
+		{"Bash", map[string]any{"command": "file -C -m magic"}},
 	} {
 		d := Evaluate(ro, tc.tool, in(tc.in))
 		if d.Verdict != VerdictDeny || d.Rule != ruleReadOnly {
@@ -1090,7 +1121,9 @@ func TestReadOnlyDeniesEveryWrite(t *testing.T) {
 		}
 	}
 	for _, cmd := range []string{"git status", "git diff main...HEAD", "git log --oneline -5", "git show HEAD:a.go",
-		"go test ./...", "grep -rn foo . | head", "ls > /dev/null", "gh pr view 3", "gh pr diff 3", "git diff --stat 2>&1"} {
+		"go test ./...", "grep -rn foo . | head", "ls > /dev/null", "git diff --stat 2>&1", "cd sub && cat a.go | wc -l",
+		"find . -name '*.go' | head", "rg -n foo", "git merge-base main HEAD", "go vet ./...", "go test -race -run TestProfile ./...",
+		"bash -lc 'go test ./...'", "make test", "npm run test", "python3 -m pytest -q", "tail -n 20 a.log", "stat a.go"} {
 		if d := Evaluate(ro, "Bash", in(map[string]any{"command": cmd})); d.Verdict != VerdictAllow {
 			t.Errorf("read-only %q = %+v, want allowed", cmd, d)
 		}
@@ -1109,6 +1142,30 @@ func TestReadOnlyDeniesEveryWrite(t *testing.T) {
 	} {
 		if d := codexEval(ro, tc.tool, in(tc.in)); d.Verdict != VerdictDeny || d.Rule != ruleReadOnly {
 			t.Errorf("codex %s under read-only = %+v, want a read_only deny", tc.tool, d)
+		}
+	}
+}
+
+// A redirection's target is a file unless it is a descriptor written right after >& (2>&1, >&2, >&-): `>& file` and
+// `2>& file`, with a space, write the file, in a worker's session and a read-only one.
+func TestRedirectToDescriptorOrFile(t *testing.T) {
+	e := newRuleEnv(t)
+	outside := filepath.Join(e.outDir, "x")
+	for _, cmd := range []string{"echo x >& " + outside, "echo x 2>& " + outside, "echo x >&" + outside, "echo x &> " + outside} {
+		if d := Evaluate(e.ctx, "Bash", in(map[string]any{"command": cmd})); d.Verdict != VerdictEscalate || d.Rule != ruleWrite {
+			t.Errorf("worker %q = %+v, want a write-outside-ticket escalation", cmd, d)
+		}
+	}
+	for _, cmd := range []string{"go test ./... 2>&1", "echo x >&2", "echo x 1>&2", "exec 3>&-"} {
+		if targets := e.ctx.bashWriteTargets(cmd, e.ctx.TicketDir, 0); len(targets) != 0 {
+			t.Errorf("%q writes %v, want only descriptors", cmd, targets)
+		}
+	}
+	ro := e.ctx
+	ro.ReadOnly = true
+	for _, cmd := range []string{"go test ./... >& " + outside, "go test ./... 2>& " + outside} {
+		if d := Evaluate(ro, "Bash", in(map[string]any{"command": cmd})); d.Verdict != VerdictDeny || d.Rule != ruleReadOnly {
+			t.Errorf("read-only %q = %+v, want a read_only deny", cmd, d)
 		}
 	}
 }

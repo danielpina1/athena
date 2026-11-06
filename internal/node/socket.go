@@ -309,8 +309,16 @@ const ruleCodexUnsandboxed = "codex_unsandboxed"
 // (escalateShared). An ask through a door (Codex asking to run a command or write files outside its sandbox) on a node
 // that sandboxes its workers escalates what the rules allow: a sandboxed Claude Code worker cannot run anything
 // unsandboxed (allowUnsandboxedCommands: false), and a Codex one may only with a person's yes. Without a sandbox, Claude
-// Code's commands run unsandboxed under the rules alone, and so do these.
+// Code's commands run unsandboxed under the rules alone, and so do these. A review session's ask through a door is
+// denied, sandbox or not: it stays in its read-only sandbox.
 func (n *Node) judge(ctx context.Context, s *session, j judgment, start time.Time) HookResponse {
+	if j.door != "" && s.reviewing() {
+		// A review runs in its read-only sandbox, whatever the rules would allow: an ask to run or write outside it is
+		// refused, with or without a node sandbox, and asks no person.
+		s.log.Info("hook decision", "event", j.event, "runtime", j.runtime, "tool", j.tool, "verdict", VerdictDeny, "rule", ruleReadOnly)
+		n.observeHook(j.event, VerdictDeny, start)
+		return denied("this review session is read-only (" + ruleReadOnly + "): it runs nothing outside its sandbox")
+	}
 	rc := n.ruleContext(s, j.runtime)
 	d, at := EvaluateCalls(rc, j.runtime, j.calls)
 	unsandboxed := d.Verdict == VerdictAllow && j.door != "" && n.cfg.Sandbox != nil && runsOrWrites(j.calls)

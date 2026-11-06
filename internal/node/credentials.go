@@ -267,6 +267,11 @@ func (n *Node) handleCredential(ctx context.Context, req CredentialRequest) Cred
 		n.log.Warn("credential request from an unknown or ended session", "ticket", req.Ticket, "assignment", req.Assignment)
 		return CredentialResponse{Error: denyNoSession}
 	}
+	if s.reviewing() {
+		// A review reads the local branch and changes nothing: it gets no GitHub token.
+		s.log.Warn("credential request from a review session refused")
+		return CredentialResponse{Error: "a review session has no GitHub credentials: review the local branch"}
+	}
 	repo := s.t.Repo
 	if repo == "" {
 		return CredentialResponse{Error: "ticket " + s.t.ID + " works in no GitHub repository"}
@@ -346,14 +351,20 @@ func (n *Node) githubVariables(s *session) []string {
 
 // githubEnv is the rest of a GitHub session's environment: the shims first on PATH (gh runs `athena gh`), git's
 // credential helper replaced by `athena git-credential` (asked per repository path), and the bot as the author and
-// committer of every commit. It holds no token.
+// committer of every commit. It holds no token. A review session's has the shims and no credential helper at all.
 func (n *Node) githubEnv(s *session) []string {
 	if s.t.Repo == "" || n.cfg.Credentials == nil {
 		return nil
 	}
+	shims := "PATH=" + filepath.Join(n.cfg.StateDir, ShimsDir) + string(os.PathListSeparator) + os.Getenv("PATH")
+	if s.reviewing() {
+		// A review gets no credentials: no credential helper (nor the owner's, which would answer with the owner's own),
+		// no SSH, and the gh shim, which the node refuses a token for a review (handleCredential).
+		return withGitConfig([]string{shims}, [][2]string{{"credential.helper", ""}, {"protocol.ssh.allow", "never"}})
+	}
 	login, email := n.cfg.Credentials.Identity()
 	env := []string{
-		"PATH=" + filepath.Join(n.cfg.StateDir, ShimsDir) + string(os.PathListSeparator) + os.Getenv("PATH"),
+		shims,
 		"GIT_AUTHOR_NAME=" + login, "GIT_AUTHOR_EMAIL=" + email,
 		"GIT_COMMITTER_NAME=" + login, "GIT_COMMITTER_EMAIL=" + email,
 	}
