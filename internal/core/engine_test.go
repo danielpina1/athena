@@ -1,11 +1,14 @@
 package core
 
 import (
+	"encoding/json"
 	"errors"
 	"reflect"
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/danielpina1/athena/internal/metrics"
 )
 
 func eq[T any](t *testing.T, what string, got, want T) {
@@ -131,7 +134,7 @@ func TestAssignmentStartedDeliversWaitingInputs(t *testing.T) {
 	tk := h.submit("Fix it")
 	a := tk.Assignments[0].ID
 	h.tick(1)
-	h.must(h.eng.AssignmentStarted(tk.ID, a, "sess-1", ""))
+	h.must(h.eng.AssignmentStarted(tk.ID, a, "sess-1", "", ""))
 	stored := h.ticket(tk.ID)
 	started := base.Add(1e9)
 	eq(t, "assignment", stored.Assignments[0], Assignment{ID: a, State: AssignmentRunning, CreatedAt: base, StartedAt: &started, SessionID: "sess-1"})
@@ -150,7 +153,7 @@ func TestAssignmentStartedDeliversWaitingInputs(t *testing.T) {
 	eq(t, "delivered to", stored.Inputs[0].DeliveredTo, a)
 
 	// Unknown ticket is a UserError.
-	wantUserError(t, "unknown ticket", h.eng.AssignmentStarted("T-9999", a, "", ""))
+	wantUserError(t, "unknown ticket", h.eng.AssignmentStarted("T-9999", a, "", "", ""))
 }
 
 func TestReportQuestionSetsAttention(t *testing.T) {
@@ -520,7 +523,7 @@ func TestRefKeepsInputsUndeliveredUntilAssignmentRuns(t *testing.T) {
 	eq(t, "undelivered", len(stored.Undelivered), 2)
 	eq(t, "no deliveries", h.exec.count("deliver"), 0)
 	eq(t, "start asked again", h.exec.count("start"), 2)
-	h.must(h.eng.AssignmentStarted(tk.ID, stored.Assignments[0].ID, "s", ""))
+	h.must(h.eng.AssignmentStarted(tk.ID, stored.Assignments[0].ID, "s", "", ""))
 	h.settle(false)
 	eq(t, "delivered", h.delivered, [][2]string{{tk.ID, stored.Undelivered[0]}, {tk.ID, stored.Undelivered[1]}})
 }
@@ -758,7 +761,7 @@ func TestRefLateStartOfReplacedAssignment(t *testing.T) {
 	h.must(h.eng.RetryTicket(id))
 	before := h.ticket(id)
 	delivers := h.exec.count("deliver")
-	h.must(h.eng.AssignmentStarted(id, first, "late", ""))
+	h.must(h.eng.AssignmentStarted(id, first, "late", "", ""))
 	h.settle(false)
 	eq(t, "assignments", h.ticket(id).Assignments, before.Assignments)
 	eq(t, "delivers", h.exec.count("deliver"), delivers)
@@ -974,7 +977,7 @@ func TestAssignmentInterruptedOpensOnce(t *testing.T) {
 	id := h.accepted()
 	a := h.ticket(id).Assignments[0].ID
 	h.tick(1)
-	h.must(h.eng.AssignmentStarted(id, a, "sess", ""))
+	h.must(h.eng.AssignmentStarted(id, a, "sess", "", ""))
 	h.tick(1)
 	h.must(h.eng.AssignmentInterrupted(id, a, InterruptRestart))
 	at := base.Add(2e9)
@@ -993,11 +996,11 @@ func TestStartClosesOpenInterruption(t *testing.T) {
 	id := h.accepted()
 	a := h.ticket(id).Assignments[0].ID
 	h.tick(1)
-	h.must(h.eng.AssignmentStarted(id, a, "sess", ""))
+	h.must(h.eng.AssignmentStarted(id, a, "sess", "", ""))
 	h.tick(1)
 	h.must(h.eng.AssignmentInterrupted(id, a, InterruptRestart))
 	h.tick(1)
-	h.must(h.eng.AssignmentStarted(id, a, "sess", ""))
+	h.must(h.eng.AssignmentStarted(id, a, "sess", "", ""))
 	resumed := base.Add(3e9)
 	got := h.ticket(id).Assignments[0]
 	eq(t, "resumed", got.Interruptions[0].ResumedAt, &resumed)
@@ -1029,4 +1032,76 @@ func TestInterruptIgnoresEndedOrIdleTargets(t *testing.T) {
 	h.must(h.eng.StopTicket(id, ""))
 	h.must(h.eng.AssignmentInterrupted(id, a, InterruptRestart))
 	eq(t, "ended", len(h.ticket(id).Assignments[0].Interruptions), 0)
+}
+
+// Each Assignment records the runtime its session ran on, from the Executor's start; the metrics name it, not the
+// Ticket's auto. A start that names none keeps what the Assignment had, and a review role is kept in its own field.
+func TestAssignmentRecordsRuntime(t *testing.T) {
+	h := newHarness(t)
+	reg := metrics.NewRegistry()
+	h.eng.SetMetrics(reg)
+	tk, err := h.eng.SubmitOwnerTask("Pick for me", TaskOptions{Dir: "/work/x", Runtime: RuntimeAuto})
+	h.must(err)
+	a := tk.Assignments[0].ID
+	eq(t, "runtime before the start", h.ticket(tk.ID).Assignments[0].Runtime, "")
+	h.must(h.eng.AssignmentStarted(tk.ID, a, "thr-1", "gpt-5-codex", RuntimeCodex))
+	got := h.ticket(tk.ID)
+	eq(t, "assignment runtime", got.Assignments[0].Runtime, RuntimeCodex)
+	eq(t, "ticket keeps auto", got.Execution.Runtime, RuntimeAuto)
+	h.must(h.eng.AssignmentStarted(tk.ID, a, "thr-1", "", ""))
+	eq(t, "a start naming no runtime keeps it", h.ticket(tk.ID).Assignments[0].Runtime, RuntimeCodex)
+	h.must(h.eng.RecordUsage(tk.ID, a, UsageDelta{OutputTokens: 3, CostUSD: 0.5, Runtime: RuntimeCodex}))
+	h.must(h.eng.FileReport(tk.ID, ReportInput{State: ReportReady, Summary: "done"}))
+	runtimes := map[string]string{}
+	for _, c := range reg.Snapshot(0).Counters {
+		runtimes[c.Name] = c.Labels["runtime"]
+	}
+	for _, name := range []string{"tokens_total", "cost_usd_total", "tickets_ended_total"} {
+		if runtimes[name] != RuntimeCodex {
+			t.Errorf("%s runtime label = %q, want codex (have %v)", name, runtimes[name], runtimes)
+		}
+	}
+	b, err := json.Marshal(Assignment{ID: "a", Runtime: RuntimeClaude})
+	h.must(err)
+	if strings.Contains(string(b), `"role"`) || !strings.Contains(string(b), `"runtime":"claude"`) {
+		t.Fatalf("assignment json = %s", b)
+	}
+	b, _ = json.Marshal(Assignment{ID: "a", Role: RoleReview})
+	if !strings.Contains(string(b), `"role":"review"`) {
+		t.Fatalf("review assignment json = %s", b)
+	}
+}
+
+// A task that names no runtime runs on the Engine's default: auto when the server says so, Claude Code when nothing
+// does. A router Ticket uses the same default.
+func TestDefaultRuntimeAuto(t *testing.T) {
+	h := newHarnessWith(t, func(o *Options) { o.DefaultRuntime = RuntimeAuto })
+	tk, err := h.eng.SubmitOwnerTask("No runtime named", TaskOptions{Dir: "/work/x"})
+	h.must(err)
+	eq(t, "owner task", h.ticket(tk.ID).Execution.Runtime, RuntimeAuto)
+	tk, err = h.eng.SubmitOwnerTask("Pinned", TaskOptions{Dir: "/work/x", Runtime: RuntimeClaude})
+	h.must(err)
+	eq(t, "a named runtime wins", h.ticket(tk.ID).Execution.Runtime, RuntimeClaude)
+
+	ev := newEvalsWith(t, func(o *Options) { o.DefaultRuntime = RuntimeAuto })
+	id := ev.acceptRequest("tr-1", "github:o/r#1")
+	eq(t, "router ticket", ev.ticket(id).Execution.Runtime, RuntimeAuto)
+	plain := newEvals(t)
+	id = plain.acceptRequest("tr-2", "github:o/r#2")
+	eq(t, "router ticket without a default", plain.ticket(id).Execution.Runtime, RuntimeClaude)
+}
+
+// A runtime the Engine does not know is refused, whether the task names it or the Engine's default is.
+func TestUnknownRuntimeRejected(t *testing.T) {
+	h := newHarness(t)
+	_, err := h.eng.SubmitOwnerTask("Task", TaskOptions{Runtime: "gemini"})
+	wantUserError(t, "unknown runtime", err)
+	if !strings.Contains(err.Error(), `"gemini"`) {
+		t.Fatalf("error %q does not name the runtime", err)
+	}
+	bad := newHarnessWith(t, func(o *Options) { o.DefaultRuntime = "gemini" })
+	_, err = bad.eng.SubmitOwnerTask("Task", TaskOptions{})
+	wantUserError(t, "unknown default runtime", err)
+	tickets, _, _ := h.repos.counts()
+	eq(t, "tickets stored", tickets, 0)
 }

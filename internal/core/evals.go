@@ -627,7 +627,7 @@ func (o *op) accept(th *Thread, ev *Evaluation, d DecisionInput, p Policy, res *
 	}
 	t := &Ticket{ID: id, Title: titleOf(d.Title), DecisionID: dec.ID, Mandate: mandate, CreatedAt: o.at, UpdatedAt: o.at,
 		Origin:    Origin{TriggerID: primary.ID, TriggerIDs: slices.Clone(ev.TriggerIDs)},
-		Execution: &Execution{Runtime: RuntimeClaude}, Repo: th.Meta["repo"]}
+		Execution: &Execution{Runtime: o.defaultRuntime}, Repo: th.Meta["repo"]}
 	// The primary Trigger comes first, then the rest of the batch in order.
 	batch := []*Trigger{primary}
 	for _, tid := range ev.TriggerIDs {

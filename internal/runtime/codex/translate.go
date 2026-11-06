@@ -303,6 +303,8 @@ type rateLimitWindow struct {
 }
 
 type rateLimitSnapshot struct {
+	// LimitID is the limit the snapshot is of ("codex", or a per-model limit's id): its windows' Bucket.
+	LimitID              string           `json:"limitId"`
 	Primary              *rateLimitWindow `json:"primary"`
 	Secondary            *rateLimitWindow `json:"secondary"`
 	RateLimitReachedType *string          `json:"rateLimitReachedType"`
@@ -320,8 +322,9 @@ func (s rateLimitSnapshot) windows() []rt.Window {
 			name = windowName(*w.WindowDurationMins)
 		}
 		win := rt.Window{
-			Name: name,
-			Used: min(max(w.UsedPercent/100, 0), 1),
+			Bucket: s.LimitID,
+			Name:   name,
+			Used:   min(max(w.UsedPercent/100, 0), 1),
 		}
 		anyUsedUp = anyUsedUp || win.Used >= 1
 		if w.ResetsAt != nil {

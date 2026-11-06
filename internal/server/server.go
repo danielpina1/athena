@@ -219,6 +219,11 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	} else {
 		logger.Info("codex is disabled (runtimes.codex.enabled is false)")
 	}
+	if ncfg.Chooser == nil {
+		ncfg.Chooser = fileCfg.Runtimes.chooser()
+	}
+	logger.Info("runtimes", "default", fileCfg.Runtimes.Default, "preferred", fileCfg.Runtimes.Preferred,
+		"avoidAbove", fileCfg.Runtimes.AvoidAbove)
 
 	// The hub, made once the Dispatcher exists, hears of the node's changes through hubRef.
 	var hubRef atomic.Pointer[hub.Hub]
@@ -253,7 +258,7 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	}
 	fx := effects.New(st, logger.With("component", "effects"))
 	eng := core.NewEngineWith(st.Repos(), n, core.Options{Now: time.Now, Emit: emit, Policy: pc.policy, Scope: sourceReg,
-		Wake: fx.Wake, Relays: routerOn})
+		Wake: fx.Wake, Relays: routerOn, DefaultRuntime: fileCfg.Runtimes.Default})
 	eng.SetMetrics(reg)
 	n.SetEngine(eng)
 	// registerSource registers the GitHub Source once the App passed its check: here, or later in the background.
@@ -288,6 +293,13 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	defer nodeCancel()
 	served := make(chan error, 1)
 	go func() { served <- n.Serve(nodeCtx) }()
+	// The dashboard shows each runtime's readiness from the start, not only after its first launch.
+	refreshed := make(chan struct{})
+	go func() {
+		defer close(refreshed)
+		n.RefreshRuntimes(nodeCtx)
+	}()
+	defer func() { nodeCancel(); <-refreshed }()
 	nodeDone := false
 	waitNode := func() error {
 		if nodeDone {

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/danielpina1/athena/internal/core"
+	"github.com/danielpina1/athena/internal/quota"
 	"github.com/danielpina1/athena/internal/render"
 	"github.com/danielpina1/athena/internal/runtime/claude"
 	"github.com/danielpina1/athena/internal/runtime/codex"
@@ -1240,7 +1241,7 @@ func TestStopTicketClosesSession(t *testing.T) {
 type blockingEngine struct{ release chan struct{} }
 
 func (b blockingEngine) wait() { <-b.release }
-func (b blockingEngine) AssignmentStarted(string, string, string, string) error {
+func (b blockingEngine) AssignmentStarted(string, string, string, string, string) error {
 	b.wait()
 	return nil
 }
@@ -2544,5 +2545,220 @@ func TestCodexDenyThenReportItemStillRefused(t *testing.T) {
 	}
 	if cur, _ := h.ticket(tk.ID); cur.Ended != nil {
 		t.Fatalf("ticket ended: %+v", cur.Ended)
+	}
+}
+
+// --- runtimes per Assignment (T8) ---
+
+// newTracker is a quota Tracker in the test's own directory.
+func newTracker(t *testing.T) *quota.Tracker {
+	t.Helper()
+	tr, err := quota.New(filepath.Join(t.TempDir(), "quota.json"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tr
+}
+
+// An auto Ticket runs on the runtime the chooser picks: Codex while Claude Code is limited. Its Assignment records the
+// runtime, the session's quota reading reaches the Tracker, and Status shows both runtimes.
+func TestAutoTicketLaunchesOnChosenRuntime(t *testing.T) {
+	tr := newTracker(t)
+	reset := time.Now().Add(time.Hour)
+	tr.Hit(core.RuntimeClaude, rt.LimitHit{Runtime: core.RuntimeClaude, ResetsAt: &reset})
+	h := newCodexHarness(t, codexTurn(), func(c *Config) { c.Quota = tr })
+	// An auto Ticket's model is Claude Code's: on Codex the session runs Codex's own default.
+	tk, err := h.eng.SubmitOwnerTask("Pick a runtime", core.TaskOptions{Runtime: core.RuntimeAuto, Model: "opus"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, a := h.running(tk.ID)
+	if a.Runtime != core.RuntimeCodex {
+		t.Fatalf("assignment runtime = %q, want codex", a.Runtime)
+	}
+	if h.rpcHas(`"opus"`) || a.Model == "opus" {
+		t.Fatalf("codex was given the Ticket's Claude Code model (assignment model %q)", a.Model)
+	}
+	if !h.rpcHas(`"method":"thread/start"`) || len(h.invocations()) != 0 {
+		t.Fatalf("want one Codex session and no Claude Code one (claude ran %d times)", len(h.invocations()))
+	}
+	h.eventually("codex's quota reading reached the tracker", func() bool { return tr.State(core.RuntimeCodex).Measured })
+	var claudeStatus, codexStatus RuntimeStatus
+	h.eventually("status lists both runtimes", func() bool {
+		for _, r := range h.n.Status().Runtimes {
+			switch r.Name {
+			case core.RuntimeClaude:
+				claudeStatus = r
+			case core.RuntimeCodex:
+				codexStatus = r
+			}
+		}
+		return codexStatus.Live == 1 && codexStatus.Quota.Measured
+	})
+	if !claudeStatus.Ready || !claudeStatus.Quota.Limited(time.Now()) || claudeStatus.Live != 0 {
+		t.Fatalf("claude status = %+v", claudeStatus)
+	}
+	if !codexStatus.Ready || codexStatus.Version == "" {
+		t.Fatalf("codex status = %+v", codexStatus)
+	}
+
+	// With both free, the preferred runtime (Claude Code) runs the next auto Ticket.
+	h2 := newHarness(t, nil)
+	tk2, err := h2.eng.SubmitOwnerTask("Auto task", core.TaskOptions{Runtime: core.RuntimeAuto})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, a2 := h2.running(tk2.ID)
+	if a2.Runtime != core.RuntimeClaude || h2.invocations()[0].Env["ATHENA_RUNTIME"] != core.RuntimeClaude {
+		t.Fatalf("assignment runtime = %q, invocations %+v", a2.Runtime, h2.invocations())
+	}
+}
+
+// A launch whose runtime is limited waits, queued and with no session, then starts once the limit resets: the Ticket
+// stays working/queued meanwhile and never waits for a person.
+func TestLaunchWaitsThenStarts(t *testing.T) {
+	tr := newTracker(t)
+	reset := time.Now().Add(1500 * time.Millisecond)
+	tr.Hit(core.RuntimeClaude, rt.LimitHit{Runtime: core.RuntimeClaude, ResetsAt: &reset})
+	h := newHarness(t, func(c *Config) { c.Quota = tr })
+	tk := h.submit("Wait for the reset", "")
+	h.never("a session while claude is limited", time.Second, func() bool {
+		cur, st := h.ticket(tk.ID)
+		if st != (core.Stage{Stage: "working", Action: "queued"}) {
+			t.Fatalf("stage while waiting = %+v", st)
+		}
+		return len(h.invocations()) > 0 || cur.LatestAssignment().Report != nil
+	})
+	if h.n.Status().SlotsInUse != 0 {
+		t.Fatalf("the waiting launch holds a slot: %+v", h.n.Status())
+	}
+	_, a := h.running(tk.ID)
+	if a.Runtime != core.RuntimeClaude || len(h.invocations()) != 1 {
+		t.Fatalf("after the reset: runtime %q, %d sessions", a.Runtime, len(h.invocations()))
+	}
+	if !time.Now().After(reset) {
+		t.Fatal("the session started before the reset")
+	}
+}
+
+// testClock is a clock tests move by hand, safe for concurrent use.
+type testClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func (c *testClock) now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.t
+}
+
+func (c *testClock) advance(d time.Duration) {
+	c.mu.Lock()
+	c.t = c.t.Add(d)
+	c.mu.Unlock()
+}
+
+// A new Assignment resumes the Ticket's last session only when it runs on that session's runtime (and role): on
+// another runtime it starts fresh.
+func TestResumeOnlySameRuntimeSession(t *testing.T) {
+	clk := &testClock{t: time.Now()}
+	tr, err := quota.New(filepath.Join(t.TempDir(), "quota.json"), clk.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := newCodexHarness(t, codexTurn(), func(c *Config) { c.Quota = tr })
+	tk, err := h.eng.SubmitOwnerTask("Move between runtimes", core.TaskOptions{Runtime: core.RuntimeAuto})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, first := h.running(tk.ID)
+	if first.Runtime != core.RuntimeClaude || first.SessionID != fixtureSessionID {
+		t.Fatalf("first assignment = %+v", first)
+	}
+	// limit makes runtime limited for an hour; retry fails the running Assignment and retries the Ticket.
+	limit := func(runtime string) {
+		reset := clk.now().Add(time.Hour)
+		tr.Hit(runtime, rt.LimitHit{Runtime: runtime, ResetsAt: &reset})
+	}
+	retry := func() core.Assignment {
+		t.Helper()
+		cur, _ := h.ticket(tk.ID)
+		if err := h.eng.FileReport(tk.ID, core.ReportInput{AssignmentID: cur.LatestAssignment().ID, State: core.ReportFailed, Summary: "stuck"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := h.eng.RetryTicket(tk.ID); err != nil {
+			t.Fatal(err)
+		}
+		cur, _ = h.ticket(tk.ID)
+		id := cur.LatestAssignment().ID
+		var a core.Assignment
+		h.eventually("the retry started", func() bool {
+			cur, _ := h.ticket(tk.ID)
+			a = *cur.LatestAssignment()
+			return a.ID == id && a.SessionID != ""
+		})
+		return a
+	}
+	// Claude Code is limited: the retry runs on Codex, in a new thread, not in claude's session.
+	limit(core.RuntimeClaude)
+	second := retry()
+	if second.Runtime != core.RuntimeCodex || h.rpcHas(`"method":"thread/resume"`) || !h.rpcHas(`"method":"thread/start"`) {
+		t.Fatalf("second assignment = %+v; rpc %v", second, h.rpc())
+	}
+	if err := os.Remove(h.harness.argsLog); err != nil {
+		t.Fatal(err)
+	}
+	// Claude Code's limit resets and Codex is limited: the next retry resumes Claude Code's own session.
+	clk.advance(2 * time.Hour)
+	limit(core.RuntimeCodex)
+	third := retry()
+	if third.Runtime != core.RuntimeClaude {
+		t.Fatalf("third assignment = %+v", third)
+	}
+	inv := h.invocations()
+	if len(inv) != 1 {
+		t.Fatalf("%d claude sessions, want 1", len(inv))
+	}
+	if id, ok := argValue(inv[0].Args, "--resume"); !ok || id != fixtureSessionID {
+		t.Fatalf("claude args = %v, want --resume %s", inv[0].Args, fixtureSessionID)
+	}
+
+	// The rule itself: same runtime and role only; a review starts fresh.
+	tkt := core.Ticket{Execution: &core.Execution{Runtime: core.RuntimeAuto}, Assignments: []core.Assignment{
+		{ID: "a1", SessionID: "claude-1", Runtime: core.RuntimeClaude},
+		{ID: "a2", SessionID: "codex-1", Runtime: core.RuntimeCodex},
+		{ID: "a3", SessionID: "review-1", Runtime: core.RuntimeClaude, Role: core.RoleReview},
+		{ID: "a4"},
+	}}
+	for _, c := range []struct{ runtime, role, want string }{
+		{core.RuntimeClaude, "", "claude-1"}, {core.RuntimeCodex, "", "codex-1"}, {core.RuntimeClaude, core.RoleReview, ""},
+		{"other", "", ""},
+	} {
+		if got := previousSessionID(tkt, "a4", c.runtime, c.role); got != c.want {
+			t.Errorf("previousSessionID(%s, %q) = %q, want %q", c.runtime, c.role, got, c.want)
+		}
+	}
+	// An Assignment from before runtimes were recorded ran on the Ticket's runtime (claude for auto).
+	legacy := core.Ticket{Execution: &core.Execution{Runtime: core.RuntimeAuto}, Assignments: []core.Assignment{{ID: "a1", SessionID: "old"}, {ID: "a2"}}}
+	if got := previousSessionID(legacy, "a2", core.RuntimeClaude, ""); got != "old" {
+		t.Errorf("legacy = %q", got)
+	}
+	if got := previousSessionID(legacy, "a2", core.RuntimeCodex, ""); got != "" {
+		t.Errorf("legacy on codex = %q", got)
+	}
+}
+
+// A quota change tells OnStatus, and Status shows it, with no session involved.
+func TestStatusFiresOnQuotaChange(t *testing.T) {
+	tr := newTracker(t)
+	var calls atomic.Int32
+	h := newHarness(t, func(c *Config) { c.Quota = tr; c.OnStatus = func() { calls.Add(1) } })
+	before := calls.Load()
+	tr.Observe(core.RuntimeClaude, []rt.Window{{Name: "5h", Used: 0.4}})
+	h.eventually("OnStatus after the quota changed", func() bool { return calls.Load() > before })
+	st := h.n.Status()
+	if len(st.Runtimes) != 1 || st.Runtimes[0].Name != core.RuntimeClaude || !st.Runtimes[0].Ready || !st.Runtimes[0].Quota.Measured {
+		t.Fatalf("runtimes = %+v", st.Runtimes)
 	}
 }

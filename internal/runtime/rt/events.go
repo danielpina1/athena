@@ -56,6 +56,10 @@ type QuotaUpdate struct{ Windows []Window }
 
 // Window is one usage-limit window.
 type Window struct {
+	// Bucket names the limit the window belongs to when the runtime keeps several (Codex's limitId: "codex", or a
+	// per-model limit's id); empty for a runtime with one (Claude Code). Two buckets' windows of the same Name are two
+	// windows.
+	Bucket string
 	// Name is "5h", "7d" or "<n>m" (a window of n minutes); "primary" or "secondary" for a window whose length the
 	// runtime did not say.
 	Name string

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/danielpina1/athena/internal/core"
 	"github.com/danielpina1/athena/internal/metrics"
+	"github.com/danielpina1/athena/internal/quota"
 	"github.com/danielpina1/athena/internal/redact"
 	"github.com/danielpina1/athena/internal/render"
 	"github.com/danielpina1/athena/internal/runtime/rt"
@@ -32,6 +34,8 @@ const (
 	// defaultCredentialRetry and maxCredentialRetry bound the pauses of a launch waiting for GitHub credentials.
 	defaultCredentialRetry = 5 * time.Second
 	maxCredentialRetry     = 5 * time.Minute
+	// minLaunchWait is the shortest pause of a launch that waits for its runtime's reset.
+	minLaunchWait = time.Second
 	// hookTimeoutMargin is how much longer than an Approval a decision hook may block, so the node, not Claude
 	// Code, decides what an unanswered Approval means.
 	hookTimeoutMargin = 5 * time.Minute
@@ -77,9 +81,14 @@ type Config struct {
 	Model string
 	// ClaudeBinary is the claude executable (default "claude") of the default Runtimes.
 	ClaudeBinary string
-	// Runtimes are the runtimes sessions run on, by name (rt.Runtime.Name); a Ticket runs on the one its Execution
-	// names, Claude Code when it names none or auto (until the runtime chooser). Default: Claude Code alone (DefaultRuntimes).
+	// Runtimes are the runtimes sessions run on, by name (rt.Runtime.Name); each Assignment runs on the one Chooser
+	// picks: a Ticket's pinned runtime, or for auto one with headroom. Default: Claude Code alone (DefaultRuntimes).
 	Runtimes map[string]rt.Runtime
+	// Chooser picks each launch's runtime (default DefaultChooser()).
+	Chooser Chooser
+	// Quota tracks the runtimes' usage limits from what their sessions report; nil makes one that keeps its state in
+	// <StateDir>/quota.json (in memory without a StateDir).
+	Quota *quota.Tracker
 	// ApprovalTimeout is how long an escalated tool call waits for a person before it is denied (default 30m).
 	ApprovalTimeout time.Duration
 	// Metrics receives the node's timings and gauges (session_spawn_seconds, session_init_seconds,
@@ -100,8 +109,8 @@ type Config struct {
 	Logger *slog.Logger
 	// Name and ClaudeVersion are shown in Status; the node does not interpret them.
 	Name, ClaudeVersion string
-	// OnStatus is called, from the node's loop goroutine, whenever the sessions in use or the launches queued change
-	// (see Status). It must not block or call back into the node.
+	// OnStatus is called, from the node's loop goroutine, whenever the sessions in use, the launches queued, a
+	// runtime's readiness or its quota change (see Status). It must not block or call back into the node.
 	OnStatus func()
 	// CloseGrace is how long a session's process gets to end after its stdin closes before it is killed (default
 	// 10 s).
@@ -110,7 +119,7 @@ type Config struct {
 
 // EngineCallbacks is the part of *core.Engine the node calls: the Executor callbacks, the Ticket query and Approvals.
 type EngineCallbacks interface {
-	AssignmentStarted(ticketID, assignmentID, sessionID, model string) error
+	AssignmentStarted(ticketID, assignmentID, sessionID, model, runtime string) error
 	InputsDelivered(ticketID, assignmentID string, inputIDs []string) error
 	DeliveryFailed(ticketID, assignmentID, errMsg string) error
 	InputsRead(ticketID string, inputIDs []string) error
@@ -187,6 +196,21 @@ type Node struct {
 	// Metric handles; nil without Config.Metrics.
 	reg        *metrics.Registry
 	slotsGauge *metrics.Gauge
+
+	// quota is Config.Quota (or the node's own); chooser Config.Chooser (or DefaultChooser()).
+	quota   *quota.Tracker
+	chooser Chooser
+	// chooseMu makes a launch's choice and its count of the sessions per runtime one step, so two launches never both
+	// take a runtime's last session.
+	chooseMu sync.Mutex
+	// endGen counts the sessions that left the registry (under mu): a launch waiting for a session to end is due once
+	// it moved.
+	endGen int64
+	// infos is the last readiness each runtime reported (checkRuntime), for Status.
+	infoMu sync.Mutex
+	infos  map[string]rt.Info
+	// statusGen moves whenever a runtime's readiness or quota changes, so publishStatus tells OnStatus.
+	statusGen atomic.Int64
 }
 
 type engineRef struct{ e EngineCallbacks }
@@ -233,6 +257,23 @@ func New(cfg Config, eng EngineCallbacks) *Node {
 		slotsGauge:   cfg.Metrics.Gauge("slots_in_use"),
 	}
 	n.tokens.log = log
+	n.infos = map[string]rt.Info{}
+	n.chooser = cfg.Chooser
+	if n.chooser == nil {
+		n.chooser = DefaultChooser()
+	}
+	n.quota = cfg.Quota
+	if n.quota == nil {
+		path := ""
+		if cfg.StateDir != "" {
+			path = filepath.Join(cfg.StateDir, QuotaFile)
+		}
+		var err error
+		if n.quota, err = quota.New(path, nil); err != nil {
+			log.Error("read the quota state; starting without it", "error", err)
+		}
+	}
+	n.quota.OnChange(n.statusChanged)
 	// Claude Code's session timings exist from the start; another runtime's from its first session.
 	n.histogram("session_spawn_seconds", runtimeClaude)
 	n.histogram("session_init_seconds", runtimeClaude)
@@ -254,6 +295,18 @@ func New(cfg Config, eng EngineCallbacks) *Node {
 func (n *Node) histogram(name, runtime string) *metrics.Histogram {
 	return n.reg.Histogram(name, "runtime", runtime)
 }
+
+// QuotaFile is the file in the state directory the node's quota Tracker keeps its state in.
+const QuotaFile = "quota.json"
+
+// statusChanged notes a change of a runtime's readiness or quota: the loop tells OnStatus.
+func (n *Node) statusChanged() {
+	n.statusGen.Add(1)
+	n.post(message{kind: msgStatus})
+}
+
+// Quota is the node's quota Tracker.
+func (n *Node) Quota() *quota.Tracker { return n.quota }
 
 // SetEngine sets the Engine the node reports to.
 func (n *Node) SetEngine(eng EngineCallbacks) { n.eng.Store(&engineRef{eng}) }
@@ -354,8 +407,10 @@ const (
 	msgStop
 	msgEnded
 	msgShutdown
-	// msgWake only schedules: a launch put off (waiting for credentials) falls due.
+	// msgWake only schedules: a launch put off (waiting for credentials or a runtime) falls due.
 	msgWake
+	// msgStatus only publishes the status: a runtime's readiness or quota changed.
+	msgStatus
 )
 
 type message struct {
@@ -411,6 +466,7 @@ func (n *Node) loop() {
 				n.onShutdown(st)
 			case msgWake:
 				n.schedule(st)
+			case msgStatus:
 			}
 		}
 		n.publishStatus(st)
@@ -502,19 +558,28 @@ func (n *Node) onEnded(st *loopState, s *session) {
 	n.mu.Lock()
 	if n.live[s.t.ID] == s {
 		delete(n.live, s.t.ID)
+		n.endGen++
 	}
 	n.mu.Unlock()
 	n.slotsGauge.Set(float64(n.liveCount()))
 	if k := s.place.dirKey; k != "" && st.busy[k] == s.t.ID {
 		delete(st.busy, k)
 	}
-	if wait, attempt := s.credentialWait(); wait > 0 && !st.shutting && !s.isStopped() {
-		// The launch waits for GitHub credentials without a slot: it is queued again, due after the pause.
+	if w := s.launchWaitOf(); w.waits() && !st.shutting && !s.isStopped() {
+		// The launch waits (for GitHub credentials, its runtime's reset or a session to end) without a slot: it is queued
+		// again, due after the pause or once a session ends.
 		if !slices.ContainsFunc(st.queue, func(q *session) bool { return q.t.ID == s.t.ID }) {
 			ns := n.newSession(s.t, s.a, s.place)
-			ns.credAttempt, ns.notBefore = attempt+1, time.Now().Add(wait)
+			ns.credAttempt = s.credAttempt
+			if w.credentials {
+				ns.credAttempt++
+			}
+			ns.awaitSession, ns.awaitGen = w.awaitSession, w.awaitGen
+			if w.d > 0 {
+				ns.notBefore = time.Now().Add(w.d)
+				time.AfterFunc(w.d, func() { n.post(message{kind: msgWake}) })
+			}
 			st.queue = append(st.queue, ns)
-			time.AfterFunc(wait, func() { n.post(message{kind: msgWake}) })
 		}
 	} else if !st.shutting && !s.isStopped() && len(s.deliverCh) > 0 {
 		// Inputs arrived after the runner stopped listening: launch the Assignment again to take them.
@@ -522,6 +587,9 @@ func (n *Node) onEnded(st *loopState, s *session) {
 		a.State = core.AssignmentRunning
 		if id := s.currentSessionID(); id != "" {
 			a.SessionID = id
+		}
+		if a.Runtime == "" {
+			a.Runtime = s.chosenRuntime() // the runtime its session ran on, which its resume keeps
 		}
 		if s.isParked() {
 			// It handed off and its turn ended idle: it resumes as a paused session, not a crashed one.
@@ -548,15 +616,14 @@ func (n *Node) onShutdown(st *loopState) {
 }
 
 // schedule launches queued sessions while slots are free, skipping a Ticket whose previous session still ends, a
-// non-git directory another Ticket uses and a launch put off until later (waiting for credentials).
+// non-git directory another Ticket uses and a launch put off until later (waiting for credentials or a runtime).
 func (n *Node) schedule(st *loopState) {
 	for i := 0; i < len(st.queue); {
 		if n.liveCount() >= n.cfg.Slots {
 			return
 		}
 		s := st.queue[i]
-		if n.liveSession(s.t.ID) != nil || (s.place.dirKey != "" && st.busy[s.place.dirKey] != "") ||
-			time.Now().Before(s.notBefore) {
+		if n.liveSession(s.t.ID) != nil || (s.place.dirKey != "" && st.busy[s.place.dirKey] != "") || !n.due(s) {
 			i++
 			continue
 		}
@@ -571,6 +638,23 @@ func (n *Node) schedule(st *loopState) {
 		n.runners.Add(1)
 		go n.run(s)
 	}
+}
+
+// due reports whether a queued launch may go: one put off is due after its pause, or once a session ended since it
+// chose to wait for one (whichever comes first).
+func (n *Node) due(s *session) bool {
+	if s.awaitSession {
+		n.mu.Lock()
+		ended := n.endGen != s.awaitGen
+		n.mu.Unlock()
+		if ended {
+			return true
+		}
+		if s.notBefore.IsZero() {
+			return false
+		}
+	}
+	return !time.Now().Before(s.notBefore)
 }
 
 // goFail reports a launch that failed before any session existed, off the loop.
@@ -624,18 +708,22 @@ type session struct {
 	// request); parked once its runner ended the process for it, the Assignment running on with its session.
 	handoff bool
 	parked  bool
-	// credWait is set when the launch could not get its GitHub credentials yet: the pause before it is queued again.
-	credWait time.Duration
+	// wait is set when the launch cannot go yet (GitHub credentials, its runtime limited or at its session cap): it
+	// is queued again, without a slot, to be tried after the pause.
+	wait launchWait
 
 	// credAttempt numbers the launch attempts of a launch waiting for credentials (1 for the first); notBefore is when
-	// a queued launch put off for them falls due. Both are fixed at creation.
-	credAttempt int
-	notBefore   time.Time
+	// a queued launch put off falls due; awaitSession makes it due also once a session ended since endGen was awaitGen.
+	// All are fixed at creation.
+	credAttempt  int
+	notBefore    time.Time
+	awaitSession bool
+	awaitGen     int64
 	// proc is the session's running process, nil between processes and after the last.
 	proc rt.Session
 	// shared holds the escalations an ask about the same action in the same turn shares (escalateShared), by key.
 	shared map[string]*sharedVerdict
-	// runtime is the runtime the session's runner started (runtimeFor), set before its first process.
+	// runtime is the runtime the session's runner chose (chooseRuntime), set before it prepares its directory.
 	runtime string
 }
 
@@ -643,6 +731,13 @@ func (s *session) setRuntime(name string) {
 	s.mu.Lock()
 	s.runtime = name
 	s.mu.Unlock()
+}
+
+// chosenRuntime is the runtime the session's runner chose, "" before it did.
+func (s *session) chosenRuntime() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.runtime
 }
 
 // currentRuntime is the runtime the session runs on: its runner's, or before the runner chose, the Ticket's.
@@ -692,17 +787,47 @@ func (s *session) isParked() bool {
 	return s.parked
 }
 
-func (s *session) setCredentialWait(d time.Duration) {
+// launchWait is why and how long a launch waits before it is tried again.
+type launchWait struct {
+	// d is the pause (zero: none); why says what it waits for.
+	d   time.Duration
+	why string
+	// credentials: it waits for GitHub credentials (the next attempt backs off further).
+	credentials bool
+	// awaitSession: it waits, too, for a session to end after the node's endGen was awaitGen.
+	awaitSession bool
+	awaitGen     int64
+}
+
+func (w launchWait) waits() bool { return w.d > 0 || w.awaitSession }
+
+// setLaunchWait puts the launch off for d (why says what it waits for): the runner ends and the loop queues it again,
+// due after the pause.
+func (s *session) setLaunchWait(d time.Duration, why string) {
 	s.mu.Lock()
-	s.credWait = d
+	s.wait.d, s.wait.why = d, why
 	s.mu.Unlock()
 }
 
-// credentialWait returns the pause of a launch that waits for credentials (zero: none) and its attempt number.
-func (s *session) credentialWait() (time.Duration, int) {
+// awaitSessionEnd makes the launch's wait end, too, once a session ends after endGen gen.
+func (s *session) awaitSessionEnd(gen int64) {
+	s.mu.Lock()
+	s.wait.awaitSession, s.wait.awaitGen = true, gen
+	s.mu.Unlock()
+}
+
+// setCredentialWait puts the launch off for d while its GitHub credentials cannot be had.
+func (s *session) setCredentialWait(d time.Duration) {
+	s.setLaunchWait(d, "github credentials not available yet")
+	s.mu.Lock()
+	s.wait.credentials = true
+	s.mu.Unlock()
+}
+
+func (s *session) launchWaitOf() launchWait {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.credWait, s.credAttempt
+	return s.wait
 }
 
 func (s *session) markEnded() {
@@ -970,6 +1095,12 @@ func (r *runner) run() {
 	if s.isStopped() {
 		return
 	}
+	// The runtime first: a launch whose runtime is limited (or at its session cap) waits without a slot, like one
+	// waiting for credentials; one whose runtime cannot run it fails with why.
+	rtm, ok := r.chooseRuntime()
+	if !ok {
+		return
+	}
 	// GitHub credentials that cannot be had yet (GitHub unreachable, the bot not known yet) delay the launch; they are
 	// retried until they come or the session is stopped, never filed as failed: the Ticket shows working/queued meanwhile.
 	// The launch waits without a slot: the runner ends, and the loop queues it again, due after the pause (onEnded).
@@ -989,7 +1120,8 @@ func (r *runner) run() {
 	// Ticket (retry, resume) continues the Ticket's last session.
 	resumeID, recovering := s.a.SessionID, s.a.SessionID != ""
 	if resumeID == "" {
-		resumeID = previousSessionID(s.t, s.a.ID)
+		// Only a session of the same runtime and role continues: another runtime's session id means nothing here.
+		resumeID = previousSessionID(s.t, s.a.ID, rtm.Name(), s.a.Role)
 	}
 	// A session whose last turn ended idle, with nothing delivered since (a handoff, or an idle Assignment after a node
 	// restart), was paused, not interrupted: it resumes with the resume note instead of the crash note.
@@ -998,37 +1130,16 @@ func (r *runner) run() {
 	if recovering {
 		r.seedUnread()
 	}
-	rtm, err := n.runtimeFor(s.t)
-	if err != nil {
-		r.fail(err.Error())
-		return
-	}
-	s.setRuntime(rtm.Name())
 	// The Ticket's model, else the node's default for Claude Code; Codex runs its own default (config.toml), which its
-	// session names at start (Init).
+	// session names at start (Init). An auto Ticket's model is a Claude Code model (the only kind a task named before
+	// runtimes): on Codex it runs Codex's default rather than a model Codex does not have.
 	model := ""
-	if s.t.Execution != nil && s.t.Execution.Model != "" {
-		model = s.t.Execution.Model
+	if x := s.t.Execution; x != nil && x.Model != "" && (x.Runtime != core.RuntimeAuto || rtm.Name() == runtimeClaude) {
+		model = x.Model
 	} else if rtm.Name() == runtimeClaude {
 		model = n.cfg.Model
 	}
 	r.model = model
-	// A runtime that cannot run sessions under Athena's control now refuses the Ticket with why (T8's chooser replaces
-	// this for auto). A stop ends the check.
-	cctx, cancel := context.WithCancel(n.ctx)
-	go func() {
-		select {
-		case <-s.stopCh:
-			cancel()
-		case <-cctx.Done():
-		}
-	}()
-	why := readiness(cctx, rtm)
-	cancel()
-	if why != "" {
-		r.fail(why)
-		return
-	}
 	adir := filepath.Join(s.place.workDir, ".athena")
 	env := append([]string{"ATHENA_ASSIGNMENT=" + s.a.ID}, n.variables(s)...)
 	env = append(env, n.githubEnv(s)...)
@@ -1108,6 +1219,85 @@ func (r *runner) run() {
 			return
 		}
 	}
+}
+
+// chooseRuntime picks the runtime of the launch (Config.Chooser): it asks the runtimes the choice may take for their
+// readiness (only the pinned one, when the launch is pinned; a stop ends the check), then chooses and records the
+// choice on the session in one step with counting the sessions per runtime. A wait puts the launch off (setLaunchWait)
+// and a refusal fails it with why; both report false.
+func (r *runner) chooseRuntime() (rt.Runtime, bool) {
+	s, n := r.s, r.n
+	names := slices.Sorted(maps.Keys(n.cfg.Runtimes))
+	if p := pinnedRuntime(s.t, s.a); p != "" {
+		names = []string{p}
+	}
+	cctx, cancel := context.WithCancel(n.ctx)
+	go func() {
+		select {
+		case <-s.stopCh:
+			cancel()
+		case <-cctx.Done():
+		}
+	}()
+	ready := map[string]rt.Info{}
+	for _, name := range names {
+		if rtm, ok := n.cfg.Runtimes[name]; ok {
+			ready[name] = n.checkRuntime(cctx, name, rtm)
+		}
+	}
+	cancel()
+	if s.isStopped() {
+		return nil, false
+	}
+	n.chooseMu.Lock()
+	n.mu.Lock()
+	live, gen := n.liveRuntimesLocked(s), n.endGen
+	n.mu.Unlock()
+	c := n.chooser.Choose(ChoiceInput{Ticket: s.t, Assignment: s.a, Ready: ready, Quota: n.quota.State, Live: live, Now: time.Now()})
+	launch := c.Runtime != "" && c.Until.IsZero() && !c.AwaitSession
+	if launch {
+		s.setRuntime(c.Runtime)
+	}
+	n.chooseMu.Unlock()
+	switch {
+	case launch:
+		rtm, ok := n.cfg.Runtimes[c.Runtime]
+		if !ok {
+			r.fail(fmt.Sprintf("runtime %q is not available on this node", c.Runtime))
+			return nil, false
+		}
+		return rtm, true
+	case !c.Until.IsZero() || c.AwaitSession:
+		var d time.Duration
+		if !c.Until.IsZero() {
+			// A reset that is due already still waits a moment: the launch is never retried in a loop.
+			d = max(time.Until(c.Until), minLaunchWait)
+		}
+		r.log.Info("launch waits for its runtime", "why", c.Why, "runtime", c.Runtime, "retryIn", d.String(),
+			"untilSessionEnds", c.AwaitSession)
+		s.setLaunchWait(d, c.Why)
+		if c.AwaitSession {
+			s.awaitSessionEnd(gen)
+		}
+		return nil, false
+	default:
+		r.fail(redact.String(c.Why))
+		return nil, false
+	}
+}
+
+// liveRuntimesLocked counts the live sessions per runtime they chose, except s (the launch choosing). Caller holds mu.
+func (n *Node) liveRuntimesLocked(except *session) map[string]int {
+	live := map[string]int{}
+	for _, o := range n.live {
+		if o == except {
+			continue
+		}
+		if name := o.chosenRuntime(); name != "" {
+			live[name]++
+		}
+	}
+	return live
 }
 
 // drive runs one process: it sends the first message, then turns events and delivery requests into Engine facts
@@ -1385,15 +1575,18 @@ func (r *runner) flushUsage() {
 		return
 	}
 	r.usage = core.UsageDelta{}
+	u.Runtime = r.s.chosenRuntime()
 	if err := r.eng.RecordUsage(r.s.t.ID, r.s.a.ID, u); err != nil {
 		r.log.Error("record usage", "error", err)
 	}
 }
 
-// onEvent acts on one of the session's events. A QuotaUpdate is not acted on yet.
+// onEvent acts on one of the session's events.
 func (r *runner) onEvent(ev rt.Event) {
 	r.account(ev)
 	switch e := ev.(type) {
+	case rt.QuotaUpdate:
+		r.n.quota.Observe(r.runtime, e.Windows)
 	case rt.Init:
 		r.initSeen = true
 		if !r.spawned.IsZero() {
@@ -1406,7 +1599,7 @@ func (r *runner) onEvent(ev rt.Event) {
 		if r.model == "" {
 			r.model = e.Model // the runtime's own default, named by the session
 		}
-		if err := r.eng.AssignmentStarted(r.s.t.ID, r.s.a.ID, e.SessionID, r.model); err != nil {
+		if err := r.eng.AssignmentStarted(r.s.t.ID, r.s.a.ID, e.SessionID, r.model, r.runtime); err != nil {
 			r.log.Error("record start", "error", err)
 			return
 		}
@@ -1439,7 +1632,14 @@ func (r *runner) onEvent(ev rt.Event) {
 		// A failed turn (an API error, an expired login, a rate limit, too many turns) leaves the CLI waiting for the
 		// next message: report it, or the Ticket stays working with nothing running. Its Inputs may not have reached
 		// the model, so they stay unread and a retry sends them again. A turn Athena itself ends (a stop) never gets
-		// here: the stop drains the events without onEvent, and fail does nothing once the session is stopped.
+		// here: the stop drains the events without onEvent, and fail does nothing once the session is stopped. A usage
+		// limit that stopped the turn limits its runtime in the quota, which the next launch's choice reads.
+		if e.Limit != nil {
+			r.n.quota.Hit(r.runtime, *e.Limit)
+		}
+		if e.OK {
+			r.n.quota.TurnOK(r.runtime)
+		}
 		if !e.OK {
 			r.nudged = false
 			r.fail(turnFailure(e))
@@ -1627,12 +1827,18 @@ func (r *runner) sleep(d time.Duration) bool {
 	}
 }
 
-// previousSessionID returns the session id of the Ticket's latest other Assignment that had one.
-func previousSessionID(t core.Ticket, assignmentID string) string {
+// previousSessionID returns the session id of the Ticket's latest other Assignment that had one on runtime in role
+// ("" is the worker's): a session of another runtime or role is not continued. A review always starts fresh.
+func previousSessionID(t core.Ticket, assignmentID, runtime, role string) string {
+	if role == core.RoleReview {
+		return ""
+	}
 	for i := len(t.Assignments) - 1; i >= 0; i-- {
-		if a := t.Assignments[i]; a.ID != assignmentID && a.SessionID != "" {
-			return a.SessionID
+		a := t.Assignments[i]
+		if a.ID == assignmentID || a.SessionID == "" || a.Role != role || ranOn(t, a) != runtime {
+			continue
 		}
+		return a.SessionID
 	}
 	return ""
 }
@@ -1946,9 +2152,10 @@ func (n *Node) prepare(s *session) error {
 	if err := os.WriteFile(filepath.Join(adir, ".gitignore"), []byte("*\n"), 0o600); err != nil {
 		return err
 	}
-	rtm, err := n.runtimeFor(s.t)
-	if err != nil {
-		return err
+	name := s.currentRuntime() // the one the runner chose
+	rtm, ok := n.cfg.Runtimes[name]
+	if !ok {
+		return fmt.Errorf("runtime %q is not available on this node", name)
 	}
 	sb, sbEnv := n.sandboxFor(p.workDir)
 	return rtm.Prepare(rt.Prepare{

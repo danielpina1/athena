@@ -51,8 +51,8 @@ func TestTranslateToolTurn(t *testing.T) {
 		rt.Unknown{Kind: "agentMessage"},
 		rt.AssistantText{Text: "Created the files and reported."},
 		rt.QuotaUpdate{Windows: []rt.Window{
-			{Name: "5h", Used: 0.42, ResetsAt: at(18000)},
-			{Name: "7d", Used: 0.08, ResetsAt: at(604800)},
+			{Bucket: "codex", Name: "5h", Used: 0.42, ResetsAt: at(18000)},
+			{Bucket: "codex", Name: "7d", Used: 0.08, ResetsAt: at(604800)},
 		}},
 		rt.TurnEnd{
 			SessionID: "thr_fixture_0001", OK: true, Text: "Created the files and reported.",
@@ -152,10 +152,10 @@ func TestTranslateRateLimitWindowsNormalized(t *testing.T) {
 	msgs := fixtureMessages(t, "rate-limits")
 	tr := NewTranslator()
 	want := [][]rt.Window{
-		{{Name: "5h", Used: 0.42, ResetsAt: at(18000)}, {Name: "7d", Used: 0.08, ResetsAt: at(604800)}},
+		{{Bucket: "codex", Name: "5h", Used: 0.42, ResetsAt: at(18000)}, {Bucket: "codex", Name: "7d", Used: 0.08, ResetsAt: at(604800)}},
 		// Limited goes on the window that is used up, not on the 7d one that has room.
-		{{Name: "5h", Used: 1, ResetsAt: at(7200), Limited: true}, {Name: "7d", Used: 0.63, ResetsAt: at(259200)}},
-		{{Name: "45m", Used: 0.05, ResetsAt: at(2700)}},
+		{{Bucket: "codex", Name: "5h", Used: 1, ResetsAt: at(7200), Limited: true}, {Bucket: "codex", Name: "7d", Used: 0.63, ResetsAt: at(259200)}},
+		{{Bucket: "codex", Name: "45m", Used: 0.05, ResetsAt: at(2700)}},
 	}
 	if len(msgs) != len(want) {
 		t.Fatalf("%d messages", len(msgs))

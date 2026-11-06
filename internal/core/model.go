@@ -57,7 +57,17 @@ type Assignment struct {
 	// Interruptions are the times the Assignment's session was cut short from outside, such as by a server restart,
 	// oldest first; the last one is open until the session starts again.
 	Interruptions []Interruption `json:"interruptions,omitempty"`
+	// Runtime is the runtime the Assignment's session runs on (RuntimeClaude, RuntimeCodex): pinned when it was made, or
+	// the one its Executor started it on (AssignmentStarted). Empty until then; a Ticket's Assignments may each run on
+	// another one.
+	Runtime string `json:"runtime,omitempty"`
+	// Role is what the Assignment's session does: empty for the Ticket's worker (it implements), RoleReview for a
+	// review of its work.
+	Role string `json:"role,omitempty"`
 }
+
+// RoleReview is the Role of an Assignment that reviews the Ticket's work.
+const RoleReview = "review"
 
 // InterruptRestart is the reason of an Interruption a server restart caused.
 const InterruptRestart = "server restart"
@@ -195,14 +205,15 @@ type MandateBasis struct {
 }
 
 // The runtimes a Ticket may run on (Execution.Runtime, TaskOptions.Runtime). RuntimeAuto lets the Executor choose for
-// each Assignment.
+// each Assignment; an Assignment records the one it ran on (Assignment.Runtime).
 const (
 	RuntimeClaude = "claude"
 	RuntimeCodex  = "codex"
 	RuntimeAuto   = "auto"
 )
 
-// Execution is what a Ticket's Executor chose.
+// Execution is what a Ticket's Executor chose. Runtime is the Ticket's choice (RuntimeClaude, RuntimeCodex or
+// RuntimeAuto); each Assignment records the runtime it actually ran on.
 type Execution struct {
 	Name       string `json:"name"`
 	Directory  string `json:"directory"`

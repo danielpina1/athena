@@ -82,6 +82,30 @@ type TicketStats struct {
 	CacheReadTokens int64 `json:"cacheReadTokens"`
 
 	CostUSD float64 `json:"costUsd"`
+
+	// ByRuntime splits the usage by the runtime that spent it (Assignment.Runtime): a Ticket's Assignments may run on
+	// different runtimes.
+	ByRuntime map[string]RuntimeStats `json:"byRuntime,omitempty"`
+}
+
+// RuntimeStats are the part of a Ticket's usage one runtime spent; Assignments counts the Assignments that started on
+// it.
+type RuntimeStats struct {
+	Turns           int           `json:"turns"`
+	ActiveTime      time.Duration `json:"activeTime"`
+	InputTokens     int64         `json:"inputTokens"`
+	OutputTokens    int64         `json:"outputTokens"`
+	CacheReadTokens int64         `json:"cacheReadTokens"`
+	CostUSD         float64       `json:"costUsd"`
+	Assignments     int           `json:"assignments"`
+}
+
+// byRuntime returns the stats of runtime so far, making ByRuntime if needed; the caller stores the result back.
+func (s *TicketStats) byRuntime(runtime string) RuntimeStats {
+	if s.ByRuntime == nil {
+		s.ByRuntime = map[string]RuntimeStats{}
+	}
+	return s.ByRuntime[runtime]
 }
 
 // CacheHitRatio is the share of input tokens served from the prompt cache: cache reads over cache reads plus uncached
@@ -127,6 +151,9 @@ type UsageDelta struct {
 	CostUSD        float64
 	SessionID      string
 	SessionCostUSD float64
+
+	// Runtime is the runtime that spent it; empty is the Assignment's (Assignment.Runtime).
+	Runtime string
 }
 
 // RecordUsage adds an executor's observations to the Ticket's stats in one transaction. It records them whether or not
@@ -165,7 +192,23 @@ func (e *Engine) RecordUsage(ticketID, assignmentID string, u UsageDelta) error 
 		if a == nil {
 			a = t.LatestAssignment()
 		}
+		if key := u.Runtime; key != "" || (a != nil && a.Runtime != "") {
+			if key == "" {
+				key = a.Runtime
+			}
+			rs := s.byRuntime(key)
+			rs.Turns += u.Turns
+			rs.ActiveTime += u.ActiveTime
+			rs.InputTokens += u.InputTokens
+			rs.OutputTokens += u.OutputTokens
+			rs.CacheReadTokens += u.CacheReadTokens
+			rs.CostUSD += cost
+			s.ByRuntime[key] = rs
+		}
 		runtime, model := runtimeModel(t, a)
+		if u.Runtime != "" {
+			runtime = u.Runtime
+		}
 		if o.reg != nil {
 			o.observe(func(r *metrics.Registry) {
 				for _, k := range []struct {

@@ -390,7 +390,8 @@ func TestEndToEndWithFake(t *testing.T) {
 		t.Fatalf("all tickets = %+v, want ended:completed", list)
 	}
 	d := s.detail(id)
-	if d.Stage != "ended:completed" || d.Runtime != "claude" || !strings.HasSuffix(d.Dir, "fix-the-thing-t-0001") {
+	// The server's default runtime is auto; the Assignment ran on Claude Code (the test server's Codex does not exist).
+	if d.Stage != "ended:completed" || d.Runtime != "auto" || d.Assignments[0].Runtime != "claude" || !strings.HasSuffix(d.Dir, "fix-the-thing-t-0001") {
 		t.Fatalf("detail = %+v", d)
 	}
 	if r := d.Assignments[0].Report; r == nil || r.State != core.ReportReady || r.Summary != "done it" {
@@ -971,7 +972,7 @@ func TestCrashRecoveryRecordsInterruption(t *testing.T) {
 			t.Fatal(err)
 		}
 		id = tk.ID
-		if err := e.AssignmentStarted(id, tk.Assignments[0].ID, fixtureSessionID, ""); err != nil {
+		if err := e.AssignmentStarted(id, tk.Assignments[0].ID, fixtureSessionID, "", ""); err != nil {
 			t.Fatal(err)
 		}
 		if got, _, _ := e.Ticket(id); len(got.LatestAssignment().Interruptions) != 0 {
@@ -1005,7 +1006,7 @@ func TestIdleAssignmentStillWaits(t *testing.T) {
 		}
 		id = tk.ID
 		a := tk.Assignments[0].ID
-		for _, err := range []error{e.AssignmentStarted(id, a, fixtureSessionID, ""), e.InputsDelivered(id, a, []string{tk.Inputs[0].ID}), e.TurnEnded(id, a)} {
+		for _, err := range []error{e.AssignmentStarted(id, a, fixtureSessionID, "", ""), e.InputsDelivered(id, a, []string{tk.Inputs[0].ID}), e.TurnEnded(id, a)} {
 			if err != nil {
 				t.Fatal(err)
 			}

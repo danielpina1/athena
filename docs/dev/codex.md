@@ -31,11 +31,14 @@ own.
 
 ### Which Tickets run on Codex
 
-A task names its runtime: `claude` (the default), `codex` or `auto` (the control socket's `submit` takes `runtime`).
-Until the runtime chooser lands, `auto` runs on Claude Code. A Ticket pinned to `codex` runs only there: before each
-process starts, the node asks whether Codex is ready (the check of §2, cached for 10 minutes) and, when it is not, the
-Assignment reports failed with why ("codex cannot run this ticket: Codex is not logged in for Athena: run athena codex
-login"). A session that refuses to start because a hook or a setting is not Athena's (§4) fails the same way, with the
+A task names its runtime: `claude`, `codex` or `auto` (the control socket's `submit` and `athena task --runtime`
+take it); a task that names none, and every Ticket the router accepts, gets `runtimes.default` (§3, `auto` unless set).
+Each Assignment records the runtime its session actually ran on (`Assignment.Runtime`), so one Ticket may move between
+runtimes; the metrics and the per-runtime stats (`stats.byRuntime`) name that runtime. Before each launch the node's
+runtime chooser picks the runtime (§7). A Ticket pinned to `codex` runs only there: the node asks whether Codex is ready
+(the check of §2, cached for 10 minutes) and, when it is not, the Assignment reports failed with why ("codex cannot
+run this ticket: Codex is not logged in for Athena: run athena codex login"); `auto` never chooses a runtime that is
+not ready. A session that refuses to start because a hook or a setting is not Athena's (§4) fails the same way, with the
 refusal's why, and the next launch checks Codex (and trusts Athena's hooks) again. A Codex session's environment has
 `ATHENA_RUNTIME=codex`, and its first message lists it with the other execution variables. Every process a Ticket starts,
 on either runtime, first writes a marker line to the transcript (`{"athena":"session","runtime":…,"model":…,
@@ -137,14 +140,20 @@ they leave it as it is and say when it differs; restarting the server rewrites i
 ## 3. `config.json` `runtimes`
 
 ```json
-{"runtimes": {"codex": {"enabled": true, "binary": "codex", "model": ""}}}
+{"runtimes": {"default": "auto", "preferred": "claude", "avoidAbove": {"5h": 85, "7d": 90},
+              "claude": {"maxSessions": 0},
+              "codex": {"enabled": true, "binary": "codex", "model": "", "maxSessions": 0}}}
 ```
 
+- `default`: the runtime of a task that names none: `claude`, `codex` or `auto` (the default).
+- `preferred`: the runtime `auto` picks when no warm session decides (§7): `claude` (the default) or `codex`.
+- `avoidAbove`: per quota window, the percent used above which `auto` avoids a runtime unless every runtime is above
+  (nucleos' quota brake). Left out it is `{"5h": 85, "7d": 90}`; `{}` brakes nothing.
+- `claude.maxSessions`, `codex.maxSessions`: how many sessions the runtime runs at once; 0 is no cap (the node's slots
+  still bound them).
 - `enabled`: on unless set to `false`. An enabled Codex that is not ready is never chosen, and the dashboard says why.
 - `binary`: the codex executable; `athena server --codex PATH` overrides it.
 - `model`: the default Codex model; empty leaves it to Codex.
-
-*More settings are to be written.*
 
 ## 4. Hooks and trust
 
@@ -222,7 +231,38 @@ built by command substitution is not read, nor is a file outside the Ticket's di
 
 ## 7. Quota and failover
 
-*To be written.*
+**Quota.** Each session reports its usage limits: Codex from `account/rateLimits/read` at start and
+`account/rateLimits/updated`, Claude Code from `rate_limit_event` (a window is limited only by `status: "rejected"`).
+The node's tracker (`internal/quota`) keeps the latest reading of every window per runtime, keyed by bucket and name:
+a Codex window's bucket is its snapshot's `limitId` (`codex`, or a per-model limit's id), so two limits' `5h` windows
+never overwrite each other; Claude Code's windows have no bucket. A window whose reset has passed is stale and no
+longer counts. A runtime's headroom is 1 − the largest `used` of its windows that have not reset (1 while nothing is
+measured).
+
+A runtime is limited until the reset of a window reported as limited, or after a turn stopped by a limit until that
+limit's reset. A limit with no reset, or with one already passed, backs off instead: 15 min, doubling per consecutive
+limit up to 2 h; a transient one (a rate of requests) 1, 2, 4 … min up to 30 min. A turn that ends well starts the
+backoff over. The tracker writes `<stateDir>/quota.json` (0600, whole, on every change): per runtime the last reading of
+each window with its `read_at`, the limit and the backoff count. There is no history.
+
+**The chooser.** Before each launch, and before it prepares the Ticket's directory, the node chooses the runtime:
+
+1. An Assignment that ran keeps its runtime (a resume continues its session); a Ticket pinned to `claude` or `codex`
+   runs there. Not ready, the launch fails with why; limited, it waits until the reset; at its `maxSessions`, it
+   waits for a session to end. No other runtime takes its place.
+2. `auto`: the candidates are the ready runtimes that are not limited and below their `maxSessions`. A review drops the
+   implementer's runtime when another candidate is left. Candidates above an `avoidAbove` window are dropped unless
+   that leaves none. Then the runtime of the Ticket's latest Assignment of the same role that ran wins (a warm
+   session), else `preferred`, else the largest headroom.
+3. No candidate: the launch waits until the earliest reset, or for a session to end when a session cap was the reason.
+   No runtime ready at all fails with "no runtime is ready: <runtime>: <why>; …".
+
+A waiting launch holds no slot: the Ticket shows working/queued and its runner logs why ("launch waits for its
+runtime"). A new Assignment continues the Ticket's last session only when it runs on that session's runtime and role; a
+review always starts fresh. The node's status lists each runtime with its last known readiness (Claude Code is taken
+as ready), its quota and its live sessions; the server checks the other runtimes once at start.
+
+*Failover on a limit is to be written.*
 
 ## 8. Review pairing
 

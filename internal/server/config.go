@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"net"
 	"net/http"
 	"net/url"
@@ -18,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/danielpina1/athena/internal/core"
 	"github.com/danielpina1/athena/internal/node"
 	"github.com/danielpina1/athena/internal/pki"
 	"github.com/danielpina1/athena/internal/sources/github"
@@ -33,7 +35,8 @@ import (
 //	 "web": {"enabled": false, "listen": ":8443", "host": "", "ips": [], "tls": "ca",
 //	         "acme": {"email", "provider", "resolvers": [], "directory", "agreeTos": false}},
 //	 "localRepoRoots": ["~/code"],
-//	 "runtimes": {"codex": {"enabled": true, "binary": "codex", "model": ""}}}
+//	 "runtimes": {"default": "auto", "preferred": "claude", "avoidAbove": {"5h": 85, "7d": 90},
+//	              "claude": {"maxSessions": 0}, "codex": {"enabled": true, "binary": "codex", "model": "", "maxSessions": 0}}}
 //
 // It holds the path of the GitHub App's private key, never the key. Without the file, or without its github part,
 // the server runs owner tasks only: no Source, no router. Without an enabled web part there is no dashboard endpoint.
@@ -65,9 +68,79 @@ type FileConfig struct {
 	Runtimes RuntimesConfig `json:"runtimes"`
 }
 
-// RuntimesConfig configures the runtimes besides Claude Code, which is always there.
+// RuntimesConfig configures the runtimes (Claude Code, which is always there, and Codex) and how each Assignment's is
+// chosen.
 type RuntimesConfig struct {
-	Codex CodexConfig `json:"codex"`
+	// Default is the runtime of a task that names none, and of every Ticket the router accepts: claude, codex or auto
+	// (the default), which picks per Assignment.
+	Default string `json:"default,omitempty"`
+	// Preferred is the runtime auto picks among those with headroom when no warm session decides: claude (the default)
+	// or codex.
+	Preferred string `json:"preferred,omitempty"`
+	// AvoidAbove maps a quota window ("5h", "7d") to the percent of it used above which auto avoids a runtime, unless
+	// every runtime is above. Left out, it is {"5h": 85, "7d": 90}; {} avoids nothing.
+	AvoidAbove map[string]float64 `json:"avoidAbove,omitempty"`
+	Claude     ClaudeConfig       `json:"claude"`
+	Codex      CodexConfig        `json:"codex"`
+}
+
+// DefaultAvoidAbove is the quota brake of a configuration that sets none, in percent (nucleos' defaults).
+var DefaultAvoidAbove = map[string]float64{"5h": 85, "7d": 90}
+
+// ClaudeConfig is the Claude Code runtime's part of the configuration.
+type ClaudeConfig struct {
+	// MaxSessions caps the sessions Claude Code runs at once; 0 is no cap (the node's slots still bound them).
+	MaxSessions int `json:"maxSessions,omitempty"`
+}
+
+func (r RuntimesConfig) validate() error {
+	if r.Default != "" && !core.ValidRuntime(r.Default) {
+		return fmt.Errorf("runtimes.default %q is not claude, codex or auto", r.Default)
+	}
+	if r.Preferred != "" && r.Preferred != core.RuntimeClaude && r.Preferred != core.RuntimeCodex {
+		return fmt.Errorf("runtimes.preferred %q is not claude or codex", r.Preferred)
+	}
+	for name, pct := range r.AvoidAbove {
+		if !(pct > 0 && pct <= 100) {
+			return fmt.Errorf("runtimes.avoidAbove %q is %v: it must be a percent above 0, at most 100", name, pct)
+		}
+	}
+	if r.Claude.MaxSessions < 0 || r.Codex.MaxSessions < 0 {
+		return errors.New("runtimes.claude.maxSessions and runtimes.codex.maxSessions must not be negative")
+	}
+	return nil
+}
+
+func (r RuntimesConfig) withDefaults() RuntimesConfig {
+	if r.Default == "" {
+		r.Default = core.RuntimeAuto
+	}
+	if r.Preferred == "" {
+		r.Preferred = core.RuntimeClaude
+	}
+	if r.AvoidAbove == nil {
+		r.AvoidAbove = maps.Clone(DefaultAvoidAbove)
+	} else {
+		r.AvoidAbove = maps.Clone(r.AvoidAbove)
+	}
+	if r.Codex.Binary == "" {
+		r.Codex.Binary = DefaultCodexBinary
+	}
+	return r
+}
+
+// chooser is the node's runtime chooser of the configuration: the brake as fractions, the caps that are set.
+func (r RuntimesConfig) chooser() node.HeadroomChooser {
+	c := node.HeadroomChooser{Preferred: r.Preferred, AvoidAbove: map[string]float64{}, MaxSessions: map[string]int{}}
+	for name, pct := range r.AvoidAbove {
+		c.AvoidAbove[name] = pct / 100
+	}
+	for name, n := range map[string]int{core.RuntimeClaude: r.Claude.MaxSessions, core.RuntimeCodex: r.Codex.MaxSessions} {
+		if n > 0 {
+			c.MaxSessions[name] = n
+		}
+	}
+	return c
 }
 
 // CodexConfig is the Codex runtime. Its CODEX_HOME is Athena's own, <stateDir>/codex (CodexHome).
@@ -79,6 +152,8 @@ type CodexConfig struct {
 	Binary string `json:"binary,omitempty"`
 	// Model is the default Codex model; empty leaves it to Codex.
 	Model string `json:"model,omitempty"`
+	// MaxSessions caps the sessions Codex runs at once; 0 is no cap.
+	MaxSessions int `json:"maxSessions,omitempty"`
 }
 
 // DefaultCodexBinary is the codex executable when the configuration names none.
@@ -173,7 +248,9 @@ func (c SandboxConfig) On() bool {
 
 // WeakerNetworkIsolationOn reports whether workers' commands may reach trustd: WeakerNetworkIsolation, or unset on
 // macOS, where without it `gh` fails every TLS handshake (x509: OSStatus -26276).
-func (c SandboxConfig) WeakerNetworkIsolationOn() bool { return c.weakerNetworkIsolationOn(runtime.GOOS) }
+func (c SandboxConfig) WeakerNetworkIsolationOn() bool {
+	return c.weakerNetworkIsolationOn(runtime.GOOS)
+}
 
 func (c SandboxConfig) weakerNetworkIsolationOn(goos string) bool {
 	if c.WeakerNetworkIsolation != nil {
@@ -289,6 +366,9 @@ func LoadConfig(stateDir string) (FileConfig, error) {
 			return FileConfig{}, fmt.Errorf("config: %s: %w", path, err)
 		}
 	}
+	if err := c.Runtimes.validate(); err != nil {
+		return FileConfig{}, fmt.Errorf("config: %s: %w", path, err)
+	}
 	return c.withDefaults(), nil
 }
 
@@ -312,9 +392,7 @@ func (c FileConfig) withDefaults() FileConfig {
 		w := c.Web.withDefaults()
 		c.Web = &w
 	}
-	if c.Runtimes.Codex.Binary == "" {
-		c.Runtimes.Codex.Binary = DefaultCodexBinary
-	}
+	c.Runtimes = c.Runtimes.withDefaults()
 	if c.LocalRepoRoots != nil {
 		roots := slices.Clone(*c.LocalRepoRoots)
 		if roots == nil {

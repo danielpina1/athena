@@ -131,3 +131,82 @@ func TestServerRunsCodexTickets(t *testing.T) {
 		t.Fatalf("unknown runtime: %+v %v", r, err)
 	}
 }
+
+// The runtimes section: the default runtime of a task (auto), the preferred one, the quota brake in percent and the
+// session caps; the server gives the chooser the brake as fractions.
+func TestRuntimesConfigDefaultsAndChooser(t *testing.T) {
+	dir := t.TempDir()
+	c, err := LoadConfig(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := c.Runtimes
+	if r.Default != core.RuntimeAuto || r.Preferred != core.RuntimeClaude || r.AvoidAbove["5h"] != 85 || r.AvoidAbove["7d"] != 90 ||
+		r.Claude.MaxSessions != 0 || r.Codex.MaxSessions != 0 {
+		t.Fatalf("defaults = %+v", r)
+	}
+	ch := r.chooser()
+	if ch.Preferred != core.RuntimeClaude || ch.AvoidAbove["5h"] != 0.85 || ch.AvoidAbove["7d"] != 0.90 || len(ch.MaxSessions) != 0 {
+		t.Fatalf("default chooser = %+v", ch)
+	}
+
+	writeConfigFile(t, dir, `{"runtimes": {"default": "claude", "preferred": "codex", "avoidAbove": {"5h": 50},
+		"claude": {"maxSessions": 2}, "codex": {"enabled": false, "maxSessions": 1}}}`)
+	if c, err = LoadConfig(dir); err != nil {
+		t.Fatal(err)
+	}
+	ch = c.Runtimes.chooser()
+	if c.Runtimes.Default != core.RuntimeClaude || ch.Preferred != core.RuntimeCodex || len(ch.AvoidAbove) != 1 || ch.AvoidAbove["5h"] != 0.5 ||
+		ch.MaxSessions[core.RuntimeClaude] != 2 || ch.MaxSessions[core.RuntimeCodex] != 1 || c.Runtimes.Codex.On() {
+		t.Fatalf("configured: %+v, chooser %+v", c.Runtimes, ch)
+	}
+	if err := SaveConfig(dir, c); err != nil {
+		t.Fatal(err)
+	}
+	if again, err := LoadConfig(dir); err != nil || again.Runtimes.Preferred != core.RuntimeCodex || again.Runtimes.Claude.MaxSessions != 2 {
+		t.Fatalf("after save: %+v, %v", again.Runtimes, err)
+	}
+	// An empty brake brakes nothing.
+	writeConfigFile(t, dir, `{"runtimes": {"avoidAbove": {}}}`)
+	if c, err = LoadConfig(dir); err != nil || len(c.Runtimes.chooser().AvoidAbove) != 0 {
+		t.Fatalf("empty brake: %+v, %v", c.Runtimes, err)
+	}
+
+	for _, bad := range []struct{ body, want string }{
+		{`{"runtimes": {"default": "gemini"}}`, "runtimes.default"},
+		{`{"runtimes": {"preferred": "auto"}}`, "runtimes.preferred"},
+		{`{"runtimes": {"avoidAbove": {"5h": 150}}}`, "runtimes.avoidAbove"},
+		{`{"runtimes": {"avoidAbove": {"5h": 0}}}`, "runtimes.avoidAbove"},
+		{`{"runtimes": {"claude": {"maxSessions": -1}}}`, "maxSessions"},
+		{`{"runtimes": {"codex": {"maxSessions": -2}}}`, "maxSessions"},
+	} {
+		writeConfigFile(t, dir, bad.body)
+		if _, err := LoadConfig(dir); err == nil || !strings.Contains(err.Error(), bad.want) {
+			t.Errorf("%s: %v, want an error naming %s", bad.body, err, bad.want)
+		}
+	}
+}
+
+// A task that names no runtime runs on the configuration's default, auto: here on Claude Code, since the test server's
+// Codex does not exist. `runtime` on the submit pins one.
+func TestServerDefaultRuntimeIsAuto(t *testing.T) {
+	newFakeEnv(t, openTurnFixture(t))
+	dir := newStateDir(t)
+	s := startServer(t, dir)
+	var sub struct {
+		ID string `json:"id"`
+	}
+	s.ok(Request{Op: OpSubmit, Text: "No runtime named"}, &sub)
+	var d TicketDetail
+	eventually(t, "the auto ticket runs", func() bool {
+		d = s.detail(sub.ID)
+		return d.Assignments[0].Runtime != ""
+	})
+	if d.Runtime != core.RuntimeAuto || d.Assignments[0].Runtime != core.RuntimeClaude {
+		t.Fatalf("runtime %q, assignment on %q", d.Runtime, d.Assignments[0].Runtime)
+	}
+	s.ok(Request{Op: OpSubmit, Text: "Pinned", Runtime: core.RuntimeClaude}, &sub)
+	if d := s.detail(sub.ID); d.Runtime != core.RuntimeClaude {
+		t.Fatalf("pinned runtime = %q", d.Runtime)
+	}
+}

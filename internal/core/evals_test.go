@@ -79,12 +79,21 @@ type evals struct {
 
 func newEvals(t *testing.T) *evals {
 	t.Helper()
+	return newEvalsWith(t, nil)
+}
+
+// newEvalsWith is newEvals with more Engine Options, which configure sets.
+func newEvalsWith(t *testing.T, configure func(*Options)) *evals {
+	t.Helper()
 	h := &evals{pol: newEvalPolicy()}
 	in := &intake{scope: &fakeScope{deaf: map[string]bool{}}, policy: &fakePolicy{holds: true}}
 	in.harness = newHarnessWith(t, func(o *Options) {
 		o.Scope = in.scope
 		o.Policy = func() Policy { return h.pol }
 		o.Wake = func() { in.wakes.Add(1) }
+		if configure != nil {
+			configure(o)
+		}
 	})
 	h.intake = in
 	return h

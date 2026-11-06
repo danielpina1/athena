@@ -36,7 +36,7 @@ const dialTimeout = 2 * time.Second
 // usage is each command's usage line, without the --state-dir flag every command takes.
 var usage = map[string]string{
 	"server":      "athena server [--slots N] [--model M] [--blocked a,b] [--approval-timeout D] [--claude PATH] [--codex PATH]",
-	"task":        `athena task "<text>" [--dir D | --repo owner/name] [--model M]`,
+	"task":        `athena task "<text>" [--dir D | --repo owner/name] [--model M] [--runtime claude|codex|auto]`,
 	"github":      "athena github setup --app-id N --slug S --key FILE --installation N --repo owner/name [--repo ...] [--receive-all owner/name ...] | athena github check",
 	"policy":      "athena policy show | athena policy set FILE",
 	"triggers":    "athena triggers [--thread K]",
@@ -204,6 +204,7 @@ func (c *command) task(args []string) int {
 	dir := c.fs.String("dir", "", "directory the task runs in (a git repository gets its own worktree)")
 	repo := c.fs.String("repo", "", "GitHub repository (owner/name) the task works in, through the App")
 	model := c.fs.String("model", "", "model for this task")
+	runtime := c.fs.String("runtime", "", "runtime the task runs on: claude, codex or auto (default: runtimes.default of config.json)")
 	pos, code, ok := c.parse(args, 1, -1)
 	if !ok {
 		return code
@@ -225,7 +226,8 @@ func (c *command) task(args []string) int {
 	var out struct {
 		ID string `json:"id"`
 	}
-	if err := call(c.stateDir, server.Request{Op: server.OpSubmit, Text: strings.Join(pos, " "), Dir: taskDir, Repo: *repo, Model: *model}, &out); err != nil {
+	if err := call(c.stateDir, server.Request{Op: server.OpSubmit, Text: strings.Join(pos, " "), Dir: taskDir, Repo: *repo, Model: *model,
+		Runtime: *runtime}, &out); err != nil {
 		return c.fail(err)
 	}
 	fmt.Fprintln(c.stdout, out.ID)
@@ -346,6 +348,12 @@ func printDetail(w io.Writer, d server.TicketDetail, now time.Time) {
 	fmt.Fprintln(w, "assignments:")
 	for _, a := range d.Assignments {
 		line := fmt.Sprintf("  %s  %s", a.ID, a.State)
+		if a.Runtime != "" {
+			line += "  on " + a.Runtime
+		}
+		if a.Role != "" {
+			line += " (" + a.Role + ")"
+		}
 		if a.StartedAt != nil {
 			line += "  started " + a.StartedAt.Local().Format(time.DateTime)
 		}

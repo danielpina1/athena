@@ -449,3 +449,32 @@ func TestServerStopsOnSIGHUP(t *testing.T) {
 		t.Fatalf("log = %q, want it to say the server stops", stderr.String())
 	}
 }
+
+// `athena task --runtime` names the runtime the task runs on; left out, the server's default (auto) does, and the
+// status shows the runtime each Assignment ran on.
+func TestTaskRuntimeFlag(t *testing.T) {
+	dir := startServer(t)
+	ctx := context.Background()
+	code, out, errOut := athena(ctx, "task", "Pinned to claude", "--runtime", "claude", "--state-dir", dir)
+	if code != 0 {
+		t.Fatalf("task --runtime claude: exit %d, stderr %q", code, errOut)
+	}
+	if d := detail(t, dir, strings.TrimSpace(out)); d.Runtime != "claude" {
+		t.Fatalf("runtime = %q, want claude", d.Runtime)
+	}
+	code, out, errOut = athena(ctx, "task", "Pick one", "--state-dir", dir)
+	if code != 0 {
+		t.Fatalf("task: exit %d, stderr %q", code, errOut)
+	}
+	id := strings.TrimSpace(out)
+	if d := detail(t, dir, id); d.Runtime != "auto" {
+		t.Fatalf("runtime = %q, want the server's default auto", d.Runtime)
+	}
+	runningAssignment(t, dir, id)
+	if _, out, _ := athena(ctx, "status", id, "--state-dir", dir); !strings.Contains(out, "runtime:   auto") || !strings.Contains(out, "running  on claude") {
+		t.Fatalf("status %s:\n%s", id, out)
+	}
+	if code, _, errOut := athena(ctx, "task", "Bad", "--runtime", "gemini", "--state-dir", dir); code != 1 || !strings.Contains(errOut, `"gemini"`) {
+		t.Fatalf("task --runtime gemini: exit %d, stderr %q", code, errOut)
+	}
+}

@@ -772,7 +772,7 @@ func TestQuotaReadAtStart(t *testing.T) {
 	evs := next(t, s, func(e rt.Event) bool { _, ok := e.(rt.QuotaUpdate); return ok })
 	q := evs[len(evs)-1].(rt.QuotaUpdate)
 	at := func(sec int64) *time.Time { t := time.Unix(sec, 0).UTC(); return &t }
-	want := []rt.Window{{Name: "5h", Used: 0.12, ResetsAt: at(1893456000 + 18000)}, {Name: "7d", Used: 0.04, ResetsAt: at(1893456000 + 604800)}}
+	want := []rt.Window{{Bucket: "codex", Name: "5h", Used: 0.12, ResetsAt: at(1893456000 + 18000)}, {Bucket: "codex", Name: "7d", Used: 0.04, ResetsAt: at(1893456000 + 604800)}}
 	if !reflect.DeepEqual(q.Windows, want) {
 		t.Fatalf("QuotaUpdate = %+v, want %+v", q.Windows, want)
 	}

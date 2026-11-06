@@ -65,7 +65,8 @@ func userErrorf(format string, args ...any) error {
 type TaskOptions struct {
 	Dir   string
 	Model string
-	// Runtime is the runtime the Ticket runs on: RuntimeClaude (the default when empty), RuntimeCodex or RuntimeAuto.
+	// Runtime is the runtime the Ticket runs on: RuntimeClaude, RuntimeCodex or RuntimeAuto; empty is the Engine's
+	// Options.DefaultRuntime. Any other name is a UserError.
 	Runtime string
 	// Repo is the repository (owner/name) the task works in, through its Source; it excludes Dir.
 	Repo string
@@ -107,6 +108,8 @@ type Engine struct {
 	wake   func()
 	// relays is Options.Relays.
 	relays bool
+	// defaultRuntime is Options.DefaultRuntime, RuntimeClaude when it was empty.
+	defaultRuntime string
 }
 
 // Options configure an Engine beyond its Repositories and Executor. Every field may be left zero.
@@ -124,6 +127,9 @@ type Options struct {
 	// Relays makes commands enqueue the main Session's relay and notice effects (see notices.go). Leave it off when no
 	// router runs, or they pile up unread.
 	Relays bool
+	// DefaultRuntime is the runtime of a Ticket that names none: an owner task without TaskOptions.Runtime and every
+	// Ticket the router accepts. Empty is RuntimeClaude; the server passes its configuration's (auto by default).
+	DefaultRuntime string
 }
 
 // NewEngine returns an Engine with the plan 1 options: a clock and an event sink (see Options).
@@ -142,8 +148,29 @@ func NewEngineWith(repos Repositories, exec Executor, opts Options) *Engine {
 	if emit == nil {
 		emit = func(Event) {}
 	}
+	def := opts.DefaultRuntime
+	if def == "" {
+		def = RuntimeClaude
+	}
 	return &Engine{repos: repos, exec: exec, now: now, emit: emit, waiters: map[string]chan struct{}{},
-		policy: opts.Policy, scope: opts.Scope, wake: opts.Wake, relays: opts.Relays}
+		policy: opts.Policy, scope: opts.Scope, wake: opts.Wake, relays: opts.Relays, defaultRuntime: def}
+}
+
+// ValidRuntime reports whether name is a runtime a Ticket may run on: RuntimeClaude, RuntimeCodex or RuntimeAuto.
+func ValidRuntime(name string) bool {
+	return name == RuntimeClaude || name == RuntimeCodex || name == RuntimeAuto
+}
+
+// ticketRuntime is the runtime a Ticket that asked for name runs on: name, or the Engine's default when it is empty. A
+// name that is not a runtime is a UserError.
+func (e *Engine) ticketRuntime(name string) (string, error) {
+	if name == "" {
+		name = e.defaultRuntime
+	}
+	if !ValidRuntime(name) {
+		return "", userErrorf("runtime %q is not %s, %s or %s", name, RuntimeClaude, RuntimeCodex, RuntimeAuto)
+	}
+	return name, nil
 }
 
 // --- Owner tasks ---
@@ -157,13 +184,11 @@ func (e *Engine) SubmitOwnerTask(text string, opts TaskOptions) (Ticket, error) 
 	if title == "" {
 		return Ticket{}, userErrorf("a task needs text")
 	}
-	switch opts.Runtime {
-	case "":
-		opts.Runtime = RuntimeClaude
-	case RuntimeClaude, RuntimeCodex, RuntimeAuto:
-	default:
-		return Ticket{}, userErrorf("runtime %q is not %s, %s or %s", opts.Runtime, RuntimeClaude, RuntimeCodex, RuntimeAuto)
+	runtime, err := e.ticketRuntime(opts.Runtime)
+	if err != nil {
+		return Ticket{}, err
 	}
+	opts.Runtime = runtime
 	if opts.Repo != "" {
 		if !validRepo(opts.Repo) {
 			return Ticket{}, userErrorf("repository %q is not owner/name", opts.Repo)
@@ -173,7 +198,7 @@ func (e *Engine) SubmitOwnerTask(text string, opts TaskOptions) (Ticket, error) 
 		}
 	}
 	var created, existing *Ticket
-	err := e.command(cmdSubmit, func(o *op) error {
+	err = e.command(cmdSubmit, func(o *op) error {
 		if opts.RequestID != "" {
 			t, err := o.tx.TicketByRequestID(opts.RequestID)
 			if err != nil {
@@ -236,10 +261,11 @@ func (e *Engine) SubmitOwnerTask(text string, opts TaskOptions) (Ticket, error) 
 
 // --- Executor callbacks ---
 
-// AssignmentStarted is the Executor's fact that an Assignment runs, in the runtime session sessionID with model (the
-// model the Executor chose, its default when the Ticket names none); the Inputs that wait for it go out. A start of
-// an unknown or ended Assignment, such as one a retry replaced, changes nothing.
-func (e *Engine) AssignmentStarted(ticketID, assignmentID, sessionID, model string) error {
+// AssignmentStarted is the Executor's fact that an Assignment runs, in the session sessionID of runtime with model (the
+// model the Executor chose, its default when the Ticket names none); the Inputs that wait for it go out. The runtime
+// is the one the session actually runs on, which the Assignment records (empty keeps what it has). A start of an
+// unknown or ended Assignment, such as one a retry replaced, changes nothing.
+func (e *Engine) AssignmentStarted(ticketID, assignmentID, sessionID, model, runtime string) error {
 	return e.command(cmdAssignmentStarted, func(o *op) error {
 		t, err := o.require(ticketID)
 		if err != nil {
@@ -250,7 +276,16 @@ func (e *Engine) AssignmentStarted(ticketID, assignmentID, sessionID, model stri
 			return nil
 		}
 		a.State = AssignmentRunning
+		if runtime != "" {
+			a.Runtime = runtime
+		}
 		if a.StartedAt == nil {
+			if a.Runtime != "" {
+				// The Assignment counts once, for the runtime it first started on.
+				rs := t.Stats.byRuntime(a.Runtime)
+				rs.Assignments++
+				t.Stats.ByRuntime[a.Runtime] = rs
+			}
 			a.StartedAt = o.timestamp()
 			// From the Assignment's creation to its session starting: the wait for a slot plus the launch.
 			wait := nonNegative(o.at.Sub(a.CreatedAt))
@@ -662,6 +697,8 @@ type op struct {
 	// reg is the Engine's registry; observations wait in metrics until the command committed.
 	reg     *metrics.Registry
 	metrics []func(*metrics.Registry)
+	// defaultRuntime is the Engine's: the runtime of a Ticket the router accepts.
+	defaultRuntime string
 }
 
 // observe queues a metrics observation that runs once the command committed. Callers check o.reg first, so that no
@@ -687,7 +724,7 @@ func (e *Engine) run(fn func(o *op) error) error {
 	var o *op
 	err := e.repos.Tx(func(tx Tx) error {
 		// A fresh op per attempt, so nothing collected by a failed attempt leaks.
-		o = &op{tx: tx, at: e.now(), reg: e.reg, policy: e.policy, relays: e.relays}
+		o = &op{tx: tx, at: e.now(), reg: e.reg, policy: e.policy, relays: e.relays, defaultRuntime: e.defaultRuntime}
 		return fn(o)
 	})
 	if err != nil {
@@ -969,8 +1006,9 @@ func hasReport(t *Ticket) bool {
 
 func nonNegative(d time.Duration) time.Duration { return max(d, 0) }
 
-// runtimeModel returns the metric labels of a Ticket's runtime and model. The model is the one the Executor ran the
-// Assignment a with (nil for none), else the one the task named, else "default" (no Executor has run the Ticket).
+// runtimeModel returns the metric labels of a Ticket's runtime and model: the runtime and model the Executor ran the
+// Assignment a with (nil for none), else the ones the Ticket named (its runtime may be auto), else "unknown" and
+// "default" (no Executor has run the Ticket).
 func runtimeModel(t *Ticket, a *Assignment) (runtime, model string) {
 	runtime, model = "unknown", "default"
 	if x := t.Execution; x != nil {
@@ -983,6 +1021,9 @@ func runtimeModel(t *Ticket, a *Assignment) (runtime, model string) {
 	}
 	if a != nil && a.Model != "" {
 		model = a.Model
+	}
+	if a != nil && a.Runtime != "" {
+		runtime = a.Runtime
 	}
 	return runtime, model
 }
@@ -1083,6 +1124,7 @@ func cloneTicket(t *Ticket) Ticket {
 	c.Execution = clonePtr(t.Execution)
 	c.Delivery = clonePtr(t.Delivery)
 	c.SessionCosts = maps.Clone(t.SessionCosts)
+	c.Stats.ByRuntime = maps.Clone(t.Stats.ByRuntime)
 	return c
 }
 
