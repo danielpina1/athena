@@ -97,6 +97,8 @@ type Source interface {
 	Prompts() (*athenav1.PromptsView, error)
 	// Control returns the kill switch.
 	Control() pause.State
+	// Offers returns the standing allow rules on offer (see Offers).
+	Offers() ([]Offer, error)
 }
 
 type ringEntry struct {
@@ -138,6 +140,7 @@ type Hub struct {
 	quotaLater bool
 	repos      *athenav1.RepoList
 	notifs     *athenav1.NotificationPrefsView
+	offers     *athenav1.OfferList
 	closed     bool // the hub has stopped: Subscribe returns closed feeds
 	// folders are the placement folders whose facts changed since the loop last republished their Tickets.
 	folders map[string]bool
@@ -223,8 +226,9 @@ func (h *Hub) Start(ctx context.Context) {
 		repos = &athenav1.RepoList{Repos: r}
 	}
 	notifs, _ := h.notificationsView()
+	offers, _ := h.offersView()
 	h.mu.Lock()
-	h.health, h.node, h.repos, h.notifs = health, n, repos, notifs
+	h.health, h.node, h.repos, h.notifs, h.offers = health, n, repos, notifs, offers
 	h.mu.Unlock()
 	h.running.Add(2) // the loop and its probe
 	go h.run(ctx)
@@ -378,6 +382,11 @@ func (h *Hub) apply(c store.Changes) {
 		}
 		h.publish(&athenav1.Delta{Change: &athenav1.Delta_Prompts{Prompts: p}})
 	}
+	if c.Offers || c.Policy || len(c.Approvals) > 0 {
+		if !h.publishOffers() {
+			return
+		}
+	}
 	if c.Control {
 		h.publish(&athenav1.Delta{Change: &athenav1.Delta_Control{Control: controlView(h.src.Control())}})
 	}
@@ -503,6 +512,31 @@ func (h *Hub) publishNotifications() bool {
 	h.mu.Unlock()
 	if !same {
 		h.publish(&athenav1.Delta{Change: &athenav1.Delta_Notifications{Notifications: next}})
+	}
+	return true
+}
+
+func (h *Hub) offersView() (*athenav1.OfferList, error) {
+	offers, err := h.src.Offers()
+	if err != nil {
+		return nil, err
+	}
+	return offerList(offers), nil
+}
+
+// publishOffers publishes the offers when they differ from the last published; false when the Source could not be read.
+func (h *Hub) publishOffers() bool {
+	next, err := h.offersView()
+	if err != nil {
+		h.lost("read offers", "error", err)
+		return false
+	}
+	h.mu.Lock()
+	same := h.offers != nil && proto.Equal(h.offers, next)
+	h.offers = next
+	h.mu.Unlock()
+	if !same {
+		h.publish(&athenav1.Delta{Change: &athenav1.Delta_Offers{Offers: next}})
 	}
 	return true
 }
@@ -806,6 +840,9 @@ func (h *Hub) Snapshot() (*athenav1.Snapshot, error) {
 		return nil, err
 	}
 	s.Control = controlView(h.src.Control())
+	if s.Offers, err = h.offersView(); err != nil {
+		return nil, err
+	}
 	return s, nil
 }
 

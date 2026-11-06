@@ -65,6 +65,7 @@ func (*connSource) Trust(core.Trigger) string                  { return "" }
 func (*connSource) Notifications() ([]string, []string, error) { return nil, nil, nil }
 func (*connSource) Prompts() (*athenav1.PromptsView, error)    { return &athenav1.PromptsView{}, nil }
 func (*connSource) Control() pause.State                       { return pause.State{} }
+func (*connSource) Offers() ([]hub.Offer, error)               { return nil, nil }
 func (*connSource) Approval(string) (core.Approval, error) {
 	return core.Approval{}, errors.New("none")
 }

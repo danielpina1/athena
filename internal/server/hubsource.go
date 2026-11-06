@@ -329,3 +329,21 @@ func (s hubSource) Control() pause.State {
 	}
 	return s.d.pause.State()
 }
+
+// Offers is the standing allow rules on offer: the owner's approval streaks, under the current Policy and what they
+// dismissed.
+func (s hubSource) Offers() ([]hub.Offer, error) {
+	streaks, err := s.d.st.ApprovalStreaks()
+	if err != nil || len(streaks) == 0 {
+		return nil, err
+	}
+	cur, _, err := s.d.policy.saved()
+	if err != nil {
+		return nil, err
+	}
+	dismissed, err := s.d.dismissedOffers()
+	if err != nil {
+		return nil, err
+	}
+	return hub.Offers(streaks, cur, dismissed), nil
+}

@@ -12,7 +12,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file athena/v1/state.proto.
  */
 export const file_athena_v1_state: GenFile = /*@__PURE__*/
-  fileDesc("ChVhdGhlbmEvdjEvc3RhdGUucHJvdG8SCWF0aGVuYS52MSKJBAoIU25hcHNob3QSDgoGY3Vyc29yGAEgASgEEikKB3RpY2tldHMYAiADKAsyGC5hdGhlbmEudjEuVGlja2V0U3VtbWFyeRIqCglhcHByb3ZhbHMYAyADKAsyFy5hdGhlbmEudjEuQXBwcm92YWxWaWV3EigKCHRyaWdnZXJzGAQgAygLMhYuYXRoZW5hLnYxLlRyaWdnZXJWaWV3EiYKB3RocmVhZHMYBSADKAsyFS5hdGhlbmEudjEuVGhyZWFkVmlldxIqCglkZWNpc2lvbnMYBiADKAsyFy5hdGhlbmEudjEuRGVjaXNpb25WaWV3EiMKBG5vZGUYByABKAsyFS5hdGhlbmEudjEuTm9kZVN0YXR1cxIhCgZoZWFsdGgYCCABKAsyES5hdGhlbmEudjEuSGVhbHRoEiUKBnBvbGljeRgJIAEoCzIVLmF0aGVuYS52MS5Qb2xpY3lWaWV3EiIKBXJlcG9zGAogAygLMhMuYXRoZW5hLnYxLlJlcG9WaWV3EjcKDW5vdGlmaWNhdGlvbnMYCyABKAsyIC5hdGhlbmEudjEuTm90aWZpY2F0aW9uUHJlZnNWaWV3EicKB3Byb21wdHMYDCABKAsyFi5hdGhlbmEudjEuUHJvbXB0c1ZpZXcSIwoHY29udHJvbBgNIAEoCzISLmF0aGVuYS52MS5Db250cm9sItIECgVEZWx0YRILCgNzZXEYASABKAQSKgoGdGlja2V0GAogASgLMhguYXRoZW5hLnYxLlRpY2tldFN1bW1hcnlIABIwCg10aWNrZXRfZGV0YWlsGAsgASgLMhcuYXRoZW5hLnYxLlRpY2tldERldGFpbEgAEisKCGFwcHJvdmFsGAwgASgLMhcuYXRoZW5hLnYxLkFwcHJvdmFsVmlld0gAEikKB3RyaWdnZXIYDSABKAsyFi5hdGhlbmEudjEuVHJpZ2dlclZpZXdIABInCgZ0aHJlYWQYDiABKAsyFS5hdGhlbmEudjEuVGhyZWFkVmlld0gAEisKCGRlY2lzaW9uGA8gASgLMhcuYXRoZW5hLnYxLkRlY2lzaW9uVmlld0gAEiUKBG5vZGUYECABKAsyFS5hdGhlbmEudjEuTm9kZVN0YXR1c0gAEiMKBmhlYWx0aBgRIAEoCzIRLmF0aGVuYS52MS5IZWFsdGhIABInCgZwb2xpY3kYEiABKAsyFS5hdGhlbmEudjEuUG9saWN5Vmlld0gAEiQKBXJlcG9zGBMgASgLMhMuYXRoZW5hLnYxLlJlcG9MaXN0SAASOQoNbm90aWZpY2F0aW9ucxgUIAEoCzIgLmF0aGVuYS52MS5Ob3RpZmljYXRpb25QcmVmc1ZpZXdIABIpCgdwcm9tcHRzGBUgASgLMhYuYXRoZW5hLnYxLlByb21wdHNWaWV3SAASJQoHY29udHJvbBgWIAEoCzISLmF0aGVuYS52MS5Db250cm9sSABCCAoGY2hhbmdlIlAKB0NvbnRyb2wSDgoGcGF1c2VkGAEgASgIEikKBXNpbmNlGAIgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIKCgJieRgDIAEoCSLxAwoNVGlja2V0U3VtbWFyeRIKCgJpZBgBIAEoCRINCgV0aXRsZRgCIAEoCRINCgVzdGFnZRgDIAEoCRIOCgZhY3Rpb24YBCABKAkSDAoEcmVwbxgFIAEoCRILCgNkaXIYBiABKAkSDQoFbW9kZWwYByABKAkSLgoKY3JlYXRlZF9hdBgIIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASLgoKdXBkYXRlZF9hdBgJIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASLAoIZW5kZWRfYXQYCiABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEg8KB291dGNvbWUYCyABKAkSEQoJbmVlZHNfeW91GAwgASgIEhEKCWNhbl9yZXRyeRgNIAEoCBIbChNwZW5kaW5nX2FwcHJvdmFsX2lkGA4gASgJEg4KBnByX3VybBgPIAEoCRIaChJhdHRlbnRpb25fcXVlc3Rpb24YECABKAkSDgoGYnJhbmNoGBEgASgJEg8KB3J1bnRpbWUYEiABKAkSFgoOcnVudGltZV9jaG9pY2UYEyABKAkSDwoHcGFpcmluZxgUIAEoCRIVCg1yZXZpZXdfcm91bmRzGBUgASgNEg0KBXRydXN0GBYgASgJIrgBCgxUaWNrZXREZXRhaWwSKQoHc3VtbWFyeRgBIAEoCzIYLmF0aGVuYS52MS5UaWNrZXRTdW1tYXJ5EioKCHRpbWVsaW5lGAIgAygLMhguYXRoZW5hLnYxLlRpbWVsaW5lRW50cnkSDwoHdGhyZWFkcxgDIAMoCRIYChB0aW1lbGluZV90cmltbWVkGAQgASgIEiYKB3JlcG9ydHMYBSADKAsyFS5hdGhlbmEudjEuUmVwb3J0VmlldyKWAQoNVGltZWxpbmVFbnRyeRImCgJhdBgBIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASDAoEa2luZBgCIAEoCRIMCgR0ZXh0GAMgASgJEg4KBnJlZl9pZBgEIAEoCRIPCgdzdWJraW5kGAUgASgJEg8KB3N1YmplY3QYBiABKAkSDwoHcnVudGltZRgHIAEoCSKLAQoKUmVwb3J0VmlldxIVCg1hc3NpZ25tZW50X2lkGAEgASgJEg0KBXN0YXRlGAIgASgJEg8KB3N1bW1hcnkYAyABKAkSDAoEcHVsbBgEIAEoDRIQCghxdWVzdGlvbhgFIAEoCRImCgJhdBgGIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXAi4gEKDEFwcHJvdmFsVmlldxIKCgJpZBgBIAEoCRIRCgl0aWNrZXRfaWQYAiABKAkSDAoEdG9vbBgDIAEoCRIPCgdzdW1tYXJ5GAQgASgJEgwKBHJ1bGUYBSABKAkSFgoOaW5wdXRfcmVkYWN0ZWQYBiABKAkSDQoFc3RhdGUYByABKAkSLgoKY3JlYXRlZF9hdBgIIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASLwoLYW5zd2VyZWRfYXQYCSABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wIr8BCgtUcmlnZ2VyVmlldxIKCgJpZBgBIAEoCRImCgJhdBgCIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASDgoGc291cmNlGAMgASgJEg0KBWFjdG9yGAQgASgJEgwKBGtpbmQYBSABKAkSEQoJYWRkcmVzc2VkGAYgASgJEg4KBnRocmVhZBgHIAEoCRIMCgR0ZXh0GAggASgJEg8KB291dGNvbWUYCSABKAkSDQoFdHJ1c3QYCiABKAkigAEKClRocmVhZFZpZXcSCwoDa2V5GAEgASgJEg4KBnF1ZXVlZBgCIAEoDRIhCgRldmFsGAMgASgLMhMuYXRoZW5hLnYxLkV2YWxWaWV3Eg8KB3RpY2tldHMYBCADKAkSEQoJZGVjaXNpb25zGAUgASgNEg4KBmNsb3NlZBgGIAEoCSKKAQoIRXZhbFZpZXcSCgoCaWQYASABKAkSEAoIc3RyZW5ndGgYAiABKAkSLgoKc3RhcnRlZF9hdBgDIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASMAoMZGVsaXZlcmVkX2F0GAQgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcCLxAQoMRGVjaXNpb25WaWV3EgoKAmlkGAEgASgJEiYKAmF0GAIgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIMCgRraW5kGAMgASgJEg4KBnRocmVhZBgEIAEoCRIRCgl0aWNrZXRfaWQYBSABKAkSEAoIdHJpZ2dlcnMYBiADKAkSIgoHcmVhc29ucxgHIAMoCzIRLmF0aGVuYS52MS5SZWFzb24SFAoMd291bGRfYWNjZXB0GAggASgIEjAKDGRpc21pc3NlZF9hdBgJIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXAidAoGUmVhc29uEgwKBGNvZGUYASABKAkSLQoGdmFsdWVzGAIgAygLMh0uYXRoZW5hLnYxLlJlYXNvbi5WYWx1ZXNFbnRyeRotCgtWYWx1ZXNFbnRyeRILCgNrZXkYASABKAkSDQoFdmFsdWUYAiABKAk6AjgBIqwBCgpOb2RlU3RhdHVzEgwKBG5hbWUYASABKAkSDQoFc2xvdHMYAiABKA0SFAoMc2xvdHNfaW5fdXNlGAMgASgNEhcKD2xpdmVfdGlja2V0X2lkcxgEIAMoCRIOCgZxdWV1ZWQYBSABKA0SFgoOY2xhdWRlX3ZlcnNpb24YBiABKAkSKgoIcnVudGltZXMYByADKAsyGC5hdGhlbmEudjEuUnVudGltZVN0YXR1cyJnCgtRdW90YVdpbmRvdxIMCgRuYW1lGAEgASgJEgwKBHVzZWQYAiABKAISLQoJcmVzZXRzX2F0GAMgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBINCgVzdGFsZRgEIAEoCCKsAgoNUnVudGltZVN0YXR1cxIMCgRuYW1lGAEgASgJEg8KB3ZlcnNpb24YAiABKAkSDQoFcmVhZHkYAyABKAgSDgoGdGVzdGVkGAQgASgIEgsKA3doeRgFIAEoCRInCgd3aW5kb3dzGAYgAygLMhYuYXRoZW5hLnYxLlF1b3RhV2luZG93EjEKDWxpbWl0ZWRfdW50aWwYByABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEisKB3JlYWRfYXQYCCABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEhAKCG1lYXN1cmVkGAkgASgIEgwKBGxpdmUYCiABKA0SJwoGbW9kZWxzGAsgAygLMhcuYXRoZW5hLnYxLlJ1bnRpbWVNb2RlbCI5CgxSdW50aW1lTW9kZWwSCgoCaWQYASABKAkSDAoEbmFtZRgCIAEoCRIPCgdkZWZhdWx0GAMgASgIIi4KBkhlYWx0aBIkCgVpdGVtcxgBIAMoCzIVLmF0aGVuYS52MS5IZWFsdGhJdGVtImIKCkhlYWx0aEl0ZW0SDAoEbmFtZRgBIAEoCRIKCgJvaxgCIAEoCBIPCgdtZXNzYWdlGAMgASgJEikKBXNpbmNlGAQgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcCJGCgpQb2xpY3lWaWV3EhAKCHJldmlzaW9uGAEgASgNEg8KB3ZlcnNpb24YAiABKAkSFQoNc2V0dGluZ3NfanNvbhgDIAEoCSJYCghSZXBvVmlldxIMCgRuYW1lGAEgASgJEgwKBGtpbmQYAiABKAkSMAoMbGFzdF91c2VkX2F0GAMgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcCIuCghSZXBvTGlzdBIiCgVyZXBvcxgBIAMoCzITLmF0aGVuYS52MS5SZXBvVmlldyI1ChVOb3RpZmljYXRpb25QcmVmc1ZpZXcSDQoFa2luZHMYASADKAkSDQoFbXV0ZWQYAiADKAkiSQoLUHJvbXB0c1ZpZXcSEAoIcmV2aXNpb24YASABKA0SKAoFcGFydHMYAiADKAsyGS5hdGhlbmEudjEuUHJvbXB0UGFydFZpZXciSwoOUHJvbXB0UGFydFZpZXcSDAoEbmFtZRgBIAEoCRISCgpvdmVycmlkZGVuGAIgASgIEhcKD2RlZmF1bHRfdXBkYXRlZBgDIAEoCEI9WjtnaXRodWIuY29tL2RhbmllbHBpbmExL2F0aGVuYS9pbnRlcm5hbC9wYi9hdGhlbmF2MTthdGhlbmF2MWIGcHJvdG8z", [file_google_protobuf_timestamp]);
+  fileDesc("ChVhdGhlbmEvdjEvc3RhdGUucHJvdG8SCWF0aGVuYS52MSKvBAoIU25hcHNob3QSDgoGY3Vyc29yGAEgASgEEikKB3RpY2tldHMYAiADKAsyGC5hdGhlbmEudjEuVGlja2V0U3VtbWFyeRIqCglhcHByb3ZhbHMYAyADKAsyFy5hdGhlbmEudjEuQXBwcm92YWxWaWV3EigKCHRyaWdnZXJzGAQgAygLMhYuYXRoZW5hLnYxLlRyaWdnZXJWaWV3EiYKB3RocmVhZHMYBSADKAsyFS5hdGhlbmEudjEuVGhyZWFkVmlldxIqCglkZWNpc2lvbnMYBiADKAsyFy5hdGhlbmEudjEuRGVjaXNpb25WaWV3EiMKBG5vZGUYByABKAsyFS5hdGhlbmEudjEuTm9kZVN0YXR1cxIhCgZoZWFsdGgYCCABKAsyES5hdGhlbmEudjEuSGVhbHRoEiUKBnBvbGljeRgJIAEoCzIVLmF0aGVuYS52MS5Qb2xpY3lWaWV3EiIKBXJlcG9zGAogAygLMhMuYXRoZW5hLnYxLlJlcG9WaWV3EjcKDW5vdGlmaWNhdGlvbnMYCyABKAsyIC5hdGhlbmEudjEuTm90aWZpY2F0aW9uUHJlZnNWaWV3EicKB3Byb21wdHMYDCABKAsyFi5hdGhlbmEudjEuUHJvbXB0c1ZpZXcSIwoHY29udHJvbBgNIAEoCzISLmF0aGVuYS52MS5Db250cm9sEiQKBm9mZmVycxgOIAEoCzIULmF0aGVuYS52MS5PZmZlckxpc3Qi+gQKBURlbHRhEgsKA3NlcRgBIAEoBBIqCgZ0aWNrZXQYCiABKAsyGC5hdGhlbmEudjEuVGlja2V0U3VtbWFyeUgAEjAKDXRpY2tldF9kZXRhaWwYCyABKAsyFy5hdGhlbmEudjEuVGlja2V0RGV0YWlsSAASKwoIYXBwcm92YWwYDCABKAsyFy5hdGhlbmEudjEuQXBwcm92YWxWaWV3SAASKQoHdHJpZ2dlchgNIAEoCzIWLmF0aGVuYS52MS5UcmlnZ2VyVmlld0gAEicKBnRocmVhZBgOIAEoCzIVLmF0aGVuYS52MS5UaHJlYWRWaWV3SAASKwoIZGVjaXNpb24YDyABKAsyFy5hdGhlbmEudjEuRGVjaXNpb25WaWV3SAASJQoEbm9kZRgQIAEoCzIVLmF0aGVuYS52MS5Ob2RlU3RhdHVzSAASIwoGaGVhbHRoGBEgASgLMhEuYXRoZW5hLnYxLkhlYWx0aEgAEicKBnBvbGljeRgSIAEoCzIVLmF0aGVuYS52MS5Qb2xpY3lWaWV3SAASJAoFcmVwb3MYEyABKAsyEy5hdGhlbmEudjEuUmVwb0xpc3RIABI5Cg1ub3RpZmljYXRpb25zGBQgASgLMiAuYXRoZW5hLnYxLk5vdGlmaWNhdGlvblByZWZzVmlld0gAEikKB3Byb21wdHMYFSABKAsyFi5hdGhlbmEudjEuUHJvbXB0c1ZpZXdIABIlCgdjb250cm9sGBYgASgLMhIuYXRoZW5hLnYxLkNvbnRyb2xIABImCgZvZmZlcnMYFyABKAsyFC5hdGhlbmEudjEuT2ZmZXJMaXN0SABCCAoGY2hhbmdlIlAKB0NvbnRyb2wSDgoGcGF1c2VkGAEgASgIEikKBXNpbmNlGAIgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIKCgJieRgDIAEoCSJbCg5Qcm9tb3Rpb25PZmZlchINCgVjbGFzcxgBIAEoCRIMCgR0b29sGAIgASgJEgwKBHJ1bGUYAyABKAkSDAoEcmVwbxgEIAEoCRIQCghhcHByb3ZlZBgFIAEoDSI2CglPZmZlckxpc3QSKQoGb2ZmZXJzGAEgAygLMhkuYXRoZW5hLnYxLlByb21vdGlvbk9mZmVyIvEDCg1UaWNrZXRTdW1tYXJ5EgoKAmlkGAEgASgJEg0KBXRpdGxlGAIgASgJEg0KBXN0YWdlGAMgASgJEg4KBmFjdGlvbhgEIAEoCRIMCgRyZXBvGAUgASgJEgsKA2RpchgGIAEoCRINCgVtb2RlbBgHIAEoCRIuCgpjcmVhdGVkX2F0GAggASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIuCgp1cGRhdGVkX2F0GAkgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIsCghlbmRlZF9hdBgKIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASDwoHb3V0Y29tZRgLIAEoCRIRCgluZWVkc195b3UYDCABKAgSEQoJY2FuX3JldHJ5GA0gASgIEhsKE3BlbmRpbmdfYXBwcm92YWxfaWQYDiABKAkSDgoGcHJfdXJsGA8gASgJEhoKEmF0dGVudGlvbl9xdWVzdGlvbhgQIAEoCRIOCgZicmFuY2gYESABKAkSDwoHcnVudGltZRgSIAEoCRIWCg5ydW50aW1lX2Nob2ljZRgTIAEoCRIPCgdwYWlyaW5nGBQgASgJEhUKDXJldmlld19yb3VuZHMYFSABKA0SDQoFdHJ1c3QYFiABKAkiuAEKDFRpY2tldERldGFpbBIpCgdzdW1tYXJ5GAEgASgLMhguYXRoZW5hLnYxLlRpY2tldFN1bW1hcnkSKgoIdGltZWxpbmUYAiADKAsyGC5hdGhlbmEudjEuVGltZWxpbmVFbnRyeRIPCgd0aHJlYWRzGAMgAygJEhgKEHRpbWVsaW5lX3RyaW1tZWQYBCABKAgSJgoHcmVwb3J0cxgFIAMoCzIVLmF0aGVuYS52MS5SZXBvcnRWaWV3IpYBCg1UaW1lbGluZUVudHJ5EiYKAmF0GAEgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIMCgRraW5kGAIgASgJEgwKBHRleHQYAyABKAkSDgoGcmVmX2lkGAQgASgJEg8KB3N1YmtpbmQYBSABKAkSDwoHc3ViamVjdBgGIAEoCRIPCgdydW50aW1lGAcgASgJIosBCgpSZXBvcnRWaWV3EhUKDWFzc2lnbm1lbnRfaWQYASABKAkSDQoFc3RhdGUYAiABKAkSDwoHc3VtbWFyeRgDIAEoCRIMCgRwdWxsGAQgASgNEhAKCHF1ZXN0aW9uGAUgASgJEiYKAmF0GAYgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcCLiAQoMQXBwcm92YWxWaWV3EgoKAmlkGAEgASgJEhEKCXRpY2tldF9pZBgCIAEoCRIMCgR0b29sGAMgASgJEg8KB3N1bW1hcnkYBCABKAkSDAoEcnVsZRgFIAEoCRIWCg5pbnB1dF9yZWRhY3RlZBgGIAEoCRINCgVzdGF0ZRgHIAEoCRIuCgpjcmVhdGVkX2F0GAggASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIvCgthbnN3ZXJlZF9hdBgJIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXAivwEKC1RyaWdnZXJWaWV3EgoKAmlkGAEgASgJEiYKAmF0GAIgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIOCgZzb3VyY2UYAyABKAkSDQoFYWN0b3IYBCABKAkSDAoEa2luZBgFIAEoCRIRCglhZGRyZXNzZWQYBiABKAkSDgoGdGhyZWFkGAcgASgJEgwKBHRleHQYCCABKAkSDwoHb3V0Y29tZRgJIAEoCRINCgV0cnVzdBgKIAEoCSKAAQoKVGhyZWFkVmlldxILCgNrZXkYASABKAkSDgoGcXVldWVkGAIgASgNEiEKBGV2YWwYAyABKAsyEy5hdGhlbmEudjEuRXZhbFZpZXcSDwoHdGlja2V0cxgEIAMoCRIRCglkZWNpc2lvbnMYBSABKA0SDgoGY2xvc2VkGAYgASgJIooBCghFdmFsVmlldxIKCgJpZBgBIAEoCRIQCghzdHJlbmd0aBgCIAEoCRIuCgpzdGFydGVkX2F0GAMgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIwCgxkZWxpdmVyZWRfYXQYBCABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wIvEBCgxEZWNpc2lvblZpZXcSCgoCaWQYASABKAkSJgoCYXQYAiABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEgwKBGtpbmQYAyABKAkSDgoGdGhyZWFkGAQgASgJEhEKCXRpY2tldF9pZBgFIAEoCRIQCgh0cmlnZ2VycxgGIAMoCRIiCgdyZWFzb25zGAcgAygLMhEuYXRoZW5hLnYxLlJlYXNvbhIUCgx3b3VsZF9hY2NlcHQYCCABKAgSMAoMZGlzbWlzc2VkX2F0GAkgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcCJ0CgZSZWFzb24SDAoEY29kZRgBIAEoCRItCgZ2YWx1ZXMYAiADKAsyHS5hdGhlbmEudjEuUmVhc29uLlZhbHVlc0VudHJ5Gi0KC1ZhbHVlc0VudHJ5EgsKA2tleRgBIAEoCRINCgV2YWx1ZRgCIAEoCToCOAEirAEKCk5vZGVTdGF0dXMSDAoEbmFtZRgBIAEoCRINCgVzbG90cxgCIAEoDRIUCgxzbG90c19pbl91c2UYAyABKA0SFwoPbGl2ZV90aWNrZXRfaWRzGAQgAygJEg4KBnF1ZXVlZBgFIAEoDRIWCg5jbGF1ZGVfdmVyc2lvbhgGIAEoCRIqCghydW50aW1lcxgHIAMoCzIYLmF0aGVuYS52MS5SdW50aW1lU3RhdHVzImcKC1F1b3RhV2luZG93EgwKBG5hbWUYASABKAkSDAoEdXNlZBgCIAEoAhItCglyZXNldHNfYXQYAyABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEg0KBXN0YWxlGAQgASgIIqwCCg1SdW50aW1lU3RhdHVzEgwKBG5hbWUYASABKAkSDwoHdmVyc2lvbhgCIAEoCRINCgVyZWFkeRgDIAEoCBIOCgZ0ZXN0ZWQYBCABKAgSCwoDd2h5GAUgASgJEicKB3dpbmRvd3MYBiADKAsyFi5hdGhlbmEudjEuUXVvdGFXaW5kb3cSMQoNbGltaXRlZF91bnRpbBgHIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASKwoHcmVhZF9hdBgIIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASEAoIbWVhc3VyZWQYCSABKAgSDAoEbGl2ZRgKIAEoDRInCgZtb2RlbHMYCyADKAsyFy5hdGhlbmEudjEuUnVudGltZU1vZGVsIjkKDFJ1bnRpbWVNb2RlbBIKCgJpZBgBIAEoCRIMCgRuYW1lGAIgASgJEg8KB2RlZmF1bHQYAyABKAgiLgoGSGVhbHRoEiQKBWl0ZW1zGAEgAygLMhUuYXRoZW5hLnYxLkhlYWx0aEl0ZW0iYgoKSGVhbHRoSXRlbRIMCgRuYW1lGAEgASgJEgoKAm9rGAIgASgIEg8KB21lc3NhZ2UYAyABKAkSKQoFc2luY2UYBCABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wIkYKClBvbGljeVZpZXcSEAoIcmV2aXNpb24YASABKA0SDwoHdmVyc2lvbhgCIAEoCRIVCg1zZXR0aW5nc19qc29uGAMgASgJIlgKCFJlcG9WaWV3EgwKBG5hbWUYASABKAkSDAoEa2luZBgCIAEoCRIwCgxsYXN0X3VzZWRfYXQYAyABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wIi4KCFJlcG9MaXN0EiIKBXJlcG9zGAEgAygLMhMuYXRoZW5hLnYxLlJlcG9WaWV3IjUKFU5vdGlmaWNhdGlvblByZWZzVmlldxINCgVraW5kcxgBIAMoCRINCgVtdXRlZBgCIAMoCSJJCgtQcm9tcHRzVmlldxIQCghyZXZpc2lvbhgBIAEoDRIoCgVwYXJ0cxgCIAMoCzIZLmF0aGVuYS52MS5Qcm9tcHRQYXJ0VmlldyJLCg5Qcm9tcHRQYXJ0VmlldxIMCgRuYW1lGAEgASgJEhIKCm92ZXJyaWRkZW4YAiABKAgSFwoPZGVmYXVsdF91cGRhdGVkGAMgASgIQj1aO2dpdGh1Yi5jb20vZGFuaWVscGluYTEvYXRoZW5hL2ludGVybmFsL3BiL2F0aGVuYXYxO2F0aGVuYXYxYgZwcm90bzM", [file_google_protobuf_timestamp]);
 
 /**
  * @generated from message athena.v1.Snapshot
@@ -84,6 +84,13 @@ export type Snapshot = Message<"athena.v1.Snapshot"> & {
    * @generated from field: athena.v1.Control control = 13;
    */
   control?: Control | undefined;
+
+  /**
+   * offers are the actions the owner keeps approving, each offered as a standing allow rule.
+   *
+   * @generated from field: athena.v1.OfferList offers = 14;
+   */
+  offers?: OfferList | undefined;
 };
 
 /**
@@ -185,6 +192,14 @@ export type Delta = Message<"athena.v1.Delta"> & {
      */
     value: Control;
     case: "control";
+  } | {
+    /**
+     * offers carries the whole list, sent only when it changed.
+     *
+     * @generated from field: athena.v1.OfferList offers = 23;
+     */
+    value: OfferList;
+    case: "offers";
   } | { case: undefined; value?: undefined };
 };
 
@@ -225,6 +240,65 @@ export type Control = Message<"athena.v1.Control"> & {
  */
 export const ControlSchema: GenMessage<Control> = /*@__PURE__*/
   messageDesc(file_athena_v1_state, 2);
+
+/**
+ * PromotionOffer is an action class (tool + rule + repository) the owner approved `approved` times in a row without a
+ * denial; allowing it writes a standing Policy allow rule.
+ *
+ * @generated from message athena.v1.PromotionOffer
+ */
+export type PromotionOffer = Message<"athena.v1.PromotionOffer"> & {
+  /**
+   * class is the stable key: tool|rule|repo, lower-cased.
+   *
+   * @generated from field: string class = 1;
+   */
+  class: string;
+
+  /**
+   * @generated from field: string tool = 2;
+   */
+  tool: string;
+
+  /**
+   * @generated from field: string rule = 3;
+   */
+  rule: string;
+
+  /**
+   * @generated from field: string repo = 4;
+   */
+  repo: string;
+
+  /**
+   * @generated from field: uint32 approved = 5;
+   */
+  approved: number;
+};
+
+/**
+ * Describes the message athena.v1.PromotionOffer.
+ * Use `create(PromotionOfferSchema)` to create a new message.
+ */
+export const PromotionOfferSchema: GenMessage<PromotionOffer> = /*@__PURE__*/
+  messageDesc(file_athena_v1_state, 3);
+
+/**
+ * @generated from message athena.v1.OfferList
+ */
+export type OfferList = Message<"athena.v1.OfferList"> & {
+  /**
+   * @generated from field: repeated athena.v1.PromotionOffer offers = 1;
+   */
+  offers: PromotionOffer[];
+};
+
+/**
+ * Describes the message athena.v1.OfferList.
+ * Use `create(OfferListSchema)` to create a new message.
+ */
+export const OfferListSchema: GenMessage<OfferList> = /*@__PURE__*/
+  messageDesc(file_athena_v1_state, 4);
 
 /**
  * @generated from message athena.v1.TicketSummary
@@ -360,7 +434,7 @@ export type TicketSummary = Message<"athena.v1.TicketSummary"> & {
  * Use `create(TicketSummarySchema)` to create a new message.
  */
 export const TicketSummarySchema: GenMessage<TicketSummary> = /*@__PURE__*/
-  messageDesc(file_athena_v1_state, 3);
+  messageDesc(file_athena_v1_state, 5);
 
 /**
  * @generated from message athena.v1.TicketDetail
@@ -401,7 +475,7 @@ export type TicketDetail = Message<"athena.v1.TicketDetail"> & {
  * Use `create(TicketDetailSchema)` to create a new message.
  */
 export const TicketDetailSchema: GenMessage<TicketDetail> = /*@__PURE__*/
-  messageDesc(file_athena_v1_state, 4);
+  messageDesc(file_athena_v1_state, 6);
 
 /**
  * @generated from message athena.v1.TimelineEntry
@@ -476,7 +550,7 @@ export type TimelineEntry = Message<"athena.v1.TimelineEntry"> & {
  * Use `create(TimelineEntrySchema)` to create a new message.
  */
 export const TimelineEntrySchema: GenMessage<TimelineEntry> = /*@__PURE__*/
-  messageDesc(file_athena_v1_state, 5);
+  messageDesc(file_athena_v1_state, 7);
 
 /**
  * ReportView is one Report in full.
@@ -528,7 +602,7 @@ export type ReportView = Message<"athena.v1.ReportView"> & {
  * Use `create(ReportViewSchema)` to create a new message.
  */
 export const ReportViewSchema: GenMessage<ReportView> = /*@__PURE__*/
-  messageDesc(file_athena_v1_state, 6);
+  messageDesc(file_athena_v1_state, 8);
 
 /**
  * @generated from message athena.v1.ApprovalView
@@ -585,7 +659,7 @@ export type ApprovalView = Message<"athena.v1.ApprovalView"> & {
  * Use `create(ApprovalViewSchema)` to create a new message.
  */
 export const ApprovalViewSchema: GenMessage<ApprovalView> = /*@__PURE__*/
-  messageDesc(file_athena_v1_state, 7);
+  messageDesc(file_athena_v1_state, 9);
 
 /**
  * TriggerView is a Trigger in a list: no Meta, no Channel address, its text cut to one short line.
@@ -654,7 +728,7 @@ export type TriggerView = Message<"athena.v1.TriggerView"> & {
  * Use `create(TriggerViewSchema)` to create a new message.
  */
 export const TriggerViewSchema: GenMessage<TriggerView> = /*@__PURE__*/
-  messageDesc(file_athena_v1_state, 8);
+  messageDesc(file_athena_v1_state, 10);
 
 /**
  * @generated from message athena.v1.ThreadView
@@ -700,7 +774,7 @@ export type ThreadView = Message<"athena.v1.ThreadView"> & {
  * Use `create(ThreadViewSchema)` to create a new message.
  */
 export const ThreadViewSchema: GenMessage<ThreadView> = /*@__PURE__*/
-  messageDesc(file_athena_v1_state, 9);
+  messageDesc(file_athena_v1_state, 11);
 
 /**
  * @generated from message athena.v1.EvalView
@@ -732,7 +806,7 @@ export type EvalView = Message<"athena.v1.EvalView"> & {
  * Use `create(EvalViewSchema)` to create a new message.
  */
 export const EvalViewSchema: GenMessage<EvalView> = /*@__PURE__*/
-  messageDesc(file_athena_v1_state, 10);
+  messageDesc(file_athena_v1_state, 12);
 
 /**
  * DecisionView is a Decision in the routing records.
@@ -793,7 +867,7 @@ export type DecisionView = Message<"athena.v1.DecisionView"> & {
  * Use `create(DecisionViewSchema)` to create a new message.
  */
 export const DecisionViewSchema: GenMessage<DecisionView> = /*@__PURE__*/
-  messageDesc(file_athena_v1_state, 11);
+  messageDesc(file_athena_v1_state, 13);
 
 /**
  * @generated from message athena.v1.Reason
@@ -815,7 +889,7 @@ export type Reason = Message<"athena.v1.Reason"> & {
  * Use `create(ReasonSchema)` to create a new message.
  */
 export const ReasonSchema: GenMessage<Reason> = /*@__PURE__*/
-  messageDesc(file_athena_v1_state, 12);
+  messageDesc(file_athena_v1_state, 14);
 
 /**
  * @generated from message athena.v1.NodeStatus
@@ -866,7 +940,7 @@ export type NodeStatus = Message<"athena.v1.NodeStatus"> & {
  * Use `create(NodeStatusSchema)` to create a new message.
  */
 export const NodeStatusSchema: GenMessage<NodeStatus> = /*@__PURE__*/
-  messageDesc(file_athena_v1_state, 13);
+  messageDesc(file_athena_v1_state, 15);
 
 /**
  * QuotaWindow is one usage-limit window of a runtime.
@@ -906,7 +980,7 @@ export type QuotaWindow = Message<"athena.v1.QuotaWindow"> & {
  * Use `create(QuotaWindowSchema)` to create a new message.
  */
 export const QuotaWindowSchema: GenMessage<QuotaWindow> = /*@__PURE__*/
-  messageDesc(file_athena_v1_state, 14);
+  messageDesc(file_athena_v1_state, 16);
 
 /**
  * RuntimeStatus is one runtime of the node.
@@ -992,7 +1066,7 @@ export type RuntimeStatus = Message<"athena.v1.RuntimeStatus"> & {
  * Use `create(RuntimeStatusSchema)` to create a new message.
  */
 export const RuntimeStatusSchema: GenMessage<RuntimeStatus> = /*@__PURE__*/
-  messageDesc(file_athena_v1_state, 15);
+  messageDesc(file_athena_v1_state, 17);
 
 /**
  * RuntimeModel is one model a runtime offers.
@@ -1027,7 +1101,7 @@ export type RuntimeModel = Message<"athena.v1.RuntimeModel"> & {
  * Use `create(RuntimeModelSchema)` to create a new message.
  */
 export const RuntimeModelSchema: GenMessage<RuntimeModel> = /*@__PURE__*/
-  messageDesc(file_athena_v1_state, 16);
+  messageDesc(file_athena_v1_state, 18);
 
 /**
  * @generated from message athena.v1.Health
@@ -1044,7 +1118,7 @@ export type Health = Message<"athena.v1.Health"> & {
  * Use `create(HealthSchema)` to create a new message.
  */
 export const HealthSchema: GenMessage<Health> = /*@__PURE__*/
-  messageDesc(file_athena_v1_state, 17);
+  messageDesc(file_athena_v1_state, 19);
 
 /**
  * HealthItem covers the Sources, the router, effects kinds, tls and push.
@@ -1078,7 +1152,7 @@ export type HealthItem = Message<"athena.v1.HealthItem"> & {
  * Use `create(HealthItemSchema)` to create a new message.
  */
 export const HealthItemSchema: GenMessage<HealthItem> = /*@__PURE__*/
-  messageDesc(file_athena_v1_state, 18);
+  messageDesc(file_athena_v1_state, 20);
 
 /**
  * PolicyView carries the Policy as its canonical JSON; internal/policy stays its only schema.
@@ -1107,7 +1181,7 @@ export type PolicyView = Message<"athena.v1.PolicyView"> & {
  * Use `create(PolicyViewSchema)` to create a new message.
  */
 export const PolicyViewSchema: GenMessage<PolicyView> = /*@__PURE__*/
-  messageDesc(file_athena_v1_state, 19);
+  messageDesc(file_athena_v1_state, 21);
 
 /**
  * RepoView is a place a task can run: a GitHub repository, a local git repository or a plain folder.
@@ -1142,7 +1216,7 @@ export type RepoView = Message<"athena.v1.RepoView"> & {
  * Use `create(RepoViewSchema)` to create a new message.
  */
 export const RepoViewSchema: GenMessage<RepoView> = /*@__PURE__*/
-  messageDesc(file_athena_v1_state, 20);
+  messageDesc(file_athena_v1_state, 22);
 
 /**
  * @generated from message athena.v1.RepoList
@@ -1159,7 +1233,7 @@ export type RepoList = Message<"athena.v1.RepoList"> & {
  * Use `create(RepoListSchema)` to create a new message.
  */
 export const RepoListSchema: GenMessage<RepoList> = /*@__PURE__*/
-  messageDesc(file_athena_v1_state, 21);
+  messageDesc(file_athena_v1_state, 23);
 
 /**
  * NotificationPrefsView says which push notification kinds exist and which the owner muted.
@@ -1183,7 +1257,7 @@ export type NotificationPrefsView = Message<"athena.v1.NotificationPrefsView"> &
  * Use `create(NotificationPrefsViewSchema)` to create a new message.
  */
 export const NotificationPrefsViewSchema: GenMessage<NotificationPrefsView> = /*@__PURE__*/
-  messageDesc(file_athena_v1_state, 22);
+  messageDesc(file_athena_v1_state, 24);
 
 /**
  * PromptsView says which prompt parts the owner overrode. Its revision is the base for SetPrompt and ResetPrompt.
@@ -1207,7 +1281,7 @@ export type PromptsView = Message<"athena.v1.PromptsView"> & {
  * Use `create(PromptsViewSchema)` to create a new message.
  */
 export const PromptsViewSchema: GenMessage<PromptsView> = /*@__PURE__*/
-  messageDesc(file_athena_v1_state, 23);
+  messageDesc(file_athena_v1_state, 25);
 
 /**
  * @generated from message athena.v1.PromptPartView
@@ -1236,5 +1310,5 @@ export type PromptPartView = Message<"athena.v1.PromptPartView"> & {
  * Use `create(PromptPartViewSchema)` to create a new message.
  */
 export const PromptPartViewSchema: GenMessage<PromptPartView> = /*@__PURE__*/
-  messageDesc(file_athena_v1_state, 24);
+  messageDesc(file_athena_v1_state, 26);
 

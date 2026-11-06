@@ -1248,10 +1248,11 @@ func (b blockingEngine) AssignmentStarted(string, string, string, string, string
 	b.wait()
 	return nil
 }
-func (b blockingEngine) InputsDelivered(string, string, []string) error { b.wait(); return nil }
-func (b blockingEngine) DeliveryFailed(string, string, string) error    { b.wait(); return nil }
-func (b blockingEngine) InputsRead(string, []string) error              { b.wait(); return nil }
-func (b blockingEngine) TurnEnded(string, string) error                 { b.wait(); return nil }
+func (b blockingEngine) AllowedByRule(string, string, string, string) error { b.wait(); return nil }
+func (b blockingEngine) InputsDelivered(string, string, []string) error     { b.wait(); return nil }
+func (b blockingEngine) DeliveryFailed(string, string, string) error        { b.wait(); return nil }
+func (b blockingEngine) InputsRead(string, []string) error                  { b.wait(); return nil }
+func (b blockingEngine) TurnEnded(string, string) error                     { b.wait(); return nil }
 func (b blockingEngine) FileReview(string, string, string, string) error {
 	b.wait()
 	return nil

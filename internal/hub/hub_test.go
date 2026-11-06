@@ -42,6 +42,7 @@ type fakeSource struct {
 	muted     []string
 	prompts   *athenav1.PromptsView
 	control   pause.State
+	offers    []Offer
 	// triggerReads counts Trigger calls; triggerErr fails them, as a store that cannot be read does.
 	triggerReads int
 	triggerErr   error
@@ -166,6 +167,12 @@ func (f *fakeSource) Control() pause.State {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.control
+}
+
+func (f *fakeSource) Offers() ([]Offer, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.offers, nil
 }
 
 func (f *fakeSource) setMuted(m ...string) { f.mu.Lock(); f.muted = m; f.mu.Unlock() }
@@ -1141,5 +1148,28 @@ func TestHubCarriesControl(t *testing.T) {
 	snap, _ = h.Snapshot()
 	if !snap.Control.GetPaused() || snap.Control.GetBy() != "cli" {
 		t.Fatalf("snapshot control after pause = %v", snap.Control)
+	}
+}
+
+func TestHubCarriesOffers(t *testing.T) {
+	f := newFake()
+	h := start(t, f)
+	snap, _ := h.Snapshot()
+	if len(snap.Offers.GetOffers()) != 0 {
+		t.Fatalf("snapshot offers at the start = %v", snap.Offers)
+	}
+	sub, _ := h.Subscribe(0, h.Epoch())
+	defer sub.Close()
+	f.mu.Lock()
+	f.offers = []Offer{{Class: "bash|bash-escalate:npm|acme/web", Tool: "Bash", Rule: "bash-escalate:npm", Repo: "acme/web", Approved: 5}}
+	f.mu.Unlock()
+	h.OnCommit(store.Changes{Offers: true})
+	d := next(t, sub)
+	if o := d.GetOffers().GetOffers(); len(o) != 1 || o[0].GetRepo() != "acme/web" || o[0].GetApproved() != 5 {
+		t.Fatalf("offers delta = %v", d)
+	}
+	snap, _ = h.Snapshot()
+	if len(snap.Offers.GetOffers()) != 1 {
+		t.Fatalf("snapshot offers = %v", snap.Offers)
 	}
 }

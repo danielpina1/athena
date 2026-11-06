@@ -18,6 +18,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/danielpina1/athena/internal/core"
+	"github.com/danielpina1/athena/internal/policy"
 	"github.com/danielpina1/athena/internal/redact"
 	"github.com/danielpina1/athena/internal/runtime/rt"
 	"github.com/danielpina1/athena/internal/sources/github"
@@ -495,10 +496,30 @@ func (n *Node) escalateShared(ctx context.Context, s *session, event, key, door 
 	return resp
 }
 
+// allowedByRule reports whether the owner's allow rules let the session do what it asks with no Approval: only a
+// standard session, never a rule the owner always decides, and only in a repository.
+func (n *Node) allowedByRule(s *session, ask approvalAsk) bool {
+	repo := s.ticketRepo()
+	if n.cfg.Policy == nil || s.restricted() || repo == "" || slices.Contains(policy.NeverPromote, ask.d.Rule) {
+		return false
+	}
+	return n.cfg.Policy.Allows(ask.tool, ask.d.Rule, repo)
+}
+
 // escalate asks a person through an Approval and waits up to ApprovalTimeout, or until the session stops, for the
 // answer; no answer is a deny and the Approval expires.
 func (n *Node) escalate(ctx context.Context, s *session, event string, ask approvalAsk, start time.Time) HookResponse {
 	eng := n.engine()
+	if n.allowedByRule(s, ask) {
+		// The owner's standing rule answers it: nobody is asked, no Approval is made and no escalation is counted.
+		n.observeHook(event, VerdictAllow, start)
+		repo := s.ticketRepo()
+		s.log.Info("allowed by a standing rule", "tool", ask.tool, "rule", ask.d.Rule, "repo", repo)
+		if err := eng.AllowedByRule(s.t.ID, ask.tool, ask.d.Rule, repo); err != nil {
+			s.log.Error("record allowed action", "error", err)
+		}
+		return allowed("allowed by your standing rule")
+	}
 	ap, err := eng.RequestApproval(core.Approval{
 		TicketID: s.t.ID, AssignmentID: s.a.ID, Tool: ask.tool, Rule: ask.d.Rule, Input: ask.input, Summary: ask.summary,
 	})

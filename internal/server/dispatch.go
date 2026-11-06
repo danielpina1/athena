@@ -398,6 +398,17 @@ func (d *Dispatcher) act(o web.Origin, c *athenav1.Command) *athenav1.CommandRes
 		if err := d.setPaused(false, "web"); err != nil {
 			return d.failure(err)
 		}
+	case *athenav1.Command_AllowAction:
+		if !o.Sensitive {
+			return proto.Clone(reauthRequired).(*athenav1.CommandResult)
+		}
+		if err := d.allowAction(a.AllowAction.GetClass()); err != nil {
+			return d.failure(err)
+		}
+	case *athenav1.Command_DismissOffer:
+		if err := d.dismissOffer(a.DismissOffer.GetClass()); err != nil {
+			return d.failure(err)
+		}
 	case *athenav1.Command_SetPolicy:
 		if !o.Sensitive {
 			return proto.Clone(reauthRequired).(*athenav1.CommandResult)

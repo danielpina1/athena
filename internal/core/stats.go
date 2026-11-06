@@ -50,6 +50,7 @@ const (
 	cmdSettleProposal        = "settle_proposal"
 	cmdHoldWaiting           = "hold_waiting"
 	cmdStartProposal         = "start_proposal"
+	cmdAllowedByRule         = "allowed_by_rule"
 )
 
 var commandNames = []string{
@@ -60,6 +61,7 @@ var commandNames = []string{
 	cmdAttach, cmdHandback, cmdReevaluate, cmdDismiss, cmdPolicyChanged, cmdFollowForContext, cmdMarkUnrelated,
 	cmdUnsubscribe, cmdNote, cmdRequestStatus, cmdReply,
 	cmdPropose, cmdApplyProposal, cmdDiscardProposal, cmdSettleProposal, cmdHoldWaiting, cmdStartProposal,
+	cmdAllowedByRule,
 }
 
 // TicketStats are a Ticket's performance numbers (spec §10.3). The Engine updates them in the same transaction as the

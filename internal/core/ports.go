@@ -110,8 +110,10 @@ const (
 	EventInputAdded        = "input.added"
 	EventApprovalRequested = "approval.requested"
 	EventApprovalAnswered  = "approval.answered"
-	EventTriggerReceived   = "trigger.received"
-	EventThreadSubscribed  = "thread.subscribed"
+	// EventApprovalAllowed is an action a standing allow rule let through with no Approval.
+	EventApprovalAllowed  = "approval.allowed"
+	EventTriggerReceived  = "trigger.received"
+	EventThreadSubscribed = "thread.subscribed"
 	// EventThreadUnsubscribed is emitted for each Ticket whose Subscription to a Thread was dropped.
 	EventThreadUnsubscribed = "thread.unsubscribed"
 	EventEvalStarted        = "eval.started"

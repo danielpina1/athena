@@ -50,6 +50,8 @@ type Command struct {
 	//	*Command_ResetPrompt
 	//	*Command_Pause
 	//	*Command_Resume
+	//	*Command_AllowAction
+	//	*Command_DismissOffer
 	Action        isCommand_Action `protobuf_oneof:"action"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -306,6 +308,24 @@ func (x *Command) GetResume() *Resume {
 	return nil
 }
 
+func (x *Command) GetAllowAction() *AllowAction {
+	if x != nil {
+		if x, ok := x.Action.(*Command_AllowAction); ok {
+			return x.AllowAction
+		}
+	}
+	return nil
+}
+
+func (x *Command) GetDismissOffer() *DismissOffer {
+	if x != nil {
+		if x, ok := x.Action.(*Command_DismissOffer); ok {
+			return x.DismissOffer
+		}
+	}
+	return nil
+}
+
 type isCommand_Action interface {
 	isCommand_Action()
 }
@@ -402,6 +422,14 @@ type Command_Resume struct {
 	Resume *Resume `protobuf:"bytes,32,opt,name=resume,proto3,oneof"`
 }
 
+type Command_AllowAction struct {
+	AllowAction *AllowAction `protobuf:"bytes,33,opt,name=allow_action,json=allowAction,proto3,oneof"`
+}
+
+type Command_DismissOffer struct {
+	DismissOffer *DismissOffer `protobuf:"bytes,34,opt,name=dismiss_offer,json=dismissOffer,proto3,oneof"`
+}
+
 func (*Command_SubmitTask) isCommand_Action() {}
 
 func (*Command_Reply) isCommand_Action() {}
@@ -447,6 +475,10 @@ func (*Command_ResetPrompt) isCommand_Action() {}
 func (*Command_Pause) isCommand_Action() {}
 
 func (*Command_Resume) isCommand_Action() {}
+
+func (*Command_AllowAction) isCommand_Action() {}
+
+func (*Command_DismissOffer) isCommand_Action() {}
 
 type SubmitTask struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -1986,12 +2018,101 @@ func (x *PromptRevision) GetReset_() bool {
 	return false
 }
 
+// AllowAction turns an offer into a standing allow rule in the Policy. It is Sensitive (needs a recent passkey).
+type AllowAction struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Class         string                 `protobuf:"bytes,1,opt,name=class,proto3" json:"class,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AllowAction) Reset() {
+	*x = AllowAction{}
+	mi := &file_athena_v1_commands_proto_msgTypes[29]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AllowAction) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AllowAction) ProtoMessage() {}
+
+func (x *AllowAction) ProtoReflect() protoreflect.Message {
+	mi := &file_athena_v1_commands_proto_msgTypes[29]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AllowAction.ProtoReflect.Descriptor instead.
+func (*AllowAction) Descriptor() ([]byte, []int) {
+	return file_athena_v1_commands_proto_rawDescGZIP(), []int{29}
+}
+
+func (x *AllowAction) GetClass() string {
+	if x != nil {
+		return x.Class
+	}
+	return ""
+}
+
+// DismissOffer hides an offer until the owner has approved the class as many times again.
+type DismissOffer struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Class         string                 `protobuf:"bytes,1,opt,name=class,proto3" json:"class,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DismissOffer) Reset() {
+	*x = DismissOffer{}
+	mi := &file_athena_v1_commands_proto_msgTypes[30]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DismissOffer) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DismissOffer) ProtoMessage() {}
+
+func (x *DismissOffer) ProtoReflect() protoreflect.Message {
+	mi := &file_athena_v1_commands_proto_msgTypes[30]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DismissOffer.ProtoReflect.Descriptor instead.
+func (*DismissOffer) Descriptor() ([]byte, []int) {
+	return file_athena_v1_commands_proto_rawDescGZIP(), []int{30}
+}
+
+func (x *DismissOffer) GetClass() string {
+	if x != nil {
+		return x.Class
+	}
+	return ""
+}
+
 var File_athena_v1_commands_proto protoreflect.FileDescriptor
 
 const file_athena_v1_commands_proto_rawDesc = "" +
 	"\n" +
-	"\x18athena/v1/commands.proto\x12\tathena.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xd3\n" +
-	"\n" +
+	"\x18athena/v1/commands.proto\x12\tathena.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xd0\v\n" +
 	"\aCommand\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x128\n" +
 	"\vsubmit_task\x18\n" +
@@ -2025,7 +2146,9 @@ const file_athena_v1_commands_proto_rawDesc = "" +
 	"set_prompt\x18\x1d \x01(\v2\x14.athena.v1.SetPromptH\x00R\tsetPrompt\x12;\n" +
 	"\freset_prompt\x18\x1e \x01(\v2\x16.athena.v1.ResetPromptH\x00R\vresetPrompt\x12(\n" +
 	"\x05pause\x18\x1f \x01(\v2\x10.athena.v1.PauseH\x00R\x05pause\x12+\n" +
-	"\x06resume\x18  \x01(\v2\x11.athena.v1.ResumeH\x00R\x06resumeB\b\n" +
+	"\x06resume\x18  \x01(\v2\x11.athena.v1.ResumeH\x00R\x06resume\x12;\n" +
+	"\fallow_action\x18! \x01(\v2\x16.athena.v1.AllowActionH\x00R\vallowAction\x12>\n" +
+	"\rdismiss_offer\x18\" \x01(\v2\x17.athena.v1.DismissOfferH\x00R\fdismissOfferB\b\n" +
 	"\x06action\"\x9e\x01\n" +
 	"\n" +
 	"SubmitTask\x12\x12\n" +
@@ -2126,7 +2249,11 @@ const file_athena_v1_commands_proto_rawDesc = "" +
 	"\brevision\x18\x01 \x01(\rR\brevision\x12*\n" +
 	"\x02at\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\x02at\x12\x16\n" +
 	"\x06origin\x18\x03 \x01(\tR\x06origin\x12\x14\n" +
-	"\x05reset\x18\x04 \x01(\bR\x05resetB=Z;github.com/danielpina1/athena/internal/pb/athenav1;athenav1b\x06proto3"
+	"\x05reset\x18\x04 \x01(\bR\x05reset\"#\n" +
+	"\vAllowAction\x12\x14\n" +
+	"\x05class\x18\x01 \x01(\tR\x05class\"$\n" +
+	"\fDismissOffer\x12\x14\n" +
+	"\x05class\x18\x01 \x01(\tR\x05classB=Z;github.com/danielpina1/athena/internal/pb/athenav1;athenav1b\x06proto3"
 
 var (
 	file_athena_v1_commands_proto_rawDescOnce sync.Once
@@ -2140,7 +2267,7 @@ func file_athena_v1_commands_proto_rawDescGZIP() []byte {
 	return file_athena_v1_commands_proto_rawDescData
 }
 
-var file_athena_v1_commands_proto_msgTypes = make([]protoimpl.MessageInfo, 29)
+var file_athena_v1_commands_proto_msgTypes = make([]protoimpl.MessageInfo, 31)
 var file_athena_v1_commands_proto_goTypes = []any{
 	(*Command)(nil),               // 0: athena.v1.Command
 	(*SubmitTask)(nil),            // 1: athena.v1.SubmitTask
@@ -2171,7 +2298,9 @@ var file_athena_v1_commands_proto_goTypes = []any{
 	(*Passkey)(nil),               // 26: athena.v1.Passkey
 	(*PromptDetail)(nil),          // 27: athena.v1.PromptDetail
 	(*PromptRevision)(nil),        // 28: athena.v1.PromptRevision
-	(*timestamppb.Timestamp)(nil), // 29: google.protobuf.Timestamp
+	(*AllowAction)(nil),           // 29: athena.v1.AllowAction
+	(*DismissOffer)(nil),          // 30: athena.v1.DismissOffer
+	(*timestamppb.Timestamp)(nil), // 31: google.protobuf.Timestamp
 }
 var file_athena_v1_commands_proto_depIdxs = []int32{
 	1,  // 0: athena.v1.Command.submit_task:type_name -> athena.v1.SubmitTask
@@ -2197,18 +2326,20 @@ var file_athena_v1_commands_proto_depIdxs = []int32{
 	23, // 20: athena.v1.Command.reset_prompt:type_name -> athena.v1.ResetPrompt
 	8,  // 21: athena.v1.Command.pause:type_name -> athena.v1.Pause
 	9,  // 22: athena.v1.Command.resume:type_name -> athena.v1.Resume
-	25, // 23: athena.v1.CommandResult.passkeys:type_name -> athena.v1.PasskeyList
-	27, // 24: athena.v1.CommandResult.prompt:type_name -> athena.v1.PromptDetail
-	26, // 25: athena.v1.PasskeyList.passkeys:type_name -> athena.v1.Passkey
-	29, // 26: athena.v1.Passkey.created_at:type_name -> google.protobuf.Timestamp
-	29, // 27: athena.v1.Passkey.last_used_at:type_name -> google.protobuf.Timestamp
-	28, // 28: athena.v1.PromptDetail.history:type_name -> athena.v1.PromptRevision
-	29, // 29: athena.v1.PromptRevision.at:type_name -> google.protobuf.Timestamp
-	30, // [30:30] is the sub-list for method output_type
-	30, // [30:30] is the sub-list for method input_type
-	30, // [30:30] is the sub-list for extension type_name
-	30, // [30:30] is the sub-list for extension extendee
-	0,  // [0:30] is the sub-list for field type_name
+	29, // 23: athena.v1.Command.allow_action:type_name -> athena.v1.AllowAction
+	30, // 24: athena.v1.Command.dismiss_offer:type_name -> athena.v1.DismissOffer
+	25, // 25: athena.v1.CommandResult.passkeys:type_name -> athena.v1.PasskeyList
+	27, // 26: athena.v1.CommandResult.prompt:type_name -> athena.v1.PromptDetail
+	26, // 27: athena.v1.PasskeyList.passkeys:type_name -> athena.v1.Passkey
+	31, // 28: athena.v1.Passkey.created_at:type_name -> google.protobuf.Timestamp
+	31, // 29: athena.v1.Passkey.last_used_at:type_name -> google.protobuf.Timestamp
+	28, // 30: athena.v1.PromptDetail.history:type_name -> athena.v1.PromptRevision
+	31, // 31: athena.v1.PromptRevision.at:type_name -> google.protobuf.Timestamp
+	32, // [32:32] is the sub-list for method output_type
+	32, // [32:32] is the sub-list for method input_type
+	32, // [32:32] is the sub-list for extension type_name
+	32, // [32:32] is the sub-list for extension extendee
+	0,  // [0:32] is the sub-list for field type_name
 }
 
 func init() { file_athena_v1_commands_proto_init() }
@@ -2240,6 +2371,8 @@ func file_athena_v1_commands_proto_init() {
 		(*Command_ResetPrompt)(nil),
 		(*Command_Pause)(nil),
 		(*Command_Resume)(nil),
+		(*Command_AllowAction)(nil),
+		(*Command_DismissOffer)(nil),
 	}
 	file_athena_v1_commands_proto_msgTypes[1].OneofWrappers = []any{}
 	file_athena_v1_commands_proto_msgTypes[24].OneofWrappers = []any{
@@ -2254,7 +2387,7 @@ func file_athena_v1_commands_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_athena_v1_commands_proto_rawDesc), len(file_athena_v1_commands_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   29,
+			NumMessages:   31,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

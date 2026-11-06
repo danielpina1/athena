@@ -220,3 +220,80 @@ func placedAt(id, repo string, at time.Time) *core.Ticket {
 	tk.Repo, tk.CreatedAt, tk.UpdatedAt, tk.Execution = repo, at, at, nil
 	return tk
 }
+
+// answered puts an Approval of the class answered at t0+min minutes.
+func answered(t *testing.T, s *Store, id, state, tool, rule, repo string, min int) {
+	t.Helper()
+	at := t0.Add(time.Duration(min) * time.Minute)
+	a := &core.Approval{ID: id, TicketID: "t", Tool: tool, Rule: rule, Repo: repo, State: state, CreatedAt: at, AnsweredAt: &at}
+	if err := s.Tx(func(tx *Tx) error { return tx.PutApproval(a) }); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestStreakResetsOnDenial(t *testing.T) {
+	s, _ := openTemp(t)
+	n := 0
+	add := func(state string) {
+		n++
+		answered(t, s, fmt.Sprintf("a%02d", n), state, "Bash", "bash-escalate:npm", "Acme/Web", n)
+	}
+	for range 3 {
+		add(core.ApprovalApproved)
+	}
+	add(core.ApprovalDenied)
+	add(core.ApprovalApproved)
+	add(core.ApprovalExpired) // neither counts nor resets
+	add(core.ApprovalApproved)
+	// Another class does not disturb it.
+	answered(t, s, "other", core.ApprovalApproved, "Bash", "bash-escalate:npm", "acme/api", 50)
+
+	got, err := s.ApprovalStreaks()
+	if err != nil {
+		t.Fatal(err)
+	}
+	by := map[string]Streak{}
+	for _, g := range got {
+		by[g.Repo] = g
+	}
+	g := by["acme/web"]
+	if g.Approved != 2 || g.Tool != "Bash" || g.Rule != "bash-escalate:npm" || !g.Last.Equal(t0.Add(7*time.Minute)) {
+		t.Errorf("streak = %+v, want 2 approvals of Bash|bash-escalate:npm|acme/web, last at +7m", g)
+	}
+	if by["acme/api"].Approved != 1 {
+		t.Errorf("other class = %+v, want 1", by["acme/api"])
+	}
+}
+
+func TestMigration10BackfillsApprovalClass(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "athena.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range migrations[:9] {
+		if _, err := db.Exec(m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.Exec(`INSERT INTO kv (key, value) VALUES ('schema', '9')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO tickets (id, ended, updated_at, doc) VALUES ('t', 0, '', '{"id":"t","repo":"Acme/Web"}')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO approvals (id, state, ticket_id, doc, answered_at) VALUES ('a', 'approved', 't',
+		'{"id":"a","ticketId":"t","tool":"Bash","rule":"bash-escalate:npm","state":"approved"}', '2026-03-04T05:06:07.000000000Z')`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	got, err := s.ApprovalStreaks()
+	if err != nil || len(got) != 1 || got[0].Repo != "acme/web" || got[0].Approved != 1 {
+		t.Errorf("streaks after migration = %+v, %v", got, err)
+	}
+}

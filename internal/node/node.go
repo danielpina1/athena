@@ -150,6 +150,8 @@ type EngineCallbacks interface {
 	RequestApproval(a core.Approval) (core.Approval, error)
 	WaitApproval(ctx context.Context, id string) (core.Approval, error)
 	ExpireApproval(id string) error
+	// AllowedByRule records on the Ticket that the owner's standing allow rule let an action through with no Approval.
+	AllowedByRule(ticketID, tool, rule, repo string) error
 	// Trigger reads a stored Trigger: a Ticket's origin for its execution variables, an Input's for its card.
 	Trigger(id string) (core.Trigger, error)
 	// The worker tools' commands (workertools.go) and the binding of a reported pull request.
@@ -787,8 +789,16 @@ func (s *session) readToolPolicy(read func() string) {
 	}
 }
 
+// ticketRepo is the repository (owner/name) the session's Ticket works in, or empty.
+func (s *session) ticketRepo() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.t.Repo
+}
+
 // restricted reports whether the session runs under the restricted tool policy: any but standard, so a session not
 // prepared yet is restricted too.
+
 func (s *session) restricted() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()

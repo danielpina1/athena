@@ -23,6 +23,8 @@ message Snapshot {
   NotificationPrefsView notifications = 11;
   PromptsView prompts = 12;
   Control control = 13;
+  // offers are the actions the owner keeps approving, each offered as a standing allow rule.
+  OfferList offers = 14;
 }
 
 message Delta {
@@ -42,6 +44,8 @@ message Delta {
     NotificationPrefsView notifications = 20;
     PromptsView prompts = 21;
     Control control = 22;
+    // offers carries the whole list, sent only when it changed.
+    OfferList offers = 23;
   }
 }
 
@@ -51,6 +55,21 @@ message Control {
   google.protobuf.Timestamp since = 2;
   // by is who paused it: cli or web.
   string by = 3;
+}
+
+// PromotionOffer is an action class (tool + rule + repository) the owner approved `approved` times in a row without a
+// denial; allowing it writes a standing Policy allow rule.
+message PromotionOffer {
+  // class is the stable key: tool|rule|repo, lower-cased.
+  string class = 1;
+  string tool = 2;
+  string rule = 3;
+  string repo = 4;
+  uint32 approved = 5;
+}
+
+message OfferList {
+  repeated PromotionOffer offers = 1;
 }
 
 message TicketSummary {

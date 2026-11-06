@@ -251,3 +251,24 @@ func TestEndingTicketExpiresApprovals(t *testing.T) {
 	}
 	eq(t, "answered events", answered, 2)
 }
+
+func TestApprovalTakesTheTicketsRepoAndAllowedCallsCountNothing(t *testing.T) {
+	h := newHarness(t)
+	id := h.accepted()
+	tk := h.ticket(id)
+	tk.Repo = "acme/web"
+	raw, err := json.Marshal(tk)
+	h.must(err)
+	h.repos.mu.Lock()
+	h.repos.tickets[id] = raw
+	h.repos.mu.Unlock()
+	a := h.request(id)
+	eq(t, "repo", a.Repo, "acme/web")
+	eq(t, "escalations after a request", h.ticket(id).Stats.Escalations, 1)
+
+	h.must(h.eng.AllowedByRule(id, "Bash", "bash-escalate:npm", "acme/web"))
+	eq(t, "escalations after an allowed call", h.ticket(id).Stats.Escalations, 1)
+	ev := h.events.events[len(h.events.events)-1]
+	eq(t, "event", ev.Type, EventApprovalAllowed)
+	eq(t, "event text", ev.Data["text"], any("Allowed by your standing rule: Bash · bash-escalate:npm in acme/web"))
+}
