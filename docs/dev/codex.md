@@ -1,7 +1,12 @@
 # Codex
 
-Athena can run its workers on OpenAI's Codex CLI as well as on Claude Code. This page is being written along with the
-Codex runtime; the sections marked *to be written* are not there yet.
+Athena can run its workers on OpenAI's Codex CLI as well as on Claude Code: a Ticket runs on `claude`, `codex` or
+`auto`, moves to the other runtime when one reaches its usage limit, and can have each ready report reviewed by a
+read-only session on the other runtime. This page is the setup guide and the reference for how Athena controls Codex.
+
+Quick start, once Codex is installed: `athena codex login`, then `athena codex status` (it must say ready), then
+`athena task --runtime auto --review "..."` (or `--runtime codex`). The node card of the dashboard shows both runtimes
+and their quota.
 
 ## 1. What Athena runs
 
@@ -199,29 +204,39 @@ does not check what they set beyond the features and MCP servers above.
 
 ## 5. Sandbox
 
-*To be written.* Found while building the runtime, with Codex 0.160.1's `codex sandbox`: Codex keeps a workspace's own
-git directory read-only even inside a writable root, so a Ticket's worktree can commit only when the worktree's git
-directory (`<common>/worktrees/<name>`) and the common directory's `objects`, `refs` and `logs` are writable roots;
-the common directory as a root is not enough. Those roots leave the common directory's `config` and `hooks` read-only.
-Caveats:
+A Codex worker runs in Codex's own `workspace-write` sandbox (a reviewer in `read-only`), with network access off,
+for every command Codex runs itself. Athena passes the writable roots in every `turn/start`'s `sandboxPolicy`
+(`workspaceWrite` with `writableRoots`, network off; `readOnly` for a reviewer); the session's working directory is
+always writable, and the CA variables a sandboxed command needs are in the session process's environment, which its
+commands inherit. It is not the same sandbox as Claude Code's, and three things differ:
 
-- This was verified with `codex sandbox -c sandbox_workspace_write.writable_roots=…` only, not with the
-  `sandboxPolicy.writableRoots` a session's `turn/start` carries (checking that takes a real turn).
-- `<gitDir>/config.worktree` stays writable under those roots, so Athena's PreToolUse rules must protect it.
-- git prints `error: Unable to create '…/packed-refs.lock': Operation not permitted` during the commit; it is harmless,
-  and the commit succeeds.
+- **No denied sub-paths.** Claude Code's sandbox can keep a path read-only inside a writable directory; Codex's has no
+  deny list. Athena therefore makes writable only what a worktree needs: the worktree's git directory
+  (`<common>/worktrees/<name>`) and the common directory's `objects`, `refs` and `logs`, never the common directory as
+  a whole, so its `config` and `hooks` stay read-only. The owner's `sandbox.allowWrite` paths (a build cache) are
+  writable roots too, less any that holds a protected path or lies in one (the node logs each it leaves out).
+- **No domain allowlist.** Claude Code's sandbox lets named hosts through (GitHub and `sandbox.allowedDomains`);
+  Codex's network is all or nothing. Inside it the network stays off, so a command that needs it (`git push`, a
+  package install) asks to leave the sandbox, which on a node with `sandbox` set is an Approval (§1, rule
+  `codex_unsandboxed`). A Ticket from a `stranger` that must not reach the network should be pinned to `claude`
+  until Codex's network proxy is stable.
+- **Protected paths through the rules.** What Claude Code's sandbox denies by path, Athena's hook rules deny for
+  Codex (rule `protected_path`): writes to `.athena/settings.json`, `.athena/mcp.json`, `.athena/.gitignore`, the git
+  common directory's `config`, `config.worktree` and `hooks/`, the git directory's `commondir`, a worktree's own
+  `config.worktree` and `gitdir`, and the working directory's `.git` file (§1). `<gitDir>/config.worktree` stays
+  writable under the roots above, so the rules are what protect it.
 
-The node computes exactly those roots for a worktree (its git directory, and the common directory's `objects`, `refs`
-and `logs`) and protects `<gitDir>/config.worktree`, the git config and hooks and Athena's own files with its rules
-(§1, "Hooks, approvals and the rules"). A session passes the node's writable roots, as the node computed them, in every `turn/start`'s `sandboxPolicy`
-(`workspaceWrite` with `writableRoots`, network off; `readOnly` for a reviewer). The owner's `sandbox.allowWrite`
-paths (a build cache) are writable roots too, less any that holds a protected path or lies in one (the node logs each
-it leaves out): Codex's sandbox has no deny list. The session's working directory is always writable. The CA variables a sandboxed command needs are in the session process's environment, which its
-commands inherit.
+Found with Codex 0.160.1's `codex sandbox`: Codex keeps a workspace's own git directory read-only even inside a
+writable root, so a worktree commits only with the roots above. This was verified with `codex sandbox -c
+sandbox_workspace_write.writable_roots=…`, not with a session's `sandboxPolicy.writableRoots` (checking that takes a
+real turn). git prints `error: Unable to create '…/packed-refs.lock': Operation not permitted` during a commit; it is
+harmless, and the commit succeeds.
 
 ## 6. Attribution
 
-Commits and pull requests carry no AI attribution, whichever runtime made them. The rules deny (rule `attribution`, for
+Commits and pull requests carry no AI attribution, whichever runtime made them. Codex tells its model to add a
+`Co-authored-by: Codex <noreply@openai.com>` trailer unless the ChatGPT *workspace* turns that off; no local setting
+does, so Athena cannot switch it off in `config.toml` and enforces the rule itself. The rules deny (rule `attribution`, for
 both runtimes, right after the blocked commands) a `git commit` or a `gh pr create|edit` (also as `athena gh`, or inside
 `sh -c`) whose message, `--trailer`, title or body matches a co-author trailer naming Codex or Claude, a "Generated
 with Codex" or "Generated with [Claude Code]" footer, or a `noreply@openai.com` or `noreply@anthropic.com` address. The
@@ -250,6 +265,14 @@ limit's reset. A limit with no reset, or with one already passed, backs off inst
 limit up to 2 h; a transient one (a rate of requests) 1, 2, 4 … min up to 30 min. A turn that ends well starts the
 backoff over. The tracker writes `<stateDir>/quota.json` (0600, whole, on every change): per runtime the last reading of
 each window with its `read_at`, the limit and the backoff count. There is no history.
+
+**The bars.** The dashboard's node card shows each runtime with its version ("untested" when Athena was not verified
+against it), whether it is ready (or why not), and one bar per quota window: the percent used of that window (amber
+from 85%) and when it resets. "Not measured yet" means no session has reported a reading since the server started
+(Codex reads it at each session's start, Claude Code reports it during a turn); "Limited until <time>" means the
+runtime is limited (below) and `auto` places nothing there until then; a window whose reset has passed shows "reset
+since read", and a reading over 10 minutes old says its age. The sidebar shows each runtime's fullest window. A limit
+is amber, never orange: it waits by itself and needs nobody.
 
 **The chooser.** Before each launch, and before it prepares the Ticket's directory, the node chooses the runtime:
 
@@ -381,6 +404,9 @@ task) has each ready report of its implementer reviewed before it counts:
    rounds get no review once `maxRounds` is used. The Policy's `maxRounds` is read at each ready report.
 
 ## 9. Fixtures
+
+Every Go and browser test runs `fakecodex` (`internal/runtime/codex/testdata/fakecodex`), which replays recorded
+app-server lines, never this machine's `codex` or its quota. Its fixtures come from a real Codex:
 
 - `scripts/capture-codex-fixtures.sh schema` regenerates `internal/runtime/codex/testdata/codex/protocol.json` from the
   installed Codex. It is free.

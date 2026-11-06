@@ -9,6 +9,9 @@
 //	sessionctl report -env FILE -athena BIN -status waiting -summary TEXT [-question TEXT]
 //	    calls the report tool of `athena mcp --ticket <id>` over MCP stdio, the server Claude Code talks to. It prints
 //	    the tool's answer and exits 1 when the tool refused the report.
+//	sessionctl review -env FILE -athena BIN -verdict changes -findings TEXT
+//	    calls the review tool of `athena mcp --ticket <id> --role review`, a review session's server, with the verdict
+//	    and findings. It prints the tool's answer and exits 1 when the tool refused them.
 package main
 
 import (
@@ -33,7 +36,7 @@ func main() {
 
 func run(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: sessionctl approval|report [flags]")
+		fmt.Fprintln(stderr, "usage: sessionctl approval|report|review [flags]")
 		return 2
 	}
 	fs := flag.NewFlagSet("sessionctl "+args[0], flag.ContinueOnError)
@@ -45,6 +48,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	status := fs.String("status", "", "report: the report's state (progress, waiting, ready, blocked, failed, dropped)")
 	summary := fs.String("summary", "", "report: the summary")
 	question := fs.String("question", "", "report: a question for the owner")
+	verdict := fs.String("verdict", "", "review: the verdict (approved, changes)")
+	findings := fs.String("findings", "", "review: the findings, one per line")
 	if err := fs.Parse(args[1:]); err != nil {
 		return 2
 	}
@@ -57,7 +62,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case "approval":
 		err = approval(env, *athena, *tool, *input, stdout)
 	case "report":
-		err = report(env, *athena, *status, *summary, *question, stdout)
+		args := map[string]any{"status": *status, "summary": *summary}
+		if *question != "" {
+			args["question"] = *question
+		}
+		err = callTool(env, *athena, false, "report", args, stdout)
+	case "review":
+		err = callTool(env, *athena, true, "review", map[string]any{"verdict": *verdict, "findings": *findings}, stdout)
 	default:
 		fmt.Fprintf(stderr, "sessionctl: unknown command %q\n", args[0])
 		return 2
@@ -128,14 +139,20 @@ func approval(env []string, athena, tool, input string, stdout io.Writer) error 
 	return err
 }
 
-func report(env []string, athena, status, summary, question string, stdout io.Writer) error {
+// callTool calls tool of the session's MCP server (`athena mcp --ticket <id>`, with --role review for a review
+// session's) with args, and prints its answer; a refusal is the error.
+func callTool(env []string, athena string, review bool, tool string, args map[string]any, stdout io.Writer) error {
 	ticket := lookup(env, "ATHENA_TICKET")
 	if ticket == "" {
 		return errors.New("the environment names no ATHENA_TICKET")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	cmd := exec.Command(athena, "mcp", "--ticket", ticket)
+	argv := []string{"mcp", "--ticket", ticket}
+	if review {
+		argv = append(argv, "--role", "review")
+	}
+	cmd := exec.Command(athena, argv...)
 	cmd.Env = env
 	client := mcp.NewClient(&mcp.Implementation{Name: "sessionctl", Version: "1"}, nil)
 	session, err := client.Connect(ctx, &mcp.CommandTransport{Command: cmd}, nil)
@@ -143,13 +160,9 @@ func report(env []string, athena, status, summary, question string, stdout io.Wr
 		return fmt.Errorf("start athena mcp: %w", err)
 	}
 	defer session.Close()
-	args := map[string]any{"status": status, "summary": summary}
-	if question != "" {
-		args["question"] = question
-	}
-	res, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "report", Arguments: args})
+	res, err := session.CallTool(ctx, &mcp.CallToolParams{Name: tool, Arguments: args})
 	if err != nil {
-		return fmt.Errorf("call report: %w", err)
+		return fmt.Errorf("call %s: %w", tool, err)
 	}
 	var text strings.Builder
 	for _, c := range res.Content {

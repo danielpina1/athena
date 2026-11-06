@@ -66,6 +66,8 @@
 //	    goes on at once (the answer is still logged when it comes)
 //	{"fake":"exit","code":3}
 //	    exits at once with that code
+//	{"fake":"wait","path":"/tmp/release"}
+//	    waits until that file exists before it replays the next line (a turn/interrupt meanwhile ends the turn)
 //	{"fake":"mcp","tool":"report","arguments":{...}}
 //	    calls that tool of Athena's MCP server as Codex would: the command config.toml's [mcp_servers.athena] names,
 //	    with the args and env of this process's -c overrides, over stdio; the result is logged to the RPC log
@@ -569,6 +571,7 @@ func (s *server) replay(t *turn, path string, echo userEcho, steer, exitMid bool
 			Code   int             `json:"code"`
 			Tool   string          `json:"tool"`
 			Args   json.RawMessage `json:"arguments"`
+			Path   string          `json:"path"`
 		}
 		if json.Unmarshal(l, &line) != nil {
 			continue
@@ -589,6 +592,11 @@ func (s *server) replay(t *turn, path string, echo userEcho, steer, exitMid bool
 			continue
 		case "mcp":
 			s.callMCP(line.Tool, line.Args)
+			continue
+		case "wait":
+			if !untilExists(t, line.Path) {
+				return
+			}
 			continue
 		}
 		if line.Method == "thread/started" || (steer && (line.Method == "turn/started" || line.Method == "turn/completed")) {
@@ -646,11 +654,9 @@ func (s *server) emit(t *turn, line []byte, end bool) bool {
 	return true
 }
 
-// hold waits, before a turn's end, until ATHENA_FAKE_CODEX_HOLD_RESULT names a file that exists; false when the turn
-// was interrupted meanwhile.
-func (s *server) hold(t *turn) bool {
-	p := ticketPath(os.Getenv("ATHENA_FAKE_CODEX_HOLD_RESULT"))
-	for p != "" && !fileExists(p) {
+// untilExists waits until the file at p exists; false when turn t was interrupted meanwhile.
+func untilExists(t *turn, p string) bool {
+	for !fileExists(p) {
 		select {
 		case <-t.cancelled:
 			return false
@@ -658,6 +664,13 @@ func (s *server) hold(t *turn) bool {
 		}
 	}
 	return true
+}
+
+// hold waits, before a turn's end, until ATHENA_FAKE_CODEX_HOLD_RESULT names a file that exists; false when the turn
+// was interrupted meanwhile.
+func (s *server) hold(t *turn) bool {
+	p := ticketPath(os.Getenv("ATHENA_FAKE_CODEX_HOLD_RESULT"))
+	return p == "" || untilExists(t, p)
 }
 
 // serverRequest sends a server request and waits for the client's answer (which handleLine logs); false when the turn

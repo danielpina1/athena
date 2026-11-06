@@ -61,6 +61,9 @@ export default async function globalSetup() {
         web: { enabled: true, listen: `127.0.0.1:${port}`, tls: "off", host: "localhost" },
         localRepoRoots: [],
         runtimes: { codex: { enabled: true, binary: join(BIN, "fakecodex") } },
+        // A required Claude Code sandbox makes Claude Code eligible for reviews (docs/dev/codex.md §8); fakeclaude
+        // starts no sandbox, so nothing else changes.
+        sandbox: { required: true },
       },
       null,
       2,

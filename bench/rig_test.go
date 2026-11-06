@@ -271,11 +271,16 @@ func measureHook(tb testing.TB, n int) []time.Duration {
 	})
 }
 
+// fakeCodex builds fakecodex, the Codex every measurement runs (never this machine's codex or its quota).
+func fakeCodex(tb testing.TB) string {
+	return build(tb, "codex", "github.com/danielpina1/athena/internal/runtime/codex/testdata/fakecodex")
+}
+
 // measureHookCodex returns the latencies of n hook decisions of a running Codex session (fakecodex, its first turn
 // held open): argv shell calls, a patch and a commit the attribution rule reads, whose decisions also normalise the
 // call and check the protected paths.
 func measureHookCodex(tb testing.TB, n int) []time.Duration {
-	fake := build(tb, "codex", "github.com/danielpina1/athena/internal/runtime/codex/testdata/fakecodex")
+	fake := fakeCodex(tb)
 	fixture := filepath.Join(tb.TempDir(), "open-turn.jsonl")
 	turn := `{"method":"turn/started","params":{"threadId":"thr_fixture_0001","turn":{"id":"turn_fixture_0001","items":[],"status":"inProgress","startedAt":1893456001}}}` + "\n" +
 		`{"method":"turn/completed","params":{"threadId":"thr_fixture_0001","turn":{"id":"turn_fixture_0001","items":[],"status":"completed","startedAt":1893456001,"completedAt":1893456005,"durationMs":4200}}}` + "\n"
@@ -463,15 +468,15 @@ func stopServer(cmd *exec.Cmd) {
 	}
 }
 
-// idleRSS starts a real `athena server` with the fake runtime, leaves it idle past two samples of its resource
-// gauges and returns the process_rss_bytes it reports (its peak RSS where the OS offers nothing better).
+// idleRSS starts a real `athena server` with both runtimes registered (fakeclaude, and fakecodex as a ready Codex the
+// server checks at start), leaves it idle past two samples of its resource gauges and returns the process_rss_bytes it
+// reports (its peak RSS where the OS offers nothing better).
 func idleRSS(tb testing.TB, idle time.Duration) uint64 {
 	tb.Helper()
 	bin := build(tb, "athena", "github.com/danielpina1/athena/cmd/athena")
 	fake := fakeClaude(tb)
 	dir := shortDir(tb)
-	// Codex is a binary that does not exist: no measurement reaches this machine's codex.
-	cmd := exec.Command(bin, "server", "--state-dir", dir, "--claude", fake, "--codex", "/nonexistent/athena-bench-codex")
+	cmd := exec.Command(bin, "server", "--state-dir", dir, "--claude", fake, "--codex", fakeCodex(tb))
 	if err := cmd.Start(); err != nil {
 		tb.Fatal(err)
 	}
@@ -589,7 +594,8 @@ func startDashboard(tb testing.TB) *dashboard {
 	if err := os.WriteFile(later, []byte(line), 0o600); err != nil {
 		tb.Fatal(err)
 	}
-	cmd := exec.Command(bin, "server", "--state-dir", dir, "--claude", fake)
+	// Both runtimes registered, as in idleRSS; never this machine's codex.
+	cmd := exec.Command(bin, "server", "--state-dir", dir, "--claude", fake, "--codex", fakeCodex(tb))
 	cmd.Env = append(os.Environ(), "ATHENA_FAKE_LATER_FIXTURE="+later)
 	if err := cmd.Start(); err != nil {
 		tb.Fatal(err)

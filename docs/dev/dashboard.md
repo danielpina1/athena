@@ -12,11 +12,11 @@ It is off until you run `athena web setup`.
 | View | What it is for |
 | --- | --- |
 | **Needs you** | Everything waiting on you, one tap each: answer a question inline, approve or deny an Approval (with a note), review finished work, retry or stop a stalled Ticket. Approvals come first. |
-| **Tickets** | The Tickets, filtered by stage, repository and model, with a search. A Ticket opens to its live session (streamed output, tool calls paired with their results, a reply box), its timeline, and its Changes (the diff) or Files. On a wide screen up to three sessions can be pinned side by side. |
-| **New task** | A task in free text, an optional repository (a known one, a local git repository, or `owner/name`) and a model. |
+| **Tickets** | The Tickets, filtered by stage, repository, model and runtime, with a search; each row names the runtime its session runs on (`Claude Code` or `Codex`, and `auto` when Athena chooses). A Ticket opens to its live session (streamed output, tool calls paired with their results, a reply box; Codex's plans, commands, patches and web searches too, with a divider wherever the session moves to the other runtime and the hand-off note the new session got), its timeline (a usage limit, "Continued on <runtime>", each review round and its verdict), and its Changes (the diff) or Files. On a wide screen up to three sessions can be pinned side by side. |
+| **New task** | A task in free text, an optional repository (a known one, a local git repository, or `owner/name`), the runtime (`Auto`, `Claude Code` or `Codex`) and a model. |
 | **Graph** | The Tickets as nodes in lanes by repository, orange where you are needed, with a list fallback and a time scrubber. |
 | **Routing** | The Triggers, Threads and Decisions behind the Tickets. |
-| **Nodes** | The nodes, their slots and load. |
+| **Nodes** | The nodes, their slots and load, and each runtime's readiness and quota: a bar per usage window, "Limited until <time>" while a runtime waits for its reset ([Codex setup](codex.md), section 7). |
 | **Settings** | The Policy (with conflict handling when two screens edit it), Prompts, the Devices (passkeys, add a device, sign out), Notifications and the execution environment. |
 
 Keyboard (desktop): `⌘K` command palette, `j`/`k` move, `⏎` open, `a` approve, `d` deny, `r` reply, `/` search,
@@ -313,7 +313,9 @@ embeds (the directory is git-ignored; without a build the server shows "Dashboar
    cookie is not port-scoped, so the proxy reuses it.
 3. `make web-check` runs typecheck, lint, unit tests, the build and the bundle budget; `make check` includes it.
    `make e2e` runs the browser tests (Playwright against a real server built into `bin/e2e/`, never `bin/athena`, with a
-   fake runtime), including `full-flow.spec.ts`, the whole path from sign-in to sign-out on a phone and a desktop viewport.
+   fake runtime), including `full-flow.spec.ts`, the whole path from sign-in to sign-out on a phone and a desktop viewport,
+   and `multi-runtime.spec.ts`, an `auto` Ticket that fails over from Claude Code to Codex and goes through two review
+   rounds (fakeclaude and fakecodex, never the real CLIs).
 
 Browser enrollment is the dashboard's `/enroll` page: it reads the token from the link's fragment, removes the
 fragment from the address, asks for a device name, creates the passkey (`/auth/register/begin|finish`) and signs in. A

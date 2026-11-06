@@ -359,6 +359,37 @@ func TestFakecodexInterruptEndsTheTurnInterrupted(t *testing.T) {
 	}
 }
 
+// A wait directive holds the replay until its file exists: nothing after it arrives before.
+func TestFakecodexWaitDirectiveHoldsTheReplay(t *testing.T) {
+	dir := t.TempDir()
+	release := filepath.Join(dir, "release")
+	simple, err := os.ReadFile(fixturePath(t, "simple-turn"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wait, _ := json.Marshal(map[string]string{"fake": "wait", "path": release})
+	fixture := filepath.Join(dir, "wait-turn.jsonl")
+	if err := os.WriteFile(fixture, append(append(wait, '\n'), simple...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p := startFake(t, "ATHENA_FAKE_CODEX_FIXTURE="+fixture)
+	thread := p.begin()
+	p.until(func(e rt.Event) bool { _, ok := e.(rt.Init); return ok }) // its thread/started
+	p.startTurn(thread, "go", "")
+	select {
+	case e := <-p.events:
+		t.Fatalf("an event before the release: %+v", e)
+	case <-time.After(150 * time.Millisecond):
+	}
+	if err := os.WriteFile(release, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	evs := p.until(isTurnEnd)
+	if end := evs[len(evs)-1].(rt.TurnEnd); !end.OK || end.Text != "Done." {
+		t.Fatalf("events after the release: %+v", evs)
+	}
+}
+
 func TestFakecodexSendsServerRequestsAndLogsTheAnswer(t *testing.T) {
 	p := startFake(t, "ATHENA_FAKE_CODEX_FIXTURE="+fixturePath(t, "approval-turn"))
 	thread := p.begin()
