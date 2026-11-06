@@ -92,7 +92,11 @@ directory's `config`, `config.worktree` and `hooks/`, the git directory's `commo
 The node's own git (creating and removing worktrees, `git status`) runs with `core.fsmonitor=false` and
 `core.hooksPath=/dev/null`, whatever a repository's config says, and with `GIT_DIR`, `GIT_COMMON_DIR` and
 `GIT_WORK_TREE` pinned to the directories Athena made (`<common>/worktrees/<name>`), so a rewritten `.git`,
-`commondir` or `gitdir` cannot hand it another config (a filter driver).
+`commondir` or `gitdir` cannot hand it another config (a filter driver). A worktree an earlier node made under git's
+`<name><number>` is found only when its `gitdir` names the worktree and the worktree is in the work root; otherwise the
+node keeps away from it (and logs it). Where a Ticket works (a plain directory, a worktree, the node's clone) is recorded
+in the state directory at its first placement (`placements/<ticket>.json`) and never derived again, so a worker that
+runs `git init` in a plain directory cannot have the next launch make a worktree of it.
 
 ### Keep one athena binary
 

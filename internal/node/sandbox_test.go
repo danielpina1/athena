@@ -277,7 +277,7 @@ func TestNodeGitIgnoresRepointedGitDirs(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(wt, "a.txt"), []byte("b\n"), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			cleanupWorktree(placement{workDir: wt, repo: repo}, core.Ticket{ID: "T-1"}, slog.New(slog.DiscardHandler))
+			cleanupWorktree(placement{workDir: wt, repo: repo}, core.Ticket{ID: "T-1"}, "", slog.New(slog.DiscardHandler))
 			if b, err := os.ReadFile(marker); err == nil {
 				t.Fatalf("the node's git ran the worker's filter driver:\n%s", b)
 			}
@@ -285,5 +285,105 @@ func TestNodeGitIgnoresRepointedGitDirs(t *testing.T) {
 				t.Fatalf("the changed worktree was removed: %v", err)
 			}
 		})
+	}
+}
+
+// A worktree an earlier node made under git's <name><number> (its own name was taken) is found by its gitdir file, for
+// the file listing and the cleanup; one whose gitdir names another directory, or outside the work root, is not.
+func TestLegacyWorktreeGitDir(t *testing.T) {
+	repo := newRepo(t)
+	common := filepath.Join(repo, ".git")
+	workRoot := t.TempDir()
+	log := slog.New(slog.DiscardHandler)
+	// Another worktree of the same name takes worktrees/fix-t-1; the Ticket's gets worktrees/fix-t-11, as git names it.
+	other := filepath.Join(t.TempDir(), "fix-t-1")
+	git(t, repo, "worktree", "add", "-q", "-b", "other", other)
+	wt := filepath.Join(workRoot, "fix-t-1")
+	git(t, repo, "worktree", "add", "-q", "-b", "athena/t-1", wt)
+	legacy := filepath.Join(common, "worktrees", "fix-t-11")
+	if _, err := os.Stat(legacy); err != nil {
+		t.Fatalf("git did not name the git dir fix-t-11: %v", err)
+	}
+	got, err := worktreeGitDir(t.Context(), repo, wt, workRoot, log)
+	if err != nil || got != legacy {
+		t.Fatalf("worktreeGitDir = %q, %v; want %s", got, err, legacy)
+	}
+	// Outside the work root, or with a gitdir naming another directory: refused.
+	if _, err := findWorktreeAdmin(common, wt, t.TempDir(), log); err == nil || !strings.Contains(err.Error(), "unregistered or renamed git dir") {
+		t.Fatalf("outside the work root: %v", err)
+	}
+	gd := filepath.Join(legacy, "gitdir")
+	keep, err := os.ReadFile(gd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(gd, []byte(filepath.Join(other, ".git")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := findWorktreeAdmin(common, wt, workRoot, log); err == nil {
+		t.Fatal("a legacy git dir naming another worktree was used")
+	}
+	cleanupWorktree(placement{workDir: wt, repo: repo, common: common}, core.Ticket{ID: "T-1"}, workRoot, log)
+	if _, err := os.Stat(wt); err != nil {
+		t.Fatalf("a worktree whose git dir is not found was removed: %v", err)
+	}
+	// Found again, the clean worktree's cleanup removes it.
+	if err := os.WriteFile(gd, keep, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cleanupWorktree(placement{workDir: wt, repo: repo, common: common}, core.Ticket{ID: "T-1"}, workRoot, log)
+	if _, err := os.Stat(wt); !os.IsNotExist(err) {
+		t.Fatalf("the legacy worktree was not cleaned up: %v", err)
+	}
+	if _, err := os.Stat(other); err != nil {
+		t.Fatalf("the other worktree was touched: %v", err)
+	}
+}
+
+// A plain directory's Ticket stays plain: a worker that makes the directory a repository, with a smudge filter, does
+// not get its next launch to make a worktree of it (whose checkout would run the filter on the host).
+func TestPlainDirPlacementIsRecorded(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell filter")
+	}
+	h := newHarness(t, nil)
+	dir := t.TempDir()
+	tk := h.submit("Work in a folder", dir)
+	tk, a := h.running(tk.ID)
+	rec := filepath.Join(h.cfg.StateDir, placementsDir, tk.ID+".json")
+	if _, err := os.Stat(rec); err != nil {
+		t.Fatalf("no placement record: %v", err)
+	}
+	// The worker: git init, an attributed file committed, and a smudge filter in the new repository's config.
+	marker := filepath.Join(t.TempDir(), "ran")
+	filter := filepath.Join(t.TempDir(), "evil.sh")
+	if err := os.WriteFile(filter, []byte("#!/bin/sh\necho ran >> "+marker+"\ncat\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	git(t, dir, "init", "-q", "-b", "main")
+	for name, body := range map[string]string{".gitattributes": "*.txt filter=evil\n", "a.txt": "a\n"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	git(t, dir, "add", ".gitattributes", "a.txt")
+	git(t, dir, "commit", "-q", "-m", "x")
+	git(t, dir, "config", "filter.evil.smudge", filter)
+	p, err := h.n.place(tk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.repo != "" || p.workDir != p.dirKey || p.dirKey == "" {
+		t.Fatalf("placement = %+v, want the plain directory it was placed as", p)
+	}
+	// The next launch's preparation makes no worktree and runs nothing.
+	if err := h.n.prepare(h.n.newSession(tk, a, p)); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := os.ReadFile(marker); err == nil {
+		t.Fatalf("the worker's smudge filter ran on the host:\n%s", b)
+	}
+	if _, err := os.Stat(TicketDir(h.cfg.WorkRoot, tk)); !os.IsNotExist(err) {
+		t.Fatalf("a worktree was made: %v", err)
 	}
 }

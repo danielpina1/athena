@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path"
@@ -529,7 +530,7 @@ func (n *Node) TicketFiles(ctx context.Context, ticketID string) ([]FileEntry, b
 		return nil, false, err
 	}
 	if p.repo != "" {
-		return n.worktreeFiles(ctx, p, branchName(t))
+		return n.worktreeFiles(ctx, p, t)
 	}
 	r, err := n.fileRoot(p.workDir)
 	if err != nil {
@@ -602,7 +603,8 @@ func (n *Node) TicketFiles(ctx context.Context, ticketID string) ([]FileEntry, b
 // is in the worktree now. At most 1000, sorted by path; truncated reports that the cap was hit or git's output was cut.
 // git reads only the repository and the worktree's index and directories, with its git dir pinned (worktreeGitDir):
 // no hook, no filter and no fsmonitor runs.
-func (n *Node) worktreeFiles(ctx context.Context, p placement, branch string) ([]FileEntry, bool, error) {
+func (n *Node) worktreeFiles(ctx context.Context, p placement, t core.Ticket) ([]FileEntry, bool, error) {
+	branch := branchName(t)
 	r, err := n.fileRoot(p.workDir)
 	if err != nil {
 		return nil, false, err
@@ -620,8 +622,9 @@ func (n *Node) worktreeFiles(ctx context.Context, p placement, branch string) ([
 			status[f.Path] = f.Status
 		}
 	}
-	gitDir, err := worktreeGitDir(ctx, p.repo, dir)
+	gitDir, err := worktreeGitDir(ctx, p.repo, dir, n.cfg.WorkRoot, n.log)
 	if err != nil {
+		n.log.Warn("not listing the worktree's files", "ticket", t.ID, "dir", p.workDir, "error", err)
 		return nil, false, err
 	}
 	// The common dir is pinned too: the worktree's commondir file is writable by the worker, and would otherwise choose
@@ -668,10 +671,10 @@ func (n *Node) worktreeFiles(ctx context.Context, p placement, branch string) ([
 	return files, b.cut || cut, nil
 }
 
-// worktreeGitDir is the git dir of the worktree at dir as ensureWorktree made it (worktreeAdmin): the repository's
-// common dir's worktrees/<dir's name>. The worktree's own .git file and its git dir's gitdir and commondir, which its
+// worktreeGitDir is the git dir of the worktree at dir as ensureWorktree made it (findWorktreeAdmin): the repository's
+// common dir's worktrees/<dir's name>, or a legacy one. The worktree's own .git file and its git dir's gitdir and commondir, which its
 // worker can rewrite to point at a git dir of its own (with its own config, exclude file and index), are never read.
-func worktreeGitDir(ctx context.Context, repo, dir string) (string, error) {
+func worktreeGitDir(ctx context.Context, repo, dir, workRoot string, log *slog.Logger) (string, error) {
 	common := filepath.Join(repo, ".git")
 	if st, err := os.Lstat(common); err != nil || !st.IsDir() {
 		// The repository is itself a worktree or uses a gitdir file: ask git where its common dir is.
@@ -684,11 +687,7 @@ func worktreeGitDir(ctx context.Context, repo, dir string) (string, error) {
 	if _, err := os.Stat(dir); err != nil {
 		return "", ErrNoWorkspace
 	}
-	admin := worktreeAdmin(common, dir)
-	if st, err := os.Lstat(admin); err != nil || !st.IsDir() {
-		return "", fmt.Errorf("no worktree of %s is registered at %s", repo, dir)
-	}
-	return admin, nil
+	return findWorktreeAdmin(common, dir, workRoot, log)
 }
 
 // readSmall reads a file of git's own bookkeeping, at most 4 KiB of it.
@@ -721,7 +720,7 @@ func (n *Node) OpenTicketFile(ctx context.Context, ticketID, rel string) (*os.Fi
 	if !ok {
 		return nil, ErrNotFound
 	}
-	files, _, err := n.worktreeFiles(ctx, p, branchName(t))
+	files, _, err := n.worktreeFiles(ctx, p, t)
 	if err != nil {
 		return nil, err
 	}
