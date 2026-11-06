@@ -194,3 +194,54 @@ func TestRestoreGitLinksReplacesAnyShape(t *testing.T) {
 	}
 	h.n.restoreGitLinks(plain, log)
 }
+
+// A launch puts the worktree's git links back before it builds the session's sandbox from them: links a session left
+// repointed (its node died before the process-end restore) never become the next session's writable roots. Links
+// whose git directory cannot be found refuse the launch, and the worktree's .git is set aside.
+func TestPrepareRestoresGitLinksFirst(t *testing.T) {
+	h := newHarness(t, nil)
+	repo := newRepo(t)
+	tk := h.submit("Fix the parser", repo)
+	tk, a := h.running(tk.ID)
+	p, err := h.n.place(tk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	common := filepath.Join(repo, ".git")
+	admin := worktreeAdmin(common, p.workDir)
+	dotGit := filepath.Join(p.workDir, ".git")
+	evil := t.TempDir()
+	git(t, evil, "init", "-q", "--bare")
+	for path, body := range map[string]string{
+		dotGit:                            "gitdir: " + evil + "\n",
+		filepath.Join(admin, "commondir"): evil + "\n",
+	} {
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := h.n.prepare(h.n.newSession(tk, a, p)); err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	gitDir, gotCommon := gitDirs(p.workDir)
+	if !sameFile(gitDir, admin) || !sameFile(gotCommon, common) {
+		t.Fatalf("after prepare the git dirs sessionSandbox reads = %s, %s; want %s, %s", gitDir, gotCommon, admin, common)
+	}
+
+	// The git directory gone (or replaced past finding): the launch is refused and .git is set aside.
+	if err := os.RemoveAll(admin); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dotGit, []byte("gitdir: "+evil+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.n.prepare(h.n.newSession(tk, a, p)); err == nil {
+		t.Fatal("prepare launched with git links it could not check")
+	}
+	if _, err := os.Lstat(dotGit); !os.IsNotExist(err) {
+		t.Errorf(".git is still in place (%v), want it set aside", err)
+	}
+	if _, err := os.Lstat(dotGit + ".untrusted"); err != nil {
+		t.Errorf(".git.untrusted: %v", err)
+	}
+}

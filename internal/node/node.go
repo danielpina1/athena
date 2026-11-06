@@ -2280,6 +2280,11 @@ func WorktreeBranch(t core.Ticket, hasGit func(dir string) bool) string {
 // prepare makes the session's directory and writes its settings and MCP config.
 func (n *Node) prepare(s *session) error {
 	p := s.place
+	// An earlier session may have repointed the worktree's git links and its process not ended cleanly (a node that
+	// died, a child that outlived it): put them back before anything, the sandbox included, reads them.
+	if err := n.restoreGitLinks(s.t, s.log); err != nil {
+		return err
+	}
 	switch {
 	case p.github != "":
 		if login, _ := n.cfg.Credentials.Identity(); login == "" {

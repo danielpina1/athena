@@ -2,6 +2,7 @@ package node
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -32,26 +33,38 @@ type gitLink struct {
 // a worktree made before Athena checked the name), whose gitdir names the .git file and whose commondir names the
 // repository's git directory; config.worktree is what git made at the worktree's creation (placement.worktreeConfig),
 // left alone for a Ticket placed before the node recorded it. A path that is a symlink or a directory is replaced. A
-// Ticket with no worktree, or no record, has nothing to check.
-func (n *Node) restoreGitLinks(t core.Ticket, log *slog.Logger) {
+// Ticket with no worktree, or no record, has nothing to check. The error says the links could not all be put back:
+// prepare then launches nothing, since a session's sandbox is built from these links (sessionSandbox). When the git
+// directory itself cannot be found, the worktree's .git is moved aside to .git.untrusted, so no git (the owner's
+// included) follows what a worker may have written there.
+func (n *Node) restoreGitLinks(t core.Ticket, log *slog.Logger) error {
 	p, ok, err := n.recordedPlacement(t)
 	if err != nil {
 		log.Warn("git links not checked: the placement record cannot be read", "error", err)
-		return
+		return fmt.Errorf("the worktree's git links cannot be checked: %w", err)
 	}
 	if !ok || p.repo == "" || p.common == "" {
-		return
+		return nil
 	}
 	if _, err := os.Lstat(p.workDir); err != nil {
-		return
-	}
-	admin, err := n.recordedAdmin(p, log)
-	if err != nil {
-		log.Warn("git links not checked: the worktree's git directory is not where Athena made it; remove the worktree by hand",
-			"dir", p.workDir, "error", err)
-		return
+		return nil
 	}
 	dotGit := filepath.Join(p.workDir, ".git")
+	admin, err := n.recordedAdmin(p, log)
+	if err != nil {
+		if _, lerr := os.Lstat(dotGit); errors.Is(lerr, fs.ErrNotExist) {
+			return nil // no worktree made yet (or its .git gone): no link to follow, and the launch makes it afresh
+		}
+		log.Warn("git links not checked: the worktree's git directory is not where Athena made it; its .git is set aside, remove the worktree by hand",
+			"dir", p.workDir, "error", err)
+		if _, lerr := os.Lstat(dotGit); lerr == nil {
+			if rerr := os.Rename(dotGit, dotGit+".untrusted"); rerr != nil {
+				log.Error("set aside a worktree's .git", "path", dotGit, "error", rerr)
+			}
+		}
+		return fmt.Errorf("the worktree's git directory is not where Athena made it: %w", err)
+	}
+	var failed error
 	for _, l := range []gitLink{
 		{path: dotGit, base: p.workDir, prefix: "gitdir:", want: admin, body: "gitdir: " + admin + "\n"},
 		{path: filepath.Join(admin, "gitdir"), base: admin, want: dotGit, body: dotGit + "\n"},
@@ -62,16 +75,17 @@ func (n *Node) restoreGitLinks(t core.Ticket, log *slog.Logger) {
 		}
 		if err := replaceFile(l.path, l.body); err != nil {
 			log.Error("restore a git link a session changed", "path", l.path, "error", err)
+			failed = fmt.Errorf("restore %s: %w", l.path, err)
 			continue
 		}
 		log.Warn("restored a git link a session changed", "path", l.path)
 	}
 	if p.worktreeConfig == nil {
-		return
+		return failed
 	}
 	path, want := filepath.Join(admin, "config.worktree"), *p.worktreeConfig
 	if regularHolds(path, want) {
-		return
+		return failed
 	}
 	if want == "" {
 		err = os.RemoveAll(path)
@@ -80,9 +94,10 @@ func (n *Node) restoreGitLinks(t core.Ticket, log *slog.Logger) {
 	}
 	if err != nil {
 		log.Error("restore the worktree's config a session changed", "path", path, "error", err)
-		return
+		return fmt.Errorf("restore %s: %w", path, err)
 	}
 	log.Warn("restored the worktree's config a session changed", "path", path)
+	return failed
 }
 
 // recordedAdmin is the git directory of p's worktree: worktreeAdmin when it is a directory, else (a worktree made before
