@@ -6,6 +6,7 @@ import { create } from "zustand";
 import { Channel } from "@/gen/athena/v1/link_pb";
 import type {
   ApprovalView,
+  Control,
   DecisionView,
   Delta,
   Health,
@@ -43,6 +44,8 @@ export type AthenaData = {
   node?: NodeStatus;
   health?: Health;
   policy?: PolicyView;
+  /** The kill switch: absent until the first Snapshot; paused while Athena makes no decisions and sends no replies. */
+  control?: Control;
   repos: RepoView[];
   notifications?: NotificationPrefsView;
   prompts?: PromptsView;
@@ -104,6 +107,7 @@ function empty(): AthenaData {
     node: undefined,
     health: undefined,
     policy: undefined,
+    control: undefined,
     repos: [],
     notifications: undefined,
     prompts: undefined,
@@ -210,6 +214,8 @@ function change(s: AthenaData, d: Delta): Partial<AthenaData> {
       return { health: c.value };
     case "policy":
       return { policy: c.value };
+    case "control":
+      return { control: c.value };
     case "repos":
       return { repos: c.value.repos };
     case "notifications":
@@ -249,6 +255,7 @@ export const useAthena = create<AthenaState>()((set, get) => ({
       node: s.node,
       health: s.health,
       policy: s.policy,
+      control: s.control,
       repos: s.repos,
       notifications: s.notifications,
       prompts: s.prompts,

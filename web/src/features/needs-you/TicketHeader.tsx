@@ -7,6 +7,7 @@ import { Mono } from "@/ui/athena/Mono";
 import { RelativeTime } from "@/ui/athena/RelativeTime";
 import { StageBadge } from "@/ui/athena/StageBadge";
 import { Truncate } from "@/ui/athena/Truncate";
+import { TrustBadge } from "@/features/control/trust";
 import { useShortcut } from "@/app/shortcuts";
 
 /** When a Timestamp is, for RelativeTime; NaN (shown as a dash) when the server sent none. */
@@ -53,6 +54,7 @@ export function TicketHeader({
         <Mono>
           <RelativeTime at={since} />
         </Mono>
+        <TrustBadge trust={ticket.trust} ticket />
       </div>
     </header>
   );

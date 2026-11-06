@@ -10,6 +10,7 @@ import { Link, useLocation, useSearchParams } from "react-router";
 import type { ApprovalView, TicketSummary } from "@/gen/athena/v1/state_pb";
 import { AnswerCard } from "@/features/needs-you/AnswerCard";
 import { ApprovalCard } from "@/features/needs-you/ApprovalCard";
+import { TrustBadge } from "@/features/control/trust";
 import { stopTicket } from "@/features/needs-you/stopTicket";
 import { useShortcut } from "@/app/shortcuts";
 import { Composer, interruptSession } from "@/features/session/Composer";
@@ -119,6 +120,7 @@ function Header({ ticket, back, onReply }: { ticket: TicketSummary; back: string
           {ticket.id}
         </Mono>
         <StageBadge stage={ticket.stage} action={ticket.action} outcome={ticket.outcome} stopping={stopping} />
+        <TrustBadge trust={ticket.trust} ticket />
       </div>
       <div className="flex flex-wrap gap-2">
         {!ended && (

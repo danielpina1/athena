@@ -8,6 +8,7 @@ import { NAV, type NavItem, useNavCount } from "@/app/routes";
 import { modKeyLabel } from "@/app/shortcuts";
 import { selectCounts, selectSynced } from "@/lib/store/selectors";
 import { useAthena } from "@/lib/store/state";
+import { PauseControl } from "@/features/control/PauseControl";
 import { LiveFeed } from "@/features/activity/LiveFeed";
 import { quotaLine } from "@/features/nodes/QuotaBars";
 import { runtimeLabel } from "@/lib/text/runtime";
@@ -191,6 +192,9 @@ export function Sidebar({ link, onOpenPalette }: { link: LinkSource; onOpenPalet
       <NodeCard />
       <LiveFeed className="mt-4 min-h-40 flex-1 overflow-y-auto border-t border-line-soft px-4 py-4" />
       <Today />
+      <div className="border-t border-line-soft p-2">
+        <PauseControl variant="sidebar" />
+      </div>
     </aside>
   );
 }

@@ -3,6 +3,7 @@
 import type { ReactNode } from "react";
 import { ConnectionBanner, type LinkSource } from "@/app/ConnectionBanner";
 import { UpdateBanner } from "@/app/UpdateBanner";
+import { PausedBanner } from "@/features/control/PausedBanner";
 import { Sidebar } from "@/app/Sidebar";
 
 export function DesktopShell({
@@ -20,6 +21,7 @@ export function DesktopShell({
       <div className="flex min-w-0 flex-1 flex-col">
         <ConnectionBanner link={link} />
         <UpdateBanner />
+        <PausedBanner />
         <main className="flex min-h-0 flex-1">{children}</main>
       </div>
     </div>

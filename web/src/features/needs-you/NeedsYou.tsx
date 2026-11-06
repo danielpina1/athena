@@ -16,6 +16,7 @@ import { EmptyState } from "@/ui/athena/EmptyState";
 import { Waiting } from "@/ui/athena/Waiting";
 import { Button } from "@/ui/primitives/button";
 import { AnswerCard } from "./AnswerCard";
+import { BrakeNotice } from "./BrakeNotice";
 import { ApprovalCard } from "./ApprovalCard";
 import { ReviewCard } from "./ReviewCard";
 import { StalledCard } from "./StalledCard";
@@ -65,6 +66,7 @@ export function NeedsYou() {
   const tickets = useAthena((s) => s.tickets);
   const counts = useAthena((s) => selectCounts(s));
   const node = useAthena((s) => s.node);
+  const repos = useAthena((s) => s.repos);
   const synced = useAthena(selectSynced);
   const [shown, setShown] = useState(PAGE);
   // The desktop has the live feed in its sidebar; the phone has it here, under the cards.
@@ -94,6 +96,7 @@ export function NeedsYou() {
         <h1 className="text-xl font-semibold break-words">Needs you</h1>
         {synced && <p className="font-mono text-xs text-muted">{header}</p>}
       </div>
+      {synced && <BrakeNotice repos={repos} />}
       {!synced ? (
         <Waiting className="border-t border-line py-8" />
       ) : items.length === 0 ? (
