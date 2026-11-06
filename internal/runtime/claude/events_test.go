@@ -421,27 +421,47 @@ func TestRejectedRateLimitSetsTurnLimit(t *testing.T) {
 	}
 }
 
-// A failed turn whose result says it hit a usage limit is limited, without a rate_limit_event; another failure, or a
-// turn that ended well whatever it says, is not.
+// A failed turn whose result says it hit a limit is limited, without a rate_limit_event; another failure, or a turn
+// that ended well whatever it says, is not. A rate limit that names no usage limit is transient (a rate of requests);
+// Claude Code's "usage limit reached|<unix time>" says when it resets.
 func TestUsageLimitResultTextSetsLimit(t *testing.T) {
-	for line, want := range map[string]bool{
-		`{"type":"result","subtype":"success","is_error":true,"result":"Claude AI usage limit reached|1794000000"}`:        true,
-		`{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["API Error: Rate limit exceeded"]}`: true,
-		`{"type":"result","subtype":"success","is_error":true,"result":"You've hit your limit · resets 3pm"}`:              true,
-		`{"type":"result","subtype":"success","is_error":true,"result":"5-hour limit reached ∙ resets 3pm"}`:               true,
-		`{"type":"result","subtype":"error_max_turns","is_error":true,"errors":["Reached maximum number of turns (1)"]}`:   false,
-		`{"type":"result","subtype":"success","is_error":false,"result":"I added a rate limit to the API."}`:               false,
+	type want struct {
+		limited, transient bool
+		reset              int64
+	}
+	for line, w := range map[string]want{
+		`{"type":"result","subtype":"success","is_error":true,"result":"Claude AI usage limit reached|1794000000"}`:        {true, false, 1794000000},
+		`{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["API Error: Rate limit exceeded"]}`: {true, true, 0},
+		`{"type":"result","subtype":"success","is_error":true,"result":"API Error: 429 rate limit · usage limit reached"}`:  {true, false, 0},
+		`{"type":"result","subtype":"success","is_error":true,"result":"You've hit your limit · resets 3pm"}`:              {true, false, 0},
+		`{"type":"result","subtype":"success","is_error":true,"result":"5-hour limit reached ∙ resets 3pm"}`:               {true, false, 0},
+		`{"type":"result","subtype":"error_max_turns","is_error":true,"errors":["Reached maximum number of turns (1)"]}`:   {},
+		`{"type":"result","subtype":"success","is_error":false,"result":"I added a rate limit to the API."}`:               {},
 	} {
 		ends := turnsOf(t, line)
 		if len(ends) != 1 {
 			t.Fatalf("%s: %d ends", line, len(ends))
 		}
-		if got := ends[0].Limit != nil; got != want {
-			t.Errorf("%s: limited = %v, want %v", line, got, want)
+		l := ends[0].Limit
+		if got := l != nil; got != w.limited {
+			t.Errorf("%s: limited = %v, want %v", line, got, w.limited)
 			continue
 		}
-		if want && (ends[0].Limit.Runtime != "claude" || ends[0].Limit.Message == "" || ends[0].Limit.ResetsAt != nil) {
-			t.Errorf("%s: limit = %+v", line, ends[0].Limit)
+		if l == nil {
+			continue
 		}
+		var reset int64
+		if l.ResetsAt != nil {
+			reset = l.ResetsAt.Unix()
+		}
+		if l.Runtime != "claude" || l.Message == "" || l.Transient != w.transient || reset != w.reset {
+			t.Errorf("%s: limit = %+v (reset %d), want transient %v reset %d", line, l, reset, w.transient, w.reset)
+		}
+	}
+	// A rejected rate_limit_event's reset wins over the text's.
+	rejected := `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1794000500,"rateLimitType":"five_hour"}}`
+	ends := turnsOf(t, rejected, `{"type":"result","subtype":"success","is_error":true,"result":"Claude AI usage limit reached|1794000000"}`)
+	if l := ends[0].Limit; l == nil || l.ResetsAt == nil || l.ResetsAt.Unix() != 1794000500 || l.Transient {
+		t.Fatalf("rejected then text: %+v", l)
 	}
 }

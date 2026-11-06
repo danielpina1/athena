@@ -3104,3 +3104,69 @@ func TestUnknownResetBacksOff(t *testing.T) {
 		})
 	}
 }
+
+// limitAfterReport runs a Claude Code turn in which the worker files req (its Ticket and Assignment filled in) before
+// the turn stops at its usage limit, and returns the Ticket once the limit is in the quota. before runs first.
+func limitAfterReport(t *testing.T, before func(h *harness, tk core.Ticket), req ReportRequest) (*harness, core.Ticket) {
+	t.Helper()
+	h := newHarness(t, nil)
+	hold := filepath.Join(t.TempDir(), "hold")
+	t.Setenv("ATHENA_FAKE_HOLD_RESULT", hold)
+	t.Setenv("ATHENA_FAKE_FIXTURE", claudeLimitFixture(t, strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10)))
+	tk := h.submit("Fix the parser", "")
+	tk, a := h.running(tk.ID)
+	if before != nil {
+		before(h, tk)
+	}
+	req.Op, req.Ticket, req.Assignment = OpReport, tk.ID, a.ID
+	var resp Response
+	if err := callNode(h.cfg.SocketPath, req, &resp); err != nil || !resp.OK {
+		t.Fatalf("report: %v %+v", err, resp)
+	}
+	if err := os.WriteFile(hold, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.eventually("the limit reaches the quota", func() bool { return h.n.Quota().State(core.RuntimeClaude).Limited(time.Now()) })
+	return h, tk
+}
+
+// A limit on the turn in which the worker reported blocked, with a question, is an ordinary turn end: the Ticket still
+// waits for the person's answer, and no new session runs past it.
+func TestLimitAfterBlockedReportKeepsThePersonStage(t *testing.T) {
+	h, tk := limitAfterReport(t, nil, ReportRequest{Status: string(core.ReportBlocked), Summary: "needs a key", Question: "Which API key?"})
+	h.never("a new assignment or session", 1500*time.Millisecond, func() bool {
+		cur, _ := h.ticket(tk.ID)
+		return len(cur.Assignments) > 1 || len(h.invocations()) > 1
+	})
+	cur, st := h.ticket(tk.ID)
+	a := cur.Assignments[0]
+	if a.State != core.AssignmentRunning || a.EndedReason != "" || a.Report == nil || a.Report.State != core.ReportBlocked {
+		t.Fatalf("assignment = %+v", a)
+	}
+	if cur.Attention == nil || cur.Attention.Question != "Which API key?" || !cur.WaitsForPerson() || st != (core.Stage{Stage: "person", Action: "answer"}) {
+		t.Fatalf("attention %+v, waits %v, stage %+v", cur.Attention, cur.WaitsForPerson(), st)
+	}
+}
+
+// A limit on the turn in which the worker reported ready on a Ticket that waits for its pull request is the end of a
+// hand-off: the session parks as usual, the ready Report stands, and nothing starts again.
+func TestLimitAfterReadyReportParks(t *testing.T) {
+	h, tk := limitAfterReport(t, func(h *harness, tk core.Ticket) {
+		if err := h.eng.BindThread(tk.ID, "github:o/r#1", true); err != nil {
+			t.Fatal(err)
+		}
+	}, ReportRequest{Status: string(core.ReportReady), Summary: "PR is up"})
+	h.eventually("the session parks", func() bool { return h.n.liveCount() == 0 })
+	h.never("a new assignment or session", 1500*time.Millisecond, func() bool {
+		cur, _ := h.ticket(tk.ID)
+		return len(cur.Assignments) > 1 || len(h.invocations()) > 1
+	})
+	cur, st := h.ticket(tk.ID)
+	a := cur.Assignments[0]
+	if cur.Ended != nil || a.State != core.AssignmentRunning || a.Report == nil || a.Report.State != core.ReportReady || !cur.HandedOff() {
+		t.Fatalf("ended %+v, assignment %+v", cur.Ended, a)
+	}
+	if st != (core.Stage{Stage: "person", Action: "review"}) || cur.WaitsForPerson() {
+		t.Fatalf("stage %+v, waits %v", st, cur.WaitsForPerson())
+	}
+}

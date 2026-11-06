@@ -269,7 +269,9 @@ as ready), its quota and its live sessions; the server checks the other runtimes
 **Failover.** A turn that stops at its usage limit is no failure and asks no person. Codex says so in the turn's
 error (`usageLimitExceeded`, or `rateLimitExceeded` for a transient limit); Claude Code with a `rate_limit_event`
 whose status is `rejected` (whichever window it names, one Athena does not map too) followed by an error `result`, or
-with an error `result` whose text says it hit a limit. The node then:
+with an error `result` whose text says it hit a limit. A text that says "rate limit" but neither "usage limit" nor
+"hit your limit" is transient (a rate of requests: the short backoff); "Claude AI usage limit reached|<unix time>"
+resets at that time. The node then:
 
 1. records the limit in the quota (above);
 2. checkpoints the work in progress, when the Ticket runs in a git worktree (below);
@@ -280,10 +282,16 @@ with an error `result` whose text says it hit a limit. The node then:
 4. ends the limited session as if stopped. Its process has exited before the next session starts: a Ticket has one
    live session, so two sessions never write the same worktree at once.
 
+A limit on a turn in which the worker had already reported `blocked`, `waiting` or `ready` (since its last Input) is
+not failed over: the turn ends as one that ended well (a ready worker on a Ticket that waits for its pull request
+parks), the question or the hand-off stands, and only the quota records the limit. The next Input reaches the limited
+session, whose turn then fails over.
+
 The new Assignment launches through the chooser, the only wait there is: an `auto` Ticket goes to the other runtime
 (the limited one is no candidate), or, with both limited, waits until the earliest reset; a pinned Ticket waits for its
 runtime's reset and then resumes its session. A reset that is unknown or already past is never waited on: the quota
-backs off (15 min, doubling) and the limit's reset shows as unknown.
+backs off (15 min, doubling) and the limit's reset shows as unknown. The wait for a reset counts toward the Ticket's
+`queueWait` stat (from the new Assignment's creation to its start), so after a limit it can be hours.
 
 The new session works in the same directory (the Ticket's recorded placement). Its transcript marker says
 `"reason":"failover"` when it moved to the other runtime. A new worker session whose previous worker Assignment ended
@@ -299,7 +307,9 @@ branch's HEAD, through an index of its own: `git add -A` respecting `.gitignore`
 `update-ref`), and leaves the branch, the index and the files as they are. Nothing is lost, because the next session
 works in the same worktree, and no checkpoint commit lands on the pull request. The node's git runs it with no shell,
 its git directories pinned, a minimal environment and a 30 s timeout; a failure is logged and does not hold up the
-failover. Moving the branch instead would be a small change.
+failover. The ref is deleted when the Ticket's worktree is cleaned up (a worktree kept for its changes keeps its
+checkpoint too), so no work in progress, an untracked `.env` say, stays reachable in the repository after that. Moving
+the branch instead would be a small change.
 
 ## 8. Review pairing
 

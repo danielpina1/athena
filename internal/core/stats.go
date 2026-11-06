@@ -55,7 +55,8 @@ var commandNames = []string{
 // command that causes them; what only the executor can see reaches it through RecordUsage.
 type TicketStats struct {
 	// QueueWait is the time from each Assignment's creation to its session starting, summed: the wait for a slot plus
-	// the launch.
+	// the launch, and for an Assignment made at a usage limit (UsageLimited) the wait for its runtime's reset too, which
+	// can be hours.
 	QueueWait time.Duration `json:"queueWait"`
 	// TimeToFirstOutput is how long the worker took from its first message to its first output (the first one only).
 	TimeToFirstOutput time.Duration `json:"timeToFirstOutput"`

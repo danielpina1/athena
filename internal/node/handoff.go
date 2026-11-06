@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/danielpina1/athena/internal/core"
@@ -37,6 +38,8 @@ const (
 	handoffGitMax      = 4 << 10
 	handoffLastTurnMax = 4 << 10
 	lastTurnScan       = 1 << 20
+	// handoffGitTimeout bounds the git calls that read the worktree's state for a note.
+	handoffGitTimeout = 30 * time.Second
 	// handoffMax caps the whole note: the Inputs get what the rest leaves.
 	handoffMax = 32 << 10
 	// cutMark marks where the note cut something.
@@ -57,8 +60,9 @@ type Handoff struct {
 }
 
 // handoffNote is the note h says, at most handoffMax bytes. Everything but its own lines is quoted (quoteText), so
-// nothing in it reads as an Input header the node writes; cuts are marked cutMark (after the quoting, so a cut that
-// keeps an end starts its line with the mark).
+// nothing in it reads as an Input header the node writes; cuts are marked cutMark. A cut that keeps a start leaves
+// every line's start as it was; one that keeps an end is quoted again (quotedEnd), since its first line starts
+// wherever the cut fell.
 func handoffNote(h Handoff) string {
 	runtime := h.Previous.Runtime
 	if runtime == "" {
@@ -84,12 +88,12 @@ func handoffNote(h Handoff) string {
 	fmt.Fprintf(&rest, "\nThe branch's commits since its base (git log --oneline):\n%s\nUncommitted changes (git diff --stat HEAD):\n%s\nUntracked files: %s\n",
 		orNone(keepStart(quoteText(redact.String(h.GitLog)), handoffGitMax)),
 		orNone(keepStart(quoteText(redact.String(h.DiffStat)), handoffGitMax)), quoteText(untracked))
-	fmt.Fprintf(&rest, "\nWhat it said last:\n%s\n", orNone(keepEnd(quoteText(redact.String(strings.TrimSpace(h.LastTurn))), handoffLastTurnMax)))
+	fmt.Fprintf(&rest, "\nWhat it said last:\n%s\n", orNone(quotedEnd(quoteText(redact.String(strings.TrimSpace(h.LastTurn))), handoffLastTurnMax)))
 
 	head := fmt.Sprintf(opening, runtimeLabel(runtime)) + "\n\nThe Ticket's latest messages, quoted:\n"
 	room := handoffMax - len(head) - rest.Len()
 	inputs := orNone(quoteText(strings.TrimRight(h.Inputs, "\n")))
-	return keepStart(head+keepEnd(inputs, max(room, len(cutMark)))+rest.String(), handoffMax)
+	return keepStart(head+quotedEnd(inputs, max(room, len(cutMark)+1))+rest.String(), handoffMax)
 }
 
 // runtimeLabel is a runtime's name for people: Claude Code, Codex.
@@ -120,6 +124,15 @@ func keepStart(s string, n int) string {
 		cut--
 	}
 	return s[:cut] + cutMark
+}
+
+// quotedEnd is quoted text s cut to at most n bytes keeping its end (keepEnd), its cut line quoted again: a cut can
+// fall between a quoted line's leading space and what it quotes, and the mark itself starts like a header.
+func quotedEnd(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return quoteText(keepEnd(s, n-1)) // only the first line can need the space
 }
 
 // keepEnd is s cut to at most n bytes on a rune boundary, keeping its end; a cut starts with cutMark.
@@ -208,7 +221,7 @@ func (n *Node) handoffGit(s *session) (log, stat, untracked string) {
 		s.log.Warn("handoff: no git state", "error", err)
 		return "", "", ""
 	}
-	ctx, cancel := context.WithTimeout(n.ctx, checkpointTimeout)
+	ctx, cancel := context.WithTimeout(n.ctx, handoffGitTimeout)
 	defer cancel()
 	git := func(args ...string) string {
 		out, err := gitInCtx(ctx, p.workDir, env, args...)

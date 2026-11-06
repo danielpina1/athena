@@ -1663,16 +1663,20 @@ func (r *runner) onEvent(ev rt.Event) {
 		// next message: report it, or the Ticket stays working with nothing running. Its Inputs may not have reached
 		// the model, so they stay unread and a retry sends them again. A turn Athena itself ends (a stop) never gets
 		// here: the stop drains the events without onEvent, and fail does nothing once the session is stopped. A usage
-		// limit that stopped the turn is no failure: the Ticket fails over (usageLimited).
-		if e.Limit != nil {
+		// limit that stopped the turn is no failure: the Ticket fails over (usageLimited), unless the worker had already
+		// handed its work over in the turn (settledThisTurn), which ends as a turn that ended well and limits the runtime
+		// in the quota only: the next Input, sent to a limited session, fails over then.
+		switch {
+		case e.Limit != nil && !r.settledThisTurn():
 			r.nudged = false
 			r.usageLimited(e)
 			return
-		}
-		if e.OK {
+		case e.Limit != nil:
+			r.n.quota.Hit(r.runtime, *e.Limit)
+			r.log.Info("usage limit reached after the worker handed its work over; the turn ends as usual", "runtime", r.runtime)
+		case e.OK:
 			r.n.quota.TurnOK(r.runtime)
-		}
-		if !e.OK {
+		default:
 			r.nudged = false
 			r.fail(turnFailure(e))
 			return
@@ -1831,6 +1835,29 @@ func (r *runner) unreadIDs() []string {
 		ids[i] = u.id
 	}
 	return ids
+}
+
+// settledThisTurn reports whether the worker filed, since its last Input, a Report that hands the work to a person or
+// to its pull request: blocked, waiting or ready, the Assignment's latest. A limit after it stops nothing the Ticket
+// waits for, and a new session would run past the person stage or the finished hand-off.
+func (r *runner) settledThisTurn() bool {
+	if r.s.reportCount() <= r.inputReports {
+		return false
+	}
+	t, _, err := r.eng.Ticket(r.s.t.ID)
+	if err != nil {
+		r.log.Error("read ticket", "error", err)
+		return false
+	}
+	for _, a := range t.Assignments {
+		if a.ID == r.s.a.ID && a.Report != nil {
+			switch a.Report.State {
+			case core.ReportBlocked, core.ReportWaiting, core.ReportReady:
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // usageLimited handles a turn that stopped at its runtime's usage limit: the limit goes to the quota (which the next
@@ -2387,7 +2414,8 @@ func gitBase(env []string) []string {
 
 // cleanupWorktree removes an ended Ticket's worktree when nothing in it would be lost: no uncommitted or untracked
 // changes (Athena's own .athena directory is ignored) and no commits on its branch that exist nowhere else (no other
-// branch, no remote). Otherwise it keeps it and logs why. The branch itself is kept.
+// branch, no remote). Otherwise it keeps it and logs why. The branch itself is kept; the Ticket's checkpoint ref goes
+// with the worktree.
 func cleanupWorktree(p placement, t core.Ticket, workRoot string, log *slog.Logger) {
 	if p.repo == "" {
 		return
@@ -2447,6 +2475,10 @@ func cleanupWorktree(p placement, t core.Ticket, workRoot string, log *slog.Logg
 		return
 	}
 	log.Info("removed worktree", "dir", p.workDir)
+	// Its checkpoint (checkpoint.go) goes with it: nothing of the Ticket's work in progress stays reachable.
+	if _, err := gitOut(p.repo, "update-ref", "-d", checkpointRef(t.ID)); err != nil {
+		log.Warn("remove the checkpoint ref", "ref", checkpointRef(t.ID), "error", err)
+	}
 }
 
 // gitOut runs git in dir and returns its trimmed stdout.

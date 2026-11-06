@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/danielpina1/athena/internal/core"
 )
 
 // wipWorktree is a worktree of a new repository (which ignores *.log) on branch athena/t-1, with work in progress: a
@@ -131,5 +133,39 @@ func TestCheckpointRefPointsAtWIP(t *testing.T) {
 	// Not a git directory: an error, nothing written.
 	if _, err := checkpoint(t.TempDir(), "T-2", nil); err == nil {
 		t.Fatal("a checkpoint of a plain directory succeeded")
+	}
+}
+
+// The checkpoint ref goes with the Ticket's worktree: removed with it, kept while the worktree is kept.
+func TestCleanupRemovesTheCheckpointRef(t *testing.T) {
+	repo := newRepo(t)
+	root := t.TempDir()
+	log := slog.New(slog.DiscardHandler)
+	for _, c := range []struct {
+		id    string
+		dirty bool
+	}{{"T-1", false}, {"T-2", true}} {
+		tk := core.Ticket{ID: c.id}
+		dir := filepath.Join(root, strings.ToLower(c.id))
+		if err := ensureWorktree(repo, dir, branchName(tk), "HEAD", nil); err != nil {
+			t.Fatal(err)
+		}
+		if c.dirty {
+			if err := os.WriteFile(filepath.Join(dir, "wip.txt"), []byte("wip\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := checkpoint(dir, c.id, nil); err != nil {
+			t.Fatal(err)
+		}
+		cleanupWorktree(placement{workDir: dir, repo: repo, common: filepath.Join(repo, ".git")}, tk, root, log)
+		_, statErr := os.Stat(dir)
+		refs := git(t, repo, "for-each-ref", "--format=%(refname)", checkpointRef(c.id))
+		if c.dirty && (statErr != nil || refs != checkpointRef(c.id)) {
+			t.Errorf("%s: kept worktree (%v) lost its checkpoint (refs %q)", c.id, statErr, refs)
+		}
+		if !c.dirty && (!os.IsNotExist(statErr) || refs != "") {
+			t.Errorf("%s: removed worktree (%v) left its checkpoint (refs %q)", c.id, statErr, refs)
+		}
 	}
 }

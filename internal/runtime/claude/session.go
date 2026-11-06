@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -203,13 +204,21 @@ func start(ctx context.Context, o Options, forRT bool) (*Session, error) {
 	return s, nil
 }
 
-// limitText matches what a failed turn's result says when Claude Code stopped it at a usage limit.
-var limitText = regexp.MustCompile(`(?i)usage limit|rate limit|hit your limit|limit reached`)
+var (
+	// limitText matches what a failed turn's result says when Claude Code stopped it at a limit. A rate limit that
+	// names no usage limit (usedUpText) is transient: a rate of requests, not a used-up window.
+	limitText  = regexp.MustCompile(`(?i)usage limit|rate limit|hit your limit|limit reached`)
+	rateText   = regexp.MustCompile(`(?i)rate limit`)
+	usedUpText = regexp.MustCompile(`(?i)usage limit|hit your limit`)
+	// resetText is the reset Claude Code's "Claude AI usage limit reached|<unix time>" carries.
+	resetText = regexp.MustCompile(`(?i)usage limit reached\|([0-9]{9,12})\b`)
+)
 
 // limitWatch translates a session's events for the node (toRT), and sets the Limit of the TurnEnd of a turn that
 // failed at its usage limit: one that saw a rate_limit_event with status "rejected" (resetting when that event says,
-// whichever window it names), or whose result is an error that says so (limitText; no reset known). A turn that ended
-// well is not limited, and a rejection does not outlive its turn. One watch serves one session's events, in order.
+// whichever window it names), or whose result is an error that says so (limitText: transient for a rate limit that
+// names no usage limit, resetting when the text's "|<unix time>" says). A turn that ended well is not limited, and a
+// rejection does not outlive its turn. One watch serves one session's events, in order.
 type limitWatch struct{ rejected *rt.LimitHit }
 
 func (w *limitWatch) translate(ev Event) rt.Event {
@@ -233,7 +242,13 @@ func (w *limitWatch) translate(ev Event) rt.Event {
 		}
 		why := strings.TrimSpace(strings.Join(append([]string{e.Text}, e.Errors...), "\n"))
 		if hit == nil && limitText.MatchString(why) {
-			hit = &rt.LimitHit{Runtime: runtimeName}
+			hit = &rt.LimitHit{Runtime: runtimeName, Transient: rateText.MatchString(why) && !usedUpText.MatchString(why)}
+		}
+		if m := resetText.FindStringSubmatch(why); hit != nil && hit.ResetsAt == nil && m != nil {
+			if sec, err := strconv.ParseInt(m[1], 10, 64); err == nil {
+				at := time.Unix(sec, 0)
+				hit.ResetsAt = &at
+			}
 		}
 		if hit != nil {
 			hit.Message = why
