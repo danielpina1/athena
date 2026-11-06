@@ -133,6 +133,9 @@ func (n *Node) handleWorker(req WorkerRequest) WorkerResponse {
 	if !known {
 		return WorkerResponse{Error: fmt.Sprintf("unknown tool %q", req.Tool)}
 	}
+	if s.reviewing() {
+		return WorkerResponse{Error: "a review session has only the review tool"}
+	}
 	res, err := n.workerTool(s, req.Tool, req.Args)
 	if err != nil {
 		s.log.Warn("worker tool refused", "tool", req.Tool, "error", err)

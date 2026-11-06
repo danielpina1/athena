@@ -11,9 +11,15 @@
 //   - athena(...args): the CLI against the shared state dir, e.g. athena("task", "Deploy it") → its stdout.
 //   - expectAccessible(page): axe on the current screen; any serious or critical violation fails.
 //   - session.requestApproval(ticket, tool, input) and session.report(ticket, state, text, question?): act as the
-//     Ticket's worker session through sessionctl (internal/testutil/sessionctl), on the real hook and MCP paths.
+//     Ticket's worker session through sessionctl (internal/testutil/sessionctl), on the real hook and MCP paths;
+//     session.review(ticket, verdict, findings) as its review session (on Claude Code: fakeclaude logs its
+//     environment), and sessionAssignment(ticket) is the Assignment of the Ticket's latest fakeclaude session.
 //   - laterFixture(ticket, lines) and stdinLog(ticket): what the Ticket's fakeclaude prints after each later message
-//     (a reply), and what it has read on stdin; holdLaterResult(ticket) holds that fixture's result line back.
+//     (a reply; the returned function removes it), and what it has read on stdin; holdLaterResult(ticket) holds that
+//     fixture's result line back.
+//   - codexFixture(ticket, lines): the app-server lines the Ticket's fakecodex replays on its session's first turn;
+//     statePath(name) a file in the shared state dir (one such a fixture waits on).
+//   - untilNotLimited(runtime): waits until the server no longer counts the runtime limited (its quota.json).
 //
 // Every Ticket's session runs fakeclaude replaying the default fixture (global-setup.ts): a turn that never ends.
 import { execFile, spawn, type ChildProcess } from "node:child_process";
@@ -51,10 +57,54 @@ export async function enrollLink(): Promise<string> {
 
 /**
  * Gives the Ticket's fakeclaude stream-json lines to print after each message it reads after the first (a reply from
- * the dashboard, say). Write it before that message is sent.
+ * the dashboard, say), returning a function that removes them. Write it before that message is sent.
  */
-export function laterFixture(ticket: string, lines: object[]): void {
-  writeFileSync(join(env("ATHENA_E2E_STATE"), `later-${ticket}.jsonl`), lines.map((l) => JSON.stringify(l) + "\n").join(""));
+export function laterFixture(ticket: string, lines: object[]): () => void {
+  const file = join(env("ATHENA_E2E_STATE"), `later-${ticket}.jsonl`);
+  writeFileSync(file, lines.map((l) => JSON.stringify(l) + "\n").join(""));
+  return () => rmSync(file, { force: true });
+}
+
+/** A path in the shared state dir, for a file a fixture waits on (fakecodex's {"fake":"wait","path":...}). */
+export function statePath(name: string): string {
+  return join(env("ATHENA_E2E_STATE"), name);
+}
+
+/**
+ * Gives the Ticket's fakecodex the app-server lines (and fakecodex directives) to replay on its session's first turn,
+ * returning a function that removes them. Write it before the session starts: ticket "default" serves every Codex
+ * session that has no fixture of its own, for a Ticket whose id is not known before it starts.
+ */
+export function codexFixture(ticket: string, lines: object[]): () => void {
+  const file = join(env("ATHENA_E2E_STATE"), `codex-fixture-${ticket}.jsonl`);
+  writeFileSync(file, lines.map((l) => JSON.stringify(l) + "\n").join(""));
+  return () => rmSync(file, { force: true });
+}
+
+/**
+ * Waits, in Node (a page torn down by a failed test cannot cut it short), until the server's quota no longer holds
+ * the runtime limited: its <state>/quota.json names no limited_until for it in the future. Fails after timeoutMs.
+ */
+export async function untilNotLimited(runtime: string, timeoutMs = 30_000): Promise<void> {
+  const file = join(env("ATHENA_E2E_STATE"), "quota.json");
+  const until = (): number => {
+    if (!existsSync(file)) return 0;
+    const q = JSON.parse(readFileSync(file, "utf8")) as { runtimes?: Record<string, { limited_until?: string }> };
+    const at = q.runtimes?.[runtime]?.limited_until;
+    return at ? Date.parse(at) : 0;
+  };
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    let left = 0;
+    try {
+      left = until() - Date.now();
+    } catch {
+      left = 1; // the file is being replaced: read it again
+    }
+    if (left <= 0) return;
+    if (Date.now() > deadline) throw new Error(`${runtime} is still limited for ${left} ms`);
+    await new Promise((r) => setTimeout(r, Math.min(left + 50, 250)));
+  }
 }
 
 /**
@@ -207,7 +257,16 @@ export type Session = {
   requestApproval(ticket: string, tool: string, input: Record<string, unknown>): Promise<HookVerdict>;
   /** Files a Report on the Ticket through its MCP server's report tool, as its session would. */
   report(ticket: string, state: string, text: string, question?: string): Promise<string>;
+  /** Files a verdict through the review tool of the Ticket's review session (its latest fakeclaude session). */
+  review(ticket: string, verdict: "approved" | "changes", findings: string): Promise<string>;
 };
+
+/** The ATHENA_ASSIGNMENT of the Ticket's latest fakeclaude session ("" before its first): a new one has started once it changes. */
+export function sessionAssignment(ticket: string): string {
+  const file = join(env("ATHENA_E2E_STATE"), `env-${ticket}.log`);
+  if (!existsSync(file)) return "";
+  return /^ATHENA_ASSIGNMENT=(.*)$/m.exec(readFileSync(file, "utf8"))?.[1] ?? "";
+}
 
 /** <state>/env-<ticket>.log, once the Ticket's session has started. */
 async function sessionEnv(ticket: string): Promise<string> {
@@ -279,6 +338,10 @@ export const test = base.extend<{ session: Session; ownPasskeysReset: void }>({
         const args = ["report", "-env", file, "-status", state, "-summary", text];
         if (question) args.push("-question", question);
         return sessionctl(args, children);
+      },
+      async review(ticket, verdict, findings) {
+        const file = await sessionEnv(ticket);
+        return sessionctl(["review", "-env", file, "-verdict", verdict, "-findings", findings], children);
       },
     });
     // A hook still waiting for an answer when the test ends is not left behind.

@@ -17,7 +17,7 @@ const (
 	VerdictEscalate = "escalate"
 )
 
-// HookRequest asks the node for a decision about one Claude Code hook event.
+// HookRequest asks the node for a decision about one hook event of a runtime (Claude Code or Codex).
 type HookRequest struct {
 	Op         string `json:"op"`
 	Event      string `json:"event"`
@@ -27,6 +27,9 @@ type HookRequest struct {
 	// Assignment; empty for a worker's.
 	Role  string `json:"role,omitempty"`
 	Token string `json:"token,omitempty"`
+	// Runtime is the runtime whose hook this is (`athena hook --runtime`): "claude" or "codex", whose tool names and
+	// inputs differ. A decision hook that names another runtime than its session's is denied; empty is the session's.
+	Runtime string `json:"runtime,omitempty"`
 	// Input is the raw JSON the hook received on stdin, forwarded verbatim.
 	Input json.RawMessage `json:"input"`
 }

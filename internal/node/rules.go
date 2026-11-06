@@ -45,6 +45,13 @@ type RuleContext struct {
 	// themselves are recognised from the command text.
 	VenvActive bool
 
+	// Protected are paths no write may touch, each with everything below it (ProtectedPaths): set for a session whose
+	// sandbox cannot keep them read-only (Codex's). A write to one is denied.
+	Protected []string
+
+	// ReadOnly is set for a session that may change nothing (a review): every write it names is denied (readOnlyRule).
+	ReadOnly bool
+
 	// tainted names the expandable variables a Bash command assigns or may change; set by bashWriteRule.
 	tainted map[string]bool
 }
@@ -59,6 +66,9 @@ const (
 	ruleSessionConfig = "session-config-write"
 	ruleBashPrefix    = "bash-escalate:"
 	ruleRouterTools   = "router-tools"
+	ruleProtectedPath = "protected_path"
+	ruleAttribution   = "attribution"
+	ruleReadOnly      = "read_only"
 )
 
 // routerToolPrefix names the tools of Athena's MCP server, the only server the router session has.
@@ -85,10 +95,12 @@ func escalate(rule, reason string) Decision {
 	return Decision{Verdict: VerdictEscalate, Reason: reason, Rule: rule}
 }
 
-// Evaluate applies the hook rules in order: credential reads (deny), blocked
-// commands (deny), writes outside the ticket dir (escalate; for Bash the
+// Evaluate applies the hook rules in order: credential reads (deny), any write of a
+// read-only session (deny), blocked commands (deny), an AI attribution in a commit or pull request (deny), writes
+// to a protected path (deny) or outside the ticket dir (escalate; for Bash the
 // redirections and file commands that name a target), risky Bash commands
-// (escalate); anything else is allowed. Malformed input is denied.
+// (escalate); anything else is allowed. Malformed input is denied. A Bash
+// input's "workdir", when set, is the directory the command runs in.
 func Evaluate(ctx RuleContext, tool string, input json.RawMessage) Decision {
 	var in map[string]any
 	if len(input) == 0 || json.Unmarshal(input, &in) != nil || in == nil {
@@ -97,8 +109,14 @@ func Evaluate(ctx RuleContext, tool string, input json.RawMessage) Decision {
 	if d, ok := credentialRule(ctx, tool, in); ok {
 		return d
 	}
+	if d, ok := readOnlyRule(ctx, tool, in); ok {
+		return d
+	}
 	if tool == "Bash" {
 		if d, ok := blockedRule(ctx, str(in, "command")); ok {
+			return d
+		}
+		if d, ok := attributionRule(ctx, str(in, "command"), str(in, "workdir")); ok {
 			return d
 		}
 	}
@@ -108,7 +126,7 @@ func Evaluate(ctx RuleContext, tool string, input json.RawMessage) Decision {
 		}
 	}
 	if tool == "Bash" {
-		if d, ok := bashWriteRule(ctx, str(in, "command")); ok {
+		if d, ok := bashWriteRule(ctx, str(in, "command"), str(in, "workdir")); ok {
 			return d
 		}
 		if d, ok := bashEscalateRule(ctx, str(in, "command")); ok {
@@ -659,6 +677,9 @@ func writeRule(ctx RuleContext, in map[string]any) (Decision, bool) {
 	if !ok {
 		return escalate(ruleWrite, "write target "+p+" cannot be resolved"), true
 	}
+	if ctx.protectedTarget(target) {
+		return deny(ruleProtectedPath, protectedReason(p)), true
+	}
 	base, ok := realpath(ctx.TicketDir)
 	if !ok || !within(base, target) {
 		return escalate(ruleWrite, "write to "+p+" is outside the ticket directory"), true
@@ -675,6 +696,230 @@ func writeRule(ctx RuleContext, in map[string]any) (Decision, bool) {
 		return escalate(ruleSessionConfig, "writing Claude Code settings needs approval"), true
 	}
 	return Decision{}, false
+}
+
+// ---------------------------------------------------------------------------
+// read-only sessions
+
+// readOnlyGit are the git subcommands a read-only session may run: they read the repository and change nothing.
+var readOnlyGit = map[string]bool{
+	"status": true, "diff": true, "log": true, "show": true, "blame": true, "grep": true, "rev-parse": true,
+	"ls-files": true, "merge-base": true, "cat-file": true,
+}
+
+// readOnlyCmds are the other commands a read-only session may run, besides the test and vet runners (testRunner).
+var readOnlyCmds = map[string]bool{
+	"cat": true, "ls": true, "rg": true, "grep": true, "find": true, "head": true, "tail": true, "wc": true,
+	"file": true, "stat": true, "cd": true, "pwd": true, "echo": true, "true": true,
+}
+
+// findWrites are find's actions that run a program or write a file.
+var findWrites = map[string]bool{"-delete": true, "-exec": true, "-execdir": true, "-ok": true, "-okdir": true,
+	"-fprint": true, "-fprint0": true, "-fprintf": true, "-fls": true}
+
+// readOnlyRule denies, in a read-only session (ctx.ReadOnly), what may change anything: a write tool, any Bash write
+// target (bashWriteTargets), and any command but a short list (readOnlyCommand): read-only git subcommands, reading
+// commands, and the test and vet runners. A test runner runs the repository's code, which may write; that residual is
+// accepted (a review must be able to run the tests), and the session's sandbox, when it has one, bounds it.
+func readOnlyRule(ctx RuleContext, tool string, in map[string]any) (Decision, bool) {
+	if !ctx.ReadOnly {
+		return Decision{}, false
+	}
+	const why = "this review session is read-only (" + ruleReadOnly + "): it changes nothing; report what should change " +
+		"as a finding with the review tool"
+	if writeTools[tool] {
+		return deny(ruleReadOnly, why), true
+	}
+	if tool != "Bash" {
+		return Decision{}, false
+	}
+	command := str(in, "command")
+	if targets := ctx.bashWriteTargets(command, "", 0); len(targets) > 0 {
+		return deny(ruleReadOnly, why+"; the command writes to "+targets[0].path), true
+	}
+	if bad := readOnlyScript(command, 0); bad != "" {
+		return deny(ruleReadOnly, why+"; it may run only read-only git (status, diff, log, show, blame, grep, rev-parse, "+
+			"ls-files, merge-base, cat-file), cat, ls, rg, grep, find, head, tail, wc, file, stat and the test and vet "+
+			"runners, not "+bad), true
+	}
+	return Decision{}, false
+}
+
+// readOnlyScript is the first command of a shell script a read-only session may not run (readOnlyCommand), "" when
+// it may run them all. The script splits into segments as findBlocked splits it (quoting ignored, so over-split), and
+// the script of a shell's -c is judged the same way.
+func readOnlyScript(command string, depth int) string {
+	if depth > 3 {
+		return "a script nested this deep"
+	}
+	// The & of a redirection (&>file, 2>&1) splits nothing, as in bashWriteTargets.
+	command = strings.NewReplacer(">|", ">", "&>", ampOut+">", ">&", ">"+ampFd).Replace(command)
+	for _, seg := range segmentSplit.Split(command, -1) {
+		seg = strings.NewReplacer(ampOut, "&", ampFd, "&").Replace(seg)
+		if a := readOnlyPrefix(seg); a != "" {
+			return a
+		}
+		words := commandWords(seg)
+		if len(words) == 0 {
+			continue
+		}
+		if shellCmds[words[0]] {
+			script, ok := shellScript(words)
+			if !ok {
+				return words[0]
+			}
+			if bad := readOnlyScript(script, depth+1); bad != "" {
+				return bad
+			}
+			continue
+		}
+		if !readOnlyCommand(words) {
+			return strings.Join(words[:min(len(words), 2)], " ")
+		}
+	}
+	return ""
+}
+
+// readOnlyPrefix is the first word up to a segment's command that a read-only session may not run, "" when there is
+// none: a variable assignment (GIT_PAGER=… git log, env PAGER=… git log), which can name a program an allowed
+// command runs; sudo; and a wrapper or command named by a path outside the system's bin directories (./bin/cat,
+// /tmp/x/git), which the allowlist judges by base name only (systemPath).
+func readOnlyPrefix(seg string) string {
+	words := cleanWords(strings.Fields(seg))
+	for len(words) > 0 {
+		w := words[0]
+		switch {
+		case assignRe.MatchString(w):
+			return w
+		case reservedWords[w]:
+			words = words[1:]
+			continue
+		case strings.Contains(w, "/") && !systemPath(w), baseName(w) == "sudo":
+			return w
+		case wrapperCmds[baseName(w)]:
+			words = words[1:]
+			for len(words) > 0 && strings.HasPrefix(words[0], "-") {
+				words = words[1:]
+			}
+			continue
+		}
+		return ""
+	}
+	return ""
+}
+
+// systemBins are the directories a read-only session may name a command in by its path.
+var systemBins = map[string]bool{"/bin": true, "/usr/bin": true, "/usr/local/bin": true, "/opt/homebrew/bin": true,
+	"/usr/sbin": true, "/sbin": true}
+
+// systemPath reports whether w is an absolute path to a program directly in one of systemBins.
+func systemPath(w string) bool {
+	return filepath.IsAbs(w) && filepath.Clean(w) == w && systemBins[filepath.Dir(w)]
+}
+
+// gitRuns are the git options that run a program a read-only session did not name as a command: a configuration
+// value (-c, --config-env), another exec path, a pager for grep's matches, an external diff.
+func gitRuns(a string) bool {
+	return a == "-c" || strings.HasPrefix(a, "--config-env") || strings.HasPrefix(a, "--exec-path") ||
+		strings.HasPrefix(a, "-O") || strings.HasPrefix(a, "--open-files-in-pager") || a == "--ext-diff"
+}
+
+// shellScript is the script of a shell's words (sh -c '<script>'); ok is false when they run no -c script.
+func shellScript(words []string) (string, bool) {
+	for i, w := range words[1:] {
+		if w == "-c" || (strings.HasPrefix(w, "-") && strings.HasSuffix(w, "c") && !strings.HasPrefix(w, "--")) {
+			return strings.Join(words[i+2:], " "), true
+		}
+	}
+	return "", false
+}
+
+// readOnlyCommand reports whether a read-only session may run one command segment's words: a read-only git subcommand
+// without an output file, a reading command (find without actions that run or write, rg without a preprocessor), or a
+// test or vet runner.
+func readOnlyCommand(words []string) bool {
+	args := words[1:]
+	has := func(pred func(string) bool) bool { return slices.ContainsFunc(args, pred) }
+	switch w0 := words[0]; {
+	case w0 == "git":
+		return readOnlyGit[gitSubcommand(args)] && !has(func(a string) bool { return strings.HasPrefix(a, "--output") || gitRuns(a) })
+	case w0 == "find":
+		return !has(func(a string) bool { return findWrites[a] })
+	case w0 == "rg":
+		return !has(func(a string) bool {
+			return a == "--pre" || strings.HasPrefix(a, "--pre=") || strings.HasPrefix(a, "--hostname-bin")
+		})
+	case w0 == "file":
+		return !has(func(a string) bool { return a == "-C" || a == "--compile" })
+	case readOnlyCmds[w0]:
+		return true
+	}
+	return testRunner(words)
+}
+
+// testRunner reports whether words run a repository's tests or vet (go test|vet, cargo test|check, make test|check,
+// npm|pnpm|yarn test, pytest, python -m pytest), without an option that names an output file, or a program or build
+// file of its own (runnerRuns).
+func testRunner(words []string) bool {
+	if slices.ContainsFunc(words[1:], func(a string) bool {
+		return a == "-o" || strings.HasPrefix(a, "-o=") || strings.HasPrefix(a, "-outputdir") ||
+			(strings.HasPrefix(a, "-") && strings.Contains(a, "profile"))
+	}) {
+		return false
+	}
+	sub := firstArg(words[1:])
+	ok := false
+	switch words[0] {
+	case "go":
+		ok = sub == "test" || sub == "vet"
+	case "cargo":
+		ok = sub == "test" || sub == "check"
+	case "make":
+		ok = sub == "test" || sub == "check"
+	case "npm", "pnpm", "yarn":
+		ok = sub == "test" || (sub == "run" && len(words) > 2 && words[2] == "test")
+	case "pytest":
+		ok = true
+	case "python", "python3":
+		ok = len(words) > 2 && words[1] == "-m" && words[2] == "pytest"
+	}
+	return ok && !runnerRuns(words)
+}
+
+// runnerRuns reports whether a test runner's words carry an option that names a program for it to run or a build or
+// configuration file of the session's choosing, in the --opt value and --opt=value forms (and short options run
+// together, -fX): go's -exec, -toolexec and -vettool; make's NAME=value, -f, --file, --makefile, -e, --eval, -C and
+// --directory; cargo's --config and -Z; npm's, pnpm's and yarn's --script-shell and --node-options; pytest's -p, -c,
+// --config-file, -o and --override-ini.
+func runnerRuns(words []string) bool {
+	tool, args := words[0], words[1:]
+	if tool == "python" || tool == "python3" {
+		tool, args = "pytest", words[3:]
+	}
+	long := func(a string, names ...string) bool {
+		name, _, _ := strings.Cut(a, "=")
+		return slices.Contains(names, name)
+	}
+	short := func(a, letters string) bool { // a single-dash option bundle with one of letters
+		return len(a) > 1 && a[0] == '-' && a[1] != '-' && strings.ContainsAny(a[1:], letters)
+	}
+	return slices.ContainsFunc(args, func(a string) bool {
+		switch tool {
+		case "go": // Go's flags take one dash or two
+			name, _, _ := strings.Cut(strings.TrimLeft(a, "-"), "=")
+			return strings.HasPrefix(a, "-") && (name == "exec" || name == "toolexec" || name == "vettool")
+		case "make":
+			return assignRe.MatchString(a) || short(a, "fCe") ||
+				long(a, "--file", "--makefile", "--eval", "--directory", "--environment-overrides")
+		case "cargo":
+			return strings.HasPrefix(a, "-Z") || long(a, "--config")
+		case "npm", "pnpm", "yarn":
+			return long(a, "--script-shell", "--node-options")
+		case "pytest":
+			return short(a, "pco") || long(a, "--config-file", "--override-ini")
+		}
+		return false
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -710,8 +955,9 @@ const (
 )
 
 // redirectRe finds an output redirection and its target: >, >>, >|, &> and N>, as in `echo x > file` or `cmd 2>>log`.
-// A target that starts with ampFd is a file descriptor (2>&1) unless it names a file (>&file).
-var redirectRe = regexp.MustCompile(`(?:\d*|` + ampOut + `)>>?` + ampFd + `?\s*(\S+)`)
+// Its groups: the ampFd of a >& (if any), the space before the target, the target. A >& followed at once by a number or
+// - names a file descriptor (2>&1, >&-); followed by a space, or by anything else, it names a file (`>& file`, >&file).
+var redirectRe = regexp.MustCompile(`(?:\d*|` + ampOut + `)>>?(` + ampFd + `)?(\s*)(\S+)`)
 
 // writeTargetCmds are commands whose arguments name the files they create or change: every argument for
 // the first group, the last one for the second (cp a b, mv a b, ln -s a b).
@@ -799,12 +1045,10 @@ func (c RuleContext) bashWriteTargets(command, dir string, depth int) []writeTar
 	add := func(p, d string) { out = append(out, writeTarget{p, d}) }
 	for _, seg := range segmentSplit.Split(command, -1) {
 		for _, m := range redirectRe.FindAllStringSubmatch(seg, -1) {
-			t := m[1]
-			if strings.HasPrefix(t, ampFd) {
-				t = t[1:]
-				if t == "-" || (t != "" && strings.Trim(t, "0123456789") == "") {
-					continue
-				}
+			// A descriptor follows >& at once (2>&1, >&2, >&-); after a space, or not a number, it is a file.
+			t := m[3]
+			if m[1] != "" && m[2] == "" && (t == "-" || strings.Trim(t, "0123456789") == "") {
+				continue
 			}
 			if t = strings.Trim(t, `"'`); t != "" && !strings.HasPrefix(t, "(") && !harmlessTarget(t) {
 				add(t, dir)
@@ -897,11 +1141,17 @@ func taintedVars(command string) map[string]bool {
 // bashWriteRule judges a Bash command's write targets like writeRule judges a Write tool call, but over all of them:
 // a target in .athena denies the command even when another target only needs an approval. A target it cannot
 // resolve (an unknown variable, a command substitution, a directory a cd made unknown) escalates.
-func bashWriteRule(ctx RuleContext, command string) (Decision, bool) {
+func bashWriteRule(ctx RuleContext, command, workdir string) (Decision, bool) {
 	ctx.tainted = taintedVars(command)
 	var base string
 	if ctx.TicketDir != "" {
 		base, _ = realpath(ctx.TicketDir)
+	}
+	// The command runs in workdir when one is named; relative targets are named from there (from nowhere known when it
+	// cannot be resolved, so they escalate).
+	start := base
+	if workdir != "" {
+		start, _ = ctx.resolveFrom(workdir, base)
 	}
 	var esc *Decision
 	note := func(d Decision) {
@@ -909,13 +1159,15 @@ func bashWriteRule(ctx RuleContext, command string) (Decision, bool) {
 			esc = &d
 		}
 	}
-	for _, t := range ctx.bashWriteTargets(command, base, 0) {
+	for _, t := range ctx.bashWriteTargets(command, start, 0) {
 		p := strings.TrimSpace(t.path)
 		if p == "" {
 			continue
 		}
 		target, ok := ctx.resolveFrom(p, t.dir)
 		switch {
+		case ok && ctx.protectedTarget(target):
+			return deny(ruleProtectedPath, protectedReason(p)), true
 		case !ok:
 			note(escalate(ruleWrite, "command writes to "+p+", which cannot be resolved"))
 			continue
@@ -947,4 +1199,23 @@ func bashEscalateRule(ctx RuleContext, command string) (Decision, bool) {
 		return escalate(ruleBashPrefix+"pip-install", "pip install outside a virtualenv needs approval"), true
 	}
 	return Decision{}, false
+}
+
+// ---------------------------------------------------------------------------
+// protected paths
+
+// protectedTarget reports whether the resolved path target is one of ctx.Protected or lies below one.
+func (c RuleContext) protectedTarget(target string) bool {
+	for _, p := range c.Protected {
+		for _, v := range variants(p) {
+			if within(v, target) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func protectedReason(p string) string {
+	return "writing " + p + " is not allowed: Athena's session files and the repository's git config and hooks are protected"
 }

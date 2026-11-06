@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path"
@@ -147,11 +148,31 @@ func (n *Node) ticketPlacement(ticketID string) (placement, core.Ticket, error) 
 	if err != nil {
 		return placement{}, core.Ticket{}, ErrNoWorkspace
 	}
-	p, err := n.place(t)
+	p, err := n.viewPlacement(t)
 	if err != nil {
 		return placement{}, core.Ticket{}, ErrNoWorkspace
 	}
 	return p, t, nil
+}
+
+// viewPlacement is where the read-only views (diff, files) look for a Ticket: its placement (place), or for a Ticket
+// with no record that place refuses (it ran, and is now in a repository it has no worktree of: a worktree cleaned up
+// after its work was done, or a plain directory its worker made a repository), the placement derived now, which is
+// not recorded. The views run nothing a repository can configure on it: the diff compares trees (branchFiles: no
+// external diff, no textconv, no hooks, no fsmonitor, no transport), and the working tree is read only through the git
+// dir the node made (worktreeFiles, findWorktreeAdmin), with ls-files, which runs no filter.
+func (n *Node) viewPlacement(t core.Ticket) (placement, error) {
+	if p, ok, err := n.recordedPlacement(t); ok || err != nil {
+		return p, err
+	}
+	p, err := n.derivePlacement(t)
+	if err != nil {
+		return p, err
+	}
+	if n.checkUnrecorded(t, p) != nil {
+		return p, nil
+	}
+	return p, n.recordPlacement(t, p)
 }
 
 // TicketDiff is the diff of a Ticket placed in a git repository: its branch against the merge-base of the branch with
@@ -168,7 +189,7 @@ func (n *Node) TicketDiff(ctx context.Context, ticketID string) (Diff, error) {
 	}
 	ctx, cancel := context.WithTimeout(ctx, diffTimeout)
 	defer cancel()
-	b, err := branchFiles(ctx, p.repo, branch)
+	b, err := branchFiles(ctx, p.repo, p.common, branch)
 	if err != nil {
 		return Diff{}, err
 	}
@@ -202,9 +223,14 @@ type branchDiff struct {
 }
 
 // branchFiles reads the files branch changes in repo against its base: the merge-base with origin's default branch,
-// else with the repository's own HEAD. A branch that does not exist is ErrNoWorkspace.
-func branchFiles(ctx context.Context, repo, branch string) (branchDiff, error) {
+// else with the repository's own HEAD. A branch that does not exist is ErrNoWorkspace. With common (the placement's),
+// git's directory is pinned to it, not found from repo's files. It compares trees only: no filter (clean, smudge,
+// process), textconv, external diff, hook or fsmonitor of the repository's runs.
+func branchFiles(ctx context.Context, repo, common, branch string) (branchDiff, error) {
 	env := diffEnv()
+	if common != "" {
+		env = append(env, "GIT_DIR="+common, "GIT_COMMON_DIR="+common)
+	}
 	git := func(limit int, args ...string) ([]byte, bool, error) {
 		return diffGit(ctx, repo, env, limit, args...)
 	}
@@ -529,7 +555,7 @@ func (n *Node) TicketFiles(ctx context.Context, ticketID string) ([]FileEntry, b
 		return nil, false, err
 	}
 	if p.repo != "" {
-		return n.worktreeFiles(ctx, p, branchName(t))
+		return n.worktreeFiles(ctx, p, t)
 	}
 	r, err := n.fileRoot(p.workDir)
 	if err != nil {
@@ -602,7 +628,8 @@ func (n *Node) TicketFiles(ctx context.Context, ticketID string) ([]FileEntry, b
 // is in the worktree now. At most 1000, sorted by path; truncated reports that the cap was hit or git's output was cut.
 // git reads only the repository and the worktree's index and directories, with its git dir pinned (worktreeGitDir):
 // no hook, no filter and no fsmonitor runs.
-func (n *Node) worktreeFiles(ctx context.Context, p placement, branch string) ([]FileEntry, bool, error) {
+func (n *Node) worktreeFiles(ctx context.Context, p placement, t core.Ticket) ([]FileEntry, bool, error) {
+	branch := branchName(t)
 	r, err := n.fileRoot(p.workDir)
 	if err != nil {
 		return nil, false, err
@@ -610,7 +637,7 @@ func (n *Node) worktreeFiles(ctx context.Context, p placement, branch string) ([
 	dir := r.dir
 	ctx, cancel := context.WithTimeout(ctx, diffTimeout)
 	defer cancel()
-	b, err := branchFiles(ctx, p.repo, branch)
+	b, err := branchFiles(ctx, p.repo, p.common, branch)
 	if err != nil {
 		return nil, false, err
 	}
@@ -620,8 +647,9 @@ func (n *Node) worktreeFiles(ctx context.Context, p placement, branch string) ([
 			status[f.Path] = f.Status
 		}
 	}
-	gitDir, err := worktreeGitDir(ctx, p.repo, dir)
+	gitDir, err := worktreeGitDir(ctx, p.repo, dir, n.cfg.WorkRoot, n.log)
 	if err != nil {
+		n.log.Warn("not listing the worktree's files", "ticket", t.ID, "dir", p.workDir, "error", err)
 		return nil, false, err
 	}
 	// The common dir is pinned too: the worktree's commondir file is writable by the worker, and would otherwise choose
@@ -668,10 +696,10 @@ func (n *Node) worktreeFiles(ctx context.Context, p placement, branch string) ([
 	return files, b.cut || cut, nil
 }
 
-// worktreeGitDir is the git dir of the worktree at dir, found from the repository's side: the entry of
-// <common dir>/worktrees whose gitdir file names dir's .git. The worktree's own .git file, which its worker can
-// rewrite to point at a git dir of its own (with its own config, exclude file and index), is never read.
-func worktreeGitDir(ctx context.Context, repo, dir string) (string, error) {
+// worktreeGitDir is the git dir of the worktree at dir as ensureWorktree made it (findWorktreeAdmin): the repository's
+// common dir's worktrees/<dir's name>, or a legacy one. The worktree's own .git file and its git dir's gitdir and commondir, which its
+// worker can rewrite to point at a git dir of its own (with its own config, exclude file and index), are never read.
+func worktreeGitDir(ctx context.Context, repo, dir, workRoot string, log *slog.Logger) (string, error) {
 	common := filepath.Join(repo, ".git")
 	if st, err := os.Lstat(common); err != nil || !st.IsDir() {
 		// The repository is itself a worktree or uses a gitdir file: ask git where its common dir is.
@@ -681,32 +709,10 @@ func worktreeGitDir(ctx context.Context, repo, dir string) (string, error) {
 		}
 		common = strings.TrimSpace(string(out))
 	}
-	want, err := os.Stat(dir)
-	if err != nil {
+	if _, err := os.Stat(dir); err != nil {
 		return "", ErrNoWorkspace
 	}
-	names := []string{filepath.Base(dir)}
-	if entries, err := os.ReadDir(filepath.Join(common, "worktrees")); err == nil {
-		for _, e := range entries {
-			names = append(names, e.Name())
-		}
-	}
-	for _, name := range names {
-		admin := filepath.Join(common, "worktrees", name)
-		b, err := readSmall(filepath.Join(admin, "gitdir"))
-		if err != nil {
-			continue
-		}
-		at := strings.TrimSpace(string(b))
-		if !filepath.IsAbs(at) {
-			// worktree.useRelativePaths (git 2.48+) records it relative to the admin directory.
-			at = filepath.Join(admin, at)
-		}
-		if st, err := os.Stat(filepath.Dir(at)); err == nil && filepath.Base(at) == ".git" && os.SameFile(st, want) {
-			return admin, nil
-		}
-	}
-	return "", fmt.Errorf("no worktree of %s is registered at %s", repo, dir)
+	return findWorktreeAdmin(common, dir, workRoot, log)
 }
 
 // readSmall reads a file of git's own bookkeeping, at most 4 KiB of it.
@@ -739,7 +745,7 @@ func (n *Node) OpenTicketFile(ctx context.Context, ticketID, rel string) (*os.Fi
 	if !ok {
 		return nil, ErrNotFound
 	}
-	files, _, err := n.worktreeFiles(ctx, p, branchName(t))
+	files, _, err := n.worktreeFiles(ctx, p, t)
 	if err != nil {
 		return nil, err
 	}

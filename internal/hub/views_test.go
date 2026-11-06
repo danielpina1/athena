@@ -10,7 +10,9 @@ import (
 	"unicode/utf8"
 
 	"github.com/danielpina1/athena/internal/core"
+	"github.com/danielpina1/athena/internal/node"
 	"github.com/danielpina1/athena/internal/pb/athenav1"
+	"github.com/danielpina1/athena/internal/quota"
 )
 
 func TestTicketSummaryFlags(t *testing.T) {
@@ -157,6 +159,26 @@ func TestTimelineHasRepliesAndAnsweredApprovals(t *testing.T) {
 	}
 }
 
+func TestTimelineShowsInterruptionsAndResumes(t *testing.T) {
+	f := newFake()
+	tk := ticket("T-1")
+	started, resumed := epoch0.Add(time.Minute), epoch0.Add(3*time.Minute)
+	tk.Assignments = []core.Assignment{{ID: "a1", State: core.AssignmentRunning, CreatedAt: epoch0, StartedAt: &started, Model: "sonnet",
+		Interruptions: []core.Interruption{
+			{At: epoch0.Add(2 * time.Minute), Reason: core.InterruptRestart, ResumedAt: &resumed},
+			{At: epoch0.Add(4 * time.Minute), Reason: core.InterruptRestart},
+		}}}
+	f.put(tk)
+	d, err := New(f, quiet()).Detail("T-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "assignment/started sonnet · |assignment/restart  · |assignment/resumed  · |assignment/restart  · "
+	if got := entries(d.Timeline); got != want {
+		t.Errorf("timeline:\n got %q\nwant %q", got, want)
+	}
+}
+
 // entries is a timeline as kind/subkind subject · text, one entry per |.
 func entries(tl []*athenav1.TimelineEntry) string {
 	var got []string
@@ -256,6 +278,23 @@ func TestTimelineAssignmentEnds(t *testing.T) {
 		{"interrupted", func(tk *core.Ticket) {
 			tk.Assignments = []core.Assignment{{ID: "a", State: core.AssignmentEnded, EndedAt: at(2 * time.Minute), EndedReason: "node restart"}}
 		}, "assignment/started  · |assignment/interrupted  · node restart"},
+		{"limited", func(tk *core.Ticket) {
+			reset := time.Date(2026, 11, 6, 15, 0, 0, 0, time.FixedZone("x", 3600))
+			tk.Assignments = []core.Assignment{
+				{ID: "a", State: core.AssignmentEnded, Runtime: core.RuntimeClaude, EndedAt: at(2 * time.Minute), EndedReason: core.ReasonUsageLimit,
+					Limit: &core.UsageLimit{Runtime: core.RuntimeClaude, ResetsAt: &reset, Message: "usage limit reached"}},
+				{ID: "b", State: core.AssignmentPending, CreatedAt: *at(2 * time.Minute)},
+			}
+		}, "assignment/started  · |assignment/limited claude · 2026-11-06T14:00:00Z|assignment/queued  · "},
+		{"review failed", func(tk *core.Ticket) {
+			tk.Assignments = []core.Assignment{{ID: "a", State: core.AssignmentEnded, Role: core.RoleReview, EndedAt: at(2 * time.Minute),
+				EndedReason: core.ReasonReviewed, ReviewOutcome: &core.ReviewOutcome{Verdict: core.ReviewFailed, First: core.ReviewFailed,
+					Why: "no runtime is ready: claude: a Claude Code review needs sandbox.required: true"}}}
+		}, "assignment/review  · |review/failed  · no runtime is ready: claude: a Claude Code review needs sandbox.required: true"},
+		{"limited, reset unknown", func(tk *core.Ticket) {
+			tk.Assignments = []core.Assignment{{ID: "a", State: core.AssignmentEnded, Runtime: core.RuntimeCodex, EndedAt: at(2 * time.Minute),
+				EndedReason: core.ReasonUsageLimit, Limit: &core.UsageLimit{Runtime: core.RuntimeCodex}}}
+		}, "assignment/started  · |assignment/limited codex · "},
 	} {
 		f := newFake()
 		tk := ticket("T-1")
@@ -490,5 +529,231 @@ func TestEchoOnTheOriginTriggerIsDroppedWhateverItsText(t *testing.T) {
 	got := entries(d.Timeline)
 	if strings.Contains(got, "(trimmed)") || !strings.Contains(got, "Fix the login, edited") || strings.Count(got, "|") != 1 {
 		t.Errorf("timeline: %q, want the origin and the later edit only", got)
+	}
+}
+
+func TestSummaryRuntimeIsLatestStarted(t *testing.T) {
+	at := func(d time.Duration) *time.Time { v := epoch0.Add(d); return &v }
+	for _, c := range []struct {
+		name string
+		mod  func(*core.Ticket)
+		want string
+	}{
+		{"no assignment: the choice", func(tk *core.Ticket) { tk.Execution = &core.Execution{Runtime: core.RuntimeCodex} }, "codex"},
+		{"auto before any start", func(tk *core.Ticket) {
+			tk.Execution = &core.Execution{Runtime: core.RuntimeAuto}
+			tk.Assignments = []core.Assignment{{ID: "a", State: core.AssignmentPending}}
+		}, "auto"},
+		{"auto, started on codex", func(tk *core.Ticket) {
+			tk.Execution = &core.Execution{Runtime: core.RuntimeAuto}
+			tk.Assignments = []core.Assignment{{ID: "a", Runtime: core.RuntimeCodex, StartedAt: at(time.Minute)}}
+		}, "codex"},
+		{"failover: the later start wins", func(tk *core.Ticket) {
+			tk.Execution = &core.Execution{Runtime: core.RuntimeAuto}
+			tk.Assignments = []core.Assignment{
+				{ID: "a", Runtime: core.RuntimeClaude, StartedAt: at(time.Minute)},
+				{ID: "b", Runtime: core.RuntimeCodex, StartedAt: at(2 * time.Minute)},
+			}
+		}, "codex"},
+		{"a queued one is not started", func(tk *core.Ticket) {
+			tk.Execution = &core.Execution{Runtime: core.RuntimeAuto}
+			tk.Assignments = []core.Assignment{
+				{ID: "a", Runtime: core.RuntimeClaude, StartedAt: at(time.Minute)},
+				{ID: "b", Runtime: core.RuntimeCodex, State: core.AssignmentPending},
+			}
+		}, "claude"},
+	} {
+		tk := ticket("T-1")
+		c.mod(&tk)
+		if got := ticketSummary(&tk, core.TicketStage(&tk), nil).Runtime; got != c.want {
+			t.Errorf("%s: runtime %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+func TestSummaryRuntimeChoiceAndPairing(t *testing.T) {
+	tk := ticket("T-1")
+	if v := ticketSummary(&tk, core.TicketStage(&tk), nil); v.RuntimeChoice != "claude" || v.Pairing != "" || v.ReviewRounds != 0 {
+		t.Errorf("a Ticket from before runtimes: %v", v)
+	}
+	tk.Execution, tk.Pairing = &core.Execution{Runtime: core.RuntimeAuto}, core.PairingReview
+	tk.Stats.ReviewRounds = 2
+	tk.Assignments = []core.Assignment{{ID: "a", Runtime: core.RuntimeCodex, StartedAt: &epoch0}}
+	v := ticketSummary(&tk, core.TicketStage(&tk), nil)
+	if v.RuntimeChoice != "auto" || v.Runtime != "codex" || v.Pairing != "review" || v.ReviewRounds != 2 {
+		t.Errorf("summary = %v", v)
+	}
+}
+
+func TestTimelineRestartResumeLimitReviewEntries(t *testing.T) {
+	at := func(d time.Duration) *time.Time { v := epoch0.Add(d); return &v }
+	reset := epoch0.Add(5 * time.Hour)
+	tk := ticket("T-1")
+	tk.Assignments = []core.Assignment{
+		{ID: "a1", State: core.AssignmentEnded, Runtime: core.RuntimeClaude, Model: "sonnet", CreatedAt: epoch0, StartedAt: at(time.Minute),
+			Interruptions: []core.Interruption{{At: epoch0.Add(2 * time.Minute), Reason: core.InterruptRestart, ResumedAt: at(3 * time.Minute)}},
+			EndedAt:       at(4 * time.Minute), EndedReason: core.ReasonUsageLimit,
+			Limit: &core.UsageLimit{Runtime: core.RuntimeClaude, ResetsAt: &reset}},
+		{ID: "a2", State: core.AssignmentEnded, Runtime: core.RuntimeCodex, Model: "gpt", CreatedAt: epoch0.Add(4 * time.Minute),
+			StartedAt: at(5 * time.Minute), EndedAt: at(10 * time.Minute), EndedReason: core.ReasonReview},
+		{ID: "r1", State: core.AssignmentEnded, Role: core.RoleReview, Runtime: core.RuntimeClaude, Model: "opus", CreatedAt: epoch0.Add(10 * time.Minute),
+			StartedAt: at(11 * time.Minute), EndedAt: at(12 * time.Minute), EndedReason: core.ReasonReviewed,
+			ReviewOutcome: &core.ReviewOutcome{Verdict: core.ReviewChanges, First: "- [high] main.go:3 — leaks a goroutine"}},
+		{ID: "r2", State: core.AssignmentEnded, Role: core.RoleReview, Runtime: core.RuntimeClaude, CreatedAt: epoch0.Add(13 * time.Minute),
+			StartedAt: at(14 * time.Minute), EndedAt: at(15 * time.Minute), EndedReason: core.ReasonReviewed,
+			ReviewOutcome: &core.ReviewOutcome{Verdict: core.ReviewApproved, First: "- none"}},
+		{ID: "r3", State: core.AssignmentEnded, Role: core.RoleReview, Runtime: core.RuntimeCodex, CreatedAt: epoch0.Add(16 * time.Minute),
+			StartedAt: at(17 * time.Minute), EndedAt: at(18 * time.Minute), EndedReason: core.ReasonReviewed,
+			ReviewOutcome: &core.ReviewOutcome{Verdict: core.ReviewFailed, First: core.ReviewFailed, Why: "codex exited 2\nsecond line"}},
+	}
+	f := newFake()
+	f.put(tk)
+	d, err := New(f, quiet()).Detail("T-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "assignment/started sonnet · |assignment/restart  · |assignment/resumed  · |assignment/limited claude · 2026-11-04T17:00:00Z|" +
+		"assignment/started gpt · |assignment/ended  · review|" +
+		"assignment/review opus · |review/changes claude · - [high] main.go:3 — leaks a goroutine|" +
+		"assignment/review  · |review/approved claude · - none|" +
+		"assignment/review  · |review/failed codex · codex exited 2"
+	if got := entries(d.Timeline); got != want {
+		t.Errorf("timeline:\n got %q\nwant %q", got, want)
+	}
+	var runtimes []string
+	for _, e := range d.Timeline {
+		runtimes = append(runtimes, e.Runtime)
+	}
+	if got := strings.Join(runtimes, ","); got != "claude,claude,claude,claude,codex,codex,claude,claude,claude,claude,codex,codex" {
+		t.Errorf("entry runtimes = %s", got)
+	}
+}
+
+func TestNodeStatusRuntimesWithQuota(t *testing.T) {
+	reset := epoch0.Add(2 * time.Hour)
+	until := epoch0.Add(time.Hour)
+	v := nodeStatus(node.Status{Name: "n", ClaudeVersion: "2.1", Runtimes: []node.RuntimeStatus{
+		{Name: "claude", Ready: true, Tested: true, Live: 1, Quota: quota.State{}},
+		{Name: "codex", Version: "0.160.1", Ready: true, Tested: true, Live: 2, Quota: quota.State{
+			Measured: true, ReadAt: epoch0, LimitedUntil: &until,
+			Windows: []quota.Window{{Bucket: "codex", Name: "5h", Used: 0.5, ResetsAt: &reset}, {Name: "7d", Used: 0.25, Stale: true}}}},
+	}})
+	if v.ClaudeVersion != "2.1" || len(v.Runtimes) != 2 {
+		t.Fatalf("node = %v", v)
+	}
+	c, x := v.Runtimes[0], v.Runtimes[1]
+	if c.Name != "claude" || !c.Ready || c.Measured || c.Live != 1 || len(c.Windows) != 0 || c.LimitedUntil != nil || c.ReadAt != nil {
+		t.Errorf("claude = %v", c)
+	}
+	if x.Name != "codex" || x.Version != "0.160.1" || !x.Ready || !x.Tested || !x.Measured || x.Live != 2 ||
+		!x.LimitedUntil.AsTime().Equal(until) || !x.ReadAt.AsTime().Equal(epoch0) || len(x.Windows) != 2 {
+		t.Fatalf("codex = %v", x)
+	}
+	// One bucket: its windows are named by themselves.
+	if w := x.Windows[0]; w.Name != "5h" || w.Used != 0.5 || !w.ResetsAt.AsTime().Equal(reset) || w.Stale {
+		t.Errorf("window 0 = %v", w)
+	}
+	if w := x.Windows[1]; w.Name != "7d" || w.Used != 0.25 || w.ResetsAt != nil || !w.Stale {
+		t.Errorf("window 1 = %v", w)
+	}
+}
+
+// A runtime that reports windows of more than one bucket (a Codex per-model limit) names each by its bucket too.
+func TestWindowBucketOnlyWhenSeveral(t *testing.T) {
+	v := runtimeStatus(node.RuntimeStatus{Name: "codex", Quota: quota.State{Measured: true, Windows: []quota.Window{
+		{Bucket: "codex", Name: "5h"}, {Bucket: "codex", Name: "7d"}, {Bucket: "codex_mini", Name: "5h"}}}})
+	var names []string
+	for _, w := range v.Windows {
+		names = append(names, w.Name)
+	}
+	if got := strings.Join(names, ","); got != "codex 5h,codex 7d,codex_mini 5h" {
+		t.Errorf("names = %s", got)
+	}
+}
+
+func TestRuntimeWhyRedactedAndCut(t *testing.T) {
+	v := runtimeStatus(node.RuntimeStatus{Name: "codex", Why: "login failed: GITHUB_TOKEN=ghp_abc123 was\nrejected"})
+	if strings.Contains(v.Why, "ghp_abc123") || strings.Contains(v.Why, "\n") || !strings.Contains(v.Why, "login failed") {
+		t.Errorf("why = %q", v.Why)
+	}
+	long := runtimeStatus(node.RuntimeStatus{Name: "codex", Why: strings.Repeat("é", 500)})
+	if n := utf8.RuneCountInString(long.Why); n != WhyMaxRunes+1 || !strings.HasSuffix(long.Why, "…") {
+		t.Errorf("why has %d runes", n)
+	}
+}
+
+// A review holds the implementer's ready report: it is not "ready" while the review runs, nor after a review that sent
+// it back, and once applied (applyHeld) it reads once, from the Assignment that applied it, which itself started no
+// session and so has no start of its own.
+func TestHeldReportShowsOnceWhenApplied(t *testing.T) {
+	at := func(d time.Duration) *time.Time { v := epoch0.Add(d); return &v }
+	held := &core.Report{State: core.ReportReady, Summary: "Login done", At: epoch0.Add(5 * time.Minute)}
+	impl := core.Assignment{ID: "a1", State: core.AssignmentEnded, Runtime: core.RuntimeCodex, Model: "gpt", CreatedAt: epoch0,
+		StartedAt: at(time.Minute), EndedAt: at(5 * time.Minute), EndedReason: core.ReasonReview, Report: held}
+	review := core.Assignment{ID: "r1", State: core.AssignmentRunning, Role: core.RoleReview, Runtime: core.RuntimeClaude,
+		CreatedAt: epoch0.Add(5 * time.Minute), StartedAt: at(6 * time.Minute)}
+
+	detail := func(as ...core.Assignment) *athenav1.TicketDetail {
+		t.Helper()
+		tk := ticket("T-1")
+		tk.Assignments = as
+		f := newFake()
+		f.put(tk)
+		d, err := New(f, quiet()).Detail("T-1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+
+	// During the review: no ready anywhere.
+	d := detail(impl, review)
+	if got := entries(d.Timeline); strings.Contains(got, "report/") {
+		t.Errorf("during the review the timeline shows a report: %q", got)
+	}
+	if len(d.Reports) != 0 {
+		t.Errorf("during the review the reports are %v", d.Reports)
+	}
+
+	// After changes were requested: still none; the next round has not reported.
+	sent := review
+	sent.State, sent.EndedAt, sent.EndedReason = core.AssignmentEnded, at(7*time.Minute), core.ReasonReviewed
+	sent.ReviewOutcome = &core.ReviewOutcome{Verdict: core.ReviewChanges, First: "- [high] a.go:1 — racy"}
+	next := core.Assignment{ID: "a2", State: core.AssignmentPending, CreatedAt: epoch0.Add(7 * time.Minute)}
+	d = detail(impl, sent, next)
+	if got := entries(d.Timeline); strings.Contains(got, "report/") {
+		t.Errorf("after changes the timeline shows a report: %q", got)
+	}
+	if len(d.Reports) != 0 {
+		t.Errorf("after changes the reports are %v", d.Reports)
+	}
+
+	// Approved: the report applies once, on the continuing Assignment, which started no session of its own.
+	approved := review
+	approved.State, approved.EndedAt, approved.EndedReason = core.AssignmentEnded, at(7*time.Minute), core.ReasonReviewed
+	approved.ReviewOutcome = &core.ReviewOutcome{Verdict: core.ReviewApproved, First: "- none"}
+	applied := *held
+	applied.At = epoch0.Add(7 * time.Minute)
+	cont := core.Assignment{ID: "a2", State: core.AssignmentRunning, Runtime: core.RuntimeCodex, Model: "gpt",
+		CreatedAt: epoch0.Add(7 * time.Minute), StartedAt: at(7 * time.Minute), IdleAt: at(7 * time.Minute),
+		Continues: "a1", Report: &applied}
+	d = detail(impl, approved, cont)
+	want := "assignment/started gpt · |assignment/ended  · review|assignment/review  · |review/approved claude · - none|" +
+		"report/ready  · Login done"
+	if got := entries(d.Timeline); got != want {
+		t.Errorf("applied timeline:\n got %q\nwant %q", got, want)
+	}
+	if len(d.Reports) != 1 || d.Reports[0].AssignmentId != "a2" || d.Reports[0].State != "ready" {
+		t.Errorf("applied reports = %v", d.Reports)
+	}
+
+	// Once a later message resumes that session, its start reads at the delivery.
+	cont.DeliveredAt = at(30 * time.Minute)
+	d = detail(impl, approved, cont)
+	if got := entries(d.Timeline); got != want+"|assignment/started gpt · " {
+		t.Errorf("resumed timeline: %q", got)
+	}
+	if e := d.Timeline[len(d.Timeline)-1]; !e.At.AsTime().Equal(epoch0.Add(30 * time.Minute)) {
+		t.Errorf("resumed start at %v, want the delivery", e.At.AsTime())
 	}
 }

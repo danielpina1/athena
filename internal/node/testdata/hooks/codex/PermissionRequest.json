@@ -1,0 +1,13 @@
+{
+  "session_id": "thr_fixture_0001",
+  "turn_id": "turn_fixture_0001",
+  "transcript_path": null,
+  "cwd": "/home/user/work",
+  "model": "gpt-5-codex",
+  "permission_mode": "default",
+  "hook_event_name": "PermissionRequest",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "kubectl apply -f app.yaml"
+  }
+}

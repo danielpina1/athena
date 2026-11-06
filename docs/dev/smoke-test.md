@@ -1,7 +1,8 @@
 # Smoke test with real Claude Code
 
 Plan 1 is tested with a fake `claude` in CI. This page shows how to check it against the real, logged-in
-Claude Code (2.1.x) on your machine. It costs a few cents (the model is `haiku`) and needs the network.
+Claude Code (2.1.x) on your machine, and Codex in the [manual Codex session](#manual-codex-session). It costs a few
+cents (the model is `haiku`) and needs the network.
 
 ## Automated
 
@@ -65,6 +66,44 @@ What to look for:
   are expired.
 
 Clean up with `rm -rf /tmp/athena-smoke /tmp/athena-smoke-outside.txt`.
+
+## Manual Codex session
+
+This spends a little of your Codex quota (and of Claude Code's, for the `auto` part). Codex must be installed
+([Codex setup](codex.md), section 2); Athena logs it in separately from your own `codex`, in `<state>/codex`, and never
+reads `~/.codex`. With the server above stopped:
+
+    S=/tmp/athena-smoke
+    ./bin/athena codex login --state-dir $S          # once per state dir: signs in with ChatGPT in the browser
+    ./bin/athena codex status --state-dir $S         # must end with "ready"
+    ./bin/athena server --state-dir $S --model haiku --approval-timeout 5m
+
+In a second terminal, on a scratch git repository (`git init /tmp/athena-scratch && git -C /tmp/athena-scratch commit
+--allow-empty -m init`):
+
+    ./bin/athena task --runtime codex --dir /tmp/athena-scratch "Add hello.txt containing hi, commit it, then report ready." --state-dir $S
+    ./bin/athena task --runtime auto --review --dir /tmp/athena-scratch "Add bye.txt containing bye, commit it, then report ready." --state-dir $S
+    ./bin/athena status <id> --state-dir $S          # the runtime of each assignment, and the review rounds
+    ./bin/athena logs <id> -f --state-dir $S
+
+What to look for:
+
+- `athena codex status` shows the version, "logged in" (the kind of account only, never its id or email), Athena's five
+  hooks trusted, and ready; anything else is in the troubleshooting table of [codex.md](codex.md).
+- The `codex` Ticket's assignment runs on `codex` and ends `completed`. The `auto` Ticket runs an implement assignment
+  and then a `review` assignment on the other runtime (Codex reviews unless `sandbox.required` is `true`, see
+  [codex.md](codex.md) section 8) before it ends; its timeline in the dashboard shows "Review started · …" and the
+  verdict.
+- `git -C /tmp/athena-scratch log --format=%B athena/<id>` shows no `Co-authored-by` trailer and no "Generated with"
+  footer; with a GitHub repository, neither does the pull request.
+- The dashboard's node card shows a quota bar per window for each runtime that has run, moving as the sessions run.
+- Nothing is ever written to `~/.codex` (`ls -la ~/.codex` before and after).
+- A process a Codex worker leaves running ends with its session. Ask a `codex` task to start a long-running background
+  command (for example "run `sleep 600` in the background, then report ready"); once its Ticket has ended,
+  `pgrep -fl "sleep 600"` must find nothing. Codex's background terminals may start their commands in a session of
+  their own, outside the process group Athena stops: if the process is still there, report it (and `kill` it by hand).
+
+Clean up with `rm -rf /tmp/athena-scratch` (and the state dir as above).
 
 ## GitHub (needs your GitHub App)
 

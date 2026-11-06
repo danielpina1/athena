@@ -5,3 +5,5 @@ Athena is a single Go binary (`athena`) that drives Claude Code and Codex sessio
 To work on GitHub through a GitHub App (mentions, routing, pull requests), see the [GitHub App setup guide](docs/dev/github-app.md).
 
 To reach Athena from your phone or laptop (HTTPS, passkeys, push), see the [dashboard setup guide](docs/dev/dashboard.md).
+
+To run workers on Codex as well as Claude Code (its own login, `auto` failover between them, review pairing), see the [Codex setup guide](docs/dev/codex.md).

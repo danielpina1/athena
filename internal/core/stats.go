@@ -8,42 +8,45 @@ import (
 
 // Names of the Engine's commands, the values of the `command` label of engine_command_seconds.
 const (
-	cmdSubmit             = "submit"
-	cmdAssignmentStarted  = "assignment_started"
-	cmdInputsDelivered    = "inputs_delivered"
-	cmdDeliveryFailed     = "delivery_failed"
-	cmdInputsRead         = "inputs_read"
-	cmdTurnEnded          = "turn_ended"
-	cmdFileReport         = "file_report"
-	cmdPersonInput        = "person_input"
-	cmdStop               = "stop"
-	cmdRetry              = "retry"
-	cmdRequestApproval    = "request_approval"
-	cmdAnswerApproval     = "answer_approval"
-	cmdExpireApproval     = "expire_approval"
-	cmdRecordUsage        = "record_usage"
-	cmdReceive            = "receive"
-	cmdBindThread         = "bind_thread"
-	cmdThreadClosed       = "thread_closed"
-	cmdEvaluateDue        = "evaluate_due"
-	cmdCandidateDelivered = "candidate_delivered"
-	cmdDecide             = "decide"
-	cmdAttach             = "attach"
-	cmdHandback           = "handback"
-	cmdReevaluate         = "reevaluate"
-	cmdDismiss            = "dismiss"
-	cmdPolicyChanged      = "policy_changed"
-	cmdFollowForContext   = "follow_for_context"
-	cmdMarkUnrelated      = "mark_unrelated"
-	cmdUnsubscribe        = "unsubscribe"
-	cmdNote               = "note"
-	cmdRequestStatus      = "request_status"
-	cmdReply              = "reply"
+	cmdSubmit                = "submit"
+	cmdAssignmentStarted     = "assignment_started"
+	cmdInputsDelivered       = "inputs_delivered"
+	cmdDeliveryFailed        = "delivery_failed"
+	cmdInputsRead            = "inputs_read"
+	cmdAssignmentInterrupted = "assignment_interrupted"
+	cmdUsageLimited          = "usage_limited"
+	cmdTurnEnded             = "turn_ended"
+	cmdFileReport            = "file_report"
+	cmdFileReview            = "file_review"
+	cmdPersonInput           = "person_input"
+	cmdStop                  = "stop"
+	cmdRetry                 = "retry"
+	cmdRequestApproval       = "request_approval"
+	cmdAnswerApproval        = "answer_approval"
+	cmdExpireApproval        = "expire_approval"
+	cmdRecordUsage           = "record_usage"
+	cmdReceive               = "receive"
+	cmdBindThread            = "bind_thread"
+	cmdThreadClosed          = "thread_closed"
+	cmdEvaluateDue           = "evaluate_due"
+	cmdCandidateDelivered    = "candidate_delivered"
+	cmdDecide                = "decide"
+	cmdAttach                = "attach"
+	cmdHandback              = "handback"
+	cmdReevaluate            = "reevaluate"
+	cmdDismiss               = "dismiss"
+	cmdPolicyChanged         = "policy_changed"
+	cmdFollowForContext      = "follow_for_context"
+	cmdMarkUnrelated         = "mark_unrelated"
+	cmdUnsubscribe           = "unsubscribe"
+	cmdNote                  = "note"
+	cmdRequestStatus         = "request_status"
+	cmdReply                 = "reply"
 )
 
 var commandNames = []string{
-	cmdSubmit, cmdAssignmentStarted, cmdInputsDelivered, cmdDeliveryFailed, cmdInputsRead, cmdTurnEnded,
-	cmdFileReport, cmdPersonInput, cmdStop, cmdRetry, cmdRequestApproval, cmdAnswerApproval, cmdExpireApproval,
+	cmdSubmit, cmdAssignmentStarted, cmdInputsDelivered, cmdDeliveryFailed, cmdInputsRead, cmdTurnEnded, cmdAssignmentInterrupted,
+	cmdUsageLimited, cmdFileReport, cmdFileReview, cmdPersonInput, cmdStop, cmdRetry, cmdRequestApproval, cmdAnswerApproval, cmdExpireApproval,
 	cmdRecordUsage, cmdReceive, cmdBindThread, cmdThreadClosed, cmdEvaluateDue, cmdCandidateDelivered, cmdDecide,
 	cmdAttach, cmdHandback, cmdReevaluate, cmdDismiss, cmdPolicyChanged, cmdFollowForContext, cmdMarkUnrelated,
 	cmdUnsubscribe, cmdNote, cmdRequestStatus, cmdReply,
@@ -53,7 +56,8 @@ var commandNames = []string{
 // command that causes them; what only the executor can see reaches it through RecordUsage.
 type TicketStats struct {
 	// QueueWait is the time from each Assignment's creation to its session starting, summed: the wait for a slot plus
-	// the launch.
+	// the launch, and for an Assignment made at a usage limit (UsageLimited) the wait for its runtime's reset too, which
+	// can be hours.
 	QueueWait time.Duration `json:"queueWait"`
 	// TimeToFirstOutput is how long the worker took from its first message to its first output (the first one only).
 	TimeToFirstOutput time.Duration `json:"timeToFirstOutput"`
@@ -75,12 +79,38 @@ type TicketStats struct {
 	PersonMessages int `json:"personMessages"`
 	Retries        int `json:"retries"`
 	Crashes        int `json:"crashes"`
+	// ReviewRounds counts the reviews of the Ticket's ready reports that ended (review.go), failed ones included.
+	ReviewRounds int `json:"reviewRounds"`
 
 	InputTokens     int64 `json:"inputTokens"`
 	OutputTokens    int64 `json:"outputTokens"`
 	CacheReadTokens int64 `json:"cacheReadTokens"`
 
 	CostUSD float64 `json:"costUsd"`
+
+	// ByRuntime splits the usage by the runtime that spent it (Assignment.Runtime): a Ticket's Assignments may run on
+	// different runtimes.
+	ByRuntime map[string]RuntimeStats `json:"byRuntime,omitempty"`
+}
+
+// RuntimeStats are the part of a Ticket's usage one runtime spent; Assignments counts the Assignments that started on
+// it.
+type RuntimeStats struct {
+	Turns           int           `json:"turns"`
+	ActiveTime      time.Duration `json:"activeTime"`
+	InputTokens     int64         `json:"inputTokens"`
+	OutputTokens    int64         `json:"outputTokens"`
+	CacheReadTokens int64         `json:"cacheReadTokens"`
+	CostUSD         float64       `json:"costUsd"`
+	Assignments     int           `json:"assignments"`
+}
+
+// byRuntime returns the stats of runtime so far, making ByRuntime if needed; the caller stores the result back.
+func (s *TicketStats) byRuntime(runtime string) RuntimeStats {
+	if s.ByRuntime == nil {
+		s.ByRuntime = map[string]RuntimeStats{}
+	}
+	return s.ByRuntime[runtime]
 }
 
 // CacheHitRatio is the share of input tokens served from the prompt cache: cache reads over cache reads plus uncached
@@ -126,6 +156,9 @@ type UsageDelta struct {
 	CostUSD        float64
 	SessionID      string
 	SessionCostUSD float64
+
+	// Runtime is the runtime that spent it; empty is the Assignment's (Assignment.Runtime).
+	Runtime string
 }
 
 // RecordUsage adds an executor's observations to the Ticket's stats in one transaction. It records them whether or not
@@ -164,7 +197,23 @@ func (e *Engine) RecordUsage(ticketID, assignmentID string, u UsageDelta) error 
 		if a == nil {
 			a = t.LatestAssignment()
 		}
+		if key := u.Runtime; key != "" || (a != nil && a.Runtime != "") {
+			if key == "" {
+				key = a.Runtime
+			}
+			rs := s.byRuntime(key)
+			rs.Turns += u.Turns
+			rs.ActiveTime += u.ActiveTime
+			rs.InputTokens += u.InputTokens
+			rs.OutputTokens += u.OutputTokens
+			rs.CacheReadTokens += u.CacheReadTokens
+			rs.CostUSD += cost
+			s.ByRuntime[key] = rs
+		}
 		runtime, model := runtimeModel(t, a)
+		if u.Runtime != "" {
+			runtime = u.Runtime
+		}
 		if o.reg != nil {
 			o.observe(func(r *metrics.Registry) {
 				for _, k := range []struct {

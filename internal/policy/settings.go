@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/danielpina1/athena/internal/core"
 	"github.com/danielpina1/athena/internal/store"
 )
 
@@ -88,11 +89,42 @@ type SourcePart struct {
 	Admission map[string]Row `json:"admission,omitempty"`
 }
 
-// Settings are what the Policy is built from: the accept mode, the rules and each Source's part.
+// Settings are what the Policy is built from: the accept mode, the rules and each Source's part; and the pairing of
+// the Tickets that name none, which is no part of the Policy's version.
 type Settings struct {
 	Mode    string                `json:"mode"`
 	Rules   []Rule                `json:"rules"`
 	Sources map[string]SourcePart `json:"sources"`
+	Pairing Pairing               `json:"pairing"`
+}
+
+// Values of Pairing.Review.
+const (
+	PairingOn  = "on"
+	PairingOff = "off"
+)
+
+// maxReviewRounds bounds Pairing.MaxRounds.
+const maxReviewRounds = 10
+
+// Pairing is the pairing default (spec §6.1a): Review on pairs every Ticket that names no pairing with a review of
+// its ready reports, in at most MaxRounds rounds (1 to 10). Empty fields are their defaults: off, 2 rounds.
+type Pairing struct {
+	Review    string `json:"review"`
+	MaxRounds int    `json:"maxRounds"`
+}
+
+// defaultPairing is the pairing of an installation nobody configured.
+var defaultPairing = Pairing{Review: PairingOff, MaxRounds: 2}
+
+// PairingDefaults are the Engine's pairing defaults these settings give (core.Options.Pairing).
+func (s Settings) PairingDefaults() core.PairingDefaults {
+	p := normalize(s).Pairing
+	d := core.PairingDefaults{MaxRounds: p.MaxRounds}
+	if p.Review == PairingOn {
+		d.Mode = core.PairingReview
+	}
+	return d
 }
 
 // defaultRow is the reference's default admission row.
@@ -110,7 +142,14 @@ func Defaults(allowed []string) Settings {
 // normalize returns a deep copy of s with trimmed names and logins, an admission row for every known scope and
 // every empty cell set to its default.
 func normalize(s Settings) Settings {
-	out := Settings{Mode: s.Mode, Rules: make([]Rule, len(s.Rules)), Sources: make(map[string]SourcePart, len(s.Sources))}
+	out := Settings{Mode: s.Mode, Rules: make([]Rule, len(s.Rules)), Sources: make(map[string]SourcePart, len(s.Sources)),
+		Pairing: s.Pairing}
+	if out.Pairing.Review == "" {
+		out.Pairing.Review = defaultPairing.Review
+	}
+	if out.Pairing.MaxRounds == 0 {
+		out.Pairing.MaxRounds = defaultPairing.MaxRounds
+	}
 	for i, r := range s.Rules {
 		r.Name = strings.TrimSpace(r.Name)
 		out.Rules[i] = r
@@ -152,12 +191,20 @@ func trimmed(in []string) []string {
 
 // Validate reports why s cannot be saved, or nil: the mode is off, observe or auto; rule names are non-empty and
 // unique; logins are non-empty; admission rows are known and each cell holds one of its allowed choices (a ci row
-// has only the last cell).
+// has only the last cell); the pairing's review is on or off and its rounds 1 to 10 (empty and 0 are the defaults).
 func Validate(s Settings) error {
 	switch s.Mode {
 	case ModeOff, ModeObserve, ModeAuto:
 	default:
 		return fmt.Errorf("policy: mode %q is not off, observe or auto", s.Mode)
+	}
+	switch s.Pairing.Review {
+	case "", PairingOn, PairingOff:
+	default:
+		return fmt.Errorf("policy: pairing review %q is not on or off", s.Pairing.Review)
+	}
+	if r := s.Pairing.MaxRounds; r < 0 || r > maxReviewRounds {
+		return fmt.Errorf("policy: pairing maxRounds %d is not 1 to %d", r, maxReviewRounds)
 	}
 	seen := map[string]bool{}
 	for _, r := range s.Rules {

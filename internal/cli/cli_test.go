@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -107,7 +108,7 @@ func startServer(t *testing.T) string {
 	var serverErr bytes.Buffer
 	go func() {
 		var out bytes.Buffer
-		done <- Run(ctx, "server", []string{"--state-dir", dir, "--claude", fakeClaude(t), "--slots", "2",
+		done <- Run(ctx, "server", []string{"--state-dir", dir, "--claude", fakeClaude(t), "--codex", noCodex, "--slots", "2",
 			"--model", "haiku", "--blocked", "rm,git push", "--approval-timeout", "5s"}, &out, &lockedWriter{w: &serverErr})
 	}()
 	t.Cleanup(func() {
@@ -400,5 +401,108 @@ func TestMetricsCommand(t *testing.T) {
 	_, o, _ := athena(ctx, "status", "--state-dir", dir, id)
 	if !strings.Contains(o, "stats:") || !strings.Contains(o, "queue wait") {
 		t.Errorf("status lacks stats:\n%s", o)
+	}
+}
+
+// TestServerHelperProcess is the body of the subprocess TestServerStopsOnSIGHUP runs; it does nothing in a normal run.
+func TestServerHelperProcess(t *testing.T) {
+	dir := os.Getenv("ATHENA_TEST_SERVER_DIR")
+	if dir == "" {
+		t.Skip("helper process")
+	}
+	os.Exit(Run(context.Background(), "server", []string{"--state-dir", dir, "--claude", os.Getenv("ATHENA_TEST_CLAUDE"), "--codex", noCodex}, io.Discard, os.Stderr))
+}
+
+// noCodex is the codex the CLI's test servers run: none, so no test reaches the owner's codex.
+const noCodex = "/nonexistent/athena-test-codex"
+
+// A closed terminal sends SIGHUP; the server stops gracefully on it, as on SIGINT and SIGTERM, instead of dying with
+// its sessions still running.
+func TestServerStopsOnSIGHUP(t *testing.T) {
+	dir := newStateDir(t)
+	cmd := exec.Command(os.Args[0], "-test.run=^TestServerHelperProcess$")
+	cmd.Env = append(os.Environ(), "ATHENA_TEST_SERVER_DIR="+dir, "ATHENA_TEST_CLAUDE="+fakeClaude(t))
+	var stderr bytes.Buffer
+	cmd.Stderr = &lockedWriter{w: &stderr}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
+	t.Cleanup(func() { _ = cmd.Process.Kill() })
+	eventually(t, "server answers", func() bool {
+		code, _, _ := athena(context.Background(), "approvals", "--state-dir", dir)
+		return code == 0
+	})
+	if err := cmd.Process.Signal(syscall.SIGHUP); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-exited:
+		if err != nil {
+			t.Fatalf("server exited with %v after SIGHUP, want a clean exit 0\n%s", err, stderr.String())
+		}
+	case <-time.After(waitTimeout):
+		t.Fatalf("server still running after SIGHUP\n%s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "athena server stopping") {
+		t.Fatalf("log = %q, want it to say the server stops", stderr.String())
+	}
+}
+
+// `athena task --runtime` names the runtime the task runs on; left out, the server's default (auto) does, and the
+// status shows the runtime each Assignment ran on.
+func TestTaskRuntimeFlag(t *testing.T) {
+	dir := startServer(t)
+	ctx := context.Background()
+	code, out, errOut := athena(ctx, "task", "Pinned to claude", "--runtime", "claude", "--state-dir", dir)
+	if code != 0 {
+		t.Fatalf("task --runtime claude: exit %d, stderr %q", code, errOut)
+	}
+	if d := detail(t, dir, strings.TrimSpace(out)); d.Runtime != "claude" {
+		t.Fatalf("runtime = %q, want claude", d.Runtime)
+	}
+	code, out, errOut = athena(ctx, "task", "Pick one", "--state-dir", dir)
+	if code != 0 {
+		t.Fatalf("task: exit %d, stderr %q", code, errOut)
+	}
+	id := strings.TrimSpace(out)
+	if d := detail(t, dir, id); d.Runtime != "auto" {
+		t.Fatalf("runtime = %q, want the server's default auto", d.Runtime)
+	}
+	runningAssignment(t, dir, id)
+	if _, out, _ := athena(ctx, "status", id, "--state-dir", dir); !strings.Contains(out, "runtime:   auto") || !strings.Contains(out, "running  on claude") {
+		t.Fatalf("status %s:\n%s", id, out)
+	}
+	if code, _, errOut := athena(ctx, "task", "Bad", "--runtime", "gemini", "--state-dir", dir); code != 1 || !strings.Contains(errOut, `"gemini"`) {
+		t.Fatalf("task --runtime gemini: exit %d, stderr %q", code, errOut)
+	}
+}
+
+// `athena task --review` pairs the task with a review of its ready reports; --review=false pairs it with none, and
+// without the flag the Policy's pairing default (off) holds.
+func TestTaskReviewFlag(t *testing.T) {
+	dir := startServer(t)
+	ctx := context.Background()
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{{[]string{"--review"}, "review"}, {[]string{"--review=false"}, ""}, {nil, ""}} {
+		args := append([]string{"task", "Reviewed task"}, tc.args...)
+		code, out, errOut := athena(ctx, append(args, "--state-dir", dir)...)
+		if code != 0 {
+			t.Fatalf("task %v: exit %d, stderr %q", tc.args, code, errOut)
+		}
+		if d := detail(t, dir, strings.TrimSpace(out)); d.Pairing != tc.want {
+			t.Errorf("task %v: pairing %q, want %q", tc.args, d.Pairing, tc.want)
+		}
+	}
+}
+
+// Each usage line names every flag its command takes: a flag of task's is in its usage.
+func TestTaskUsageNamesReview(t *testing.T) {
+	code, _, errOut := athena(context.Background(), "task", "--state-dir", newStateDir(t))
+	if code != 2 || !strings.Contains(errOut, "[--review[=false]]") {
+		t.Fatalf("task usage: exit %d, %q", code, errOut)
 	}
 }

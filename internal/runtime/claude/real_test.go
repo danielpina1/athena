@@ -68,7 +68,7 @@ func TestRealClaude(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Send("Create a file hi.txt containing hi, then say done."); err != nil {
+	if err := s.Send("Create a file hi.txt containing hi, then say done.", ""); err != nil {
 		t.Fatal(err)
 	}
 	var init Init

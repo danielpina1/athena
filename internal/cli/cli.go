@@ -1,8 +1,8 @@
 // Package cli implements the owner's commands: `athena server`, `athena github setup|check` (which read and write the
 // configuration and talk to GitHub directly), and the commands that talk to the server over the control socket (task,
 // status, logs, reply, stop, retry, approvals, approve, deny, metrics, policy, triggers, threads, decisions,
-// reevaluate, dismiss, unsubscribe), and `athena web setup|status|ca|enroll|passkeys|revoke`, which work on the
-// configuration, the CA and the store directly.
+// reevaluate, dismiss, unsubscribe), `athena web setup|status|ca|enroll|passkeys|revoke`, which work on the
+// configuration, the CA and the store directly, and `athena codex login|status`, which work on Athena's own CODEX_HOME.
 package cli
 
 import (
@@ -35,8 +35,8 @@ const dialTimeout = 2 * time.Second
 
 // usage is each command's usage line, without the --state-dir flag every command takes.
 var usage = map[string]string{
-	"server":      "athena server [--slots N] [--model M] [--blocked a,b] [--approval-timeout D] [--claude PATH]",
-	"task":        `athena task "<text>" [--dir D | --repo owner/name] [--model M]`,
+	"server":      "athena server [--slots N] [--model M] [--blocked a,b] [--approval-timeout D] [--claude PATH] [--codex PATH]",
+	"task":        `athena task "<text>" [--dir D | --repo owner/name] [--model M] [--runtime claude|codex|auto] [--review[=false]]`,
 	"github":      "athena github setup --app-id N --slug S --key FILE --installation N --repo owner/name [--repo ...] [--receive-all owner/name ...] | athena github check",
 	"policy":      "athena policy show | athena policy set FILE",
 	"triggers":    "athena triggers [--thread K]",
@@ -54,6 +54,7 @@ var usage = map[string]string{
 	"approve":     "athena approve <id> [--note N]",
 	"deny":        "athena deny <id> [--note N]",
 	"metrics":     "athena metrics [--window 1h|24h|start]",
+	"codex":       "athena codex login [--with-api-key] | athena codex status",
 	"web":         "athena web setup --host H [--ip IP ...] [--listen ADDR] [--tls ca|acme|off] [--acme-email E --acme-provider P --acme-agree-tos] | athena web status | athena web ca | athena web enroll [--ttl D] | athena web passkeys | athena web revoke <id>",
 }
 
@@ -90,6 +91,8 @@ func Run(ctx context.Context, cmd string, args []string, stdout, stderr io.Write
 		return c.github(ctx, args)
 	case "web":
 		return c.web(args)
+	case "codex":
+		return c.codex(ctx, args)
 	case "policy":
 		return c.policy(args)
 	case "triggers":
@@ -166,6 +169,7 @@ func (c *command) server(ctx context.Context, args []string) int {
 	blocked := c.fs.String("blocked", "", "comma-separated commands sessions may not run")
 	timeout := c.fs.Duration("approval-timeout", 0, "how long an escalated tool call waits for an answer (default 30m)")
 	claudeBin := c.fs.String("claude", "", "the claude executable (default claude)")
+	codexBin := c.fs.String("codex", "", "the codex executable (default: runtimes.codex.binary of config.json, or codex)")
 	if _, code, ok := c.parse(args, 0, 0); !ok {
 		return code
 	}
@@ -175,15 +179,18 @@ func (c *command) server(ctx context.Context, args []string) int {
 			list = append(list, b)
 		}
 	}
-	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	// A closed terminal sends SIGHUP: it stops the server gracefully, like Ctrl-C, so its sessions end and resume on
+	// the next start instead of being orphaned.
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	defer stop()
 	err := server.Run(ctx, server.Config{
 		StateDir: c.stateDir,
 		Node: node.Config{
 			Slots: *slots, Model: *model, Blocked: list, ApprovalTimeout: *timeout, ClaudeBinary: *claudeBin,
 		},
-		Stderr:  c.stderr,
-		Version: Version,
+		CodexBinary: *codexBin,
+		Stderr:      c.stderr,
+		Version:     Version,
 	})
 	if err != nil {
 		return c.fail(err)
@@ -197,6 +204,9 @@ func (c *command) task(args []string) int {
 	dir := c.fs.String("dir", "", "directory the task runs in (a git repository gets its own worktree)")
 	repo := c.fs.String("repo", "", "GitHub repository (owner/name) the task works in, through the App")
 	model := c.fs.String("model", "", "model for this task")
+	runtime := c.fs.String("runtime", "", "runtime the task runs on: claude, codex or auto (default: runtimes.default of config.json)")
+	var review optionalBool
+	c.fs.Var(&review, "review", "have a read-only session review each ready report first; --review=false (with the =) for none; default: the policy's pairing")
 	pos, code, ok := c.parse(args, 1, -1)
 	if !ok {
 		return code
@@ -218,7 +228,8 @@ func (c *command) task(args []string) int {
 	var out struct {
 		ID string `json:"id"`
 	}
-	if err := call(c.stateDir, server.Request{Op: server.OpSubmit, Text: strings.Join(pos, " "), Dir: taskDir, Repo: *repo, Model: *model}, &out); err != nil {
+	if err := call(c.stateDir, server.Request{Op: server.OpSubmit, Text: strings.Join(pos, " "), Dir: taskDir, Repo: *repo, Model: *model,
+		Runtime: *runtime, Review: review.value}, &out); err != nil {
 		return c.fail(err)
 	}
 	fmt.Fprintln(c.stdout, out.ID)
@@ -339,6 +350,12 @@ func printDetail(w io.Writer, d server.TicketDetail, now time.Time) {
 	fmt.Fprintln(w, "assignments:")
 	for _, a := range d.Assignments {
 		line := fmt.Sprintf("  %s  %s", a.ID, a.State)
+		if a.Runtime != "" {
+			line += "  on " + a.Runtime
+		}
+		if a.Role != "" {
+			line += " (" + a.Role + ")"
+		}
 		if a.StartedAt != nil {
 			line += "  started " + a.StartedAt.Local().Format(time.DateTime)
 		}
@@ -660,3 +677,24 @@ func stream(ctx context.Context, stateDir string, req server.Request, fn func(js
 	}
 	return nil
 }
+
+// optionalBool is a boolean flag that tells unset (nil) from false: --name sets it true, --name=false false.
+type optionalBool struct{ value *bool }
+
+func (b *optionalBool) String() string {
+	if b == nil || b.value == nil {
+		return ""
+	}
+	return strconv.FormatBool(*b.value)
+}
+
+func (b *optionalBool) Set(s string) error {
+	v, err := strconv.ParseBool(s)
+	if err != nil {
+		return err
+	}
+	b.value = &v
+	return nil
+}
+
+func (b *optionalBool) IsBoolFlag() bool { return true }

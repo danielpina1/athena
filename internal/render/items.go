@@ -32,7 +32,9 @@ const (
 // hooks, background tasks, ...), rate limit events, tool progress heartbeats, command lifecycle lines and thinking
 // blocks without text (thinking is redacted upstream). A message the session was sent (echoed back) renders as one
 // "user" item per Input in it (inputItems).
-// A line of an unknown type renders to one "other" item that names it.
+// Three formats share a transcript, told apart by the line's top-level keys: Claude stream-json (the rest of this
+// comment), a Codex envelope {"at","codex"} (codexItems) and an Athena line {"athena"} (a session marker, which renders to
+// one "runtime" item, or a note of the session). A line of an unknown type renders to one "other" item that names it.
 func Items(line []byte, offset int64) []*athenav1.StreamItem {
 	other := func(text string) []*athenav1.StreamItem {
 		return []*athenav1.StreamItem{{Offset: offset, Kind: "other", Text: text}}
@@ -51,8 +53,12 @@ func Items(line []byte, offset int64) []*athenav1.StreamItem {
 		CostUSD   float64 `json:"total_cost_usd"`
 		Duration  int64   `json:"duration_ms"`
 		IsReplay  bool    `json:"isReplay"`
-		Result    string  `json:"result"`
-		Message   struct {
+		// A line of the other formats, told apart by its top-level keys alone (codex.go, marker.go).
+		At      string          `json:"at"`
+		Codex   json.RawMessage `json:"codex"`
+		Athena  json.RawMessage `json:"athena"`
+		Result  string          `json:"result"`
+		Message struct {
 			Content json.RawMessage `json:"content"`
 		} `json:"message"`
 	}
@@ -62,6 +68,19 @@ func Items(line []byte, offset int64) []*athenav1.StreamItem {
 	var at *timestamppb.Timestamp
 	if t, err := time.Parse(time.RFC3339Nano, l.Timestamp); err == nil {
 		at = timestamppb.New(t)
+	}
+	if len(l.Codex) > 0 || len(l.Athena) > 0 {
+		if t, err := time.Parse(time.RFC3339Nano, l.At); err == nil {
+			at = timestamppb.New(t)
+		}
+		items := codexItems(l.Codex, offset)
+		if len(l.Codex) == 0 {
+			items = athenaItems(line)
+		}
+		for _, it := range items {
+			it.Offset, it.At = offset, at
+		}
+		return items
 	}
 	var out []*athenav1.StreamItem
 	add := func(it *athenav1.StreamItem) {

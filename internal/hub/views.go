@@ -70,8 +70,29 @@ func prURL(t *core.Ticket) string {
 	return ""
 }
 
-// defaultRuntime is the runtime of a Ticket whose Execution does not name one: Claude Code is the only one.
-const defaultRuntime = "claude"
+// defaultRuntime is the runtime of a Ticket whose Execution does not name one (from before runtimes): Claude Code.
+const defaultRuntime = core.RuntimeClaude
+
+// WhyMaxRunes cuts a runtime's why (RuntimeStatus.why) on the wire.
+const WhyMaxRunes = 200
+
+// runtimeChoice is what the Ticket asked for: claude, codex or auto.
+func runtimeChoice(t *core.Ticket) string {
+	if x := t.Execution; x != nil && x.Runtime != "" {
+		return x.Runtime
+	}
+	return defaultRuntime
+}
+
+// runtimeOf is the runtime of the latest Assignment that started (a review's too), else the Ticket's choice.
+func runtimeOf(t *core.Ticket) string {
+	for i := len(t.Assignments) - 1; i >= 0; i-- {
+		if a := &t.Assignments[i]; a.StartedAt != nil && a.Runtime != "" {
+			return a.Runtime
+		}
+	}
+	return runtimeChoice(t)
+}
 
 // ticketSummary maps a Ticket; gitFolder tells its branch (see node.WorktreeBranch; nil: no folder has a .git entry).
 func ticketSummary(t *core.Ticket, st core.Stage, gitFolder func(dir string) bool) *athenav1.TicketSummary {
@@ -81,12 +102,10 @@ func ticketSummary(t *core.Ticket, st core.Stage, gitFolder func(dir string) boo
 		NeedsYou: st.Stage == "person", CanRetry: core.CanRetry(t),
 		PendingApprovalId: t.PendingApproval, PrUrl: prURL(t),
 	}
-	v.Runtime = defaultRuntime
+	v.Runtime, v.RuntimeChoice = runtimeOf(t), runtimeChoice(t)
+	v.Pairing, v.ReviewRounds = t.Pairing, uint32(max(t.Stats.ReviewRounds, 0))
 	if t.Execution != nil {
 		v.Dir, v.Model = t.Execution.Directory, t.Execution.Model
-		if t.Execution.Runtime != "" {
-			v.Runtime = t.Execution.Runtime
-		}
 	}
 	v.Branch = node.WorktreeBranch(*t, gitFolder)
 	if a := t.LatestAssignment(); a != nil && a.Model != "" {
@@ -187,8 +206,35 @@ func decisionView(d *core.Decision) *athenav1.DecisionView {
 }
 
 func nodeStatus(s node.Status) *athenav1.NodeStatus {
-	return &athenav1.NodeStatus{Name: s.Name, Slots: uint32(s.Slots), SlotsInUse: uint32(s.SlotsInUse),
+	v := &athenav1.NodeStatus{Name: s.Name, Slots: uint32(s.Slots), SlotsInUse: uint32(s.SlotsInUse),
 		LiveTicketIds: slices.Clone(s.LiveTicketIDs), Queued: uint32(s.Queued), ClaudeVersion: s.ClaudeVersion}
+	for _, r := range s.Runtimes {
+		v.Runtimes = append(v.Runtimes, runtimeStatus(r))
+	}
+	return v
+}
+
+// runtimeStatus maps one runtime of the node. Its why is redacted, flattened and cut: it may carry what a CLI said.
+func runtimeStatus(r node.RuntimeStatus) *athenav1.RuntimeStatus {
+	q := r.Quota
+	v := &athenav1.RuntimeStatus{Name: r.Name, Version: r.Version, Ready: r.Ready, Tested: r.Tested,
+		Why: clip(oneLine(redact.String(r.Why)), WhyMaxRunes), Live: uint32(max(r.Live, 0)),
+		LimitedUntil: tsp(q.LimitedUntil), ReadAt: ts(q.ReadAt), Measured: q.Measured}
+	// A window is named by its bucket too only when the runtime reports several (a Codex per-model limit).
+	buckets := map[string]bool{}
+	for _, w := range q.Windows {
+		if w.Bucket != "" {
+			buckets[w.Bucket] = true
+		}
+	}
+	for _, w := range q.Windows {
+		name := w.Name
+		if w.Bucket != "" && len(buckets) > 1 {
+			name = w.Bucket + " " + name
+		}
+		v.Windows = append(v.Windows, &athenav1.QuotaWindow{Name: name, Used: float32(w.Used), ResetsAt: tsp(w.ResetsAt), Stale: w.Stale})
+	}
+	return v
 }
 
 // athenaMarker matches Athena's hidden markers, such as the receipt line of a comment it posted on GitHub.
@@ -211,6 +257,12 @@ func clean(s string) string { return athenaMarker.ReplaceAllString(redact.String
 func timelineEntry(at time.Time, kind, subkind, subject, text, ref string) *athenav1.TimelineEntry {
 	return &athenav1.TimelineEntry{At: ts(at), Kind: kind, Subkind: subkind, Subject: clip(oneLine(clean(subject)), subjectRunes),
 		Text: clip(oneLine(clean(text)), timelineRunes), RefId: ref}
+}
+
+// withRuntime sets the runtime of an assignment or review entry.
+func withRuntime(e *athenav1.TimelineEntry, runtime string) *athenav1.TimelineEntry {
+	e.Runtime = runtime
+	return e
 }
 
 // firstLine is the first line of s with text on it.
@@ -273,22 +325,45 @@ func approvalWhy(a *core.Approval) string {
 	return ""
 }
 
-// assignmentEnd is how an ended Assignment's end reads: its subkind and text. latest says it is the Ticket's last,
-// the one a Ticket's end stops.
-func assignmentEnd(t *core.Ticket, a *core.Assignment, latest bool) (string, string) {
+// assignmentEnd is how an ended Assignment's end reads: its subkind, subject and text. latest says it is the Ticket's
+// last, the one a Ticket's end stops. An end at a usage limit is "limited", its subject the runtime and its text the
+// RFC 3339 reset (empty when unknown).
+func assignmentEnd(t *core.Ticket, a *core.Assignment, latest bool) (sub, subject, text string) {
 	reason := a.EndedReason
 	switch {
+	case reason == core.ReasonUsageLimit:
+		// Its runtime, and when the limit resets (empty when unknown).
+		runtime := a.Runtime
+		if l := a.Limit; l != nil {
+			if l.Runtime != "" {
+				runtime = l.Runtime
+			}
+			if l.ResetsAt != nil {
+				text = l.ResetsAt.UTC().Format(time.RFC3339)
+			}
+		}
+		return "limited", runtime, text
 	case reason == "retried":
-		return "retried", ""
+		return "retried", "", ""
 	case strings.Contains(reason, "restart"):
-		return "interrupted", reason
+		return "interrupted", "", reason
 	case a.Report != nil && a.Report.State == core.ReportFailed:
 		// The failed Report says why on its own row: the end is only the end.
-		return "ended", ""
+		return "ended", "", ""
 	case latest && t.Ended != nil && t.Ended.By == core.EndByHuman:
-		return "stopped", t.Ended.Reason
+		return "stopped", "", t.Ended.Reason
 	}
-	return "ended", reason
+	return "ended", "", reason
+}
+
+// reviewEntry is the end of a review Assignment: its verdict (approved, changes or failed, the outcome's), the first
+// finding as its text (why, for a review that could not finish and says why) and the runtime that reviewed as its subject.
+func reviewEntry(at time.Time, a *core.Assignment, o *core.ReviewOutcome) *athenav1.TimelineEntry {
+	text := o.First
+	if o.Verdict == core.ReviewFailed && o.Why != "" {
+		text = firstLine(clean(o.Why))
+	}
+	return withRuntime(timelineEntry(at, "review", o.Verdict, a.Runtime, text, a.ID), a.Runtime)
 }
 
 // headBytes is how much of a Report's summary the timeline reads for its first line: enough for any line it shows.
@@ -338,8 +413,11 @@ func originEcho(t *core.Ticket, origin *core.Trigger) int {
 // the Ticket (the owner's reply or a person's on a Channel) is a reply; any other Input is an input. actors names the
 // GitHub login of a reply's Trigger, by Trigger id, where the caller knows it.
 //
-// It reads as a story: an Assignment has a start entry and, once it ended, an end entry at its end; an Input that is
-// the origin Trigger recorded again is left out; an owner's own task has no router Decision.
+// It reads as a story: an Assignment has a start entry, a restart entry for each time its session was cut short (and a
+// resumed one when it started again) and, once it ended, an end entry at its end; an Input that is
+// the origin Trigger recorded again is left out; an owner's own task has no router Decision. A ready report a review
+// holds reads only once applied, on the Assignment that continues the implementer's session, whose start is when an
+// Input first reached it (none before).
 func ticketTimeline(t *core.Ticket, origin *core.Trigger, pending *core.Approval, answered []core.Approval,
 	actors map[string]string) []*athenav1.TimelineEntry {
 	var out []*athenav1.TimelineEntry
@@ -358,17 +436,36 @@ func ticketTimeline(t *core.Ticket, origin *core.Trigger, pending *core.Approval
 		if a.State == core.AssignmentPending {
 			sub = "queued"
 		}
-		out = append(out, timelineEntry(start, "assignment", sub, a.Model, "", a.ID))
-		if r := a.Report; r != nil {
+		if a.Role == core.RoleReview && sub == "started" {
+			sub = "review"
+		}
+		switch {
+		case a.Continues == "":
+			out = append(out, withRuntime(timelineEntry(start, "assignment", sub, a.Model, "", a.ID), a.Runtime))
+		case a.DeliveredAt != nil:
+			// It applied a held report in the implementer's session; that session starts again once an Input reaches it.
+			out = append(out, withRuntime(timelineEntry(*a.DeliveredAt, "assignment", sub, a.Model, "", a.ID), a.Runtime))
+		}
+		if r := a.Report; r != nil && !heldForReview(a) {
 			subject := ""
 			if r.Pull > 0 {
 				subject = "PR #" + strconv.Itoa(r.Pull)
 			}
 			out = append(out, timelineEntry(r.At, "report", string(r.State), subject, firstLine(clean(headOf(r.Summary))), a.ID))
 		}
+		for _, in := range a.Interruptions {
+			out = append(out, withRuntime(timelineEntry(in.At, "assignment", "restart", "", "", a.ID), a.Runtime))
+			if in.ResumedAt != nil {
+				out = append(out, withRuntime(timelineEntry(*in.ResumedAt, "assignment", "resumed", "", "", a.ID), a.Runtime))
+			}
+		}
 		if a.State == core.AssignmentEnded && a.EndedAt != nil {
-			sub, text := assignmentEnd(t, a, i == len(t.Assignments)-1)
-			out = append(out, timelineEntry(*a.EndedAt, "assignment", sub, "", text, a.ID))
+			if o := a.ReviewOutcome; a.Role == core.RoleReview && a.EndedReason == core.ReasonReviewed && o != nil {
+				out = append(out, reviewEntry(*a.EndedAt, a, o))
+				continue
+			}
+			sub, subject, text := assignmentEnd(t, a, i == len(t.Assignments)-1)
+			out = append(out, withRuntime(timelineEntry(*a.EndedAt, "assignment", sub, subject, text, a.ID), a.Runtime))
 		}
 	}
 	echo := originEcho(t, origin)
@@ -429,14 +526,21 @@ func clipBytes(s string, n int) string {
 	return s[:cut] + "…"
 }
 
-// ticketReports are the Ticket's Reports in full, newest last, the last reportsKept of them. The latest one's question
-// is the Ticket's open question when the Report has none of its own (a Report stored before Reports kept it).
+// heldForReview reports whether a's Report is a ready report a review held: it is not the Ticket's until the review
+// applies it, on the Assignment that continues a (core.Assignment.Continues), which then shows it once.
+func heldForReview(a *core.Assignment) bool {
+	return a.Role != core.RoleReview && a.EndedReason == core.ReasonReview
+}
+
+// ticketReports are the Ticket's Reports in full, newest last, the last reportsKept of them, less a report a review
+// holds (heldForReview). The latest one's question is the Ticket's open question when the Report has none of its own
+// (a Report stored before Reports kept it).
 func ticketReports(t *core.Ticket) []*athenav1.ReportView {
 	// The last reportsKept first, so only those are redacted.
 	var with []*core.Assignment
 	for i := range t.Assignments {
-		if t.Assignments[i].Report != nil {
-			with = append(with, &t.Assignments[i])
+		if a := &t.Assignments[i]; a.Report != nil && !heldForReview(a) {
+			with = append(with, a)
 		}
 	}
 	if len(with) > reportsKept {

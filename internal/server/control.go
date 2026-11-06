@@ -68,6 +68,12 @@ type Request struct {
 	Thread string `json:"thread,omitempty"`
 	// Repo is the repository (owner/name) a submitted task works in.
 	Repo string `json:"repo,omitempty"`
+	// Runtime is the runtime a submitted task runs on: claude, codex or auto; empty is runtimes.default of the
+	// configuration (auto unless it says otherwise).
+	Runtime string `json:"runtime,omitempty"`
+	// Review pairs a submitted task with a review of its ready reports (true) or with none (false); unset is the
+	// Policy's pairing default.
+	Review *bool `json:"review,omitempty"`
 	// Policy is the settings document policy.set saves.
 	Policy json.RawMessage `json:"policy,omitempty"`
 }
@@ -108,6 +114,8 @@ type TicketDetail struct {
 	Repo    string `json:"repo,omitempty"`
 	Runtime string `json:"runtime,omitempty"`
 	Model   string `json:"model,omitempty"`
+	// Pairing is how the Ticket's work is paired: "review", or empty for none.
+	Pairing string `json:"pairing,omitempty"`
 	// Question is what the Ticket asks a person, if anything.
 	Question    string            `json:"question,omitempty"`
 	Ended       *core.Ended       `json:"ended,omitempty"`

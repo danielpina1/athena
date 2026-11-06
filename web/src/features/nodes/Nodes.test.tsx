@@ -32,6 +32,30 @@ test("the node card shows its load, queue, live Tickets and Claude version", () 
   expect(within(card).getByText("2.1.3")).toBeTruthy();
 });
 
+test("the node card shows each runtime's block instead of the Claude version alone", () => {
+  load({
+    node: {
+      ...node,
+      runtimes: [
+        { name: "claude", ready: true, tested: false, measured: false },
+        { name: "codex", version: "0.160.1", ready: false, tested: true, why: "Codex is not logged in: run athena codex login" },
+      ],
+    },
+    health: { items: [] },
+  });
+  renderNodes();
+  const card = screen.getByRole("region", { name: "mac-mini" });
+  expect(within(card).queryByText("Claude version")).toBeNull();
+  const runtimes = within(card).getByRole("list", { name: "Runtimes" });
+  const claude = within(runtimes).getByRole("region", { name: "Claude Code" });
+  expect(within(claude).getByText("Not measured yet")).toBeTruthy();
+  // An empty version says nothing: never "untested".
+  expect(within(claude).queryByText("untested")).toBeNull();
+  const codex = within(runtimes).getByRole("region", { name: "Codex" });
+  expect(within(codex).getByText("Not ready")).toBeTruthy();
+  expect(within(codex).getByText("Codex is not logged in: run athena codex login")).toBeTruthy();
+});
+
 test("healthy checks collapse into one line and failing ones say why and since when", async () => {
   const user = userEvent.setup();
   load({

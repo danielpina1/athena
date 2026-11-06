@@ -137,7 +137,7 @@ func TestSessionAgainstFake(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Send("make a file"); err != nil {
+	if err := s.Send("make a file", ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -156,7 +156,7 @@ func TestSessionAgainstFake(t *testing.T) {
 			t.Fatal("no result")
 		}
 	}
-	if err := s.Send("second"); err != nil {
+	if err := s.Send("second", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Close(); err != nil {
@@ -215,7 +215,7 @@ func TestSessionAgainstFake(t *testing.T) {
 		t.Fatalf(".athena mode = %o", st.Mode().Perm())
 	}
 
-	if err := s.Send("late"); err == nil {
+	if err := s.Send("late", ""); err == nil {
 		t.Fatal("Send after exit must return an error")
 	}
 }
@@ -337,7 +337,7 @@ func TestExitMidTurnClosesEvents(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Send("go"); err != nil {
+	if err := s.Send("go", ""); err != nil {
 		t.Fatal(err)
 	}
 	evs := collect(t, s)
@@ -353,7 +353,7 @@ func TestExitMidTurnClosesEvents(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "exit status 3") {
 		t.Fatalf("Wait = %v, want exit status 3", err)
 	}
-	if err := s.Send("again"); err == nil {
+	if err := s.Send("again", ""); err == nil {
 		t.Fatal("Send after exit must return an error")
 	}
 }
@@ -371,7 +371,7 @@ func TestReaderNeverBlocksOnUndrainedEvents(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Send("go"); err != nil {
+	if err := s.Send("go", ""); err != nil {
 		t.Fatal(err)
 	}
 	// Nobody reads Events. The process must still run to completion and every
@@ -556,7 +556,7 @@ func TestCloseDoesNotHangOnBlockedSend(t *testing.T) {
 		t.Fatal(err)
 	}
 	sendErr := make(chan error, 1)
-	go func() { sendErr <- s.Send(strings.Repeat("x", 4<<20)) }() // far more than a pipe buffer
+	go func() { sendErr <- s.Send(strings.Repeat("x", 4<<20), "") }() // far more than a pipe buffer
 	select {
 	case err := <-sendErr:
 		t.Fatalf("Send returned early (%v); the child should not be reading", err)
@@ -608,7 +608,7 @@ func TestTranscriptPathAppendsAcrossSessions(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := s.Send("go"); err != nil {
+		if err := s.Send("go", ""); err != nil {
 			t.Fatal(err)
 		}
 		if err := s.Close(); err != nil {
@@ -658,7 +658,7 @@ func TestOnLineOffsetsMatchFile(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := s.Send("go"); err != nil {
+		if err := s.Send("go", ""); err != nil {
 			t.Fatal(err)
 		}
 		if err := s.Close(); err != nil {

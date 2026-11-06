@@ -189,7 +189,7 @@ func TestCloneIgnoresPlantedHooks(t *testing.T) {
 	if err := ensureWorktree(clone, wt2, "athena/t-0002", "origin/"+def, cloneGitEnv(clone, "o/r")); err != nil {
 		t.Fatal(err)
 	}
-	cleanupWorktree(placement{workDir: wt2, repo: clone, github: "o/r"}, core.Ticket{ID: "T-0002"}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	cleanupWorktree(placement{workDir: wt2, repo: clone, github: "o/r"}, core.Ticket{ID: "T-0002"}, "", slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if b, err := os.ReadFile(marker); err == nil {
 		t.Fatalf("the node's git ran planted hooks:\n%s", b)
 	}

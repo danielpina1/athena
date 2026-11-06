@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -28,6 +29,7 @@ import (
 	"github.com/danielpina1/athena/internal/hub"
 	"github.com/danielpina1/athena/internal/link"
 	"github.com/danielpina1/athena/internal/pb/athenav1"
+	"github.com/danielpina1/athena/internal/policy"
 	"github.com/danielpina1/athena/internal/store"
 	"github.com/danielpina1/athena/internal/web"
 	"github.com/danielpina1/athena/internal/web/webauthntest"
@@ -753,4 +755,65 @@ func (d *Dispatcher) sessionHashOf(t *testing.T, b *browser) string {
 		t.Fatal("no session")
 	}
 	return s.Hash
+}
+
+// A task submitted from the dashboard names its runtime and whether a review pairs it: review unset leaves the Policy's
+// default, true and false are explicit, false even when the Policy pairs every task.
+func TestSubmitTaskRuntimeAndReview(t *testing.T) {
+	newFakeEnv(t, openTurnFixture(t))
+	w := startWeb(t, newStateDir(t))
+	c := w.connect(w.login().session(), phoneHello())
+	c.welcome()
+	c.snapshot()
+	yes, no := true, false
+	cases := []struct {
+		runtime string
+		review  *bool
+		want    string // the Ticket pairing: off is none
+		rt      string
+		pairs   bool // the Policy pairs every task
+	}{
+		{"", nil, "", core.RuntimeAuto, false},
+		{core.RuntimeCodex, &yes, core.PairingReview, core.RuntimeCodex, false},
+		{core.RuntimeClaude, &no, "", core.RuntimeClaude, false},
+		{"", nil, core.PairingReview, core.RuntimeAuto, true},
+		{core.RuntimeClaude, &no, "", core.RuntimeClaude, true},
+	}
+	for i, tc := range cases {
+		if tc.pairs && (i == 0 || !cases[i-1].pairs) {
+			var shown PolicyView
+			w.ok(Request{Op: OpPolicyShow}, &shown)
+			shown.Settings.Pairing = policy.Pairing{Review: policy.PairingOn, MaxRounds: 2}
+			raw, err := json.Marshal(shown.Settings)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var set PolicySetResult
+			w.ok(Request{Op: OpPolicySet, Policy: raw}, &set)
+		}
+		res := c.do(&athenav1.Command{Id: fmt.Sprintf("s%d", i), Action: &athenav1.Command_SubmitTask{
+			SubmitTask: &athenav1.SubmitTask{Text: fmt.Sprintf("task %d", i), Runtime: tc.runtime, Review: tc.review}}})
+		if !res.GetOk() || res.GetTicketId() == "" {
+			t.Fatalf("case %d: result %v", i, res)
+		}
+		d := w.detail(res.GetTicketId())
+		if d.Runtime != tc.rt || d.Pairing != tc.want {
+			t.Errorf("case %d: ticket runtime %q pairing %q, want %q %q", i, d.Runtime, d.Pairing, tc.rt, tc.want)
+		}
+	}
+}
+
+func TestSubmitTaskUnknownRuntimeInvalid(t *testing.T) {
+	newFakeEnv(t, openTurnFixture(t))
+	w := startWeb(t, newStateDir(t))
+	c := w.connect(w.login().session(), phoneHello())
+	c.welcome()
+	c.snapshot()
+	res := c.do(&athenav1.Command{Id: "bad", Action: &athenav1.Command_SubmitTask{SubmitTask: &athenav1.SubmitTask{Text: "x", Runtime: "gemini"}}})
+	if res.GetOk() || res.GetCode() != web.CodeInvalid || !strings.Contains(res.GetMessage(), "gemini") {
+		t.Fatalf("result %v, want invalid naming the runtime", res)
+	}
+	if n := len(w.tickets()); n != 0 {
+		t.Errorf("%d tickets made by an invalid submit", n)
+	}
 }

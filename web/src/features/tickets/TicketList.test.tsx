@@ -201,3 +201,41 @@ test("500 Tickets: a Delta applies and the Tickets list renders it under budget"
   expect(mean).toBeLessThan(budget);
   expect(rows()[0]).toBe("/tickets/T-499");
 });
+
+test("runtime filter matches list length", async () => {
+  const user = userEvent.setup();
+  load({
+    tickets: [
+      { id: "T-1", title: "Ship the API", stage: "working", model: "opus", runtime: "claude", runtimeChoice: "auto", updatedAt: at(5000) },
+      { id: "T-2", title: "Port the parser", stage: "working", model: "gpt-5.5", runtime: "codex", runtimeChoice: "codex", updatedAt: at(4000) },
+      { id: "T-3", title: "Review the docs", stage: "idle", runtime: "codex", runtimeChoice: "auto", updatedAt: at(3000) },
+    ],
+  });
+  renderList();
+  // Each row says its runtime beside the model, and whether auto chose it.
+  expect(within(screen.getByRole("link", { name: /Ship the API/ })).getByText("Claude Code · auto")).toBeTruthy();
+  expect(within(screen.getByRole("link", { name: /Port the parser/ })).getByText("Codex")).toBeTruthy();
+
+  const select = screen.getByLabelText("Runtime") as HTMLSelectElement;
+  expect([...select.options].map((o) => o.text)).toEqual(["All runtimes", "Claude Code", "Codex"]);
+  await user.selectOptions(select, "codex");
+  expect(screen.getByTestId("where").textContent).toContain("runtime=codex");
+  expect(rows()).toEqual(["/tickets/T-2", "/tickets/T-3"]);
+  expect(screen.getByText(`${rows().length} Tickets`)).toBeTruthy();
+  await user.selectOptions(select, "claude");
+  expect(rows()).toEqual(["/tickets/T-1"]);
+  expect(screen.getByText("1 Ticket")).toBeTruthy();
+  // A row keeps the filter.
+  expect(screen.getByRole("link").getAttribute("href")).toBe("/tickets/T-1?runtime=claude");
+  await user.selectOptions(select, "");
+  expect(rows()).toHaveLength(3);
+});
+
+test("a runtime in the URL is the starting point; an unknown one is no filter", () => {
+  load({ tickets: [{ id: "T-2", title: "Port", stage: "working", runtime: "codex", updatedAt: at(1) }, { id: "T-5", title: "Other", stage: "working", runtime: "claude", updatedAt: at(0) }] });
+  const { unmount } = renderList("/tickets?runtime=codex");
+  expect(rows()).toEqual(["/tickets/T-2"]);
+  unmount();
+  renderList("/tickets?runtime=gemini");
+  expect(rows()).toEqual(["/tickets/T-2", "/tickets/T-5"]);
+});

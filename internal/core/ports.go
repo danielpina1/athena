@@ -92,6 +92,7 @@ const (
 	EventAssignmentStarted = "assignment.started"
 	EventAssignmentEnded   = "assignment.ended"
 	EventReportFiled       = "report.filed"
+	EventReviewFiled       = "review.filed"
 	EventInputAdded        = "input.added"
 	EventApprovalRequested = "approval.requested"
 	EventApprovalAnswered  = "approval.answered"

@@ -51,7 +51,7 @@ func TestDefaultUpdatedWhenDefaultHashDiffers(t *testing.T) {
 	if p := partView(v, prompts.PartWorker); p.Overridden || p.DefaultUpdated {
 		t.Fatalf("worker = %v, want untouched", p)
 	}
-	if len(v.Parts) != 5 || v.Revision != 1 {
+	if len(v.Parts) != len(prompts.Parts()) || v.Revision != 1 {
 		t.Fatalf("view = %v", v)
 	}
 	d, err := w.d.getPrompt(prompts.PartAdmission)
@@ -175,7 +175,7 @@ func TestGetPromptReturnsFullAndHistory(t *testing.T) {
 func TestPromptsReachTheHubOnSave(t *testing.T) {
 	w := startWeb(t, newStateDir(t))
 	snap, err := w.hub.Snapshot()
-	if err != nil || snap.Prompts.GetRevision() != 0 || len(snap.Prompts.Parts) != 5 {
+	if err != nil || snap.Prompts.GetRevision() != 0 || len(snap.Prompts.Parts) != len(prompts.Parts()) {
 		t.Fatalf("snapshot prompts = %v, %v", snap.Prompts, err)
 	}
 	c := w.connect(w.login().session(), phoneHello())

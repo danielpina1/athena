@@ -1,15 +1,19 @@
 // The desktop sidebar (240 px): Athena's mark and name and the palette key, the navigation, the node with its live
-// load, the live feed and today's counts. Every count is the length of the list it stands for (selectCounts).
+// load and one quota line per runtime (linking to Nodes), the live feed and today's counts. Every count is the length
+// of the list it stands for (selectCounts).
 import { useState } from "react";
-import { NavLink } from "react-router";
+import { Link, NavLink } from "react-router";
 import type { LinkSource } from "@/app/ConnectionBanner";
 import { NAV, type NavItem, useNavCount } from "@/app/routes";
 import { modKeyLabel } from "@/app/shortcuts";
 import { selectCounts, selectSynced } from "@/lib/store/selectors";
 import { useAthena } from "@/lib/store/state";
 import { LiveFeed } from "@/features/activity/LiveFeed";
+import { quotaLine } from "@/features/nodes/QuotaBars";
+import { runtimeLabel } from "@/lib/text/runtime";
 import { AthenaMark } from "@/app/AthenaMark";
 import { Kbd } from "@/ui/athena/Kbd";
+import { useNow } from "@/ui/athena/RelativeTime";
 import { Waiting } from "@/ui/athena/Waiting";
 import { cn } from "@/ui/cn";
 
@@ -72,6 +76,7 @@ const label = "px-4 pt-4 pb-1 font-mono text-xs tracking-wider text-muted upperc
 function NodeCard() {
   const node = useAthena((s) => s.node);
   const synced = useAthena(selectSynced);
+  const now = useNow();
   return (
     <section aria-labelledby="sidebar-node" className="grid gap-1">
       <h2 id="sidebar-node" className={label}>
@@ -102,6 +107,27 @@ function NodeCard() {
               {node.liveTicketIds.length}
             </dd>
           </dl>
+          {node.runtimes.length > 0 && (
+            <ul aria-label="Runtimes" className="grid font-mono text-xs">
+              {node.runtimes.map((r) => {
+                const line = quotaLine(r, now);
+                return (
+                  <li key={r.name}>
+                    <Link
+                      to="/nodes"
+                      data-testid={`runtime-${r.name}`}
+                      className="flex items-baseline justify-between gap-2 rounded-xs hover:bg-surface-2"
+                    >
+                      <span className="truncate text-text">{runtimeLabel(r.name)}</span>{" "}
+                      <span className={cn("shrink-0 tabular-nums", line.warn ? "text-warning" : "text-muted")}>
+                        {line.text}
+                      </span>
+                    </Link>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
         </div>
       ) : synced ? (
         <p className="px-4 text-sm text-muted">Waiting for the node.</p>

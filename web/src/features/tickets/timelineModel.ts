@@ -5,6 +5,7 @@
 import { timestampMs } from "@bufbuild/protobuf/wkt";
 import type { TimelineEntry } from "@/gen/athena/v1/state_pb";
 import { modelName } from "@/lib/text/model";
+import { resetTime, runtimeLabel } from "@/lib/text/runtime";
 import type { Tone } from "@/ui/athena/Dot";
 
 export type EntryView = {
@@ -17,7 +18,8 @@ export type EntryView = {
   report?: boolean;
 };
 
-type Entry = Pick<TimelineEntry, "kind" | "subkind" | "subject" | "text" | "refId">;
+type Entry = Pick<TimelineEntry, "kind" | "subkind" | "subject" | "text" | "refId"> &
+  Partial<Pick<TimelineEntry, "runtime" | "at">>;
 
 /** Approvals of one verdict this close together are one row. */
 const GROUP_GAP_MS = 10 * 60_000;
@@ -77,7 +79,17 @@ function splitWhat(subject: string): [string, string] {
 
 const joined = (...parts: string[]) => parts.filter(Boolean).join(" — ");
 
-export function describeEntry(e: Entry): EntryView {
+/** "Resets at 17:30" (with the date when it is not the limit's day), or "Reset time unknown" for an empty or bad time. */
+function resetsAt(text: string, from: number): string {
+  const ms = text ? Date.parse(text) : Number.NaN;
+  return Number.isFinite(ms) ? `Resets at ${resetTime(ms, from)}` : "Reset time unknown";
+}
+
+/**
+ * What an entry says. `afterLimit`: the entry is the first start after a usage limit, so the work continues there
+ * ("Continued on Codex · gpt-5.5").
+ */
+export function describeEntry(e: Entry, afterLimit = false): EntryView {
   const sub = e.subkind;
   const text = e.text;
   switch (e.kind) {
@@ -92,10 +104,28 @@ export function describeEntry(e: Entry): EntryView {
       switch (kind) {
         case "queued":
           return { title: "Queued", subtitle: "", tone: "neutral" };
-        case "started":
-          return { title: e.subject ? `Started work · ${modelName(e.subject)}` : "Started work", subtitle: "", tone: "ok" };
+        case "started": {
+          // Its runtime and model, as far as they are known ("Codex · gpt-5.5").
+          const on = [runtimeLabel(e.runtime ?? ""), e.subject ? modelName(e.subject) : ""].filter(Boolean).join(" · ");
+          if (afterLimit && on) return { title: `Continued on ${on}`, subtitle: "", tone: "ok" };
+          return { title: on ? `Started work · ${on}` : "Started work", subtitle: "", tone: "ok" };
+        }
+        case "review":
+          return { title: e.runtime ? `Review started · ${runtimeLabel(e.runtime)}` : "Review started", subtitle: "", tone: "ok" };
+        case "limited": {
+          const on = runtimeLabel(e.subject || e.runtime || "");
+          return {
+            title: on ? `Usage limit reached on ${on}` : "Usage limit reached",
+            subtitle: resetsAt(text, e.at ? timestampMs(e.at) : Date.now()),
+            tone: "warn",
+          };
+        }
         case "interrupted":
           return { title: "Interrupted by a server restart", subtitle: "Resumes on your next message", tone: "warn" };
+        case "restart":
+          return { title: "Interrupted by a server restart", subtitle: "", tone: "warn" };
+        case "resumed":
+          return { title: "Resumed automatically", subtitle: "", tone: "ok" };
         case "failed":
           return { title: "Failed", subtitle: text, tone: "danger" };
         case "stopped":
@@ -116,6 +146,17 @@ export function describeEntry(e: Entry): EntryView {
       const [title, tone] = REPORT[state] ?? ["Report", "neutral"];
       return { title, subtitle: plainLine(line), tone, badge: e.subject || undefined, report: true };
     }
+    case "review":
+      switch (sub) {
+        case "approved":
+          return { title: "Review approved", subtitle: "", tone: "ok" };
+        case "changes":
+          return { title: "Changes requested", subtitle: plainLine(text), tone: "neutral" };
+        case "failed":
+          return { title: "Review could not finish", subtitle: text, tone: "warn" };
+        default:
+          return { title: "Review", subtitle: text, tone: "neutral" };
+      }
     case "reply":
       if (sub === "github") return { title: e.subject ? `@${e.subject} replied on GitHub` : "Reply on GitHub", subtitle: text, tone: "neutral" };
       return { title: "You replied", subtitle: text, tone: "neutral" };
@@ -164,9 +205,15 @@ function groupView(entries: TimelineEntry[]): EntryView {
   return { title: `You ${verb} ${entries.length} ${noun}`, subtitle: "", tone: verb === "denied" ? "danger" : "ok" };
 }
 
-/** The rows, oldest first, with each run of answered approvals of one verdict, each within 10 minutes of the last, one row. */
+const isStart = (e: TimelineEntry) => e.kind === "assignment" && (e.subkind === "started" || (!e.subkind && e.text === "running"));
+
+/**
+ * The rows, oldest first, with each run of answered approvals of one verdict, each within 10 minutes of the last, one
+ * row. The first start after a usage limit says the work continued there.
+ */
 function rowsOf(sorted: TimelineEntry[]): Row[] {
   const rows: Row[] = [];
+  let afterLimit = false;
   for (let i = 0; i < sorted.length; ) {
     const e = sorted[i];
     let j = i + 1;
@@ -177,7 +224,9 @@ function rowsOf(sorted: TimelineEntry[]): Row[] {
       const run = sorted.slice(i, j);
       rows.push({ type: "group", key: entryKey(e), at: entryMs(run[run.length - 1]), entries: run, items: run.map((r) => joined(r.subject, r.text)), view: groupView(run) });
     } else {
-      rows.push({ type: "entry", key: entryKey(e), at: entryMs(e), entry: e, view: describeEntry(e) });
+      rows.push({ type: "entry", key: entryKey(e), at: entryMs(e), entry: e, view: describeEntry(e, afterLimit && isStart(e)) });
+      if (e.kind === "assignment" && e.subkind === "limited") afterLimit = true;
+      else if (isStart(e)) afterLimit = false;
       j = i + 1;
     }
     i = j;

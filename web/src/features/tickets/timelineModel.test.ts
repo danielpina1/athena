@@ -48,6 +48,17 @@ test("a Decision and an Assignment read as what happened", () => {
   expect(titleOf("assignment", "", "", "ended: retried")).toBe("Session ended");
 });
 
+test("timeline says interrupted and resumed", () => {
+  expect(describeEntry(e("assignment", "restart"))).toMatchObject({ title: "Interrupted by a server restart", subtitle: "", tone: "warn" });
+  expect(describeEntry(e("assignment", "resumed"))).toMatchObject({ title: "Resumed automatically", subtitle: "", tone: "ok" });
+  // The legacy end entry of an Assignment a restart ended is unchanged.
+  expect(describeEntry(e("assignment", "interrupted", "", "node restart"))).toMatchObject({
+    title: "Interrupted by a server restart",
+    subtitle: "Resumes on your next message",
+    tone: "warn",
+  });
+});
+
 test("a Report is one line: its state, the summary's first line and its pull request", () => {
   const ready = describeEntry(e("report", "ready", "PR #12", "## Review done"));
   expect(ready).toMatchObject({ title: "Ready for review", subtitle: "Review done", badge: "PR #12", tone: "ok", report: true });
@@ -136,4 +147,63 @@ test("approvals in a row with the same verdict are one row that lists what was a
   // A group of different tools counts actions.
   const mixed = buildTimeline([e("approval", "approved", "Bash: ls", "", NOW - MIN), e("approval", "approved", "Edit: a.go", "", NOW)], NOW)[0].rows;
   expect(mixed.map((r) => r.view.title)).toEqual(["You approved 2 actions"]);
+});
+
+const rt = (kind: string, subkind: string, runtime: string, subject = "", text = "", at = NOW, refId = "") =>
+  create(TimelineEntrySchema, { kind, subkind, subject, text, refId, runtime, at: timestampFromMs(at) });
+
+test("timeline copy for restart, resumed, limited, continued and review verdicts", () => {
+  // The start says its runtime and model.
+  expect(describeEntry(rt("assignment", "started", "claude", "claude-sonnet-4-5"))).toMatchObject({ title: "Started work · Claude Code · sonnet 4.5", tone: "ok" });
+  expect(describeEntry(rt("assignment", "started", "codex", "gpt-5.5"))).toMatchObject({ title: "Started work · Codex · gpt-5.5" });
+  expect(describeEntry(rt("assignment", "started", "codex"))).toMatchObject({ title: "Started work · Codex" });
+  expect(describeEntry(rt("assignment", "restart", "claude"))).toMatchObject({ title: "Interrupted by a server restart", subtitle: "", tone: "warn" });
+  expect(describeEntry(rt("assignment", "resumed", "claude"))).toMatchObject({ title: "Resumed automatically", subtitle: "", tone: "ok" });
+
+  const reset = new Date(2026, 10, 5, 17, 30);
+  expect(describeEntry(rt("assignment", "limited", "claude", "claude", reset.toISOString()))).toMatchObject({
+    title: "Usage limit reached on Claude Code",
+    subtitle: "Resets at 17:30",
+    tone: "warn",
+  });
+  expect(describeEntry(rt("assignment", "limited", "codex", "codex", ""))).toMatchObject({
+    title: "Usage limit reached on Codex",
+    subtitle: "Reset time unknown",
+    tone: "warn",
+  });
+  // A reset on another day than the limit says its date.
+  const later = new Date(2026, 10, 9, 8, 0);
+  expect(describeEntry(rt("assignment", "limited", "codex", "codex", later.toISOString())).subtitle).toBe("Resets at Mon 9 Nov 08:00");
+
+  expect(describeEntry(rt("assignment", "review", "codex", "gpt-5.5"))).toMatchObject({ title: "Review started · Codex" });
+  expect(describeEntry(rt("review", "approved", "codex", "codex"))).toMatchObject({ title: "Review approved", subtitle: "", tone: "ok" });
+  expect(describeEntry(rt("review", "changes", "codex", "codex", "The parser drops the last token"))).toMatchObject({
+    title: "Changes requested",
+    subtitle: "The parser drops the last token",
+    tone: "neutral",
+  });
+  expect(describeEntry(rt("review", "failed", "claude", "claude", "no runtime could review"))).toMatchObject({
+    title: "Review could not finish",
+    subtitle: "no runtime could review",
+    tone: "warn",
+  });
+
+  // The start right after a limit continues on the other runtime; a later start is a start again.
+  const days = buildTimeline(
+    [
+      rt("assignment", "started", "claude", "claude-opus-4-1", "", NOW - 30 * MIN, "A-1"),
+      rt("assignment", "limited", "claude", "claude", "", NOW - 20 * MIN, "A-1"),
+      rt("assignment", "started", "codex", "gpt-5.5", "", NOW - 19 * MIN, "A-2"),
+      rt("assignment", "ended", "codex", "", "", NOW - 10 * MIN, "A-2"),
+      rt("assignment", "started", "claude", "claude-opus-4-1", "", NOW - 5 * MIN, "A-3"),
+    ],
+    NOW,
+  );
+  expect(days[0].rows.map((r) => r.view.title)).toEqual([
+    "Started work · Claude Code · opus 4.1",
+    "Session ended",
+    "Continued on Codex · gpt-5.5",
+    "Usage limit reached on Claude Code",
+    "Started work · Claude Code · opus 4.1",
+  ]);
 });

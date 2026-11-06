@@ -11,6 +11,7 @@ import { stripAnsi } from "@/lib/text/ansi";
 import { EmptyState } from "@/ui/athena/EmptyState";
 import { Mono } from "@/ui/athena/Mono";
 import { RelativeTime } from "@/ui/athena/RelativeTime";
+import { RuntimeBadge, runtimeText } from "@/ui/athena/RuntimeBadge";
 import { StageBadge } from "@/ui/athena/StageBadge";
 import { Waiting } from "@/ui/athena/Waiting";
 import { cn } from "@/ui/cn";
@@ -43,6 +44,12 @@ function Row({ ticket, selected, needsYou, search }: { ticket: TicketSummary; se
         <span className="flex min-w-0 items-baseline gap-x-2">
           {where && <Mono className="min-w-0 truncate">{where}</Mono>}
           {ticket.model && <Mono className="shrink-0">{ticket.model}</Mono>}
+          {ticket.model && runtimeText(ticket.runtime, ticket.runtimeChoice) && (
+            <Mono aria-hidden className="shrink-0">
+              ·
+            </Mono>
+          )}
+          <RuntimeBadge runtime={ticket.runtime} choice={ticket.runtimeChoice} className="shrink-0" />
           <Mono className="ml-auto shrink-0">
             <RelativeTime at={ticket.updatedAt ? timestampMs(ticket.updatedAt) : Number.NaN} />
           </Mono>

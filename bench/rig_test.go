@@ -24,6 +24,7 @@ import (
 	"github.com/danielpina1/athena/internal/metrics"
 	"github.com/danielpina1/athena/internal/node"
 	"github.com/danielpina1/athena/internal/pb/athenav1"
+	"github.com/danielpina1/athena/internal/runtime/codex"
 	"github.com/danielpina1/athena/internal/server"
 	"github.com/danielpina1/athena/internal/store"
 	"github.com/danielpina1/athena/internal/web"
@@ -122,7 +123,10 @@ type startedEvent struct {
 	at     time.Time
 }
 
-func newRig(tb testing.TB) *rig {
+func newRig(tb testing.TB) *rig { return newRigWith(tb, nil) }
+
+// newRigWith is newRig with the node's config changed by mod.
+func newRigWith(tb testing.TB, mod func(*node.Config)) *rig {
 	tb.Helper()
 	fake := fakeClaude(tb)
 	dir := shortDir(tb)
@@ -139,10 +143,14 @@ func newRig(tb testing.TB) *rig {
 		tb.Fatal(err)
 	}
 	st.SetMetrics(reg)
-	n := node.New(node.Config{
+	cfg := node.Config{
 		StateDir: dir, WorkRoot: filepath.Join(dir, "work"), SocketPath: filepath.Join(dir, "node.sock"),
 		AthenaBin: "/usr/bin/true", ClaudeBinary: fake, Slots: 16, ApprovalTimeout: time.Minute, Metrics: reg,
-	}, nil)
+	}
+	if mod != nil {
+		mod(&cfg)
+	}
+	n := node.New(cfg, nil)
 	r := &rig{tb: tb, dir: dir, reg: reg, started: make(chan startedEvent, 4096)}
 	eng := core.NewEngine(st.Repos(), n, time.Now, func(e core.Event) {
 		if e.Type == core.EventAssignmentStarted {
@@ -198,8 +206,13 @@ func (r *rig) waitStarted(ticket string) time.Time {
 
 // runningTicket submits a task and waits until its session runs.
 func (r *rig) runningTicket(dir string) (core.Ticket, core.Assignment) {
+	return r.runningTicketOn(dir, "")
+}
+
+// runningTicketOn is runningTicket on runtime ("" for the node's default).
+func (r *rig) runningTicketOn(dir, runtime string) (core.Ticket, core.Assignment) {
 	r.tb.Helper()
-	tk, err := r.eng.SubmitOwnerTask("benchmark task", core.TaskOptions{Dir: dir})
+	tk, err := r.eng.SubmitOwnerTask("benchmark task", core.TaskOptions{Dir: dir, Runtime: runtime})
 	if err != nil {
 		r.tb.Fatal(err)
 	}
@@ -211,10 +224,12 @@ func (r *rig) runningTicket(dir string) (core.Ticket, core.Assignment) {
 	return cur, *cur.LatestAssignment()
 }
 
-// hook sends one hook request over the node socket, as `athena hook` does, and returns its latency.
-func (r *rig) hook(tk core.Ticket, a core.Assignment, tool string, input map[string]any) time.Duration {
-	raw, _ := json.Marshal(map[string]any{"hook_event_name": node.EventPreToolUse, "tool_name": tool, "tool_input": input})
-	req := node.HookRequest{Op: node.OpHook, Event: node.EventPreToolUse, Ticket: tk.ID, Assignment: a.ID, Input: raw}
+// hook sends one hook request of runtime ("" is Claude Code) over the node socket, as `athena hook` does, and returns
+// its latency.
+func (r *rig) hook(tk core.Ticket, a core.Assignment, runtime, tool string, input any) time.Duration {
+	raw, _ := json.Marshal(map[string]any{"hook_event_name": node.EventPreToolUse, "tool_name": tool, "tool_input": input,
+		"turn_id": "turn_bench"})
+	req := node.HookRequest{Op: node.OpHook, Event: node.EventPreToolUse, Ticket: tk.ID, Assignment: a.ID, Runtime: runtime, Input: raw}
 	start := time.Now()
 	conn, err := net.DialTimeout("unix", filepath.Join(r.dir, "node.sock"), time.Second)
 	if err != nil {
@@ -235,7 +250,13 @@ func (r *rig) hook(tk core.Ticket, a core.Assignment, tool string, input map[str
 	return d
 }
 
-// measureHook returns the latencies of n hook decisions of a running session.
+// hookCall is one tool call a hook decides.
+type hookCall struct {
+	tool  string
+	input any
+}
+
+// measureHook returns the latencies of n hook decisions of a running Claude Code session.
 func measureHook(tb testing.TB, n int) []time.Duration {
 	r := newRig(tb)
 	tk, a := r.runningTicket("")
@@ -243,22 +264,59 @@ func measureHook(tb testing.TB, n int) []time.Duration {
 	if err != nil {
 		tb.Fatal(err)
 	}
-	calls := []struct {
-		tool  string
-		input map[string]any
-	}{
+	return r.hooks(tk, a, "", n, []hookCall{
 		{"Write", map[string]any{"file_path": filepath.Join(wd, "a.txt"), "content": "x"}},
 		{"Read", map[string]any{"file_path": filepath.Join(wd, "a.txt")}},
 		{"Bash", map[string]any{"command": "ls -la"}},
+	})
+}
+
+// fakeCodex builds fakecodex, the Codex every measurement runs (never this machine's codex or its quota).
+func fakeCodex(tb testing.TB) string {
+	return build(tb, "codex", "github.com/danielpina1/athena/internal/runtime/codex/testdata/fakecodex")
+}
+
+// measureHookCodex returns the latencies of n hook decisions of a running Codex session (fakecodex, its first turn
+// held open): argv shell calls, a patch and a commit the attribution rule reads, whose decisions also normalise the
+// call and check the protected paths.
+func measureHookCodex(tb testing.TB, n int) []time.Duration {
+	fake := fakeCodex(tb)
+	fixture := filepath.Join(tb.TempDir(), "open-turn.jsonl")
+	turn := `{"method":"turn/started","params":{"threadId":"thr_fixture_0001","turn":{"id":"turn_fixture_0001","items":[],"status":"inProgress","startedAt":1893456001}}}` + "\n" +
+		`{"method":"turn/completed","params":{"threadId":"thr_fixture_0001","turn":{"id":"turn_fixture_0001","items":[],"status":"completed","startedAt":1893456001,"completedAt":1893456005,"durationMs":4200}}}` + "\n"
+	if err := os.WriteFile(fixture, []byte(turn), 0o600); err != nil {
+		tb.Fatal(err)
 	}
+	tb.Setenv("ATHENA_FAKE_CODEX_FIXTURE", fixture)
+	tb.Setenv("ATHENA_FAKE_CODEX_HOLD_RESULT", filepath.Join(tb.TempDir(), "never")) // the turn stays open
+	r := newRigWith(tb, func(c *node.Config) {
+		c.Runtimes = node.DefaultRuntimes(*c)
+		c.Runtimes[core.RuntimeCodex] = &codex.Runtime{Binary: fake, Home: filepath.Join(c.StateDir, "codex"), AthenaBin: c.AthenaBin,
+			Socket: c.SocketPath, WorkRoot: c.WorkRoot, Version: "bench"}
+	})
+	tk, a := r.runningTicketOn("", core.RuntimeCodex)
+	wd, err := node.WorkingDir(filepath.Join(r.dir, "work"), tk)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	patch := "*** Begin Patch\n*** Update File: " + filepath.Join(wd, "a.txt") + "\n@@\n-x\n+y\n*** Add File: b.txt\n+z\n*** End Patch\n"
+	return r.hooks(tk, a, core.RuntimeCodex, n, []hookCall{
+		{"exec_command", map[string]any{"cmd": []string{"bash", "-lc", "ls -la && git status"}, "workdir": wd}},
+		{"apply_patch", map[string]any{"command": patch}},
+		{"shell", map[string]any{"command": []string{"git", "commit", "-m", "Fix the parser\n\nCloses #3"}}},
+	})
+}
+
+// hooks returns the latencies of n hook decisions of runtime over calls, in turn, after a warm-up.
+func (r *rig) hooks(tk core.Ticket, a core.Assignment, runtime string, n int, calls []hookCall) []time.Duration {
 	for i := 0; i < 50; i++ { // warm up
 		c := calls[i%len(calls)]
-		r.hook(tk, a, c.tool, c.input)
+		r.hook(tk, a, runtime, c.tool, c.input)
 	}
 	out := make([]time.Duration, 0, n)
 	for i := 0; i < n; i++ {
 		c := calls[i%len(calls)]
-		out = append(out, r.hook(tk, a, c.tool, c.input))
+		out = append(out, r.hook(tk, a, runtime, c.tool, c.input))
 	}
 	return out
 }
@@ -410,14 +468,15 @@ func stopServer(cmd *exec.Cmd) {
 	}
 }
 
-// idleRSS starts a real `athena server` with the fake runtime, leaves it idle past two samples of its resource
-// gauges and returns the process_rss_bytes it reports (its peak RSS where the OS offers nothing better).
+// idleRSS starts a real `athena server` with both runtimes registered (fakeclaude, and fakecodex as a ready Codex the
+// server checks at start), leaves it idle past two samples of its resource gauges and returns the process_rss_bytes it
+// reports (its peak RSS where the OS offers nothing better).
 func idleRSS(tb testing.TB, idle time.Duration) uint64 {
 	tb.Helper()
 	bin := build(tb, "athena", "github.com/danielpina1/athena/cmd/athena")
 	fake := fakeClaude(tb)
 	dir := shortDir(tb)
-	cmd := exec.Command(bin, "server", "--state-dir", dir, "--claude", fake)
+	cmd := exec.Command(bin, "server", "--state-dir", dir, "--claude", fake, "--codex", fakeCodex(tb))
 	if err := cmd.Start(); err != nil {
 		tb.Fatal(err)
 	}
@@ -535,7 +594,8 @@ func startDashboard(tb testing.TB) *dashboard {
 	if err := os.WriteFile(later, []byte(line), 0o600); err != nil {
 		tb.Fatal(err)
 	}
-	cmd := exec.Command(bin, "server", "--state-dir", dir, "--claude", fake)
+	// Both runtimes registered, as in idleRSS; never this machine's codex.
+	cmd := exec.Command(bin, "server", "--state-dir", dir, "--claude", fake, "--codex", fakeCodex(tb))
 	cmd.Env = append(os.Environ(), "ATHENA_FAKE_LATER_FIXTURE="+later)
 	if err := cmd.Start(); err != nil {
 		tb.Fatal(err)
@@ -698,9 +758,19 @@ func (d *dashboard) startTicket() string {
 		StreamOpen: &athenav1.StreamOpen{TicketId: sub.ID}}}); err != nil {
 		tb.Fatal(err)
 	}
+	// The session's own output, not only the runtime marker the node writes before its process starts: from then on a
+	// Reply is a message of its own, not part of the session's first one.
 	d.await(func(f *athenav1.Frame) bool {
 		d.note(f)
-		return f.GetStreamItems().GetTicketId() == sub.ID && len(f.GetStreamItems().GetItems()) > 0
+		if f.GetStreamItems().GetTicketId() != sub.ID {
+			return false
+		}
+		for _, it := range f.GetStreamItems().GetItems() {
+			if it.GetKind() != "runtime" {
+				return true
+			}
+		}
+		return false
 	})
 	d.settle()
 	return sub.ID

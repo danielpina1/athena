@@ -220,7 +220,7 @@ change). `athena github setup` keeps this part when it rewrites the file.
 | Field | Meaning |
 | --- | --- |
 | `enabled` | Unset: on for macOS and Linux. `false` turns it off; the server log then warns at every start. |
-| `required` | `true` makes a worker fail to start when the sandbox cannot start (on Linux: `bubblewrap` or `socat` missing). By default Claude Code warns and runs the commands **unsandboxed**; set it once the sandbox works on your machine. |
+| `required` | `true` makes a worker fail to start when the sandbox cannot start (on Linux: `bubblewrap` or `socat` missing). By default Claude Code warns and runs the commands **unsandboxed**; set it once the sandbox works on your machine. Review pairing runs reviews on Claude Code only with `required: true`. |
 | `allowedDomains` | Hosts reachable besides GitHub: package registries and module proxies your projects' builds and tests download from. `*.example.com` matches the subdomains. |
 | `allowWrite` | Absolute paths writable besides the Ticket's directory, such as build and module caches in your home directory (`go build` writes `~/Library/Caches/go-build` on macOS, `~/.cache/go-build` on Linux). |
 | `weakerNetworkIsolation` | macOS only. Unset: on. Lets commands reach the `trustd` service, which `gh` (and every other Go program) verifies each TLS certificate through; without it a worker's `gh pr create` fails with `x509: OSStatus -26276` on every Mac, proxy or not (`git` is unaffected: it reads a CA file). The trade-off: it opens a path out of the sandbox through `trustd`. `false` turns it off, and workers then cannot open pull requests. The server log shows the effective value at start. |
@@ -265,6 +265,12 @@ SSH agent, if one is reachable); macOS allows the node socket alone.
     `claude code sandbox is on for workers` at every start.
   - For a real boundary, run the whole server as a **dedicated, restricted OS user** that owns only `~/.athena` and its
     own `claude` login and nothing else you care about, or in a **VM or container**.
+- **A review session (pairing, see [codex.md §8](codex.md#8-review-pairing)) is bounded by an OS sandbox.** It runs on
+  Codex, in Codex's read-only sandbox, or on Claude Code only when `required` is `true`, so that Claude Code's sandbox
+  always starts and bounds what its commands do. Without `required` and without a ready Codex, a review fails, and
+  the held report applies unreviewed. Athena's rules add defence in depth: an allowlist of reading commands and the
+  repository's test runners, no escalation and no GitHub token. A test runner runs the repository's code, which the
+  sandbox confines.
 - **A worker can obtain its own Assignment's token.** To push and open its pull request, a worker asks Athena for a
   token through a credential helper. It is short-lived (about an hour at most), limited to the single repository of the
   Ticket and to the worker permissions above, minted per Assignment, held in memory and never written to SQLite, logs,

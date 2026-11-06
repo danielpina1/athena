@@ -73,6 +73,8 @@ func startLiveIn(t *testing.T, claudeBin, stateDir string) *liveServer {
 			ApprovalTimeout: 5 * time.Minute,
 		},
 		Stderr: io.Discard,
+		// Live tests run Claude Code only: never the owner's codex.
+		CodexBinary: "/nonexistent/athena-test-codex",
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &testServer{t: t, stateDir: stateDir, cancel: cancel, done: make(chan error, 1)}

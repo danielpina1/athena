@@ -96,6 +96,25 @@ test("desktop shows three panes at 1024", async () => {
   expect(main.querySelector('[data-pane="full"]')).not.toBeNull();
 });
 
+test("the sidebar's node has one quota line per runtime, linking to Nodes", async () => {
+  load({
+    node: create(NodeStatusSchema, {
+      name: "mac-studio",
+      slots: 4,
+      runtimes: [
+        { name: "claude", ready: true, measured: false },
+        { name: "codex", ready: true, measured: true, windows: [{ name: "5h", used: 0.42 }, { name: "7d", used: 0.12 }] },
+      ],
+    }),
+  });
+  renderShell("/tickets", 1440);
+  const runtimes = within(screen.getByRole("region", { name: "Node" })).getByRole("list", { name: "Runtimes" });
+  const codex = within(runtimes).getByRole("link", { name: "Codex 42% · 5h" });
+  expect(within(runtimes).getByRole("link", { name: "Claude Code not measured" })).toBeTruthy();
+  await userEvent.click(codex);
+  expect(where()).toBe("/nodes");
+});
+
 test("g n chord navigates", () => {
   vi.useFakeTimers();
   renderShell("/tickets", 1440);

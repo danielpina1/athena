@@ -17,6 +17,7 @@ import (
 	"github.com/danielpina1/athena/internal/core"
 	"github.com/danielpina1/athena/internal/node"
 	"github.com/danielpina1/athena/internal/pb/athenav1"
+	"github.com/danielpina1/athena/internal/quota"
 	"github.com/danielpina1/athena/internal/store"
 )
 
@@ -1031,5 +1032,50 @@ func TestPromptsDeltaOnSave(t *testing.T) {
 	d := next(t, sub)
 	if p := d.GetPrompts(); p.GetRevision() != 2 || !p.Parts[0].DefaultUpdated {
 		t.Fatalf("prompts delta = %v", d)
+	}
+}
+
+func quotaNode(used float64) node.Status {
+	return node.Status{Name: "mac", Slots: 4, Runtimes: []node.RuntimeStatus{{Name: "codex", Ready: true, Quota: quota.State{
+		Measured: true, ReadAt: epoch0, Windows: []quota.Window{{Name: "5h", Used: used}}}}}}
+}
+
+// Quota readings arrive with every turn: a node delta that differs only in them goes out at most once per quotaEvery,
+// with the latest reading; a change of anything else is not held back.
+func TestQuotaDeltaThrottled(t *testing.T) {
+	f := newFake()
+	f.node = quotaNode(0.1)
+	// Set before the Hub runs, and wide enough that a stalled test goroutine (-race, packages in parallel) still checks
+	// none (50 ms) well inside the hold.
+	h := New(f, quiet())
+	h.quotaEvery = 400 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	h.Start(ctx)
+	sub, _ := h.Subscribe(0, h.Epoch())
+	set := func(n node.Status) { f.mu.Lock(); f.node = n; f.mu.Unlock(); h.NodeChanged() }
+	used := func(d *athenav1.Delta) float32 { return d.GetNode().GetRuntimes()[0].GetWindows()[0].GetUsed() }
+
+	set(quotaNode(0.2))
+	if d := next(t, sub); used(d) != 0.2 {
+		t.Fatalf("first reading = %v", d)
+	}
+	for _, u := range []float64{0.3, 0.4, 0.5} {
+		set(quotaNode(u))
+	}
+	none(t, sub) // held: one second is not over
+	if d := next(t, sub); used(d) != 0.5 {
+		t.Fatalf("held reading = %v, want the latest, 0.5", d)
+	}
+	none(t, sub) // three readings, one delta
+
+	// A slot change goes out at once, even right after a quota delta.
+	set(quotaNode(0.6))
+	next(t, sub)
+	busy := quotaNode(0.7)
+	busy.SlotsInUse = 1
+	set(busy)
+	if d := next(t, sub); d.GetNode().GetSlotsInUse() != 1 {
+		t.Fatalf("slot change = %v", d)
 	}
 }

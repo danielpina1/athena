@@ -62,8 +62,15 @@ message TicketSummary {
   string attention_question = 16;
   // branch is the worktree branch, athena/<lowercased id>; empty when the Ticket has no repository.
   string branch = 17;
-  // runtime is the agent runtime that works the Ticket: claude.
+  // runtime is the runtime of the latest Assignment that started (claude or codex), a review's included, so it shows
+  // the reviewer's runtime while a review runs; else the Ticket's choice (runtime_choice: claude, codex or auto).
   string runtime = 18;
+  // runtime_choice is what the Ticket asked for: claude, codex or auto.
+  string runtime_choice = 19;
+  // pairing is how the Ticket's work is paired: review, or empty for none.
+  string pairing = 20;
+  // review_rounds is how many reviews of its ready reports ended (approved, changes or failed).
+  uint32 review_rounds = 21;
 }
 
 message TicketDetail {
@@ -78,7 +85,7 @@ message TicketDetail {
 
 message TimelineEntry {
   google.protobuf.Timestamp at = 1;
-  // kind is trigger, decision, input, report, assignment, approval or reply.
+  // kind is trigger, decision, input, report, assignment, review, approval or reply.
   string kind = 2;
   // text is redacted, on one line and cut; Athena's hidden markers (<!-- athena:… -->) are removed.
   string text = 3;
@@ -86,8 +93,12 @@ message TimelineEntry {
   // subkind refines kind, so a client can say what happened in plain words:
   //   trigger: where it came from: issue, pull, issue-comment, pull-comment, review-comment, review, ci or owner;
   //   decision: accepted;
-  //   assignment: queued, started (the start entry), or ended, interrupted, stopped or retried (the end
-  //     entry, at the Assignment's end);
+  //   assignment: queued, started (the start entry), restart (its session was cut short by a server restart),
+  //     resumed (it started again by itself), limited (it ended at a usage limit: subject is the runtime, text the
+  //     RFC 3339 reset, empty when unknown), review (a review Assignment's start), or ended, interrupted, stopped
+  //     or retried (the end entry, at the Assignment's end);
+  //   review: approved, changes or failed, at the end of a review; text is the first finding line (or why it
+  //     could not finish), subject the runtime that reviewed;
   //   report: the Report's state;
   //   input: trigger (a message from no person), text, note, resumed, context (seen on a Thread the Ticket only
   //     follows) or receipt (Athena's own acknowledgement on GitHub);
@@ -98,6 +109,10 @@ message TimelineEntry {
   // subject is what the entry is about, short: an Approval's tool and command (Bash: npm test), an Assignment's
   // model, a Report's pull request (PR #12), or the GitHub login of a reply.
   string subject = 6;
+  // runtime is the runtime of the Assignment, set on assignment and review entries (claude or codex): the one it ran
+  // on, or, for a queued Assignment pinned to one, the one it will run on; empty when it names none yet (an unpinned
+  // queued Assignment, or a review that never started).
+  string runtime = 7;
 }
 
 // ReportView is one Report in full.
@@ -183,7 +198,42 @@ message NodeStatus {
   uint32 slots_in_use = 3;
   repeated string live_ticket_ids = 4;
   uint32 queued = 5;
+  // claude_version is kept for older clients; runtimes has it, and Codex, now.
   string claude_version = 6;
+  // runtimes are the node's runtimes, sorted by name.
+  repeated RuntimeStatus runtimes = 7;
+}
+
+// QuotaWindow is one usage-limit window of a runtime.
+message QuotaWindow {
+  // name is the window's length (5h, 7d), prefixed by its bucket when the runtime has several.
+  string name = 1;
+  // used is the fraction used, 0 to 1.
+  float used = 2;
+  google.protobuf.Timestamp resets_at = 3;
+  // stale: the window's reset passed since it was read, so used no longer holds.
+  bool stale = 4;
+}
+
+// RuntimeStatus is one runtime of the node.
+message RuntimeStatus {
+  string name = 1;
+  string version = 2;
+  // ready: the node can start a session on it.
+  bool ready = 3;
+  // tested: its version is one Athena was verified against.
+  bool tested = 4;
+  // why says why it is not ready, or not tested; redacted, cut at 200 runes.
+  string why = 5;
+  repeated QuotaWindow windows = 6;
+  // limited_until is when a limited runtime may work again; unset when it is not limited.
+  google.protobuf.Timestamp limited_until = 7;
+  // read_at is when the quota was last read.
+  google.protobuf.Timestamp read_at = 8;
+  // measured is false until a first quota reading came ("Not measured yet").
+  bool measured = 9;
+  // live is how many sessions run on it now.
+  uint32 live = 10;
 }
 
 message Health {

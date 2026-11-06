@@ -1,6 +1,7 @@
-// The Nodes screen: the node that runs sessions (its slots in use of its slots, the queue, the live Tickets and the
-// Claude version) and the server's health checks. Failing checks say what is wrong and since when; the passing ones
-// fold into one line. Before the first Snapshot both say "Waiting for the server.".
+// The Nodes screen: the node that runs sessions (its slots in use of its slots, the queue, the live Tickets and each
+// runtime with its version, readiness and quota, QuotaBars) and the server's health checks. Failing checks say what
+// is wrong and since when; the passing ones fold into one line. Before the first Snapshot both say "Waiting for the
+// server.".
 import { timestampMs } from "@bufbuild/protobuf/wkt";
 import { ChevronRightIcon } from "lucide-react";
 import { useId, useState } from "react";
@@ -12,6 +13,7 @@ import { Mono } from "@/ui/athena/Mono";
 import { RelativeTime } from "@/ui/athena/RelativeTime";
 import { Waiting } from "@/ui/athena/Waiting";
 import { cn } from "@/ui/cn";
+import { QuotaBars } from "./QuotaBars";
 
 export function Nodes() {
   const node = useAthena((s) => s.node);
@@ -82,9 +84,23 @@ function NodeCard({ node }: { node: NodeStatus }) {
             </ul>
           )}
         </dd>
-        <dt className="text-muted">Claude version</dt>
-        <dd className="min-w-0 font-mono break-words">{node.claudeVersion || "Not reported"}</dd>
+        {node.runtimes.length === 0 && (
+          // An older server lists no runtimes: its Claude version is all there is.
+          <>
+            <dt className="text-muted">Claude version</dt>
+            <dd className="min-w-0 font-mono break-words">{node.claudeVersion || "Not reported"}</dd>
+          </>
+        )}
       </dl>
+      {node.runtimes.length > 0 && (
+        <ul aria-label="Runtimes" className="grid gap-4 border-t border-line-soft pt-4">
+          {node.runtimes.map((r) => (
+            <li key={r.name} className="min-w-0">
+              <QuotaBars status={r} />
+            </li>
+          ))}
+        </ul>
+      )}
     </section>
   );
 }

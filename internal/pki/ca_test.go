@@ -298,7 +298,12 @@ func TestLoadRefusesWeakCACerts(t *testing.T) {
 		name string
 		mod  func(*x509.Certificate)
 	}{
-		{"not a CA", func(c *x509.Certificate) { c.IsCA = false; c.MaxPathLenZero = false; c.MaxPathLen = -1; c.KeyUsage = x509.KeyUsageDigitalSignature }},
+		{"not a CA", func(c *x509.Certificate) {
+			c.IsCA = false
+			c.MaxPathLenZero = false
+			c.MaxPathLen = -1
+			c.KeyUsage = x509.KeyUsageDigitalSignature
+		}},
 		{"expired", func(c *x509.Certificate) {
 			c.NotBefore = time.Now().Add(-48 * time.Hour)
 			c.NotAfter = time.Now().Add(-24 * time.Hour)

@@ -15,7 +15,7 @@ func TestTicketStatsAccumulate(t *testing.T) {
 	first := tk.Assignments[0].ID
 
 	h.tick(2)
-	h.must(h.eng.AssignmentStarted(tk.ID, first, "sess-1", ""))
+	h.must(h.eng.AssignmentStarted(tk.ID, first, "sess-1", "", ""))
 	h.tick(3)
 	h.must(h.eng.FileReport(tk.ID, ReportInput{State: ReportProgress, Summary: "looking"}))
 	h.tick(5)
@@ -145,7 +145,7 @@ func TestEngineRecordsMetrics(t *testing.T) {
 	tk := h.submit("Measure me")
 	a := tk.Assignments[0].ID
 	h.tick(2)
-	h.must(h.eng.AssignmentStarted(tk.ID, a, "s", ""))
+	h.must(h.eng.AssignmentStarted(tk.ID, a, "s", "", ""))
 	h.must(h.eng.RecordUsage(tk.ID, a, UsageDelta{InputTokens: 7, OutputTokens: 3, CacheReadTokens: 5, CostUSD: 0.5}))
 	h.must(h.eng.FileReport(tk.ID, ReportInput{State: ReportReady, Summary: "done"}))
 
@@ -226,7 +226,7 @@ func TestMetricsUseTheEffectiveModel(t *testing.T) {
 	tk, err := h.eng.SubmitOwnerTask("No model named", TaskOptions{Dir: "/work/x"})
 	h.must(err)
 	a := tk.Assignments[0].ID
-	h.must(h.eng.AssignmentStarted(tk.ID, a, "s", "sonnet"))
+	h.must(h.eng.AssignmentStarted(tk.ID, a, "s", "sonnet", ""))
 	eq(t, "assignment model", h.ticket(tk.ID).Assignments[0].Model, "sonnet")
 	h.must(h.eng.RecordUsage(tk.ID, a, UsageDelta{OutputTokens: 3, CostUSD: 0.5}))
 	h.must(h.eng.FileReport(tk.ID, ReportInput{State: ReportReady, Summary: "done"}))
@@ -239,4 +239,37 @@ func TestMetricsUseTheEffectiveModel(t *testing.T) {
 			t.Errorf("%s model label = %q, want sonnet (have %v)", name, models[name], models)
 		}
 	}
+}
+
+// The stats split the usage by the runtime that spent it: each Assignment counts once for the runtime it started on,
+// and a session's cumulative cost goes to the runtime that reported it.
+func TestStatsByRuntime(t *testing.T) {
+	h := newHarness(t)
+	tk, err := h.eng.SubmitOwnerTask("Mixed", TaskOptions{Dir: "/work/x", Runtime: RuntimeAuto})
+	h.must(err)
+	first := tk.Assignments[0].ID
+	h.must(h.eng.AssignmentStarted(tk.ID, first, "sess-1", "sonnet", RuntimeClaude))
+	h.must(h.eng.AssignmentStarted(tk.ID, first, "sess-1", "sonnet", RuntimeClaude)) // a resumed process
+	h.must(h.eng.RecordUsage(tk.ID, first, UsageDelta{Runtime: RuntimeClaude, Turns: 2, ActiveTime: 3 * time.Second,
+		InputTokens: 100, OutputTokens: 40, CacheReadTokens: 500, SessionID: "sess-1", SessionCostUSD: 0.3}))
+	h.must(h.eng.FileReport(tk.ID, ReportInput{State: ReportFailed, Summary: "limit"}))
+	h.must(h.eng.RetryTicket(tk.ID))
+	second := h.ticket(tk.ID).LatestAssignment().ID
+	h.must(h.eng.AssignmentStarted(tk.ID, second, "thr-1", "gpt-5-codex", RuntimeCodex))
+	h.must(h.eng.RecordUsage(tk.ID, second, UsageDelta{Runtime: RuntimeCodex, Turns: 1, ActiveTime: time.Second,
+		InputTokens: 7, OutputTokens: 3, CostUSD: 0.05}))
+	// Usage that names no runtime counts for the Assignment's.
+	h.must(h.eng.RecordUsage(tk.ID, second, UsageDelta{Turns: 1}))
+
+	got := h.ticket(tk.ID).Stats
+	eq(t, "total turns", got.Turns, 4)
+	by := got.ByRuntime
+	if math.Abs(by[RuntimeClaude].CostUSD-0.3) > 1e-9 || math.Abs(by[RuntimeCodex].CostUSD-0.05) > 1e-9 {
+		t.Fatalf("costs = %v / %v", by[RuntimeClaude].CostUSD, by[RuntimeCodex].CostUSD)
+	}
+	c, x := by[RuntimeClaude], by[RuntimeCodex]
+	c.CostUSD, x.CostUSD = 0, 0
+	eq(t, "claude", c, RuntimeStats{Turns: 2, ActiveTime: 3 * time.Second, InputTokens: 100, OutputTokens: 40, CacheReadTokens: 500, Assignments: 1})
+	eq(t, "codex", x, RuntimeStats{Turns: 2, ActiveTime: time.Second, InputTokens: 7, OutputTokens: 3, Assignments: 1})
+	eq(t, "runtimes", len(by), 2)
 }

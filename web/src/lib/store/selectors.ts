@@ -13,6 +13,8 @@ export type TicketFilter = {
   stage?: "open" | "needsYou" | "working" | "idle" | "ended";
   repo?: string;
   model?: string;
+  /** The runtime the Ticket works on (TicketSummary.runtime): claude or codex. */
+  runtime?: string;
   q?: string;
 };
 
@@ -109,7 +111,7 @@ function matchesStage(t: TicketSummary, stage: TicketFilter["stage"], answering:
 
 /** The Tickets the filter selects, most recently changed first. `q` matches the id or title, ignoring case. */
 export function selectTickets(s: TicketsSlice, f: TicketFilter): TicketSummary[] {
-  const key = JSON.stringify([f.stage, f.repo, f.model, f.q]);
+  const key = JSON.stringify([f.stage, f.repo, f.model, f.runtime, f.q]);
   const answering = answeringOf(s);
   return cached(listCache(s), key, () => {
     const q = f.q?.trim().toLowerCase();
@@ -118,6 +120,7 @@ export function selectTickets(s: TicketsSlice, f: TicketFilter): TicketSummary[]
       if (!matchesStage(t, f.stage, answering)) continue;
       if (f.repo !== undefined && t.repo !== f.repo) continue;
       if (f.model !== undefined && t.model !== f.model) continue;
+      if (f.runtime !== undefined && t.runtime !== f.runtime) continue;
       if (q && !t.id.toLowerCase().includes(q) && !t.title.toLowerCase().includes(q)) continue;
       out.push(t);
     }

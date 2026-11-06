@@ -54,6 +54,48 @@ type Assignment struct {
 	// Model is the model the Executor runs the Assignment with: the Ticket's, or the Executor's default when it names
 	// none.
 	Model string `json:"model,omitempty"`
+	// Interruptions are the times the Assignment's session was cut short from outside, such as by a server restart,
+	// oldest first; the last one is open until the session starts again.
+	Interruptions []Interruption `json:"interruptions,omitempty"`
+	// Runtime is the runtime the Assignment's session runs on (RuntimeClaude, RuntimeCodex): pinned when it was made, or
+	// the one its Executor started it on (AssignmentStarted). Empty until then; a Ticket's Assignments may each run on
+	// another one.
+	Runtime string `json:"runtime,omitempty"`
+	// Role is what the Assignment's session does: empty for the Ticket's worker (it implements), RoleReview for a
+	// review of its work.
+	Role string `json:"role,omitempty"`
+	// Limit is the usage limit its session stopped at, for an Assignment that ended with ReasonUsageLimit.
+	Limit *UsageLimit `json:"limit,omitempty"`
+	// ReviewOutcome is what a review Assignment (RoleReview) concluded, once it ended with ReasonReviewed.
+	ReviewOutcome *ReviewOutcome `json:"reviewOutcome,omitempty"`
+	// Continues is the implement Assignment whose held ready report this one applied after its review (applyHeld): it
+	// continues that Assignment's session and launched none of its own until an Input reaches it.
+	Continues string `json:"continues,omitempty"`
+}
+
+// RoleReview is the Role of an Assignment that reviews the Ticket's work.
+const RoleReview = "review"
+
+// InterruptRestart is the reason of an Interruption a server restart caused.
+const InterruptRestart = "server restart"
+
+// Interruption is a time an Assignment's session was cut short while it worked. ResumedAt is when the session started
+// again, and EndedAt when the Assignment ended before it did (a stop, a failover, a review); both are nil while the
+// Interruption is open.
+type Interruption struct {
+	At        time.Time  `json:"at"`
+	Reason    string     `json:"reason"`
+	ResumedAt *time.Time `json:"resumedAt,omitempty"`
+	EndedAt   *time.Time `json:"endedAt,omitempty"`
+}
+
+// OpenInterruption returns the Assignment's last Interruption when its session has not started again since and the
+// Assignment has not ended, else nil.
+func (a *Assignment) OpenInterruption() *Interruption {
+	if n := len(a.Interruptions); n > 0 && a.Interruptions[n-1].ResumedAt == nil && a.Interruptions[n-1].EndedAt == nil {
+		return &a.Interruptions[n-1]
+	}
+	return nil
 }
 
 // InputKind says what an Input carries.
@@ -64,6 +106,8 @@ const (
 	InputText    InputKind = "text"
 	InputNote    InputKind = "note"
 	InputResumed InputKind = "resumed"
+	// InputReview carries a review's findings to the implementer whose ready report it sent back (FileReview).
+	InputReview InputKind = "review"
 )
 
 // Input is something that reached a Ticket after it started.
@@ -172,7 +216,29 @@ type MandateBasis struct {
 	Observation bool `json:"observation,omitempty"`
 }
 
-// Execution is what a Ticket's Executor chose.
+// The runtimes a Ticket may run on (Execution.Runtime, TaskOptions.Runtime). RuntimeAuto lets the Executor choose for
+// each Assignment; an Assignment records the one it ran on (Assignment.Runtime).
+const (
+	RuntimeClaude = "claude"
+	RuntimeCodex  = "codex"
+	RuntimeAuto   = "auto"
+)
+
+// RuntimeLabel is how a runtime is named to a person: "Claude Code", "Codex", "Auto"; another name as it is.
+func RuntimeLabel(name string) string {
+	switch name {
+	case RuntimeClaude:
+		return "Claude Code"
+	case RuntimeCodex:
+		return "Codex"
+	case RuntimeAuto:
+		return "Auto"
+	}
+	return name
+}
+
+// Execution is what a Ticket's Executor chose. Runtime is the Ticket's choice (RuntimeClaude, RuntimeCodex or
+// RuntimeAuto); each Assignment records the runtime it actually ran on.
 type Execution struct {
 	Name       string `json:"name"`
 	Directory  string `json:"directory"`
@@ -226,6 +292,11 @@ type Ticket struct {
 	Repo string `json:"repo,omitempty"`
 	// RequestID is the client's id for the submit that created the Ticket; a second submit under it is a duplicate.
 	RequestID string `json:"requestId,omitempty"`
+	// Pairing is how the Ticket's work is paired: PairingReview has each ready report reviewed first (review.go), ""
+	// none.
+	Pairing string `json:"pairing,omitempty"`
+	// Review is the review in progress, nil when none is.
+	Review *ReviewState `json:"review,omitempty"`
 }
 
 // Follow is a Thread a Ticket follows: Own when the Ticket opened it, Closed once the Thread closed.

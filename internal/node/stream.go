@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/danielpina1/athena/internal/runtime/rt"
 )
 
 // The live session stream: every transcript line of a Ticket's sessions, by byte offset, to the dashboards watching
@@ -23,8 +25,9 @@ const (
 	// ringMaxLines and ringMaxBytes bound a Ticket's ring: 2000 lines or 1 MiB of them, whichever is less.
 	ringMaxLines = 2000
 	ringMaxBytes = 1 << 20
-	// maxLineBytes is the longest line kept; a longer one is kept as its offset alone (Line.Data nil).
-	maxLineBytes = 256 << 10
+	// maxLineBytes is the longest line kept; a longer one is kept as its offset alone (Line.Data nil). It is the runtimes'
+	// shared cap, which Codex's transcript writer cuts its lines to.
+	maxLineBytes = rt.MaxTranscriptLine
 	// subscriberBuffer is a live channel's capacity.
 	subscriberBuffer = 512
 	// TailLines is how many lines from = -1 asks for: about twice the items a tail shows (internal/web sends the last

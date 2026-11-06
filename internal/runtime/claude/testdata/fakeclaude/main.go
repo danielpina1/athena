@@ -27,6 +27,9 @@
 // ATHENA_TICKET when the fixture is replayed (so a file written after the session started counts), and when that file
 // does not exist, by "default"; with neither there, nothing is replayed.
 //
+// {now+Ns} in a fixture's lines (N whole seconds) is replaced, when the fixture is replayed, by the unix time N seconds
+// from then: a rate_limit_event's resetsAt a few seconds ahead.
+//
 // With --replay-user-messages among its arguments it echoes each user line as the real CLI does when it takes the
 // message into a turn ({"type":"user",...,"isReplay":true}, with the line's uuid), before replaying for it.
 //
@@ -41,6 +44,7 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -157,6 +161,22 @@ func fixture(name string) string {
 	return ""
 }
 
+// nowPlus is a fixture's {now+Ns}.
+var nowPlus = regexp.MustCompile(`\{now\+([0-9]+)s\}`)
+
+// readFixture reads a fixture with its {now+Ns} replaced.
+func readFixture(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	now := time.Now()
+	return nowPlus.ReplaceAllStringFunc(string(data), func(m string) string {
+		n, _ := strconv.Atoi(nowPlus.FindStringSubmatch(m)[1])
+		return strconv.FormatInt(now.Add(time.Duration(n)*time.Second).Unix(), 10)
+	}), nil
+}
+
 func fileExists(p string) bool {
 	_, err := os.Stat(p)
 	return err == nil
@@ -167,11 +187,11 @@ func replay(out *bufio.Writer, exitMidTurn bool) {
 	if path == "" {
 		return
 	}
-	data, err := os.ReadFile(path)
+	data, err := readFixture(path)
 	if err != nil {
 		os.Exit(6)
 	}
-	lines := strings.SplitAfter(string(data), "\n")
+	lines := strings.SplitAfter(data, "\n")
 	n := 1
 	if v, err := strconv.Atoi(os.Getenv("ATHENA_FAKE_REPEAT")); err == nil && v > 0 {
 		n = v
@@ -214,12 +234,12 @@ func replayLater(out *bufio.Writer) {
 	if path == "" {
 		return
 	}
-	data, err := os.ReadFile(path)
+	data, err := readFixture(path)
 	if err != nil {
 		os.Exit(6)
 	}
 	hold := strings.ReplaceAll(os.Getenv("ATHENA_FAKE_LATER_HOLD"), "{ticket}", os.Getenv("ATHENA_TICKET"))
-	for _, l := range strings.SplitAfter(string(data), "\n") {
+	for _, l := range strings.SplitAfter(data, "\n") {
 		if hold != "" && strings.Contains(l, `"type":"result"`) {
 			_ = out.Flush()
 			for fileExists(hold) {

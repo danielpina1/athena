@@ -7,3 +7,4 @@ web/test-results/
 web/playwright-report/
 internal/web/ui/dist/*
 !internal/web/ui/dist/.gitkeep
+internal/runtime/codex/testdata/codex/captured/

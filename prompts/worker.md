@@ -113,6 +113,7 @@ Athena gives you these values when your session starts and in its first message;
 - `ATHENA_DIR`: the Ticket's working directory; write only inside it.
 - `ATHENA_BLOCKED_COMMANDS`: commands you may not run, comma-separated.
 - `ATHENA_SOCKET`: the local Athena node's socket, used by Athena's own hooks and tools.
+- `ATHENA_RUNTIME`: the coding agent your session runs on, `claude` (Claude Code) or `codex` (Codex).
 
 A Ticket that works in a GitHub repository also has:
 

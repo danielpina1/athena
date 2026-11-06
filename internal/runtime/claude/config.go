@@ -9,6 +9,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/danielpina1/athena/internal/runtime/rt"
 )
 
 const (
@@ -73,24 +75,9 @@ type attributionSettings struct {
 // The block always sets autoAllowBashIfSandboxed false, so a sandboxed command still goes through the hooks and the
 // permission flow as before, allowUnsandboxedCommands false, so a session cannot ask to run a command outside the
 // sandbox (dangerouslyDisableSandbox is ignored), and strictAllowlist, so a host not on the list is refused, never
-// asked about.
-type Sandbox struct {
-	// Required makes the session fail at startup when the sandbox cannot start (failIfUnavailable); otherwise Claude
-	// Code warns on stderr and runs commands unsandboxed.
-	Required bool
-	// AllowWrite are paths writable besides the working directory; DenyWrite are paths never writable, even inside
-	// an allowed one; DenyRead are paths that cannot be read.
-	AllowWrite, DenyWrite, DenyRead []string
-	// AllowedDomains are the hosts commands may reach ("*.example.com" matches the subdomains).
-	AllowedDomains []string
-	// UnixSockets are the Unix sockets commands may connect to (macOS only: Linux cannot filter sockets by path).
-	UnixSockets []string
-	// AllowAllUnixSockets lets commands connect to any Unix socket; on Linux it is the only way to reach one.
-	AllowAllUnixSockets bool
-	// WeakerNetworkIsolation (macOS) lets commands reach the trustd service, which Go programs such as gh verify every
-	// TLS certificate through (enableWeakerNetworkIsolation). It opens a path out of the sandbox through that service.
-	WeakerNetworkIsolation bool
-}
+// asked about. Required sets failIfUnavailable: the session fails at startup when the sandbox cannot start; otherwise
+// Claude Code warns on stderr and runs commands unsandboxed. WeakerNetworkIsolation is enableWeakerNetworkIsolation.
+type Sandbox = rt.Sandbox
 
 type sandboxSettings struct {
 	Enabled                      bool              `json:"enabled"`
@@ -115,8 +102,8 @@ type sandboxNetwork struct {
 	AllowAllUnixSockets bool     `json:"allowAllUnixSockets,omitempty"`
 }
 
-// settings is the "sandbox" block of sb, nil without one.
-func (sb *Sandbox) settings() *sandboxSettings {
+// sandboxBlock is the "sandbox" block of sb, nil without one.
+func sandboxBlock(sb *rt.Sandbox) *sandboxSettings {
 	if sb == nil {
 		return nil
 	}
@@ -148,7 +135,7 @@ func WriteSettings(path, athenaBin, socket string, hookTimeout time.Duration) er
 // DefaultDecisionHookTimeout); the other events get 30 seconds. A non-nil sb adds
 // the "sandbox" block; env is added to the settings "env" (Claude Code passes it
 // to the commands it runs).
-func WriteSettingsWith(path, athenaBin, socket string, hookTimeout time.Duration, sb *Sandbox, env ...string) error {
+func WriteSettingsWith(path, athenaBin, socket string, hookTimeout time.Duration, sb *rt.Sandbox, env ...string) error {
 	if athenaBin == "" {
 		return errors.New("claude: athena binary path is empty")
 	}
@@ -161,7 +148,7 @@ func WriteSettingsWith(path, athenaBin, socket string, hookTimeout time.Duration
 	s := settingsFile{
 		Env:     map[string]string{},
 		Hooks:   map[string][]hookMatcher{},
-		Sandbox: sb.settings(),
+		Sandbox: sandboxBlock(sb),
 	}
 	for _, kv := range env {
 		k, v, ok := strings.Cut(kv, "=")
@@ -197,18 +184,51 @@ type mcpServer struct {
 // named "athena" running `<athenaBin> mcp --ticket <ticketID>`, with the
 // socket, ticket and assignment in its env (not left to env inheritance).
 func WriteMCPConfig(path, athenaBin, socket, ticketID, assignmentID string) error {
+	return writeTicketMCP(path, athenaBin, socket, ticketID, assignmentID, false)
+}
+
+// WriteReviewMCPConfig is WriteMCPConfig for a review session: its server runs `<athenaBin> mcp --ticket <ticketID>
+// --role review`, which offers only the review tool.
+func WriteReviewMCPConfig(path, athenaBin, socket, ticketID, assignmentID string) error {
+	return writeTicketMCP(path, athenaBin, socket, ticketID, assignmentID, true)
+}
+
+// reviewRole is the role a review session's MCP server runs with.
+const reviewRole = "review"
+
+func writeTicketMCP(path, athenaBin, socket, ticketID, assignmentID string, review bool) error {
 	if athenaBin == "" || socket == "" || ticketID == "" || assignmentID == "" {
 		return errors.New("claude: athena binary, socket, ticket and assignment are all required")
 	}
-	cfg := struct {
-		MCPServers map[string]mcpServer `json:"mcpServers"`
-	}{map[string]mcpServer{"athena": {
+	args := []string{"mcp", "--ticket", ticketID}
+	if review {
+		args = append(args, "--role", reviewRole)
+	}
+	return writeJSON(path, mcpFile{map[string]mcpServer{"athena": {
 		Type:    "stdio",
 		Command: athenaBin,
-		Args:    []string{"mcp", "--ticket", ticketID},
+		Args:    args,
 		Env:     map[string]string{"ATHENA_SOCKET": socket, "ATHENA_TICKET": ticketID, "ATHENA_ASSIGNMENT": assignmentID},
-	}}}
-	return writeJSON(path, cfg)
+	}}})
+}
+
+// mcpFile is a --mcp-config file.
+type mcpFile struct {
+	MCPServers map[string]mcpServer `json:"mcpServers"`
+}
+
+// isReviewMCP reports whether the --mcp-config file at path runs Athena's server for a review session alone.
+func isReviewMCP(path string) bool {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	var f mcpFile
+	if json.Unmarshal(b, &f) != nil || len(f.MCPServers) != 1 {
+		return false
+	}
+	a := f.MCPServers["athena"].Args
+	return len(a) == 5 && a[0] == "mcp" && a[1] == "--ticket" && a[3] == "--role" && a[4] == reviewRole
 }
 
 // WriteRouterMCPConfig writes the router's --mcp-config: one stdio server named "athena" running
