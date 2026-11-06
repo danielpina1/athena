@@ -151,6 +151,8 @@ var migrations = []string{
 		at INTEGER NOT NULL
 	);
 	CREATE INDEX prompt_revisions_part ON prompt_revisions (part, revision);`,
+	// 8: the WIP brake's held candidates, one per Trigger, with the repository as a column for the release pass.
+	`CREATE TABLE brakes (trigger_id TEXT PRIMARY KEY, repo TEXT NOT NULL, doc TEXT NOT NULL);`,
 }
 
 const schemaKey = "schema"

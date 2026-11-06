@@ -14,7 +14,7 @@ import { Button } from "@/ui/primitives/button";
 import { Select } from "@/ui/primitives/select";
 import type { FilterParams } from "../tickets/Filters";
 import type { RoutingKey } from "./Routing";
-import { canDismiss } from "./outcome";
+import { canDismiss, reasonSentence } from "./outcome";
 import { useShown } from "./shared";
 import { useCommand } from "./useCommand";
 
@@ -79,12 +79,16 @@ function Row({ decision: d }: { decision: DecisionView }) {
         <ul className="grid min-w-0 gap-0.5">
           {d.reasons.map((r, i) => (
             <li key={i} className="min-w-0 break-words">
-              <Mono tone="default" className="font-semibold">
-                {r.code}
-              </Mono>
-              {Object.entries(r.values).map(([k, v]) => (
-                <Mono key={k} className="ml-2">{`${k}=${v}`}</Mono>
-              ))}
+              {reasonSentence(r.code, r.values) ?? (
+                <>
+                  <Mono tone="default" className="font-semibold">
+                    {r.code}
+                  </Mono>
+                  {Object.entries(r.values).map(([k, v]) => (
+                    <Mono key={k} className="ml-2">{`${k}=${v}`}</Mono>
+                  ))}
+                </>
+              )}
             </li>
           ))}
         </ul>

@@ -21,6 +21,8 @@ type evalPolicy struct {
 	assessErr error
 	// trust is the class the policy gives every Trigger.
 	trust string
+	// ceiling is the WIP ceiling of every repository; 3 when 0.
+	ceiling int
 }
 
 func newEvalPolicy() *evalPolicy {
@@ -50,9 +52,14 @@ func (p *evalPolicy) Gate(t Trigger, _ Thread, tickets []Ticket) Gate {
 func (p *evalPolicy) Revalidate(Mandate) bool { return p.holds }
 
 func (p *evalPolicy) AdmitsInferred(rules []string) bool { return p.mode == "auto" && len(rules) > 0 }
-func (p *evalPolicy) WIPCeiling(string) int              { return 3 }
-func (p *evalPolicy) Shadow(string) bool                 { return false }
-func (p *evalPolicy) Trust(Trigger) string               { return p.trust }
+func (p *evalPolicy) WIPCeiling(string) int {
+	if p.ceiling > 0 {
+		return p.ceiling
+	}
+	return 3
+}
+func (p *evalPolicy) Shadow(string) bool   { return false }
+func (p *evalPolicy) Trust(Trigger) string { return p.trust }
 
 func (p *evalPolicy) Assess(a Assessment, strength string) (string, []Reason, bool, error) {
 	if p.assessErr != nil {

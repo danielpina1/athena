@@ -62,6 +62,12 @@ type Tx interface {
 	PutReceipt(r *Receipt) error
 	// TicketReceipts returns a Ticket's reply receipts, in queue order (Seq).
 	TicketReceipts(ticketID string) ([]*Receipt, error)
+	// PutBrake inserts or replaces the Brake of a Trigger.
+	PutBrake(b Brake) error
+	// DeleteBrake removes the Brake of a Trigger; none is not an error.
+	DeleteBrake(triggerID string) error
+	// Brakes returns every Brake, oldest first.
+	Brakes() ([]Brake, error)
 	// NextSeq returns the next value of the named counter: 1 on first use, then one more each call.
 	// It moves only if the transaction commits.
 	NextSeq(name string) (int, error)

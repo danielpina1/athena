@@ -510,8 +510,8 @@ func (c *policyCache) writePending(p *pendingChange) error {
 	return c.st.KVSet(policyChangeKey, string(raw))
 }
 
-// evaluate runs the Evals' due work now and then every evaluateEvery, only while a Thread has Triggers queued or an
-// Eval in progress, until ctx is done.
+// evaluate runs the Evals' due work now and then every evaluateEvery, only while a Thread has Triggers queued, an
+// Eval in progress or a candidate held by the brake, until ctx is done.
 func evaluate(ctx context.Context, eng *core.Engine, log *slog.Logger) {
 	run := func() {
 		active, err := eng.ActiveThreads()
@@ -520,7 +520,13 @@ func evaluate(ctx context.Context, eng *core.Engine, log *slog.Logger) {
 			return
 		}
 		if len(active) == 0 {
-			return
+			// Nothing queued, but a candidate the brake holds waits for the owner to catch up.
+			if held, err := eng.HasBrakes(); err != nil || !held {
+				if err != nil {
+					log.Error("evaluate: brakes", "error", err)
+				}
+				return
+			}
 		}
 		if err := eng.EvaluateDue(); err != nil {
 			log.Error("evaluate: due work", "error", err)

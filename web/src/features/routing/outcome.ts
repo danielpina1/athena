@@ -39,6 +39,14 @@ export function filteredText(code: string): string {
   return `Filtered: ${filterInWords(code)}`;
 }
 
+/** A Decision's reason in a sentence, for the codes that have one; undefined for the rest. */
+export function reasonSentence(code: string, values: Readonly<Record<string, string>>): string | undefined {
+  if (code === "wip_brake") {
+    return `Held: ${values.owed} things already wait on you in ${values.repo} (limit ${values.ceiling}).`;
+  }
+  return undefined;
+}
+
 /** What the Decisions say about each Trigger: whether one judged it and whether Eval was unavailable for it. */
 export type Judgement = { judged: boolean; unavailable: boolean };
 

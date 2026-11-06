@@ -19,6 +19,7 @@ type memRepos struct {
 	approvals map[string][]byte
 	threads   map[string][]byte
 	receipts  map[string][]byte
+	brakes    map[string][]byte
 	kv        map[string]string
 	effects   map[string]fakeEffect
 	seqs      map[string]int
@@ -29,7 +30,7 @@ type memRepos struct {
 }
 
 func newMemRepos() *memRepos {
-	return &memRepos{tickets: map[string][]byte{}, triggers: map[string][]byte{}, decisions: map[string][]byte{}, approvals: map[string][]byte{}, threads: map[string][]byte{}, receipts: map[string][]byte{}, kv: map[string]string{}, effects: map[string]fakeEffect{}, seqs: map[string]int{}}
+	return &memRepos{tickets: map[string][]byte{}, triggers: map[string][]byte{}, decisions: map[string][]byte{}, approvals: map[string][]byte{}, threads: map[string][]byte{}, receipts: map[string][]byte{}, brakes: map[string][]byte{}, kv: map[string]string{}, effects: map[string]fakeEffect{}, seqs: map[string]int{}}
 }
 
 // fakeEffect is a queued effect, as Enqueue leaves it.
@@ -49,6 +50,7 @@ func (r *memRepos) Tx(fn func(Tx) error) error {
 		approvals: cloneMap(r.approvals),
 		threads:   cloneMap(r.threads),
 		receipts:  cloneMap(r.receipts),
+		brakes:    cloneMap(r.brakes),
 		kv:        map[string]string{},
 		effects:   map[string]fakeEffect{},
 		seqs:      map[string]int{},
@@ -72,7 +74,7 @@ func (r *memRepos) Tx(fn func(Tx) error) error {
 		return r.failWith
 	}
 	r.tickets, r.triggers, r.decisions, r.approvals, r.seqs = tx.tickets, tx.triggers, tx.decisions, tx.approvals, tx.seqs
-	r.threads, r.kv, r.effects, r.receipts = tx.threads, tx.kv, tx.effects, tx.receipts
+	r.threads, r.kv, r.effects, r.receipts, r.brakes = tx.threads, tx.kv, tx.effects, tx.receipts, tx.brakes
 	return nil
 }
 
@@ -155,7 +157,7 @@ func (r *memRepos) counts() (tickets, triggers, decisions int) {
 
 type memTx struct {
 	tickets, triggers, decisions, approvals, threads map[string][]byte
-	receipts                                         map[string][]byte
+	receipts, brakes                                 map[string][]byte
 	kv                                               map[string]string
 	effects                                          map[string]fakeEffect
 	seqs                                             map[string]int
@@ -393,6 +395,33 @@ func (tx *memTx) PutDecision(d *Decision) error {
 	}
 	tx.decisions[d.ID] = raw
 	return nil
+}
+
+func (tx *memTx) PutBrake(b Brake) error {
+	raw, err := json.Marshal(b)
+	tx.brakes[b.TriggerID] = raw
+	return err
+}
+
+func (tx *memTx) DeleteBrake(triggerID string) error {
+	delete(tx.brakes, triggerID)
+	return nil
+}
+
+func (tx *memTx) Brakes() ([]Brake, error) {
+	var out []Brake
+	for _, raw := range tx.brakes {
+		var b Brake
+		mustUnmarshal(raw, &b)
+		out = append(out, b)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].At.Equal(out[j].At) {
+			return out[i].At.Before(out[j].At)
+		}
+		return out[i].TriggerID < out[j].TriggerID
+	})
+	return out, nil
 }
 
 func (tx *memTx) NextSeq(name string) (int, error) {
