@@ -1,5 +1,5 @@
-// Settings › Execution, read-only: what the node runs sessions with, each runtime's version included (an empty one is
-// not reported; "untested" when Athena was not verified against it). Slots and the default model are flags of
+// Settings › Execution, read-only: what the node runs sessions with, each runtime's version included (a runtime that
+// reports none has no row; "untested" when Athena was not verified against it). Slots and the default model are flags of
 // `athena server` (internal/cli), not settings the dashboard can change, so this says where to change them.
 import { selectSynced } from "@/lib/store/selectors";
 import { useAthena } from "@/lib/store/state";
@@ -21,22 +21,29 @@ export function Execution() {
             <dd className="min-w-0 font-mono break-words">{node.name || "This machine"}</dd>
             <dt className="text-muted">Slots</dt>
             <dd className="font-mono tabular-nums">{node.slots}</dd>
-            {node.runtimes.length === 0 ? (
-              <>
-                <dt className="text-muted">Claude version</dt>
-                <dd className="min-w-0 font-mono break-words">{node.claudeVersion || "Not reported"}</dd>
-              </>
-            ) : (
-              node.runtimes.map((r) => (
-                <div key={r.name} className="contents">
-                  <dt className="text-muted">{`${runtimeLabel(r.name)} version`}</dt>
-                  <dd className="min-w-0 font-mono break-words">
-                    {r.version || "Not reported"}
-                    {r.version && !r.tested && <span className="ml-1 text-xs text-warning"> untested</span>}
-                  </dd>
-                </div>
-              ))
-            )}
+            {node.runtimes.length === 0
+              ? node.claudeVersion && (
+                  <>
+                    <dt className="text-muted">Claude version</dt>
+                    <dd className="min-w-0 font-mono break-words">{node.claudeVersion}</dd>
+                  </>
+                )
+              : node.runtimes
+                  .filter((r) => r.version)
+                  .map((r) => (
+                    <div key={r.name} className="contents">
+                      <dt className="text-muted">{`${runtimeLabel(r.name)} version`}</dt>
+                      <dd className="min-w-0 font-mono break-words">
+                        {r.version}
+                        {!r.tested && (
+                          <>
+                            {" "}
+                            <span className="text-xs text-warning">untested</span>
+                          </>
+                        )}
+                      </dd>
+                    </div>
+                  ))}
           </dl>
         )}
       </Block>

@@ -1,6 +1,7 @@
 // One runtime of the node card: its name, version ("untested" in amber when Athena was not verified against it) and
 // whether it is ready (or why not), then one bar per quota window with the percent used and when it resets. A limited
-// runtime says until when, in amber; one never measured says so; a reading over 10 minutes old says its age. Bars are
+// runtime says until when, in amber; one never measured says so, and so does one measured with no window; a reading
+// over 10 minutes old says its age. Bars are
 // ink on a hairline track, amber from 85%. Never orange: a usage limit waits by itself and needs nobody.
 import { timestampMs } from "@bufbuild/protobuf/wkt";
 import { useId } from "react";
@@ -38,8 +39,10 @@ export function quotaLine(s: RuntimeStatus, now: number): { text: string; warn: 
   const until = limitedUntil(s, now);
   // The sidebar is narrow: the time on the same day, else the weekday; the card has the rest.
   if (until !== undefined) return { text: `limited · ${shortResetTime(until, now)}`, warn: true };
+  if (!s.measured) return { text: "not measured", warn: false };
+  if (s.windows.length === 0) return { text: "no limits reported", warn: false };
   const live = s.windows.filter((w) => !w.stale);
-  if (!s.measured || live.length === 0) return { text: "not measured", warn: false };
+  if (live.length === 0) return { text: "reset since read", warn: false };
   const top = live.reduce((a, b) => (b.used > a.used ? b : a));
   return { text: `${pctOf(top)}% · ${top.name}`, warn: pctOf(top) >= WARN_PCT };
 }
@@ -94,14 +97,14 @@ export function QuotaBars({ status }: { status: RuntimeStatus }) {
       {until !== undefined && <p className="text-sm text-warning">{`Limited until ${resetTime(until, now)}`}</p>}
       {!status.measured ? (
         <p className="text-sm text-muted">Not measured yet</p>
+      ) : status.windows.length === 0 ? (
+        <p className="text-sm text-muted">No limits reported</p>
       ) : (
-        status.windows.length > 0 && (
-          <div className="grid grid-cols-[auto_minmax(0,1fr)_auto_auto] items-baseline gap-x-3 gap-y-1.5">
-            {status.windows.map((w) => (
-              <Window key={w.name} runtime={label} w={w} now={now} />
-            ))}
-          </div>
-        )
+        <div className="grid grid-cols-[auto_minmax(0,1fr)_auto_auto] items-baseline gap-x-3 gap-y-1.5">
+          {status.windows.map((w) => (
+            <Window key={w.name} runtime={label} w={w} now={now} />
+          ))}
+        </div>
       )}
       {old && <p className="font-mono text-xs text-muted">{`as of ${age(now - readAt)}`}</p>}
     </section>

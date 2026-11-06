@@ -20,8 +20,8 @@ const status = (init: MessageInitShape<typeof RuntimeStatusSchema>) =>
 const win = (name: string, used: number, resetsAt = NOW + 3 * 60 * MIN) => ({ name, used, resetsAt: timestampFromMs(resetsAt) });
 
 const show = (init: MessageInitShape<typeof RuntimeStatusSchema>) => {
-  const { container } = render(<QuotaBars status={status(init)} />);
-  return { block: screen.getByRole("region", { name: init.name === "claude" ? "Claude Code" : "Codex" }), container };
+  const { container, unmount } = render(<QuotaBars status={status(init)} />);
+  return { block: screen.getByRole("region", { name: init.name === "claude" ? "Claude Code" : "Codex" }), container, unmount };
 };
 
 test("one bar per window with its percent and reset, and the version and readiness", () => {
@@ -40,24 +40,30 @@ test("one bar per window with its percent and reset, and the version and readine
 
 test("quota bars: unmeasured, stale age, limited, amber at 85", () => {
   // Not measured yet: no bars.
-  let { block } = show({ measured: false, readAt: undefined, windows: [] });
+  let { block, unmount } = show({ measured: false, readAt: undefined, windows: [] });
   expect(within(block).getByText("Not measured yet")).toBeTruthy();
   expect(within(block).queryByRole("meter")).toBeNull();
-  document.body.innerHTML = "";
+  unmount();
 
   // A reading older than 10 minutes says its age.
-  ({ block } = show({ readAt: timestampFromMs(NOW - 25 * MIN), windows: [win("5h", 0.3)] }));
+  ({ block, unmount } = show({ readAt: timestampFromMs(NOW - 25 * MIN), windows: [win("5h", 0.3)] }));
   expect(within(block).getByText("as of 25 min ago")).toBeTruthy();
-  document.body.innerHTML = "";
-  ({ block } = show({ readAt: timestampFromMs(NOW - 9 * MIN), windows: [win("5h", 0.3)] }));
+  unmount();
+  ({ block, unmount } = show({ readAt: timestampFromMs(NOW - 9 * MIN), windows: [win("5h", 0.3)] }));
   expect(within(block).queryByText(/as of/)).toBeNull();
-  document.body.innerHTML = "";
+  unmount();
 
   // Limited: amber, until when.
-  ({ block } = show({ limitedUntil: timestampFromMs(new Date(2026, 10, 6, 14, 30).getTime()), windows: [win("5h", 1)] }));
+  ({ block, unmount } = show({ limitedUntil: timestampFromMs(new Date(2026, 10, 6, 14, 30).getTime()), windows: [win("5h", 1)] }));
   const limited = within(block).getByText("Limited until 14:30");
   expect(limited.classList.contains("text-warning")).toBe(true);
-  document.body.innerHTML = "";
+  unmount();
+
+  // Measured, but no window reported: it says so.
+  ({ block, unmount } = show({ windows: [] }));
+  expect(within(block).getByText("No limits reported")).toBeTruthy();
+  expect(within(block).queryByText("Not measured yet")).toBeNull();
+  unmount();
 
   // Amber from 85%, ink below.
   ({ block } = show({ windows: [win("5h", 0.85), win("7d", 0.84)] }));
@@ -69,14 +75,14 @@ test("quota bars: unmeasured, stale age, limited, amber at 85", () => {
 });
 
 test("untested and not ready say so; an empty version says nothing", () => {
-  let { block } = show({ version: "0.161.0", tested: false, why: "newer than the verified 0.160.1", windows: [] });
+  let { block, unmount } = show({ version: "0.161.0", tested: false, why: "newer than the verified 0.160.1", windows: [] });
   expect(within(block).getByText("untested").classList.contains("text-warning")).toBe(true);
   expect(within(block).getByText("Ready")).toBeTruthy();
   expect(within(block).getByText("newer than the verified 0.160.1")).toBeTruthy();
-  document.body.innerHTML = "";
-  ({ block } = show({ name: "claude", version: "", tested: false, windows: [] }));
+  unmount();
+  ({ block, unmount } = show({ name: "claude", version: "", tested: false, windows: [] }));
   expect(within(block).queryByText("untested")).toBeNull();
-  document.body.innerHTML = "";
+  unmount();
   ({ block } = show({ ready: false, why: "Codex is not logged in: run athena codex login", windows: [] }));
   expect(within(block).queryByText("Ready")).toBeNull();
   expect(within(block).getByText("Codex is not logged in: run athena codex login")).toBeTruthy();
@@ -106,5 +112,8 @@ test("the sidebar's line is the fullest window, or what keeps the runtime from w
   // Another day: its weekday, so the line fits the sidebar.
   expect(quotaLine(status({ limitedUntil: timestampFromMs(new Date(2026, 10, 9, 8, 0).getTime()), windows: [] }), NOW).text).toBe("limited · Mon");
   expect(quotaLine(status({ measured: false, windows: [] }), NOW)).toEqual({ text: "not measured", warn: false });
+  // Measured: every window reset since it was read, as the card says; or none reported at all.
+  expect(quotaLine(status({ windows: [{ ...win("5h", 0.7), stale: true }] }), NOW)).toEqual({ text: "reset since read", warn: false });
+  expect(quotaLine(status({ windows: [] }), NOW)).toEqual({ text: "no limits reported", warn: false });
   expect(quotaLine(status({ ready: false, why: "x", windows: [win("5h", 0.1)] }), NOW)).toEqual({ text: "not ready", warn: true });
 });

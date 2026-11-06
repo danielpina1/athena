@@ -123,6 +123,13 @@ test("a patch's lines follow its change: an add is all added, a delete all remov
   expect(
     view("apply_patch", { changes: [{ path: `${WT}/old.go`, kind: "delete", diff: "-a\n-b\n" }] }).patch?.[0].lines.map((l) => l.sign + l.text),
   ).toEqual(["−a", "−b"]);
+  // Content whose every line is a bullet ("- " or "+ ") is plain, not signed: no character is lost.
+  expect(
+    view("apply_patch", { changes: [{ path: `${WT}/list.md`, kind: "delete", diff: "- one\n- two\n" }] }).patch?.[0].lines.map((l) => l.sign + l.text),
+  ).toEqual(["−- one", "−- two"]);
+  expect(
+    view("apply_patch", { changes: [{ path: `${WT}/plus.md`, kind: "add", diff: "+ a\n\n+ b\n" }] }).patch?.[0].lines.map((l) => l.sign + l.text),
+  ).toEqual(["++ a", "+", "++ b"]);
   // A clipped delete counts its full length.
   expect(
     view("apply_patch", { changes: [{ path: `${WT}/big.md`, kind: "delete", diff: "a\nb…" }], _lines: { "changes.0.diff": 300 } }).counts,

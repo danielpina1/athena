@@ -116,8 +116,13 @@ test("execution lists each runtime's version", () => {
   });
   renderSettings("/settings/execution", "desktop");
   const facts = screen.getByRole("region", { name: "Execution" });
-  expect(within(facts).getByText("Claude Code version").nextElementSibling?.textContent).toBe("Not reported");
-  expect(within(facts).getByText("Codex version").nextElementSibling?.textContent).toBe("0.161.0 untested");
+  // An empty version shows nothing (R70): the runtime has no version row.
+  expect(within(facts).queryByText("Claude Code version")).toBeNull();
+  expect(within(facts).queryByText("Not reported")).toBeNull();
+  const codex = within(facts).getByText("Codex version").nextElementSibling;
+  expect(codex?.textContent).toBe("0.161.0 untested");
+  // One gap before "untested": a space, no margin besides.
+  expect(codex?.querySelector("span")?.className).not.toMatch(/\bml-/);
 });
 
 test("system links to Routing and Nodes and switches the theme", async () => {

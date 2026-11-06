@@ -133,10 +133,11 @@ test("cmd-enter submits once, enter adds a line, composition does not submit", a
   await waitFor(() => expect(screen.getByText("detail of the ticket")).toBeTruthy());
 });
 
+const suggested = () => Array.from(document.querySelectorAll("datalist option")).map((o) => o.getAttribute("value"));
+
 test("model suggestions are the recent models, and an empty model sends none", async () => {
   const user = setup();
-  const options = Array.from(document.querySelectorAll("datalist option")).map((o) => o.getAttribute("value"));
-  expect(options).toEqual(["opus", "sonnet"]);
+  expect(suggested()).toEqual(["opus", "sonnet"]);
   await user.type(task(), "x");
   await user.type(screen.getByRole("combobox", { name: "Model" }), "haiku");
   await user.click(start());
@@ -215,7 +216,7 @@ test("new task sends runtime and review", async () => {
   // The switch untouched: the Policy's default decides, so no review is sent.
   await user.click(start());
   expect(submitTask).toHaveBeenLastCalledWith({ text: "Port the parser", runtime: "codex" });
-  const review = screen.getByRole("switch", { name: "Review on the other runtime" });
+  const review = screen.getByRole("switch", { name: "Review each ready report" });
   expect(review.getAttribute("aria-checked")).toBe("false");
   await user.click(review);
   await user.click(start());
@@ -231,7 +232,7 @@ test("the review switch starts at the Policy's default and sends only when toggl
   withRuntimes(both, '{"pairing":{"review":"on","maxRounds":2}}');
   const user = setup();
   submitTask.mockResolvedValue(create(CommandResultSchema, { ok: false, code: "unavailable" }));
-  const review = screen.getByRole("switch", { name: "Review on the other runtime" });
+  const review = screen.getByRole("switch", { name: "Review each ready report" });
   expect(review.getAttribute("aria-checked")).toBe("true");
   await user.type(task(), "x");
   await user.click(start());
@@ -241,14 +242,53 @@ test("the review switch starts at the Policy's default and sends only when toggl
   expect(submitTask).toHaveBeenLastCalledWith({ text: "x", runtime: "auto", review: false });
 });
 
-test("review switch only with two ready runtimes", () => {
+test("model suggestions follow the chosen runtime; under Auto the model is Claude Code's", async () => {
+  load({
+    repos: [],
+    tickets: [
+      { id: "T-1", title: "a", model: "opus", runtime: "claude" },
+      { id: "T-2", title: "b", model: "gpt-5.5", runtime: "codex" },
+      { id: "T-3", title: "c", model: "sonnet" },
+    ],
+    node: { name: "mac-mini", slots: 2, runtimes: both },
+    policy: { revision: 1, settingsJson: "{}" },
+  });
+  const user = setup();
+  expect(suggested()).toEqual(["opus", "sonnet"]);
+  expect(screen.getByText("Under Auto, the model applies on Claude Code; Codex runs its own default.")).toBeTruthy();
+  await user.click(screen.getByRole("radio", { name: "Codex" }));
+  expect(suggested()).toEqual(["gpt-5.5"]);
+  expect(screen.queryByText(/Under Auto/)).toBeNull();
+  await user.click(screen.getByRole("radio", { name: "Claude Code" }));
+  expect(suggested()).toEqual(["opus", "sonnet"]);
+});
+
+test("review switch with two ready runtimes, or whenever the Policy pairs", async () => {
+  withRuntimes([both[0]], '{"pairing":{"review":"on"}}');
+  const one = render(
+    <MemoryRouter>
+      <NewTask />
+    </MemoryRouter>,
+  );
+  // One runtime, the Policy pairing every task: the owner can still opt out of this one.
+  const review = screen.getByRole("switch", { name: "Review each ready report" });
+  expect(review.getAttribute("aria-checked")).toBe("true");
+  expect(screen.getByText(/on the other runtime when it can review/)).toBeTruthy();
+  submitTask.mockResolvedValue(create(CommandResultSchema, { ok: false, code: "unavailable" }));
+  const user = userEvent.setup();
+  await user.type(task(), "x");
+  await user.click(review);
+  await user.click(start());
+  expect(submitTask).toHaveBeenLastCalledWith({ text: "x", runtime: "auto", review: false });
+  one.unmount();
+
   withRuntimes([both[0], { name: "codex", ready: false, why: "Codex is not logged in" }]);
   const { unmount } = render(
     <MemoryRouter>
       <NewTask />
     </MemoryRouter>,
   );
-  expect(screen.queryByRole("switch", { name: "Review on the other runtime" })).toBeNull();
+  expect(screen.queryByRole("switch", { name: "Review each ready report" })).toBeNull();
   unmount();
   withRuntimes([both[0]]);
   const again = render(
@@ -256,7 +296,7 @@ test("review switch only with two ready runtimes", () => {
       <NewTask />
     </MemoryRouter>,
   );
-  expect(screen.queryByRole("switch", { name: "Review on the other runtime" })).toBeNull();
+  expect(screen.queryByRole("switch", { name: "Review each ready report" })).toBeNull();
   again.unmount();
   withRuntimes(both);
   render(
@@ -264,7 +304,7 @@ test("review switch only with two ready runtimes", () => {
       <NewTask />
     </MemoryRouter>,
   );
-  expect(screen.getByRole("switch", { name: "Review on the other runtime" })).toBeTruthy();
+  expect(screen.getByRole("switch", { name: "Review each ready report" })).toBeTruthy();
 });
 
 test("a chosen runtime that stops being ready sends auto", async () => {

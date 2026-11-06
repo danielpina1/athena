@@ -61,7 +61,10 @@ function patchLines(kind: string, diff: string): DiffLine[] {
   if (kind === "add" || kind === "delete") {
     const sign = kind === "add" ? "+" : "−";
     const mark = kind === "add" ? "+" : "-";
-    const signed = lines.length > 0 && lines.every((l) => !l || l.startsWith(mark));
+    // Signed (a diff of the whole file) when every line starts with the sign, unless every one is a bullet ("- x",
+    // "+ x"): plain content more often looks like that than a diff whose every line is indented.
+    const filled = lines.filter((l) => l);
+    const signed = filled.length > 0 && filled.every((l) => l.startsWith(mark)) && !filled.every((l) => l.startsWith(mark + " "));
     return lines.map((l) => ({ sign, text: signed ? l.slice(1) : l }));
   }
   let header = true;

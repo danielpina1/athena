@@ -20,7 +20,7 @@ test("a no-repo task starts from the form and lands on its detail, light and dar
   await expect(page.getByRole("radio", { name: "Auto" })).toHaveAttribute("aria-checked", "true");
   await expect(page.getByRole("radio", { name: "Claude Code" })).toBeEnabled();
   await expect(page.getByRole("radio", { name: "Codex" })).toBeEnabled();
-  await expect(page.getByRole("switch", { name: "Review on the other runtime" })).toBeVisible();
+  await expect(page.getByRole("switch", { name: "Review each ready report" })).toBeVisible();
 
   // Free entry offers itself; the list is open for the screenshots.
   await text.fill("Sketch the release notes");
@@ -72,8 +72,8 @@ test("a runtime that is not ready is disabled and says why, light and dark", asy
   await expect(codex).toHaveAttribute("title", why);
   await expect(codex).toHaveAccessibleDescription(why);
   await expect(page.getByText(why)).toBeVisible();
-  // One runtime ready: nothing to review on.
-  await expect(page.getByRole("switch", { name: "Review on the other runtime" })).toHaveCount(0);
+  // One runtime ready, and a Policy that pairs nothing: no review switch.
+  await expect(page.getByRole("switch", { name: "Review each ready report" })).toHaveCount(0);
   await page.getByRole("textbox", { name: "What should Athena do?" }).fill("Tidy the changelog");
   await expectAccessible(page);
   const unstable = [page.getByRole("region", { name: "Today" })];
@@ -91,7 +91,7 @@ test("a task pinned to Codex with a review says so in its Facts, light and dark"
   await page.goto("/new");
   await page.getByRole("textbox", { name: "What should Athena do?" }).fill("Port the tokenizer to the new grammar");
   await page.getByRole("radio", { name: "Codex" }).click();
-  const review = page.getByRole("switch", { name: "Review on the other runtime" });
+  const review = page.getByRole("switch", { name: "Review each ready report" });
   await expect(review).toHaveAttribute("aria-checked", "false");
   await review.click();
   await expect(review).toHaveAttribute("aria-checked", "true");
