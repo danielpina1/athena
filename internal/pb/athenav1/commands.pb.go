@@ -417,11 +417,16 @@ func (*Command_SetPrompt) isCommand_Action() {}
 func (*Command_ResetPrompt) isCommand_Action() {}
 
 type SubmitTask struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Text          string                 `protobuf:"bytes,1,opt,name=text,proto3" json:"text,omitempty"`
-	Repo          string                 `protobuf:"bytes,2,opt,name=repo,proto3" json:"repo,omitempty"`
-	Dir           string                 `protobuf:"bytes,3,opt,name=dir,proto3" json:"dir,omitempty"`
-	Model         string                 `protobuf:"bytes,4,opt,name=model,proto3" json:"model,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Text  string                 `protobuf:"bytes,1,opt,name=text,proto3" json:"text,omitempty"`
+	Repo  string                 `protobuf:"bytes,2,opt,name=repo,proto3" json:"repo,omitempty"`
+	Dir   string                 `protobuf:"bytes,3,opt,name=dir,proto3" json:"dir,omitempty"`
+	Model string                 `protobuf:"bytes,4,opt,name=model,proto3" json:"model,omitempty"`
+	// runtime is claude, codex or auto; empty is the configured default. An unknown one is invalid.
+	Runtime string `protobuf:"bytes,5,opt,name=runtime,proto3" json:"runtime,omitempty"`
+	// review pairs the task with a review of its ready reports (true) or with none (false); unset is the Policy's
+	// default.
+	Review        *bool `protobuf:"varint,6,opt,name=review,proto3,oneof" json:"review,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -482,6 +487,20 @@ func (x *SubmitTask) GetModel() string {
 		return x.Model
 	}
 	return ""
+}
+
+func (x *SubmitTask) GetRuntime() string {
+	if x != nil {
+		return x.Runtime
+	}
+	return ""
+}
+
+func (x *SubmitTask) GetReview() bool {
+	if x != nil && x.Review != nil {
+		return *x.Review
+	}
+	return false
 }
 
 type Reply struct {
@@ -1900,13 +1919,16 @@ const file_athena_v1_commands_proto_rawDesc = "" +
 	"\n" +
 	"set_prompt\x18\x1d \x01(\v2\x14.athena.v1.SetPromptH\x00R\tsetPrompt\x12;\n" +
 	"\freset_prompt\x18\x1e \x01(\v2\x16.athena.v1.ResetPromptH\x00R\vresetPromptB\b\n" +
-	"\x06action\"\\\n" +
+	"\x06action\"\x9e\x01\n" +
 	"\n" +
 	"SubmitTask\x12\x12\n" +
 	"\x04text\x18\x01 \x01(\tR\x04text\x12\x12\n" +
 	"\x04repo\x18\x02 \x01(\tR\x04repo\x12\x10\n" +
 	"\x03dir\x18\x03 \x01(\tR\x03dir\x12\x14\n" +
-	"\x05model\x18\x04 \x01(\tR\x05model\"8\n" +
+	"\x05model\x18\x04 \x01(\tR\x05model\x12\x18\n" +
+	"\aruntime\x18\x05 \x01(\tR\aruntime\x12\x1b\n" +
+	"\x06review\x18\x06 \x01(\bH\x00R\x06review\x88\x01\x01B\t\n" +
+	"\a_review\"8\n" +
 	"\x05Reply\x12\x1b\n" +
 	"\tticket_id\x18\x01 \x01(\tR\bticketId\x12\x12\n" +
 	"\x04text\x18\x02 \x01(\tR\x04text\";\n" +
@@ -2104,6 +2126,7 @@ func file_athena_v1_commands_proto_init() {
 		(*Command_SetPrompt)(nil),
 		(*Command_ResetPrompt)(nil),
 	}
+	file_athena_v1_commands_proto_msgTypes[1].OneofWrappers = []any{}
 	file_athena_v1_commands_proto_msgTypes[22].OneofWrappers = []any{
 		(*CommandResult_TicketId)(nil),
 		(*CommandResult_Passkeys)(nil),

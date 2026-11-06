@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -753,4 +754,50 @@ func (d *Dispatcher) sessionHashOf(t *testing.T, b *browser) string {
 		t.Fatal("no session")
 	}
 	return s.Hash
+}
+
+// A task submitted from the dashboard names its runtime and whether a review pairs it: review unset leaves the Policy's
+// default (none here), true and false are explicit.
+func TestSubmitTaskRuntimeAndReview(t *testing.T) {
+	newFakeEnv(t, openTurnFixture(t))
+	w := startWeb(t, newStateDir(t))
+	c := w.connect(w.login().session(), phoneHello())
+	c.welcome()
+	c.snapshot()
+	yes, no := true, false
+	for i, tc := range []struct {
+		runtime string
+		review  *bool
+		want    string // the Ticket pairing: off is none
+		rt      string
+	}{
+		{"", nil, "", core.RuntimeAuto},
+		{core.RuntimeCodex, &yes, core.PairingReview, core.RuntimeCodex},
+		{core.RuntimeClaude, &no, "", core.RuntimeClaude},
+	} {
+		res := c.do(&athenav1.Command{Id: fmt.Sprintf("s%d", i), Action: &athenav1.Command_SubmitTask{
+			SubmitTask: &athenav1.SubmitTask{Text: fmt.Sprintf("task %d", i), Runtime: tc.runtime, Review: tc.review}}})
+		if !res.GetOk() || res.GetTicketId() == "" {
+			t.Fatalf("case %d: result %v", i, res)
+		}
+		d := w.detail(res.GetTicketId())
+		if d.Runtime != tc.rt || d.Pairing != tc.want {
+			t.Errorf("case %d: ticket runtime %q pairing %q, want %q %q", i, d.Runtime, d.Pairing, tc.rt, tc.want)
+		}
+	}
+}
+
+func TestSubmitTaskUnknownRuntimeInvalid(t *testing.T) {
+	newFakeEnv(t, openTurnFixture(t))
+	w := startWeb(t, newStateDir(t))
+	c := w.connect(w.login().session(), phoneHello())
+	c.welcome()
+	c.snapshot()
+	res := c.do(&athenav1.Command{Id: "bad", Action: &athenav1.Command_SubmitTask{SubmitTask: &athenav1.SubmitTask{Text: "x", Runtime: "gemini"}}})
+	if res.GetOk() || res.GetCode() != web.CodeInvalid || !strings.Contains(res.GetMessage(), "gemini") {
+		t.Fatalf("result %v, want invalid naming the runtime", res)
+	}
+	if n := len(w.tickets()); n != 0 {
+		t.Errorf("%d tickets made by an invalid submit", n)
+	}
 }

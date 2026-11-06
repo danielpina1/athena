@@ -70,8 +70,29 @@ func prURL(t *core.Ticket) string {
 	return ""
 }
 
-// defaultRuntime is the runtime of a Ticket whose Execution does not name one: Claude Code is the only one.
-const defaultRuntime = "claude"
+// defaultRuntime is the runtime of a Ticket whose Execution does not name one (from before runtimes): Claude Code.
+const defaultRuntime = core.RuntimeClaude
+
+// WhyMaxRunes cuts a runtime's why (RuntimeStatus.why) on the wire.
+const WhyMaxRunes = 200
+
+// runtimeChoice is what the Ticket asked for: claude, codex or auto.
+func runtimeChoice(t *core.Ticket) string {
+	if x := t.Execution; x != nil && x.Runtime != "" {
+		return x.Runtime
+	}
+	return defaultRuntime
+}
+
+// runtimeOf is the runtime of the latest Assignment that started (a review's too), else the Ticket's choice.
+func runtimeOf(t *core.Ticket) string {
+	for i := len(t.Assignments) - 1; i >= 0; i-- {
+		if a := &t.Assignments[i]; a.StartedAt != nil && a.Runtime != "" {
+			return a.Runtime
+		}
+	}
+	return runtimeChoice(t)
+}
 
 // ticketSummary maps a Ticket; gitFolder tells its branch (see node.WorktreeBranch; nil: no folder has a .git entry).
 func ticketSummary(t *core.Ticket, st core.Stage, gitFolder func(dir string) bool) *athenav1.TicketSummary {
@@ -81,12 +102,10 @@ func ticketSummary(t *core.Ticket, st core.Stage, gitFolder func(dir string) boo
 		NeedsYou: st.Stage == "person", CanRetry: core.CanRetry(t),
 		PendingApprovalId: t.PendingApproval, PrUrl: prURL(t),
 	}
-	v.Runtime = defaultRuntime
+	v.Runtime, v.RuntimeChoice = runtimeOf(t), runtimeChoice(t)
+	v.Pairing, v.ReviewRounds = t.Pairing, uint32(max(t.Stats.ReviewRounds, 0))
 	if t.Execution != nil {
 		v.Dir, v.Model = t.Execution.Directory, t.Execution.Model
-		if t.Execution.Runtime != "" {
-			v.Runtime = t.Execution.Runtime
-		}
 	}
 	v.Branch = node.WorktreeBranch(*t, gitFolder)
 	if a := t.LatestAssignment(); a != nil && a.Model != "" {
@@ -187,8 +206,28 @@ func decisionView(d *core.Decision) *athenav1.DecisionView {
 }
 
 func nodeStatus(s node.Status) *athenav1.NodeStatus {
-	return &athenav1.NodeStatus{Name: s.Name, Slots: uint32(s.Slots), SlotsInUse: uint32(s.SlotsInUse),
+	v := &athenav1.NodeStatus{Name: s.Name, Slots: uint32(s.Slots), SlotsInUse: uint32(s.SlotsInUse),
 		LiveTicketIds: slices.Clone(s.LiveTicketIDs), Queued: uint32(s.Queued), ClaudeVersion: s.ClaudeVersion}
+	for _, r := range s.Runtimes {
+		v.Runtimes = append(v.Runtimes, runtimeStatus(r))
+	}
+	return v
+}
+
+// runtimeStatus maps one runtime of the node. Its why is redacted, flattened and cut: it may carry what a CLI said.
+func runtimeStatus(r node.RuntimeStatus) *athenav1.RuntimeStatus {
+	q := r.Quota
+	v := &athenav1.RuntimeStatus{Name: r.Name, Version: r.Version, Ready: r.Ready, Tested: r.Tested,
+		Why: clip(oneLine(redact.String(r.Why)), WhyMaxRunes), Live: uint32(max(r.Live, 0)),
+		LimitedUntil: tsp(q.LimitedUntil), ReadAt: ts(q.ReadAt), Measured: q.Measured}
+	for _, w := range q.Windows {
+		name := w.Name
+		if w.Bucket != "" {
+			name = w.Bucket + " " + name
+		}
+		v.Windows = append(v.Windows, &athenav1.QuotaWindow{Name: name, Used: float32(w.Used), ResetsAt: tsp(w.ResetsAt), Stale: w.Stale})
+	}
+	return v
 }
 
 // athenaMarker matches Athena's hidden markers, such as the receipt line of a comment it posted on GitHub.
@@ -211,6 +250,12 @@ func clean(s string) string { return athenaMarker.ReplaceAllString(redact.String
 func timelineEntry(at time.Time, kind, subkind, subject, text, ref string) *athenav1.TimelineEntry {
 	return &athenav1.TimelineEntry{At: ts(at), Kind: kind, Subkind: subkind, Subject: clip(oneLine(clean(subject)), subjectRunes),
 		Text: clip(oneLine(clean(text)), timelineRunes), RefId: ref}
+}
+
+// withRuntime sets the runtime of an assignment or review entry.
+func withRuntime(e *athenav1.TimelineEntry, runtime string) *athenav1.TimelineEntry {
+	e.Runtime = runtime
+	return e
 }
 
 // firstLine is the first line of s with text on it.
@@ -295,9 +340,6 @@ func assignmentEnd(t *core.Ticket, a *core.Assignment, latest bool) (sub, subjec
 		return "retried", "", ""
 	case strings.Contains(reason, "restart"):
 		return "interrupted", "", reason
-	case a.ReviewOutcome != nil && a.ReviewOutcome.Verdict == core.ReviewFailed && a.ReviewOutcome.Why != "":
-		// A review that could not finish has no Report: its end says why.
-		return "ended", "", "review failed: " + firstLine(clean(a.ReviewOutcome.Why))
 	case a.Report != nil && a.Report.State == core.ReportFailed:
 		// The failed Report says why on its own row: the end is only the end.
 		return "ended", "", ""
@@ -305,6 +347,16 @@ func assignmentEnd(t *core.Ticket, a *core.Assignment, latest bool) (sub, subjec
 		return "stopped", "", t.Ended.Reason
 	}
 	return "ended", "", reason
+}
+
+// reviewEntry is the end of a review Assignment: its verdict (approved, changes or failed, the outcome's), the first
+// finding as its text (why, for a review that could not finish and says why) and the runtime that reviewed as its subject.
+func reviewEntry(at time.Time, a *core.Assignment, o *core.ReviewOutcome) *athenav1.TimelineEntry {
+	text := o.First
+	if o.Verdict == core.ReviewFailed && o.Why != "" {
+		text = firstLine(clean(o.Why))
+	}
+	return withRuntime(timelineEntry(at, "review", o.Verdict, a.Runtime, text, a.ID), a.Runtime)
 }
 
 // headBytes is how much of a Report's summary the timeline reads for its first line: enough for any line it shows.
@@ -375,7 +427,10 @@ func ticketTimeline(t *core.Ticket, origin *core.Trigger, pending *core.Approval
 		if a.State == core.AssignmentPending {
 			sub = "queued"
 		}
-		out = append(out, timelineEntry(start, "assignment", sub, a.Model, "", a.ID))
+		if a.Role == core.RoleReview && sub == "started" {
+			sub = "review"
+		}
+		out = append(out, withRuntime(timelineEntry(start, "assignment", sub, a.Model, "", a.ID), a.Runtime))
 		if r := a.Report; r != nil {
 			subject := ""
 			if r.Pull > 0 {
@@ -384,14 +439,18 @@ func ticketTimeline(t *core.Ticket, origin *core.Trigger, pending *core.Approval
 			out = append(out, timelineEntry(r.At, "report", string(r.State), subject, firstLine(clean(headOf(r.Summary))), a.ID))
 		}
 		for _, in := range a.Interruptions {
-			out = append(out, timelineEntry(in.At, "assignment", "restart", "", "", a.ID))
+			out = append(out, withRuntime(timelineEntry(in.At, "assignment", "restart", "", "", a.ID), a.Runtime))
 			if in.ResumedAt != nil {
-				out = append(out, timelineEntry(*in.ResumedAt, "assignment", "resumed", "", "", a.ID))
+				out = append(out, withRuntime(timelineEntry(*in.ResumedAt, "assignment", "resumed", "", "", a.ID), a.Runtime))
 			}
 		}
 		if a.State == core.AssignmentEnded && a.EndedAt != nil {
+			if o := a.ReviewOutcome; a.Role == core.RoleReview && a.EndedReason == core.ReasonReviewed && o != nil {
+				out = append(out, reviewEntry(*a.EndedAt, a, o))
+				continue
+			}
 			sub, subject, text := assignmentEnd(t, a, i == len(t.Assignments)-1)
-			out = append(out, timelineEntry(*a.EndedAt, "assignment", sub, subject, text, a.ID))
+			out = append(out, withRuntime(timelineEntry(*a.EndedAt, "assignment", sub, subject, text, a.ID), a.Runtime))
 		}
 	}
 	echo := originEcho(t, origin)

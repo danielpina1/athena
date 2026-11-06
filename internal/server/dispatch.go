@@ -330,7 +330,7 @@ func (d *Dispatcher) act(o web.Origin, c *athenav1.Command) *athenav1.CommandRes
 	switch a := c.GetAction().(type) {
 	case *athenav1.Command_SubmitTask:
 		s := a.SubmitTask
-		t, err := d.submit(s.GetText(), s.GetDir(), s.GetModel(), s.GetRepo(), "", "", requestID(o, c))
+		t, err := d.submit(s.GetText(), s.GetDir(), s.GetModel(), s.GetRepo(), s.GetRuntime(), pairingOf(s.Review), requestID(o, c))
 		if err != nil {
 			return d.failure(err)
 		}

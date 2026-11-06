@@ -124,9 +124,14 @@ type Hub struct {
 	health      *athenav1.Health
 	healthSince map[string]healthState
 	node        *athenav1.NodeStatus
-	repos       *athenav1.RepoList
-	notifs      *athenav1.NotificationPrefsView
-	closed      bool // the hub has stopped: Subscribe returns closed feeds
+	// quotaAt is when a node delta last went out because only a quota reading differed; quotaEvery the least between
+	// two such deltas (quotaEvery); quotaLater says a timer will publish the node again.
+	quotaAt    time.Time
+	quotaEvery time.Duration
+	quotaLater bool
+	repos      *athenav1.RepoList
+	notifs     *athenav1.NotificationPrefsView
+	closed     bool // the hub has stopped: Subscribe returns closed feeds
 	// folders are the placement folders whose facts changed since the loop last republished their Tickets.
 	folders map[string]bool
 
@@ -155,7 +160,7 @@ func New(src Source, log *slog.Logger) *Hub {
 		src: src, log: log, epoch: hex.EncodeToString(b[:]), now: time.Now,
 		in: make(chan store.Changes, changeBuffer), wake: make(chan struct{}, 1), nodeWake: make(chan struct{}, 1),
 		reposWake: make(chan struct{}, 1), healthTick: healthEvery, subs: map[*Sub]struct{}{}, healthSince: map[string]healthState{},
-		folders: map[string]bool{}, actors: map[string]string{},
+		folders: map[string]bool{}, actors: map[string]string{}, quotaEvery: quotaEvery,
 	}
 }
 
@@ -492,15 +497,49 @@ func (h *Hub) publishNotifications() bool {
 	return true
 }
 
+// quotaEvery is the least between two node deltas that differ only in a quota reading: readings arrive with every turn.
+const quotaEvery = time.Second
+
+// quotaOnly reports whether a and b differ at most in the readings of the runtimes' quota (their windows, when they
+// were read, until when they are limited), not in anything else a node delta carries.
+func quotaOnly(a, b *athenav1.NodeStatus) bool {
+	strip := func(n *athenav1.NodeStatus) *athenav1.NodeStatus {
+		c := proto.Clone(n).(*athenav1.NodeStatus)
+		for _, r := range c.Runtimes {
+			r.Windows, r.LimitedUntil, r.ReadAt = nil, nil, nil
+		}
+		return c
+	}
+	return proto.Equal(strip(a), strip(b))
+}
+
 func (h *Hub) publishNode() {
 	n := nodeStatus(h.src.NodeStatus())
 	h.mu.Lock()
-	same := h.node != nil && proto.Equal(h.node, n)
+	if h.node != nil && proto.Equal(h.node, n) {
+		h.mu.Unlock()
+		return
+	}
+	if wait := h.quotaEvery - time.Since(h.quotaAt); h.node != nil && quotaOnly(h.node, n) && wait > 0 {
+		// A quota reading again, too soon after the last: say it once, when the second is over, with what is then known.
+		if !h.quotaLater {
+			h.quotaLater = true
+			time.AfterFunc(wait, func() {
+				h.mu.Lock()
+				h.quotaLater = false
+				h.mu.Unlock()
+				h.NodeChanged()
+			})
+		}
+		h.mu.Unlock()
+		return
+	}
+	if h.node != nil && quotaOnly(h.node, n) {
+		h.quotaAt = time.Now()
+	}
 	h.node = n
 	h.mu.Unlock()
-	if !same {
-		h.publish(&athenav1.Delta{Change: &athenav1.Delta_Node{Node: n}})
-	}
+	h.publish(&athenav1.Delta{Change: &athenav1.Delta_Node{Node: n}})
 }
 
 // probeHealth reads the Source's health (without the lock: it may do I/O) and stamps each item with when its state

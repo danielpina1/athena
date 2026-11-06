@@ -40,6 +40,11 @@ message SubmitTask {
   string repo = 2;
   string dir = 3;
   string model = 4;
+  // runtime is claude, codex or auto; empty is the configured default. An unknown one is invalid.
+  string runtime = 5;
+  // review pairs the task with a review of its ready reports (true) or with none (false); unset is the Policy's
+  // default.
+  optional bool review = 6;
 }
 
 message Reply {
