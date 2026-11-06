@@ -78,22 +78,58 @@ func (n *Node) sandboxFor(workDir string) (*rt.Sandbox, []string) {
 }
 
 // sessionSandbox is sandboxFor for a session working in workDir. A read-only session's (a review's) writes nothing of
-// the Ticket's: of allowWrite it keeps only the owner's paths that lie outside workDir and do not hold it (a build
-// cache, so that its tests can run), not workDir nor the repository's git directory, and its working directory is
-// denied too, since Claude Code's sandbox lets a session write there whatever allowWrite says.
+// the Ticket's: of allowWrite it keeps only the owner's paths that neither hold nor lie in workDir or the repository's
+// git directories (a build cache, so that its tests can run), and workDir and the git directories are denied too, since
+// Claude Code's sandbox lets a session write in its working directory whatever allowWrite says.
 func (n *Node) sessionSandbox(workDir string, readOnly bool) (*rt.Sandbox, []string) {
 	sb, env := n.sandboxFor(workDir)
 	if sb != nil && readOnly {
 		sb.AllowWrite = []string{}
-		work := filepath.Clean(workDir)
+		gitDir, common := gitDirs(workDir)
+		var owned []string
+		for _, d := range []string{workDir, gitDir, common} {
+			if d != "" {
+				owned = append(owned, filepath.Clean(d), resolvedPath(d))
+			}
+		}
+		overlaps := func(p string) bool {
+			for _, c := range []string{filepath.Clean(p), resolvedPath(p)} {
+				if slices.ContainsFunc(owned, func(k string) bool { return within(k, c) || within(c, k) }) {
+					return true
+				}
+			}
+			return false
+		}
 		for _, p := range n.cfg.Sandbox.AllowWrite {
-			if c := filepath.Clean(p); !within(work, c) && !within(c, work) {
+			if !overlaps(p) {
 				sb.AllowWrite = append(sb.AllowWrite, p)
 			}
 		}
 		sb.DenyWrite = append(sb.DenyWrite, workDir)
+		if common != "" {
+			sb.DenyWrite = append(sb.DenyWrite, common)
+		}
+		if gitDir != "" && gitDir != common {
+			sb.DenyWrite = append(sb.DenyWrite, gitDir)
+		}
 	}
 	return sb, env
+}
+
+// resolvedPath is p, clean, with the symbolic links of its longest existing ancestor resolved (/var/x becomes
+// /private/var/x on macOS), so that two spellings of one directory compare equal.
+func resolvedPath(p string) string {
+	p = filepath.Clean(p)
+	for dir, rest := p, ""; ; {
+		if r, err := filepath.EvalSymlinks(dir); err == nil {
+			return filepath.Join(r, rest)
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return p
+		}
+		dir, rest = parent, filepath.Join(filepath.Base(dir), rest)
+	}
 }
 
 // ProtectedPaths are the paths of a session working in workDir that nothing the session runs may write, each with

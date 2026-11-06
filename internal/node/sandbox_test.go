@@ -573,3 +573,32 @@ func TestReadOnlySandboxKeepsOutsideCaches(t *testing.T) {
 		t.Fatalf("worker allowWrite = %v", sb.AllowWrite)
 	}
 }
+
+// A read-only session in a worktree keeps no owner path that holds or lies in the repository's git directories, and
+// denies them: a review commits nothing.
+func TestReadOnlySandboxDropsGitDirs(t *testing.T) {
+	dir := t.TempDir()
+	repo, work := filepath.Join(dir, "repo"), filepath.Join(dir, "wt")
+	for _, args := range [][]string{{"init", "-q", repo}, {"-C", repo, "commit", "-q", "--allow-empty", "-m", "init"},
+		{"-C", repo, "worktree", "add", "-q", work, "-b", "athena/t-1"}} {
+		cmd := exec.Command("git", append([]string{"-c", "user.name=t", "-c", "user.email=t@example.invalid"}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	gitDir, common := gitDirs(work)
+	if common == "" || gitDir == common {
+		t.Fatalf("gitDirs(%s) = %q, %q, want a worktree", work, gitDir, common)
+	}
+	cache := filepath.Join(dir, "gocache")
+	n := &Node{cfg: Config{Sandbox: &SandboxConfig{AllowWrite: []string{cache, repo, filepath.Join(common, "objects"), gitDir}}}}
+	sb, _ := n.sessionSandbox(work, true)
+	if !slices.Equal(sb.AllowWrite, []string{cache}) {
+		t.Fatalf("allowWrite = %v, want only the cache %s", sb.AllowWrite, cache)
+	}
+	for _, d := range []string{work, common, gitDir} {
+		if !slices.Contains(sb.DenyWrite, d) {
+			t.Fatalf("denyWrite %v lacks %s", sb.DenyWrite, d)
+		}
+	}
+}

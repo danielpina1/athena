@@ -178,8 +178,9 @@ const unknownWait = 15 * time.Minute
 // HeadroomChooser chooses by readiness and quota headroom:
 //
 //  1. An Assignment pinned to a runtime (Assignment.Runtime, or the runtime it ran on: a resume keeps its session's)
-//     runs on it; a Ticket that names claude or codex too, but for a review, which is chosen as under auto. Not ready, the launch fails with its Why; limited, it waits
-//     until its reset; at its session cap, for a session to end. No other runtime takes its place.
+//     runs on it, and so does one of a Ticket that names claude or codex, except a review, which is chosen as under
+//     auto. Not ready, the launch fails with its Why; limited, it waits until its reset; at its session cap, for a
+//     session to end. No other runtime takes its place.
 //  2. auto: the candidates are the ready runtimes that are not limited and below their MaxSessions. A review drops the
 //     runtime of the Ticket's latest implement Assignment that ran when another candidate is left (the one code path of
 //     "review on the other runtime"); then the candidates over any AvoidAbove window are dropped,
