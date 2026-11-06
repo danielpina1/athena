@@ -1813,6 +1813,9 @@ func (n *Node) place(t core.Ticket) (placement, error) {
 	if err != nil {
 		return p, err
 	}
+	if err := n.checkUnrecorded(t, p); err != nil {
+		return placement{}, err
+	}
 	return p, n.recordPlacement(t, p)
 }
 

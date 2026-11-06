@@ -96,7 +96,11 @@ The node's own git (creating and removing worktrees, `git status`) runs with `co
 `<name><number>` is found only when its `gitdir` names the worktree and the worktree is in the work root; otherwise the
 node keeps away from it (and logs it). Where a Ticket works (a plain directory, a worktree, the node's clone) is recorded
 in the state directory at its first placement (`placements/<ticket>.json`) and never derived again, so a worker that
-runs `git init` in a plain directory cannot have the next launch make a worktree of it.
+runs `git init` in a plain directory cannot have the next launch make a worktree of it. The record pins the absolute
+working directory (and the repository and its git directory): changing the work root later does not move a Ticket
+already placed, which keeps working where it was recorded. A Ticket that ran before records existed and is now found
+in a repository is placed there only when its worktree exists and its git directory is the node's; otherwise it is
+refused ("the directory became a git repository after the Ticket started; resubmit") and nothing is recorded.
 
 ### Keep one athena binary
 

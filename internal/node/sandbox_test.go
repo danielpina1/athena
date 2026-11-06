@@ -387,3 +387,74 @@ func TestPlainDirPlacementIsRecorded(t *testing.T) {
 		t.Fatalf("a worktree was made: %v", err)
 	}
 }
+
+// Without a record (a Ticket placed before records existed), a Ticket that already ran and is now found in a
+// repository is placed there only when its worktree exists: the probe's plain directory, made a repository by its
+// worker, is refused and runs nothing; a repository Ticket with its worktree is placed and recorded; a new Ticket is
+// derived and recorded as ever.
+func TestUnrecordedPlacement(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell filter")
+	}
+	h := newHarness(t, nil)
+	record := func(id string) string { return filepath.Join(h.cfg.StateDir, placementsDir, id+".json") }
+
+	// The probe: a plain directory, a worker's git init and smudge filter, the record gone.
+	dir := t.TempDir()
+	tk := h.submit("Work in a folder", dir)
+	tk, _ = h.running(tk.ID)
+	marker := filepath.Join(t.TempDir(), "ran")
+	filter := filepath.Join(t.TempDir(), "evil.sh")
+	if err := os.WriteFile(filter, []byte("#!/bin/sh\necho ran >> "+marker+"\ncat\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	git(t, dir, "init", "-q", "-b", "main")
+	for name, body := range map[string]string{".gitattributes": "*.txt filter=evil\n", "a.txt": "a\n"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	git(t, dir, "add", ".gitattributes", "a.txt")
+	git(t, dir, "commit", "-q", "-m", "x")
+	git(t, dir, "config", "filter.evil.smudge", filter)
+	if err := os.Remove(record(tk.ID)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.n.place(tk); err == nil || err.Error() != "the directory became a git repository after the Ticket started; resubmit" {
+		t.Fatalf("place = %v, want the refusal", err)
+	}
+	if _, err := os.Stat(record(tk.ID)); !os.IsNotExist(err) {
+		t.Fatalf("a refused placement was recorded: %v", err)
+	}
+	if b, err := os.ReadFile(marker); err == nil {
+		t.Fatalf("the smudge filter ran:\n%s", b)
+	}
+	if _, err := os.Stat(TicketDir(h.cfg.WorkRoot, tk)); !os.IsNotExist(err) {
+		t.Fatalf("a worktree was made: %v", err)
+	}
+
+	// A repository Ticket from before records: its worktree exists, so it is placed there and recorded.
+	repo := newRepo(t)
+	rt2 := h.submit("Work in a repo", repo)
+	rt2, _ = h.running(rt2.ID)
+	if err := os.Remove(record(rt2.ID)); err != nil {
+		t.Fatal(err)
+	}
+	p, err := h.n.place(rt2)
+	if err != nil || p.repo == "" || !sameFile(p.repo, repo) || p.workDir != TicketDir(h.cfg.WorkRoot, rt2) {
+		t.Fatalf("place = %+v, %v; want the repository's worktree", p, err)
+	}
+	if _, err := os.Stat(record(rt2.ID)); err != nil {
+		t.Fatalf("not recorded: %v", err)
+	}
+
+	// A new Ticket (one Assignment, no session yet): derived and recorded.
+	fresh := core.Ticket{ID: "T-0099", Title: "Fresh", Execution: &core.Execution{Directory: repo},
+		Assignments: []core.Assignment{{ID: "a1"}}}
+	if p, err := h.n.place(fresh); err != nil || p.repo == "" {
+		t.Fatalf("new ticket: %+v, %v", p, err)
+	}
+	if _, err := os.Stat(record(fresh.ID)); err != nil {
+		t.Fatalf("new ticket not recorded: %v", err)
+	}
+}

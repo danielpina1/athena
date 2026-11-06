@@ -17,7 +17,8 @@ import (
 // writes. Every later launch, view and cleanup uses the record and never derives it again: a worker of a plain
 // directory that turned it into a repository (`git init`, with a config naming a smudge filter) must not have the next
 // launch make a worktree of it, which would run the filter on the host, outside any sandbox. A Ticket placed before
-// records existed is derived once more, recorded, and logged.
+// records existed is derived once more, recorded, and logged; when it already ran and that derivation finds a
+// repository, it is placed there only if its worktree was made before (checkUnrecorded).
 
 // placementRecord is a placement as recorded.
 type placementRecord struct {
@@ -100,10 +101,37 @@ func (n *Node) recordPlacement(t core.Ticket, p placement) error {
 		kind = "plain"
 	}
 	// A Ticket that already ran had its placement derived before records existed: say so, once.
-	earlier := len(t.Assignments) > 1
-	if a := t.LatestAssignment(); a != nil && a.SessionID != "" {
-		earlier = true
+	n.log.Info("placement recorded", "ticket", t.ID, "kind", kind, "dir", p.workDir, "placed_before_records", ranBefore(t))
+	return nil
+}
+
+// ranBefore reports whether a Ticket already ran: more than one Assignment, or a session.
+func ranBefore(t core.Ticket) bool {
+	if len(t.Assignments) > 1 {
+		return true
 	}
-	n.log.Info("placement recorded", "ticket", t.ID, "kind", kind, "dir", p.workDir, "placed_before_records", earlier)
+	a := t.LatestAssignment()
+	return a != nil && a.SessionID != ""
+}
+
+// errBecameRepo refuses a Ticket whose plain directory a worker may have made a repository.
+var errBecameRepo = errors.New("the directory became a git repository after the Ticket started; resubmit")
+
+// checkUnrecorded vets the placement p just derived for t, which has no record: a Ticket that already ran (before
+// records existed) and is now found in a local repository is placed there only when its worktree exists and its git
+// directory is where the node made it (findWorktreeAdmin). Otherwise its directory may have been plain, and its worker
+// made it a repository (git init, a smudge filter) for the next launch's worktree checkout to run on the host.
+func (n *Node) checkUnrecorded(t core.Ticket, p placement) error {
+	if !ranBefore(t) || p.repo == "" || p.github != "" {
+		return nil
+	}
+	if st, err := os.Stat(p.workDir); err != nil || !st.IsDir() {
+		n.log.Warn("placement refused: a Ticket that ran is now in a repository it has no worktree of", "ticket", t.ID, "repo", p.repo)
+		return errBecameRepo
+	}
+	if _, err := findWorktreeAdmin(p.common, p.workDir, n.cfg.WorkRoot, n.log); err != nil {
+		n.log.Warn("placement refused: a Ticket that ran has no worktree git dir the node made", "ticket", t.ID, "dir", p.workDir, "error", err)
+		return errBecameRepo
+	}
 	return nil
 }
