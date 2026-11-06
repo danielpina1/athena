@@ -420,7 +420,7 @@ func TestUnrecordedPlacement(t *testing.T) {
 	if err := os.Remove(record(tk.ID)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := h.n.place(tk); err == nil || err.Error() != "the directory became a git repository after the Ticket started; resubmit" {
+	if _, err := h.n.place(tk); err == nil || err.Error() != "the directory became a git repository after the Ticket started, or its worktree was removed; resubmit" {
 		t.Fatalf("place = %v, want the refusal", err)
 	}
 	if _, err := os.Stat(record(tk.ID)); !os.IsNotExist(err) {
@@ -456,5 +456,102 @@ func TestUnrecordedPlacement(t *testing.T) {
 	}
 	if _, err := os.Stat(record(fresh.ID)); err != nil {
 		t.Fatalf("new ticket not recorded: %v", err)
+	}
+}
+
+// A repository Ticket from before records whose worktree was cleaned up after its work: its diff still shows (the
+// views use what is derived, unrecorded), and a reopening is refused with why.
+func TestUnrecordedCleanedWorktreeKeepsItsDiff(t *testing.T) {
+	h := newHarness(t, nil)
+	repo := newRepo(t)
+	tk := h.submit("Work in a repo", repo)
+	tk, _ = h.running(tk.ID)
+	wt := TicketDir(h.cfg.WorkRoot, tk)
+	if err := os.WriteFile(filepath.Join(wt, "done.txt"), []byte("done\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git(t, wt, "add", "done.txt")
+	git(t, wt, "commit", "-q", "-m", "the work")
+	git(t, repo, "worktree", "remove", "--force", wt)
+	record := filepath.Join(h.cfg.StateDir, placementsDir, tk.ID+".json")
+	if err := os.Remove(record); err != nil {
+		t.Fatal(err)
+	}
+	d, err := h.n.TicketDiff(t.Context(), tk.ID)
+	if err != nil || len(d.Files) != 1 || d.Files[0].Path != "done.txt" {
+		t.Fatalf("diff = %+v, %v; want done.txt", d, err)
+	}
+	if _, err := h.n.place(tk); err == nil || err.Error() != "the directory became a git repository after the Ticket started, or its worktree was removed; resubmit" {
+		t.Fatalf("reopen = %v, want the refusal", err)
+	}
+	if _, err := os.Stat(record); !os.IsNotExist(err) {
+		t.Fatalf("recorded: %v", err)
+	}
+}
+
+// The read-only views of a plain directory its worker made a repository (the record gone) run nothing the repository
+// configures: no filter, textconv, external diff, hook or fsmonitor.
+func TestUnrecordedProbeRepoViewedRunsNothing(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell programs")
+	}
+	h := newHarness(t, nil)
+	dir := t.TempDir()
+	tk := h.submit("Work in a folder", dir)
+	tk, _ = h.running(tk.ID)
+	marker := filepath.Join(t.TempDir(), "ran")
+	prog := filepath.Join(t.TempDir(), "evil.sh")
+	if err := os.WriteFile(prog, []byte("#!/bin/sh\necho \"$0 $*\" >> "+marker+"\ncat\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write := func(name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The worker's repository: its branch for the Ticket changes an attributed file, and its config names a program
+	// for everything git could run.
+	git(t, dir, "init", "-q", "-b", "main")
+	write(".gitattributes", "*.txt filter=evil diff=evil\n")
+	write("a.txt", "a\n")
+	git(t, dir, "add", ".gitattributes", "a.txt")
+	git(t, dir, "commit", "-q", "-m", "base")
+	git(t, dir, "checkout", "-q", "-b", branchName(tk))
+	write("a.txt", "b\n")
+	git(t, dir, "commit", "-q", "-am", "change")
+	git(t, dir, "checkout", "-q", "main")
+	hooks := filepath.Join(t.TempDir(), "hooks")
+	if err := os.MkdirAll(hooks, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, h := range []string{"post-checkout", "post-index-change", "reference-transaction"} {
+		if err := os.Symlink(prog, filepath.Join(hooks, h)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for k, v := range map[string]string{"filter.evil.clean": prog, "filter.evil.smudge": prog, "filter.evil.process": prog,
+		"diff.evil.textconv": prog, "diff.evil.command": prog, "diff.external": prog, "core.fsmonitor": prog,
+		"core.hooksPath": hooks, "core.pager": prog} {
+		git(t, dir, "config", k, v)
+	}
+	write("a.txt", "c\n") // a dirty working tree too
+	if err := os.Remove(filepath.Join(h.cfg.StateDir, placementsDir, tk.ID+".json")); err != nil {
+		t.Fatal(err)
+	}
+	ctx := t.Context()
+	d, err := h.n.TicketDiff(ctx, tk.ID)
+	if err != nil || len(d.Files) != 1 || d.Files[0].Path != "a.txt" {
+		t.Fatalf("diff = %+v, %v", d, err)
+	}
+	_, _, _ = h.n.TicketFiles(ctx, tk.ID)
+	if f, err := h.n.OpenTicketFile(ctx, tk.ID, "a.txt"); err == nil {
+		f.Close()
+	}
+	if b, err := os.ReadFile(marker); err == nil {
+		t.Fatalf("a view ran the repository's program:\n%s", b)
+	}
+	if _, err := os.Stat(filepath.Join(h.cfg.StateDir, placementsDir, tk.ID+".json")); !os.IsNotExist(err) {
+		t.Fatalf("a view recorded the placement: %v", err)
 	}
 }

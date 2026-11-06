@@ -1814,7 +1814,9 @@ func (n *Node) place(t core.Ticket) (placement, error) {
 		return p, err
 	}
 	if err := n.checkUnrecorded(t, p); err != nil {
-		return placement{}, err
+		n.log.Warn("placement refused: a Ticket that ran is now in a repository it has no worktree of", "ticket", t.ID,
+			"repo", p.repo, "error", err)
+		return placement{}, errBecameRepo
 	}
 	return p, n.recordPlacement(t, p)
 }

@@ -115,23 +115,22 @@ func ranBefore(t core.Ticket) bool {
 }
 
 // errBecameRepo refuses a Ticket whose plain directory a worker may have made a repository.
-var errBecameRepo = errors.New("the directory became a git repository after the Ticket started; resubmit")
+var errBecameRepo = errors.New("the directory became a git repository after the Ticket started, or its worktree was removed; resubmit")
 
 // checkUnrecorded vets the placement p just derived for t, which has no record: a Ticket that already ran (before
 // records existed) and is now found in a local repository is placed there only when its worktree exists and its git
 // directory is where the node made it (findWorktreeAdmin). Otherwise its directory may have been plain, and its worker
 // made it a repository (git init, a smudge filter) for the next launch's worktree checkout to run on the host.
+// The read-only views use such a placement without recording it (viewPlacement); place refuses it, and logs why.
 func (n *Node) checkUnrecorded(t core.Ticket, p placement) error {
 	if !ranBefore(t) || p.repo == "" || p.github != "" {
 		return nil
 	}
 	if st, err := os.Stat(p.workDir); err != nil || !st.IsDir() {
-		n.log.Warn("placement refused: a Ticket that ran is now in a repository it has no worktree of", "ticket", t.ID, "repo", p.repo)
-		return errBecameRepo
+		return fmt.Errorf("%w (no worktree at %s)", errBecameRepo, p.workDir)
 	}
 	if _, err := findWorktreeAdmin(p.common, p.workDir, n.cfg.WorkRoot, n.log); err != nil {
-		n.log.Warn("placement refused: a Ticket that ran has no worktree git dir the node made", "ticket", t.ID, "dir", p.workDir, "error", err)
-		return errBecameRepo
+		return fmt.Errorf("%w (%v)", errBecameRepo, err)
 	}
 	return nil
 }

@@ -100,7 +100,10 @@ runs `git init` in a plain directory cannot have the next launch make a worktree
 working directory (and the repository and its git directory): changing the work root later does not move a Ticket
 already placed, which keeps working where it was recorded. A Ticket that ran before records existed and is now found
 in a repository is placed there only when its worktree exists and its git directory is the node's; otherwise it is
-refused ("the directory became a git repository after the Ticket started; resubmit") and nothing is recorded.
+refused ("the directory became a git repository after the Ticket started, or its worktree was removed; resubmit") and
+nothing is recorded. The read-only views (diff, files) of such a Ticket still use what is derived, without recording
+it: a diff between trees (no external diff, textconv, hook or fsmonitor) and, only when the worktree exists and its git
+directory is the node's, a listing of its working tree (no filter), so a cleaned-up Ticket keeps its diff.
 
 ### Keep one athena binary
 

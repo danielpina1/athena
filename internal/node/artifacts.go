@@ -148,11 +148,31 @@ func (n *Node) ticketPlacement(ticketID string) (placement, core.Ticket, error) 
 	if err != nil {
 		return placement{}, core.Ticket{}, ErrNoWorkspace
 	}
-	p, err := n.place(t)
+	p, err := n.viewPlacement(t)
 	if err != nil {
 		return placement{}, core.Ticket{}, ErrNoWorkspace
 	}
 	return p, t, nil
+}
+
+// viewPlacement is where the read-only views (diff, files) look for a Ticket: its placement (place), or for a Ticket
+// with no record that place refuses (it ran, and is now in a repository it has no worktree of: a worktree cleaned up
+// after its work was done, or a plain directory its worker made a repository), the placement derived now, which is
+// not recorded. The views run nothing a repository can configure on it: the diff compares trees (branchFiles: no
+// external diff, no textconv, no hooks, no fsmonitor, no transport), and the working tree is read only through the git
+// dir the node made (worktreeFiles, findWorktreeAdmin), with ls-files, which runs no filter.
+func (n *Node) viewPlacement(t core.Ticket) (placement, error) {
+	if p, ok, err := n.recordedPlacement(t); ok || err != nil {
+		return p, err
+	}
+	p, err := n.derivePlacement(t)
+	if err != nil {
+		return p, err
+	}
+	if n.checkUnrecorded(t, p) != nil {
+		return p, nil
+	}
+	return p, n.recordPlacement(t, p)
 }
 
 // TicketDiff is the diff of a Ticket placed in a git repository: its branch against the merge-base of the branch with
@@ -169,7 +189,7 @@ func (n *Node) TicketDiff(ctx context.Context, ticketID string) (Diff, error) {
 	}
 	ctx, cancel := context.WithTimeout(ctx, diffTimeout)
 	defer cancel()
-	b, err := branchFiles(ctx, p.repo, branch)
+	b, err := branchFiles(ctx, p.repo, p.common, branch)
 	if err != nil {
 		return Diff{}, err
 	}
@@ -203,9 +223,14 @@ type branchDiff struct {
 }
 
 // branchFiles reads the files branch changes in repo against its base: the merge-base with origin's default branch,
-// else with the repository's own HEAD. A branch that does not exist is ErrNoWorkspace.
-func branchFiles(ctx context.Context, repo, branch string) (branchDiff, error) {
+// else with the repository's own HEAD. A branch that does not exist is ErrNoWorkspace. With common (the placement's),
+// git's directory is pinned to it, not found from repo's files. It compares trees only: no filter (clean, smudge,
+// process), textconv, external diff, hook or fsmonitor of the repository's runs.
+func branchFiles(ctx context.Context, repo, common, branch string) (branchDiff, error) {
 	env := diffEnv()
+	if common != "" {
+		env = append(env, "GIT_DIR="+common, "GIT_COMMON_DIR="+common)
+	}
 	git := func(limit int, args ...string) ([]byte, bool, error) {
 		return diffGit(ctx, repo, env, limit, args...)
 	}
@@ -612,7 +637,7 @@ func (n *Node) worktreeFiles(ctx context.Context, p placement, t core.Ticket) ([
 	dir := r.dir
 	ctx, cancel := context.WithTimeout(ctx, diffTimeout)
 	defer cancel()
-	b, err := branchFiles(ctx, p.repo, branch)
+	b, err := branchFiles(ctx, p.repo, p.common, branch)
 	if err != nil {
 		return nil, false, err
 	}
