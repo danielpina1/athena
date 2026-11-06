@@ -87,6 +87,8 @@ type Source interface {
 	// GitFolder reports whether dir has a .git entry, as a pass off the hub's loop last found it (false before one has
 	// probed it). It must not touch the filesystem: the hub reads it on its loop, for each Ticket summary's branch.
 	GitFolder(dir string) bool
+	// Trust is the trust class the current Policy gives the Trigger's sender; empty while there is no Policy.
+	Trust(t core.Trigger) string
 	// Notifications returns the notification kinds that exist and the ones the owner muted.
 	Notifications() (kinds, muted []string, err error)
 	// Prompts returns the prompt revision and which parts the owner overrode.
@@ -341,7 +343,7 @@ func (h *Hub) apply(c store.Changes) {
 			h.lost("read trigger", "id", id, "error", err)
 			return
 		}
-		h.publish(&athenav1.Delta{Change: &athenav1.Delta_Trigger{Trigger: triggerView(&t)}})
+		h.publish(&athenav1.Delta{Change: &athenav1.Delta_Trigger{Trigger: triggerView(&t, h.src.Trust)}})
 	}
 	for _, key := range c.Threads {
 		th, err := h.src.Thread(key)
@@ -752,7 +754,7 @@ func (h *Hub) Snapshot() (*athenav1.Snapshot, error) {
 		return nil, err
 	}
 	for _, t := range trigs {
-		s.Triggers = append(s.Triggers, triggerView(&t))
+		s.Triggers = append(s.Triggers, triggerView(&t, h.src.Trust))
 	}
 
 	active, err := h.src.ActiveThreads()

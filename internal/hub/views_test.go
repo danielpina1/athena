@@ -62,7 +62,7 @@ func TestCanRetryOnDeliveryFailure(t *testing.T) {
 func TestTriggerViewClipsText(t *testing.T) {
 	tr := core.Trigger{ID: "R-1", Text: strings.Repeat("é", 200), Meta: map[string]string{"secret": "x"},
 		Channels: []core.ChannelRef{{Address: map[string]string{"k": "v"}}}}
-	v := triggerView(&tr)
+	v := triggerView(&tr, nil)
 	if n := len([]rune(v.Text)); n != previewRunes+1 {
 		t.Errorf("text has %d runes", n)
 	}
@@ -760,5 +760,22 @@ func TestHeldReportShowsOnceWhenApplied(t *testing.T) {
 	}
 	if e := d.Timeline[len(d.Timeline)-1]; !e.At.AsTime().Equal(epoch0.Add(30 * time.Minute)) {
 		t.Errorf("resumed start at %v, want the delivery", e.At.AsTime())
+	}
+}
+
+func TestViewsCarryTrust(t *testing.T) {
+	tk := ticket("T-1")
+	tk.Mandate = core.Mandate{Trust: core.TrustCollaborator}
+	if v := ticketSummary(&tk, core.TicketStage(&tk), nil); v.Trust != "collaborator" {
+		t.Errorf("summary trust = %q", v.Trust)
+	}
+	// A Ticket whose Mandate predates trust classes reads its class from the basis.
+	tk.Mandate = core.Mandate{Basis: core.MandateBasis{Via: core.ViaOwner}}
+	if v := ticketSummary(&tk, core.TicketStage(&tk), nil); v.Trust != "owner" {
+		t.Errorf("legacy summary trust = %q", v.Trust)
+	}
+	tr := core.Trigger{ID: "R-1", Source: "github"}
+	if v := triggerView(&tr, func(core.Trigger) string { return core.TrustStranger }); v.Trust != "stranger" {
+		t.Errorf("trigger trust = %q", v.Trust)
 	}
 }

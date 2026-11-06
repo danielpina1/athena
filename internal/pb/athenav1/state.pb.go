@@ -434,7 +434,10 @@ type TicketSummary struct {
 	// pairing is how the Ticket's work is paired: review, or empty for none.
 	Pairing string `protobuf:"bytes,20,opt,name=pairing,proto3" json:"pairing,omitempty"`
 	// review_rounds is how many reviews of its ready reports ended (approved, changes or failed).
-	ReviewRounds  uint32 `protobuf:"varint,21,opt,name=review_rounds,json=reviewRounds,proto3" json:"review_rounds,omitempty"`
+	ReviewRounds uint32 `protobuf:"varint,21,opt,name=review_rounds,json=reviewRounds,proto3" json:"review_rounds,omitempty"`
+	// trust is the trust class of the sender the Ticket's Mandate was given on: owner, allowed, collaborator, stranger,
+	// bot or ci.
+	Trust         string `protobuf:"bytes,22,opt,name=trust,proto3" json:"trust,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -614,6 +617,13 @@ func (x *TicketSummary) GetReviewRounds() uint32 {
 		return x.ReviewRounds
 	}
 	return 0
+}
+
+func (x *TicketSummary) GetTrust() string {
+	if x != nil {
+		return x.Trust
+	}
+	return ""
 }
 
 type TicketDetail struct {
@@ -1017,7 +1027,10 @@ type TriggerView struct {
 	Thread    string                 `protobuf:"bytes,7,opt,name=thread,proto3" json:"thread,omitempty"`
 	Text      string                 `protobuf:"bytes,8,opt,name=text,proto3" json:"text,omitempty"`
 	// outcome says what became of it: filtered:<code>, reached/attached Tickets, requeued.
-	Outcome       string `protobuf:"bytes,9,opt,name=outcome,proto3" json:"outcome,omitempty"`
+	Outcome string `protobuf:"bytes,9,opt,name=outcome,proto3" json:"outcome,omitempty"`
+	// trust is the trust class the current Policy gives the sender: owner, allowed, collaborator, stranger, bot or ci;
+	// empty while there is no Policy.
+	Trust         string `protobuf:"bytes,10,opt,name=trust,proto3" json:"trust,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1111,6 +1124,13 @@ func (x *TriggerView) GetText() string {
 func (x *TriggerView) GetOutcome() string {
 	if x != nil {
 		return x.Outcome
+	}
+	return ""
+}
+
+func (x *TriggerView) GetTrust() string {
+	if x != nil {
+		return x.Trust
 	}
 	return ""
 }
@@ -2278,7 +2298,7 @@ const file_athena_v1_state_proto_rawDesc = "" +
 	"\x05repos\x18\x13 \x01(\v2\x13.athena.v1.RepoListH\x00R\x05repos\x12H\n" +
 	"\rnotifications\x18\x14 \x01(\v2 .athena.v1.NotificationPrefsViewH\x00R\rnotifications\x122\n" +
 	"\aprompts\x18\x15 \x01(\v2\x16.athena.v1.PromptsViewH\x00R\apromptsB\b\n" +
-	"\x06change\"\xae\x05\n" +
+	"\x06change\"\xc4\x05\n" +
 	"\rTicketSummary\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
 	"\x05title\x18\x02 \x01(\tR\x05title\x12\x14\n" +
@@ -2303,7 +2323,8 @@ const file_athena_v1_state_proto_rawDesc = "" +
 	"\aruntime\x18\x12 \x01(\tR\aruntime\x12%\n" +
 	"\x0eruntime_choice\x18\x13 \x01(\tR\rruntimeChoice\x12\x18\n" +
 	"\apairing\x18\x14 \x01(\tR\apairing\x12#\n" +
-	"\rreview_rounds\x18\x15 \x01(\rR\freviewRounds\"\xee\x01\n" +
+	"\rreview_rounds\x18\x15 \x01(\rR\freviewRounds\x12\x14\n" +
+	"\x05trust\x18\x16 \x01(\tR\x05trust\"\xee\x01\n" +
 	"\fTicketDetail\x122\n" +
 	"\asummary\x18\x01 \x01(\v2\x18.athena.v1.TicketSummaryR\asummary\x124\n" +
 	"\btimeline\x18\x02 \x03(\v2\x18.athena.v1.TimelineEntryR\btimeline\x12\x18\n" +
@@ -2337,7 +2358,7 @@ const file_athena_v1_state_proto_rawDesc = "" +
 	"\n" +
 	"created_at\x18\b \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x12;\n" +
 	"\vanswered_at\x18\t \x01(\v2\x1a.google.protobuf.TimestampR\n" +
-	"answeredAt\"\xef\x01\n" +
+	"answeredAt\"\x85\x02\n" +
 	"\vTriggerView\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12*\n" +
 	"\x02at\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\x02at\x12\x16\n" +
@@ -2347,7 +2368,9 @@ const file_athena_v1_state_proto_rawDesc = "" +
 	"\taddressed\x18\x06 \x01(\tR\taddressed\x12\x16\n" +
 	"\x06thread\x18\a \x01(\tR\x06thread\x12\x12\n" +
 	"\x04text\x18\b \x01(\tR\x04text\x12\x18\n" +
-	"\aoutcome\x18\t \x01(\tR\aoutcome\"\xaf\x01\n" +
+	"\aoutcome\x18\t \x01(\tR\aoutcome\x12\x14\n" +
+	"\x05trust\x18\n" +
+	" \x01(\tR\x05trust\"\xaf\x01\n" +
 	"\n" +
 	"ThreadView\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x16\n" +

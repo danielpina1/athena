@@ -741,6 +741,7 @@ type ghIssue struct {
 	State       string     `json:"state"`
 	HTMLURL     string     `json:"html_url"`
 	User        *ghUser    `json:"user"`
+	Association string     `json:"author_association"`
 	CreatedAt   time.Time  `json:"created_at"`
 	UpdatedAt   time.Time  `json:"updated_at"`
 	ClosedAt    *time.Time `json:"closed_at"`
@@ -769,6 +770,7 @@ type ghComment struct {
 	PullRequestURL string    `json:"pull_request_url"`
 	InReplyToID    int64     `json:"in_reply_to_id"`
 	User           *ghUser   `json:"user"`
+	Association    string    `json:"author_association"`
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
 }
@@ -779,6 +781,7 @@ type ghReview struct {
 	State       string     `json:"state"`
 	HTMLURL     string     `json:"html_url"`
 	User        *ghUser    `json:"user"`
+	Association string     `json:"author_association"`
 	SubmittedAt *time.Time `json:"submitted_at"`
 }
 
@@ -838,8 +841,9 @@ func kindOf(pull bool) string {
 	return "issue"
 }
 
-// trigger fills what every message Trigger of a person or bot shares.
-func (s *Source) trigger(id, kind, scope string, r repo, n int, pull bool, u ghUser, at time.Time, text, link string) core.Trigger {
+// trigger fills what every message Trigger of a person or bot shares; assoc is the sender's author_association, which
+// the Policy turns into a trust class.
+func (s *Source) trigger(id, kind, scope string, r repo, n int, pull bool, u ghUser, assoc string, at time.Time, text, link string) core.Trigger {
 	thread := ThreadKey(r.key, n)
 	meta := map[string]string{"repo": r.full, "number": strconv.Itoa(n), "kind": kindOf(pull)}
 	if link != "" {
@@ -847,6 +851,9 @@ func (s *Source) trigger(id, kind, scope string, r repo, n int, pull bool, u ghU
 	}
 	if s.receiveAll[r.key] {
 		meta["receiveAll"] = "true"
+	}
+	if assoc != "" {
+		meta["association"] = assoc
 	}
 	bot := isBot(u)
 	return core.Trigger{
@@ -934,7 +941,7 @@ func (s *Source) handleIssue(ctx context.Context, r repo, raw json.RawMessage, f
 		if it.Body != "" {
 			text += "\n\n" + it.Body
 		}
-		t := s.trigger("github:issue:"+strconv.FormatInt(it.ID, 10), core.KindMessage, scope, r, it.Number, pull, u, it.CreatedAt, text, it.HTMLURL)
+		t := s.trigger("github:issue:"+strconv.FormatInt(it.ID, 10), core.KindMessage, scope, r, it.Number, pull, u, it.Association, it.CreatedAt, text, it.HTMLURL)
 		if pull && pr.Head.Ref != "" {
 			t.Meta["head"] = pr.Head.Ref
 		}
@@ -999,7 +1006,7 @@ func (s *Source) handleIssueComment(ctx context.Context, r repo, raw json.RawMes
 	if s.own(u) {
 		return c.UpdatedAt, nil
 	}
-	t := s.trigger("github:issuecomment:"+strconv.FormatInt(c.ID, 10), core.KindMessage, "comments", r, n, pull, u, c.CreatedAt, c.Body, c.HTMLURL)
+	t := s.trigger("github:issuecomment:"+strconv.FormatInt(c.ID, 10), core.KindMessage, "comments", r, n, pull, u, c.Association, c.CreatedAt, c.Body, c.HTMLURL)
 	if pull {
 		pr, skip, err := s.itemPull(ctx, r, n)
 		if err != nil || skip {
@@ -1035,7 +1042,7 @@ func (s *Source) handleReviewComment(ctx context.Context, r repo, raw json.RawMe
 	if err != nil || skip {
 		return c.UpdatedAt, err
 	}
-	t := s.trigger("github:reviewcomment:"+strconv.FormatInt(c.ID, 10), core.KindMessage, "comments", r, n, true, u, c.CreatedAt, c.Body, c.HTMLURL)
+	t := s.trigger("github:reviewcomment:"+strconv.FormatInt(c.ID, 10), core.KindMessage, "comments", r, n, true, u, c.Association, c.CreatedAt, c.Body, c.HTMLURL)
 	if pr.Head.Ref != "" {
 		t.Meta["head"] = pr.Head.Ref
 	}
@@ -1106,7 +1113,7 @@ func (s *Source) handleReview(r repo, n int, head string, raw json.RawMessage) (
 	if s.own(u) {
 		return *rv.SubmittedAt, nil
 	}
-	t := s.trigger("github:review:"+strconv.FormatInt(rv.ID, 10), core.KindReview, "comments", r, n, true, u, *rv.SubmittedAt, rv.Body, rv.HTMLURL)
+	t := s.trigger("github:review:"+strconv.FormatInt(rv.ID, 10), core.KindReview, "comments", r, n, true, u, rv.Association, *rv.SubmittedAt, rv.Body, rv.HTMLURL)
 	t.Meta["state"] = rv.State
 	if head != "" {
 		t.Meta["head"] = head

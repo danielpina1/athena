@@ -614,7 +614,7 @@ func (o *op) accept(th *Thread, ev *Evaluation, d DecisionInput, p Policy, res *
 	if len(rules) > 0 {
 		basis.Rules = rules
 	}
-	mandate := Mandate{Strength: ev.Strength, PolicyVersion: ev.PolicyVersion, Actor: primary.Actor, Thread: ev.Thread, Basis: basis}
+	mandate := Mandate{Strength: ev.Strength, PolicyVersion: ev.PolicyVersion, Actor: primary.Actor, Thread: ev.Thread, Basis: basis, Trust: p.Trust(*primary)}
 	n, err := o.tx.NextSeq(ticketSeq)
 	if err != nil {
 		return err

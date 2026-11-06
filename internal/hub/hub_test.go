@@ -129,6 +129,14 @@ func (f *fakeSource) Repos() ([]*athenav1.RepoView, error) {
 
 func (f *fakeSource) setRepos(r ...*athenav1.RepoView) { f.mu.Lock(); f.repos = r; f.mu.Unlock() }
 
+// Trust classes every Trigger of a source "github" allowed and any other source stranger, like a settled Policy.
+func (f *fakeSource) Trust(t core.Trigger) string {
+	if t.Source == "github" {
+		return core.TrustAllowed
+	}
+	return core.TrustStranger
+}
+
 func (f *fakeSource) GitFolder(dir string) bool { f.mu.Lock(); defer f.mu.Unlock(); return f.git[dir] }
 
 func (f *fakeSource) setGit(dir string, git bool) {
@@ -608,7 +616,7 @@ func TestApprovalInputRedacted(t *testing.T) {
 func TestTriggerAndReasonRedacted(t *testing.T) {
 	tok := "ghs_16C7e42F292c6912E7710c838347Ae178B4a"
 	tr := core.Trigger{ID: "R-1", Text: "use " + tok}
-	if v := triggerView(&tr); strings.Contains(v.Text, "ghs_") {
+	if v := triggerView(&tr, nil); strings.Contains(v.Text, "ghs_") {
 		t.Errorf("trigger text = %q", v.Text)
 	}
 	d := core.Decision{Reasons: []core.Reason{{Code: "x", Values: map[string]string{"text": tok}}}}

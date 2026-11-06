@@ -88,9 +88,6 @@ func (p *policy) WIPCeiling(repo string) int {
 // Shadow reports whether the repository is in shadow mode.
 func (p *policy) Shadow(repo string) bool { return p.s.Repos[strings.ToLower(repo)].Mode == RepoShadow }
 
-// Trust is filled in by the trust classification; until then no Trigger has a class.
-func (p *policy) Trust(core.Trigger) string { return "" }
-
 // ToolPolicy is the tool policy of a trust class: the owner's setting, else DefaultTrust; an empty class is standard.
 func (p *policy) ToolPolicy(class string) string {
 	if v, ok := p.s.Trust[class]; ok {

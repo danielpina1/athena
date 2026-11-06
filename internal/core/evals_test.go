@@ -19,6 +19,8 @@ type evalPolicy struct {
 	gates     map[string]Gate
 	holds     bool
 	assessErr error
+	// trust is the class the policy gives every Trigger.
+	trust string
 }
 
 func newEvalPolicy() *evalPolicy {
@@ -50,7 +52,7 @@ func (p *evalPolicy) Revalidate(Mandate) bool { return p.holds }
 func (p *evalPolicy) AdmitsInferred(rules []string) bool { return p.mode == "auto" && len(rules) > 0 }
 func (p *evalPolicy) WIPCeiling(string) int              { return 3 }
 func (p *evalPolicy) Shadow(string) bool                 { return false }
-func (p *evalPolicy) Trust(Trigger) string               { return "" }
+func (p *evalPolicy) Trust(Trigger) string               { return p.trust }
 
 func (p *evalPolicy) Assess(a Assessment, strength string) (string, []Reason, bool, error) {
 	if p.assessErr != nil {
@@ -806,4 +808,32 @@ func TestResumeAssessments(t *testing.T) {
 	h.must(err)
 	eq(t, "nothing missing", got, []string(nil))
 	eq(t, "c keeps its deadline", h.evalOf(pull1).DeliveredAt != nil, true)
+}
+
+func TestAcceptRecordsTrust(t *testing.T) {
+	h := newEvals(t)
+	h.pol.trust = TrustCollaborator
+	issue := "github:o/r#1"
+	h.receive(h.request("c:1", issue))
+	h.due()
+	r := h.decide(DecisionInput{TriggerID: "c:1", Kind: "accept", Title: "Fix it"})
+	if r.Ticket == nil {
+		t.Fatalf("no ticket: %+v", r)
+	}
+	eq(t, "trust", r.Ticket.Mandate.Trust, TrustCollaborator)
+	eq(t, "trust class", r.Ticket.Mandate.TrustClass(), TrustCollaborator)
+}
+
+func TestLegacyMandateTrust(t *testing.T) {
+	for _, tc := range []struct {
+		m    Mandate
+		want string
+	}{
+		{Mandate{Basis: MandateBasis{Via: ViaOwner}}, TrustOwner},
+		{Mandate{Basis: MandateBasis{Via: ViaAddressed}}, TrustAllowed},
+		{Mandate{Basis: MandateBasis{Via: ViaBot}}, TrustBot},
+		{Mandate{Trust: TrustStranger, Basis: MandateBasis{Via: ViaOwner}}, TrustStranger},
+	} {
+		eq(t, "class", tc.m.TrustClass(), tc.want)
+	}
 }

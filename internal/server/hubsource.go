@@ -212,6 +212,14 @@ func (s hubSource) NodeStatus() node.Status {
 // GitFolder reports whether dir has a .git entry, as the placeFacts pass last found it (see Repos).
 func (s hubSource) GitFolder(dir string) bool { return s.d.facts.lookup(dir).git }
 
+// Trust classifies a Trigger's sender under the current Policy; there is none until settings are saved or checked.
+func (s hubSource) Trust(t core.Trigger) string {
+	if p := s.d.policy.policy(); p != nil {
+		return p.Trust(t)
+	}
+	return ""
+}
+
 // Repos lists where a task can be placed: the configured GitHub repositories and the repository or folder of each of
 // the newest Tickets, the last used first. A configured repository no Ticket used goes after them, by name; together
 // they are at most maxRepos. Then come the local git repositories the last scan found under the localRepoRoots and

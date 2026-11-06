@@ -478,7 +478,7 @@ func TestNewIssueMentionBecomesTrigger(t *testing.T) {
 		At:      at("2026-11-03T11:10:00Z"),
 		Text:    "Flaky login test\n\n@athena-bot please fix the flaky login test.",
 		Meta: map[string]string{"repo": "o/r", "number": "1", "kind": "issue", "url": "https://github.com/o/r/issues/1",
-			"receiveAll": "true"},
+			"receiveAll": "true", "association": "MEMBER"},
 		Channels: []core.ChannelRef{{Source: "github", Thread: "github:o/r#1", Address: map[string]string{"repo": "o/r", "number": "1"}}},
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -779,7 +779,7 @@ func TestReviewApprovalWithoutBody(t *testing.T) {
 		Actor: core.ActorRef{Source: "github", ID: "carol"}, Human: true, Scope: "comments",
 		Threads: []string{"github:o/r#2"}, At: at("2026-11-03T11:45:00Z"),
 		Meta: map[string]string{"repo": "o/r", "number": "2", "kind": "pull", "head": "athena/t-0007", "state": "APPROVED",
-			"url": "https://github.com/o/r/pull/2#pullrequestreview-301"},
+			"association": "MEMBER", "url": "https://github.com/o/r/pull/2#pullrequestreview-301"},
 		Channels: []core.ChannelRef{{Source: "github", Thread: "github:o/r#2", Address: map[string]string{"repo": "o/r", "number": "2"}}},
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -1312,5 +1312,29 @@ func TestPollOverlapsCursor(t *testing.T) {
 	got := h.gh.sinces("comments")
 	if want := []string{"2026-11-03T11:00:00Z|", "2026-11-03T11:21:00Z|"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("comments since = %v", got)
+	}
+}
+
+func TestTriggerCarriesAssociation(t *testing.T) {
+	h := newSourceHarness(t, SourceConfig{ReceiveAll: []string{"O/R"}})
+	h.mustPoll()
+	// The fixture's issue comments carry author_association at the top level of the item.
+	for id, want := range map[string]string{
+		"github:issuecomment:101": "MEMBER", "github:issuecomment:103": "NONE",
+		"github:issue:9003": "MEMBER", "github:reviewcomment:201": "MEMBER",
+	} {
+		if got := h.in.trigger(t, id).Meta["association"]; got != want {
+			t.Errorf("%s association = %q, want %q", id, got, want)
+		}
+	}
+	// A payload without the field yields no key at all.
+	r := repo{key: "o/r", full: "o/r"}
+	tr := h.src.trigger("x", core.KindMessage, "comments", r, 1, false, ghUser{Login: "zed", Type: "User"}, "", at("2026-11-03T11:10:00Z"), "hi", "")
+	if v, ok := tr.Meta["association"]; ok {
+		t.Errorf("association = %q for a payload without author_association", v)
+	}
+	tr = h.src.trigger("x", core.KindMessage, "comments", r, 1, false, ghUser{Login: "zed", Type: "User"}, "COLLABORATOR", at("2026-11-03T11:10:00Z"), "hi", "")
+	if tr.Meta["association"] != "COLLABORATOR" {
+		t.Errorf("association = %q", tr.Meta["association"])
 	}
 }

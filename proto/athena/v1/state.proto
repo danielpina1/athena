@@ -71,6 +71,9 @@ message TicketSummary {
   string pairing = 20;
   // review_rounds is how many reviews of its ready reports ended (approved, changes or failed).
   uint32 review_rounds = 21;
+  // trust is the trust class of the sender the Ticket's Mandate was given on: owner, allowed, collaborator, stranger,
+  // bot or ci.
+  string trust = 22;
 }
 
 message TicketDetail {
@@ -153,6 +156,9 @@ message TriggerView {
   string text = 8;
   // outcome says what became of it: filtered:<code>, reached/attached Tickets, requeued.
   string outcome = 9;
+  // trust is the trust class the current Policy gives the sender: owner, allowed, collaborator, stranger, bot or ci;
+  // empty while there is no Policy.
+  string trust = 10;
 }
 
 message ThreadView {
