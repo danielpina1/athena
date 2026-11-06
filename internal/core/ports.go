@@ -166,4 +166,10 @@ type Policy interface {
 	// (accept or ignore), its reasons and whether an ignore records "would accept". An error means the assessment
 	// failed.
 	Assess(a Assessment, strength string) (kind string, reasons []Reason, wouldAccept bool, err error)
+	// WIPCeiling is how many Tickets of the repository may be in flight at once; always at least 1.
+	WIPCeiling(repo string) int
+	// Shadow reports whether the repository is in shadow mode: its work is held for the owner.
+	Shadow(repo string) bool
+	// Trust is the trust class of the Trigger's sender.
+	Trust(t Trigger) string
 }

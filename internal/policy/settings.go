@@ -96,6 +96,73 @@ type Settings struct {
 	Rules   []Rule                `json:"rules"`
 	Sources map[string]SourcePart `json:"sources"`
 	Pairing Pairing               `json:"pairing"`
+	// Repos holds per-repository mode and WIP ceiling, keyed by lower-cased owner/name.
+	Repos map[string]RepoSettings `json:"repos,omitempty"`
+	// WIPCeiling is the ceiling of repositories without their own; 0 is DefaultWIPCeiling.
+	WIPCeiling int `json:"wipCeiling,omitempty"`
+	// Trust maps a trust class to its tool policy (standard or restricted); missing classes use DefaultTrust.
+	Trust map[string]string `json:"trust,omitempty"`
+	// Allow lists the owner's allow rules, sorted by repository, tool and rule.
+	Allow []AllowRule `json:"allow,omitempty"`
+	// PromoteAfter is how many approvals promote a rule; 0 is DefaultPromoteAfter.
+	PromoteAfter int `json:"promoteAfter,omitempty"`
+}
+
+// Repository modes.
+const (
+	RepoLive   = "live"
+	RepoShadow = "shadow"
+)
+
+// Tool policies.
+const (
+	ToolStandard   = "standard"
+	ToolRestricted = "restricted"
+)
+
+// Defaults of the autonomy brakes.
+const (
+	DefaultWIPCeiling   = 3
+	DefaultPromoteAfter = 5
+)
+
+// RepoSettings are one repository's mode (live or shadow; empty is live) and WIP ceiling (0 is the default).
+type RepoSettings struct {
+	Mode       string `json:"mode,omitempty"`
+	WIPCeiling int    `json:"wipCeiling,omitempty"`
+}
+
+// AllowRule lets one tool through one rule's check in one repository without asking.
+type AllowRule struct {
+	Tool  string    `json:"tool"`
+	Rule  string    `json:"rule"`
+	Repo  string    `json:"repo"`
+	Added time.Time `json:"added"`
+}
+
+// NeverPromote lists the rules no allow rule may name: the owner always decides these.
+var NeverPromote = []string{"credential-read", "credential-env", "blocked-command", "session-config-write", "protected_path", "attribution"}
+
+// trustClasses are the trust classes a Trigger's sender falls into.
+var trustClasses = []string{"owner", "allowed", "collaborator", "stranger", "bot", "ci"}
+
+// DefaultTrust is the tool policy of each trust class when the owner set none: only strangers are restricted.
+func DefaultTrust() map[string]string {
+	m := make(map[string]string, len(trustClasses))
+	for _, c := range trustClasses {
+		m[c] = ToolStandard
+	}
+	m["stranger"] = ToolRestricted
+	return m
+}
+
+func neverPromoted(rule string) bool {
+	for _, r := range NeverPromote {
+		if r == rule {
+			return true
+		}
+	}
+	return false
 }
 
 // Values of Pairing.Review.
@@ -143,7 +210,36 @@ func Defaults(allowed []string) Settings {
 // every empty cell set to its default.
 func normalize(s Settings) Settings {
 	out := Settings{Mode: s.Mode, Rules: make([]Rule, len(s.Rules)), Sources: make(map[string]SourcePart, len(s.Sources)),
-		Pairing: s.Pairing}
+		Pairing: s.Pairing, WIPCeiling: s.WIPCeiling, PromoteAfter: s.PromoteAfter}
+	if len(s.Repos) > 0 {
+		out.Repos = make(map[string]RepoSettings, len(s.Repos))
+		for k, v := range s.Repos {
+			out.Repos[strings.ToLower(strings.TrimSpace(k))] = v
+		}
+	}
+	if len(s.Trust) > 0 {
+		out.Trust = make(map[string]string, len(s.Trust))
+		for k, v := range s.Trust {
+			out.Trust[k] = v
+		}
+	}
+	if len(s.Allow) > 0 {
+		out.Allow = make([]AllowRule, len(s.Allow))
+		for i, a := range s.Allow {
+			a.Repo = strings.ToLower(strings.TrimSpace(a.Repo))
+			out.Allow[i] = a
+		}
+		sort.SliceStable(out.Allow, func(i, j int) bool {
+			a, b := out.Allow[i], out.Allow[j]
+			if a.Repo != b.Repo {
+				return a.Repo < b.Repo
+			}
+			if a.Tool != b.Tool {
+				return a.Tool < b.Tool
+			}
+			return a.Rule < b.Rule
+		})
+	}
 	if out.Pairing.Review == "" {
 		out.Pairing.Review = defaultPairing.Review
 	}
@@ -206,6 +302,9 @@ func Validate(s Settings) error {
 	if r := s.Pairing.MaxRounds; r < 0 || r > maxReviewRounds {
 		return fmt.Errorf("policy: pairing maxRounds %d is not 1 to %d", r, maxReviewRounds)
 	}
+	if err := validateAutonomy(s); err != nil {
+		return err
+	}
 	seen := map[string]bool{}
 	for _, r := range s.Rules {
 		name := strings.TrimSpace(r.Name)
@@ -238,6 +337,43 @@ func Validate(s Settings) error {
 			if err := validateRow(name, scope, row); err != nil {
 				return err
 			}
+		}
+	}
+	return nil
+}
+
+// validateAutonomy checks the repositories, ceilings, trust map, allow rules and promotion count.
+func validateAutonomy(s Settings) error {
+	if s.WIPCeiling < 0 {
+		return fmt.Errorf("policy: wipCeiling %d is negative", s.WIPCeiling)
+	}
+	if s.PromoteAfter < 0 {
+		return fmt.Errorf("policy: promoteAfter %d is negative", s.PromoteAfter)
+	}
+	for repo, r := range s.Repos {
+		switch r.Mode {
+		case "", RepoLive, RepoShadow:
+		default:
+			return fmt.Errorf("policy: repository %q mode %q is not live or shadow", repo, r.Mode)
+		}
+		if r.WIPCeiling < 0 {
+			return fmt.Errorf("policy: repository %q wipCeiling %d is negative", repo, r.WIPCeiling)
+		}
+	}
+	for class, v := range s.Trust {
+		if _, ok := DefaultTrust()[class]; !ok {
+			return fmt.Errorf("policy: trust class %q is not one of %s", class, strings.Join(trustClasses, ", "))
+		}
+		if v != ToolStandard && v != ToolRestricted {
+			return fmt.Errorf("policy: trust class %q policy %q is not standard or restricted", class, v)
+		}
+	}
+	for _, a := range s.Allow {
+		if strings.TrimSpace(a.Tool) == "" || strings.TrimSpace(a.Rule) == "" || strings.TrimSpace(a.Repo) == "" {
+			return errors.New("policy: an allow rule needs a tool, a rule and a repository")
+		}
+		if neverPromoted(a.Rule) {
+			return fmt.Errorf("policy: rule %q can never be allowed", a.Rule)
 		}
 	}
 	return nil

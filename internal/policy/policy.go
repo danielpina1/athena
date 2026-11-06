@@ -71,8 +71,60 @@ func New(s Settings, scope core.SourceScope, evalTimeout time.Duration) core.Pol
 	return &policy{s: n, scope: scope, timeout: evalTimeout, version: Version(n)}
 }
 
-func (p *policy) Version() string                { return p.version }
-func (p *policy) EvalTimeout() time.Duration     { return p.timeout }
+func (p *policy) Version() string            { return p.version }
+func (p *policy) EvalTimeout() time.Duration { return p.timeout }
+
+// WIPCeiling is the repository's ceiling: its own, else the settings', else DefaultWIPCeiling; never below 1.
+func (p *policy) WIPCeiling(repo string) int {
+	if c := p.s.Repos[strings.ToLower(repo)].WIPCeiling; c > 0 {
+		return c
+	}
+	if p.s.WIPCeiling > 0 {
+		return p.s.WIPCeiling
+	}
+	return DefaultWIPCeiling
+}
+
+// Shadow reports whether the repository is in shadow mode.
+func (p *policy) Shadow(repo string) bool { return p.s.Repos[strings.ToLower(repo)].Mode == RepoShadow }
+
+// Trust is filled in by the trust classification; until then no Trigger has a class.
+func (p *policy) Trust(core.Trigger) string { return "" }
+
+// ToolPolicy is the tool policy of a trust class: the owner's setting, else DefaultTrust; an empty class is standard.
+func (p *policy) ToolPolicy(class string) string {
+	if v, ok := p.s.Trust[class]; ok {
+		return v
+	}
+	if v, ok := DefaultTrust()[class]; ok {
+		return v
+	}
+	return ToolStandard
+}
+
+// Allows reports whether an allow rule matches the tool, rule and repository exactly. A never-promoted rule is
+// never allowed.
+func (p *policy) Allows(tool, rule, repo string) bool {
+	if neverPromoted(rule) {
+		return false
+	}
+	repo = strings.ToLower(repo)
+	for _, a := range p.s.Allow {
+		if a.Tool == tool && a.Rule == rule && a.Repo == repo {
+			return true
+		}
+	}
+	return false
+}
+
+// PromoteAfter is how many approvals promote a rule.
+func (p *policy) PromoteAfter() int {
+	if p.s.PromoteAfter > 0 {
+		return p.s.PromoteAfter
+	}
+	return DefaultPromoteAfter
+}
+
 func (p *policy) AdmitsInferred(r []string) bool { return admitsInferred(p.s, r) }
 
 func (p *policy) Assess(a core.Assessment, strength string) (string, []core.Reason, bool, error) {

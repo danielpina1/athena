@@ -48,6 +48,9 @@ func (p *evalPolicy) Gate(t Trigger, _ Thread, tickets []Ticket) Gate {
 func (p *evalPolicy) Revalidate(Mandate) bool { return p.holds }
 
 func (p *evalPolicy) AdmitsInferred(rules []string) bool { return p.mode == "auto" && len(rules) > 0 }
+func (p *evalPolicy) WIPCeiling(string) int              { return 3 }
+func (p *evalPolicy) Shadow(string) bool                 { return false }
+func (p *evalPolicy) Trust(Trigger) string               { return "" }
 
 func (p *evalPolicy) Assess(a Assessment, strength string) (string, []Reason, bool, error) {
 	if p.assessErr != nil {
