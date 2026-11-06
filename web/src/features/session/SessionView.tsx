@@ -9,19 +9,21 @@
 // stays put and offers "Jump to latest". The ● live dot shows while the link is open and the Ticket works. It is a lazy
 // chunk: screens show it through LazySessionView (SessionFrame.tsx).
 import { timestampMs } from "@bufbuild/protobuf/wkt";
-import { ChevronRightIcon, CircleCheckIcon, CircleXIcon } from "lucide-react";
+import { ChevronRightIcon, CircleCheckIcon, CircleXIcon, HourglassIcon } from "lucide-react";
 import { memo, type ReactNode, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { StreamItem } from "@/gen/athena/v1/stream_pb";
 import { itemText } from "@/lib/stream/ansi";
 import { itemKey, useSessionStream } from "@/lib/stream/useSessionStream";
 import { useAthena } from "@/lib/store/state";
 import { Markdown } from "@/lib/text/markdown";
+import { resetTime } from "@/lib/text/runtime";
 import { Mono } from "@/ui/athena/Mono";
+import { useNow } from "@/ui/athena/RelativeTime";
 import { cn } from "@/ui/cn";
 import { Button } from "@/ui/primitives/button";
 import { logClass, SessionFrame, type SessionViewProps } from "./SessionFrame";
 import { ToolCall } from "./ToolCall";
-import { githubFrom, modelName, parseResult, runtimeLine } from "./tools";
+import { claudeLimit, githubFrom, modelName, parseResult, runtimeLine } from "./tools";
 
 /** This chunk's sentinel: the bundle budget fails if it is in the initial route (scripts/bundle-budget.mjs). */
 export const LAZY_SENTINEL = "athena-lazy-chunk:session-view";
@@ -127,7 +129,35 @@ function RuntimeDivider({ item }: { item: StreamItem }) {
   );
 }
 
+/**
+ * A turn Claude Code stopped at its usage limit: no failure (the Ticket continues, on another runtime or after the
+ * reset, with no one asked), so amber and not red, with when the limit resets instead of Claude Code's raw text.
+ */
+function LimitResult({ resetsAt }: { resetsAt?: number }) {
+  const now = useNow();
+  const at = resetsAt !== undefined ? new Date(resetsAt) : undefined;
+  return (
+    <div data-kind="result" data-limit className="grid min-w-0 gap-2 border-t border-line-soft pt-3">
+      <p className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+        <HourglassIcon aria-hidden className="size-4 shrink-0 text-warning" />
+        <span className="font-semibold">Usage limit reached on Claude Code</span>
+        <span className="text-xs text-muted">
+          {at ? (
+            <>
+              Resets at <time dateTime={at.toISOString()}>{resetTime(at.getTime(), now)}</time>
+            </>
+          ) : (
+            "Reset time unknown"
+          )}
+        </span>
+      </p>
+    </div>
+  );
+}
+
 function Result({ item, text }: { item: StreamItem; text: string }) {
+  const limit = claudeLimit(text, item.isError);
+  if (limit) return <LimitResult resetsAt={limit.resetsAt} />;
   const [head, ...rest] = text.split("\n");
   const body = rest.join("\n").trim();
   const { title, meta } = parseResult(head, item.isError);

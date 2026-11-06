@@ -15,6 +15,7 @@
 //   - laterFixture(ticket, lines) and stdinLog(ticket): what the Ticket's fakeclaude prints after each later message
 //     (a reply), and what it has read on stdin; holdLaterResult(ticket) holds that fixture's result line back.
 //   - codexFixture(ticket, lines): the app-server lines the Ticket's fakecodex replays on its session's first turn.
+//   - untilNotLimited(runtime): waits until the server no longer counts the runtime limited (its quota.json).
 //
 // Every Ticket's session runs fakeclaude replaying the default fixture (global-setup.ts): a turn that never ends.
 import { execFile, spawn, type ChildProcess } from "node:child_process";
@@ -67,6 +68,32 @@ export function codexFixture(ticket: string, lines: object[]): () => void {
   const file = join(env("ATHENA_E2E_STATE"), `codex-fixture-${ticket}.jsonl`);
   writeFileSync(file, lines.map((l) => JSON.stringify(l) + "\n").join(""));
   return () => rmSync(file, { force: true });
+}
+
+/**
+ * Waits, in Node (a page torn down by a failed test cannot cut it short), until the server's quota no longer holds
+ * the runtime limited: its <state>/quota.json names no limited_until for it in the future. Fails after timeoutMs.
+ */
+export async function untilNotLimited(runtime: string, timeoutMs = 30_000): Promise<void> {
+  const file = join(env("ATHENA_E2E_STATE"), "quota.json");
+  const until = (): number => {
+    if (!existsSync(file)) return 0;
+    const q = JSON.parse(readFileSync(file, "utf8")) as { runtimes?: Record<string, { limited_until?: string }> };
+    const at = q.runtimes?.[runtime]?.limited_until;
+    return at ? Date.parse(at) : 0;
+  };
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    let left = 0;
+    try {
+      left = until() - Date.now();
+    } catch {
+      left = 1; // the file is being replaced: read it again
+    }
+    if (left <= 0) return;
+    if (Date.now() > deadline) throw new Error(`${runtime} is still limited for ${left} ms`);
+    await new Promise((r) => setTimeout(r, Math.min(left + 50, 250)));
+  }
 }
 
 /**

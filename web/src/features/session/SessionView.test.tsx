@@ -329,3 +329,26 @@ test("a handoff note reads as its own block, the opening first and the rest clam
   // Never the owner's words.
   expect(screen.queryByText("You")).toBeNull();
 });
+
+test("Claude Code's usage limit reads as a limit that resets, not a failure", () => {
+  render(<SessionView ticketId="T-1" />);
+  const reset = Date.parse("2026-11-04T10:30:00Z");
+  act(() =>
+    link.items("T-1", [
+      item({ offset: 0n, kind: "result", isError: true, text: `success turns=1 cost=$0.0000\nClaude AI usage limit reached|${reset / 1000}` }),
+      item({ offset: 10n, kind: "result", isError: true, text: "success turns=1\nClaude AI usage limit reached" }),
+    ]),
+  );
+  const [known, unknown] = [...document.querySelectorAll("[data-kind=result]")] as HTMLElement[];
+  expect(known.getAttribute("data-limit")).toBe("true");
+  expect(within(known).getByText("Usage limit reached on Claude Code")).toBeTruthy();
+  const at = known.querySelector("time")!;
+  expect(at.getAttribute("dateTime")).toBe(new Date(reset).toISOString());
+  expect(known.textContent).toMatch(/Resets at /);
+  // Never the raw text, never the failure's red.
+  expect(known.textContent).not.toContain("|");
+  expect(known.textContent).not.toContain("Failed");
+  expect(known.querySelector(".text-danger")).toBeNull();
+  expect(within(unknown).getByText("Reset time unknown")).toBeTruthy();
+  expect(screen.queryByText("Failed")).toBeNull();
+});

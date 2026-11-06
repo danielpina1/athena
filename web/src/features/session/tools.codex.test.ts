@@ -106,3 +106,31 @@ test("athena's tools read as they do for Claude Code", () => {
   expect(codexToolView("mcp__athena__report", {}, "")).toBeUndefined();
   expect(codexToolView("Bash", {}, "")).toBeUndefined();
 });
+
+test("a patch's lines follow its change: an add is all added, a delete all removed, an update its diff", () => {
+  // A new Markdown file with bullets: every line added, the bullets kept as written.
+  const doc = view("apply_patch", { changes: [{ path: `${WT}/NOTES.md`, kind: "add", diff: "# T\n- one\n- two\n" }] });
+  expect(doc).toMatchObject({ kind: "write", label: "Created", target: "NOTES.md", counts: { add: 3, del: 0, about: false } });
+  expect(doc.patch?.[0].lines.map((l) => l.sign + l.text)).toEqual(["+# T", "+- one", "+- two"]);
+  // An add sent as a diff (every line signed) loses the signs once.
+  expect(
+    view("apply_patch", { changes: [{ path: `${WT}/a.md`, kind: "add", diff: "+- one\n+\n+two\n" }] }).patch?.[0].lines.map((l) => l.sign + l.text),
+  ).toEqual(["+- one", "+", "+two"]);
+  // A delete: every line removed, plain or signed.
+  const gone = view("apply_patch", { changes: [{ path: `${WT}/old.md`, kind: "delete", diff: "+ kept?\nbye\n" }] });
+  expect(gone).toMatchObject({ kind: "edit", label: "Edited", counts: { add: 0, del: 2, about: false } });
+  expect(gone.patch?.[0].lines.map((l) => l.sign + l.text)).toEqual(["−+ kept?", "−bye"]);
+  expect(
+    view("apply_patch", { changes: [{ path: `${WT}/old.go`, kind: "delete", diff: "-a\n-b\n" }] }).patch?.[0].lines.map((l) => l.sign + l.text),
+  ).toEqual(["−a", "−b"]);
+  // A clipped delete counts its full length.
+  expect(
+    view("apply_patch", { changes: [{ path: `${WT}/big.md`, kind: "delete", diff: "a\nb…" }], _lines: { "changes.0.diff": 300 } }).counts,
+  ).toEqual({ add: 0, del: 300, about: true });
+  // In an update, --- and +++ are headers only before the first hunk: after it, a removed "-- comment" is a line.
+  const sql = view("apply_patch", {
+    changes: [{ path: `${WT}/q.sql`, kind: "update", diff: "--- a/q.sql\n+++ b/q.sql\n@@ -1,2 +1,2 @@\n--- old comment\n+-- new comment\n select 1;\n" }],
+  });
+  expect(sql.counts).toEqual({ add: 1, del: 1, about: false });
+  expect(sql.patch?.[0].lines.map((l) => l.sign + l.text)).toEqual([" @@ -1,2 +1,2 @@", "−-- old comment", "+-- new comment", " select 1;"]);
+});

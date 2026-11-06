@@ -48,16 +48,27 @@ function command(input: ToolInput, summary: string): ToolView {
   return { kind: "bash", label: "Ran", target: where === "." ? cmd : `${cmd} in ${where}` };
 }
 
-// The header lines of a unified diff: they change nothing.
+// The header lines of a unified diff, before its first hunk: they change nothing.
 const DIFF_HEADER = /^(?:--- |\+\+\+ |diff --git |index [0-9a-f])/;
 
-/** A change's diff as lines; an add whose diff has no signs is its file's plain content, every line added. */
+/**
+ * A change's diff as lines, by its kind: an add is every line added and a delete every line removed (the file's
+ * content, plain, or with each line signed, the sign then dropped once); an update is a unified diff, whose --- and
+ * +++ lines are headers only before its first hunk.
+ */
 function patchLines(kind: string, diff: string): DiffLine[] {
   const lines = diff ? diff.replace(/\n$/, "").split("\n") : [];
-  const signed = lines.some((l) => /^[+-]/.test(l) && !DIFF_HEADER.test(l));
-  if (kind === "add" && !signed) return lines.map((text) => ({ sign: "+", text }));
+  if (kind === "add" || kind === "delete") {
+    const sign = kind === "add" ? "+" : "−";
+    const mark = kind === "add" ? "+" : "-";
+    const signed = lines.length > 0 && lines.every((l) => !l || l.startsWith(mark));
+    return lines.map((l) => ({ sign, text: signed ? l.slice(1) : l }));
+  }
+  let header = true;
   return lines.flatMap((l): DiffLine[] => {
-    if (DIFF_HEADER.test(l)) return [];
+    if (l.startsWith("@@")) header = false;
+    else if (header && DIFF_HEADER.test(l)) return [];
+    else header = false;
     if (l.startsWith("+")) return [{ sign: "+", text: l.slice(1) }];
     if (l.startsWith("-")) return [{ sign: "−", text: l.slice(1) }];
     return [{ sign: " ", text: l.startsWith(" ") ? l.slice(1) : l }];
@@ -75,12 +86,12 @@ function patch(input: ToolInput, summary: string): ToolView {
     const diff = str(change, "diff");
     const lines = patchLines(kind, diff);
     const cut = clipped(input, `changes.${i}.diff`);
-    const add = lines.filter((l) => l.sign === "+").length;
-    // A clipped add counts its full length; a clipped update counts what was shown.
-    counts.add += cut && kind === "add" ? linesOf(input, `changes.${i}.diff`, diff) : add;
-    counts.del += lines.filter((l) => l.sign === "−").length;
+    // A clipped add or delete counts its full length; a clipped update counts what was shown.
+    const full = linesOf(input, `changes.${i}.diff`, diff);
+    counts.add += cut && kind === "add" ? full : lines.filter((l) => l.sign === "+").length;
+    counts.del += cut && kind === "delete" ? full : lines.filter((l) => l.sign === "−").length;
     counts.about ||= cut;
-    files.push({ path: shortPath(str(change, "path")), kind, lines, clipped: cut });
+    files.push({ path: shortPath(str(change, "path")), file: str(change, "path"), kind, lines, clipped: cut });
   });
   if (files.length === 0) return { kind: "edit", label: "Edited", target: shortenPaths(firstLine(summary)) };
   const created = files.every((f) => f.kind === "add");

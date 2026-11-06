@@ -29,8 +29,8 @@ export type ToolKind =
 /** Lines an edit adds and deletes; about when a value was clipped, so the counts are an estimate. */
 export type Counts = { add: number; del: number; about: boolean };
 
-/** One file of a Codex patch: its path as shown, its change (add, update, delete) and its diff's lines. */
-export type PatchFile = { path: string; kind: string; lines: DiffLine[]; clipped: boolean };
+/** One file of a Codex patch: its path as shown and as given, its change (add, update, delete) and its diff's lines. */
+export type PatchFile = { path: string; file: string; kind: string; lines: DiffLine[]; clipped: boolean };
 
 /** A row's verb and target, and what its body shows when the input says it another way: a patch, a plan's steps. */
 export type ToolView = { kind: ToolKind; label: string; target: string; counts?: Counts; patch?: PatchFile[]; todos?: Todo[] };
@@ -110,6 +110,19 @@ export function errorLine(text: string): string {
   if (/^Exit code \d+$/.test(line) && lines[1]) line += ": " + lines[1];
   if (!hook || !line) return line;
   return /\b(blocked|denied)\b/i.test(line) ? line[0].toUpperCase() + line.slice(1) : "Blocked: " + line;
+}
+
+// Claude Code's result when a turn stopped at its usage limit: "Claude AI usage limit reached|<unix time it resets>".
+const CLAUDE_LIMIT = /usage limit reached(?:\|(\d{9,12}))?/i;
+
+/**
+ * A failed result that is Claude Code's usage limit, with when it resets (ms; undefined when it did not say); undefined
+ * for any other result.
+ */
+export function claudeLimit(text: string, isError: boolean): { resetsAt?: number } | undefined {
+  const m = isError ? CLAUDE_LIMIT.exec(text) : null;
+  if (!m) return undefined;
+  return { resetsAt: m[1] ? Number(m[1]) * 1000 : undefined };
 }
 
 export type ResultView = { title: "Done" | "Failed" | "Stopped"; meta: string };

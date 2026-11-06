@@ -6,7 +6,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Locator, Page } from "@playwright/test";
-import { athena, codexFixture, expect, expectAccessible, laterFixture, liveFeed, signedInPage, test } from "./harness";
+import { athena, codexFixture, expect, expectAccessible, laterFixture, liveFeed, signedInPage, test, untilNotLimited } from "./harness";
 import { ROOT } from "./paths";
 
 /** A fixture of app-server lines, web/e2e/fixtures/<name>. */
@@ -36,8 +36,6 @@ const unstable = (page: Page) => [
   page.getByTestId("ticket-detail").locator("header .font-mono"),
   page.locator("[data-ticket-row] .font-mono"),
   page.getByPlaceholder("Search by title or id"),
-  // A result's text: Claude Code's usage limit names the time it resets at.
-  page.locator("[data-kind=result] > :not(:first-child)"),
   ...liveFeed(page),
 ];
 
@@ -162,9 +160,8 @@ test("a Ticket that moves from Claude Code to Codex shows the divider and the ha
   await signedInPage(page);
   const title = "Lex number fractions";
   const ticket = await athena("task", title, "--runtime", "auto");
-  let resetsAt = 0;
+  const unset = codexFixture(ticket, fixture("codex-failover.jsonl"));
   try {
-    codexFixture(ticket, fixture("codex-failover.jsonl"));
     laterFixture(ticket, CLAUDE_LIMITED);
     await page.goto(`/tickets/${ticket}?tab=session&q=${ticket}`);
     const log = page.getByTestId("ticket-detail").getByRole("log", { name: "Session output" });
@@ -173,9 +170,13 @@ test("a Ticket that moves from Claude Code to Codex shows the divider and the ha
 
     const box = page.getByRole("textbox", { name: "Reply to the session" });
     await box.fill("Keep going");
-    resetsAt = Date.now() + LIMIT_RESET_S * 1000;
     await box.press("Enter");
 
+    // Claude Code's turn ends at its limit, said as such: when it resets, not a failure or its raw text.
+    const limit = log.locator("[data-kind=result][data-limit]");
+    await expect(limit).toContainText("Usage limit reached on Claude Code");
+    await expect(limit).toContainText("Resets at");
+    await expect(log.getByText("Failed", { exact: true })).toHaveCount(0);
     const moved = log.locator("[data-kind=runtime]", { hasText: "continued after a usage limit" });
     await expect(moved).toHaveAttribute("aria-label", /^Codex( · \S+)? · continued after a usage limit$/);
     const handoff = log.getByRole("region", { name: "Hand-off note" });
@@ -184,18 +185,18 @@ test("a Ticket that moves from Claude Code to Codex shows the divider and the ha
     await expect(log).toContainText("Picking up where the Claude Code session stopped");
     // In order: Claude Code's words, the divider, the hand-off, Codex's words.
     const text = await log.innerText();
-    const order = ["The lexer reads integers", "continued after a usage limit", "You are continuing this Ticket", "Picking up where"].map((s) => text.indexOf(s));
+    const order = ["The lexer reads integers", "Usage limit reached on Claude Code", "continued after a usage limit", "You are continuing this Ticket", "Picking up where"].map((s) => text.indexOf(s));
     expect(order.every((at) => at >= 0), text).toBe(true);
     expect([...order].sort((a, b) => a - b)).toEqual(order);
-    for (const protocol of ["[input", "ATHENA_", "You are the worker", "Execution variables"]) {
+    for (const protocol of ["[input", "ATHENA_", "You are the worker", "Execution variables", "limit reached|"]) {
       expect(text, `the log shows ${protocol}`).not.toContain(protocol);
     }
 
-    // The move near the top of the log: the end of Claude Code's turn above it, the hand-off and Codex's words below.
+    // The move near the top of the log: Claude Code's limit line above it, the hand-off and Codex's words below.
     await page.getByRole("heading", { name: "Session", level: 2 }).evaluate((h) => h.scrollIntoView({ block: "start" }));
     await moved.evaluate((d) => {
       const box = d.closest("[role=log]")!;
-      box.scrollTop += d.getBoundingClientRect().top - box.getBoundingClientRect().top - 64;
+      box.scrollTop += d.getBoundingClientRect().top - box.getBoundingClientRect().top - 112;
     });
     await shots(page, "failover");
     await fitsNarrow(page);
@@ -206,9 +207,9 @@ test("a Ticket that moves from Claude Code to Codex shows the divider and the ha
     await expect(handoff).toContainText("Untracked files: 0");
     await shots(page, "handoff", handoff);
   } finally {
+    unset();
     await athena("stop", ticket).catch(() => {});
     // The specs after this one start their Tickets on Claude Code: its limit must have reset.
-    const left = resetsAt + 1000 - Date.now();
-    if (left > 0) await page.waitForTimeout(left);
+    await untilNotLimited("claude");
   }
 });

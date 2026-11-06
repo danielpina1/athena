@@ -251,3 +251,23 @@ test("a Codex plan opens to its steps", async () => {
   await userEvent.click(summary);
   expect([...el.querySelectorAll("[data-todo]")].map((t) => t.getAttribute("data-todo"))).toEqual(["completed", "in_progress"]);
 });
+
+test("a Codex patch of one document has an Open link; of several files, or a delete, none", () => {
+  const show = (changes: object[]) =>
+    render(
+      <MemoryRouter initialEntries={["/tickets/T-4?tab=session"]}>
+        <ToolCall call={call("apply_patch", { changes })} result={ok("completed")} active ticketId="T-4" />
+      </MemoryRouter>,
+    );
+  const one = show([{ path: `${WT}docs/PLAN.md`, kind: "add", diff: "# Plan\n" }]);
+  expect(screen.getByRole("link", { name: "Open docs/PLAN.md" }).getAttribute("href")).toBe("/tickets/T-4?tab=session&file=docs%2FPLAN.md");
+  one.unmount();
+  const two = show([
+    { path: `${WT}a.md`, kind: "add", diff: "a\n" },
+    { path: `${WT}b.md`, kind: "add", diff: "b\n" },
+  ]);
+  expect(screen.queryByRole("link", { name: /^Open/ })).toBeNull();
+  two.unmount();
+  show([{ path: `${WT}old.md`, kind: "delete", diff: "x\n" }]);
+  expect(screen.queryByRole("link", { name: /^Open/ })).toBeNull();
+});

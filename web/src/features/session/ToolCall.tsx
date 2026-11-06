@@ -374,8 +374,8 @@ function OpenFile({ ticketId, path }: { ticketId: string; path: string }) {
 /**
  * call is missing when it fell out of the kept items; result is missing while the tool runs. active says the Ticket
  * has not ended: a call without a result is running until then (waiting for an Approval too), and has none after.
- * With ticketId, a Write or Edit of a document has an Open link to the Ticket's file viewer, beside the row (a link
- * inside its summary would be a control inside a control).
+ * With ticketId, a Write or Edit of a document (or a Codex patch of one) has an Open link to the Ticket's file
+ * viewer, beside the row (a link inside its summary would be a control inside a control).
  */
 export function ToolCall({ call, result, active, ticketId }: { call?: StreamItem; result?: StreamItem; active: boolean; ticketId?: string }) {
   const routed = useInRouterContext();
@@ -387,7 +387,9 @@ export function ToolCall({ call, result, active, ticketId }: { call?: StreamItem
   const error = status === "error" && result ? errorLine(exitStatusText(call?.tool ?? "", result, itemText(result))) : "";
   // The body is built on the first open, not for every closed row: a long session has hundreds of them.
   const [opened, setOpened] = useState(false);
-  const written = (view.kind === "write" || view.kind === "edit") && call?.tool !== "NotebookEdit" ? str(input, "file_path") : "";
+  // The file a Write or Edit wrote, or the one file a Codex patch added or changed.
+  const patched = view.patch?.length === 1 && view.patch[0].kind !== "delete" ? view.patch[0].file : "";
+  const written = (view.kind === "write" || view.kind === "edit") && call?.tool !== "NotebookEdit" ? str(input, "file_path") || patched : "";
   const row = (
     <details
       data-testid="tool-call"
