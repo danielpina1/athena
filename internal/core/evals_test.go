@@ -23,6 +23,8 @@ type evalPolicy struct {
 	trust string
 	// ceiling is the WIP ceiling of every repository; 3 when 0.
 	ceiling int
+	// shadow names the repositories held for the owner.
+	shadow map[string]bool
 }
 
 func newEvalPolicy() *evalPolicy {
@@ -58,8 +60,8 @@ func (p *evalPolicy) WIPCeiling(string) int {
 	}
 	return 3
 }
-func (p *evalPolicy) Shadow(string) bool   { return false }
-func (p *evalPolicy) Trust(Trigger) string { return p.trust }
+func (p *evalPolicy) Shadow(repo string) bool { return p.shadow[repo] }
+func (p *evalPolicy) Trust(Trigger) string    { return p.trust }
 
 func (p *evalPolicy) Assess(a Assessment, strength string) (string, []Reason, bool, error) {
 	if p.assessErr != nil {

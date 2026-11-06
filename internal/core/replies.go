@@ -78,7 +78,7 @@ type Receipt struct {
 	Channel ChannelRef `json:"channel"`
 	// Conversation is the Channel's Thread; a Ticket's messages to one conversation go out in queue order.
 	Conversation string `json:"conversation"`
-	// State is waiting, sent or dropped.
+	// State is waiting, sent, dropped or held (for the owner, by a Proposal).
 	State string `json:"state"`
 	// Started counts the sends begun, recorded before each is made so a send that died unrecorded is known to have
 	// begun; Attempts counts only the failed ones.
@@ -290,6 +290,17 @@ func (o *op) queueReply(r ReplyRequest) (string, bool, error) {
 	}
 	rc := &Receipt{ID: id, TicketID: t.ID, Purpose: r.Purpose, TriggerID: r.TriggerID, Text: r.Text, Channel: ch,
 		Conversation: ch.Thread, State: ReceiptWaiting, Seq: seq, QueuedAt: o.at, Round: round}
+	if o.shadowRepo(t) {
+		// A repository held for the owner: the reply waits as a Proposal, and nothing is queued until it is applied.
+		rc.State = ReceiptHeld
+		if err := o.tx.PutReceipt(rc); err != nil {
+			return "", false, err
+		}
+		if err := o.holdReply(t, rc); err != nil {
+			return "", false, err
+		}
+		return id, false, o.takeUp(t, r, tr)
+	}
 	if err := o.tx.PutReceipt(rc); err != nil {
 		return "", false, err
 	}

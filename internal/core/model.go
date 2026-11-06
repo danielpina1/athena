@@ -314,6 +314,8 @@ type Ticket struct {
 	Delivery    *DeliveryFailure `json:"delivery,omitempty"`
 	// PendingApproval is the ID of an Approval of this Ticket waiting for a person; empty if none.
 	PendingApproval string `json:"pendingApproval,omitempty"`
+	// PendingProposals counts the Proposals of this Ticket waiting for the owner; only the Engine writes it.
+	PendingProposals int `json:"pendingProposals,omitempty"`
 	// Stats are the Ticket's performance numbers, updated in the same transaction as the command that causes them.
 	Stats TicketStats `json:"stats"`
 	// SessionCosts is, per runtime session, the cumulative cost it last reported: a runtime reports a session's total

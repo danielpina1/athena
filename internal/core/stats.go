@@ -44,6 +44,10 @@ const (
 	cmdNote                  = "note"
 	cmdRequestStatus         = "request_status"
 	cmdReply                 = "reply"
+	cmdPropose               = "propose"
+	cmdApplyProposal         = "apply_proposal"
+	cmdDiscardProposal       = "discard_proposal"
+	cmdSettleProposal        = "settle_proposal"
 )
 
 var commandNames = []string{
@@ -53,6 +57,7 @@ var commandNames = []string{
 	cmdRecordUsage, cmdReceive, cmdBindThread, cmdThreadClosed, cmdEvaluateDue, cmdCandidateDelivered, cmdDecide,
 	cmdAttach, cmdHandback, cmdReevaluate, cmdDismiss, cmdPolicyChanged, cmdFollowForContext, cmdMarkUnrelated,
 	cmdUnsubscribe, cmdNote, cmdRequestStatus, cmdReply,
+	cmdPropose, cmdApplyProposal, cmdDiscardProposal, cmdSettleProposal,
 }
 
 // TicketStats are a Ticket's performance numbers (spec §10.3). The Engine updates them in the same transaction as the

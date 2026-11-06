@@ -62,6 +62,14 @@ type Tx interface {
 	PutReceipt(r *Receipt) error
 	// TicketReceipts returns a Ticket's reply receipts, in queue order (Seq).
 	TicketReceipts(ticketID string) ([]*Receipt, error)
+	// GetProposal returns the Proposal with the given ID, or nil, nil if there is none.
+	GetProposal(id string) (*Proposal, error)
+	// PutProposal inserts or replaces a Proposal.
+	PutProposal(p *Proposal) error
+	// PendingProposals returns every Proposal still pending, oldest first.
+	PendingProposals() ([]*Proposal, error)
+	// TicketProposals returns a Ticket's Proposals in every state, oldest first.
+	TicketProposals(ticketID string) ([]*Proposal, error)
 	// PutBrake inserts or replaces the Brake of a Trigger.
 	PutBrake(b Brake) error
 	// DeleteBrake removes the Brake of a Trigger; none is not an error.
@@ -110,6 +118,8 @@ const (
 	EventDecisionRecorded   = "decision.recorded"
 	EventTriggerRequeued    = "trigger.requeued"
 	EventPolicyChanged      = "policy.changed"
+	EventProposalCreated    = "proposal.created"
+	EventProposalSettled    = "proposal.settled"
 )
 
 // Event is what the Engine reports after a committed change.

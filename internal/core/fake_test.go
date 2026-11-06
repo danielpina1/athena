@@ -20,6 +20,7 @@ type memRepos struct {
 	threads   map[string][]byte
 	receipts  map[string][]byte
 	brakes    map[string][]byte
+	proposals map[string][]byte
 	kv        map[string]string
 	effects   map[string]fakeEffect
 	seqs      map[string]int
@@ -30,7 +31,7 @@ type memRepos struct {
 }
 
 func newMemRepos() *memRepos {
-	return &memRepos{tickets: map[string][]byte{}, triggers: map[string][]byte{}, decisions: map[string][]byte{}, approvals: map[string][]byte{}, threads: map[string][]byte{}, receipts: map[string][]byte{}, brakes: map[string][]byte{}, kv: map[string]string{}, effects: map[string]fakeEffect{}, seqs: map[string]int{}}
+	return &memRepos{tickets: map[string][]byte{}, triggers: map[string][]byte{}, decisions: map[string][]byte{}, approvals: map[string][]byte{}, threads: map[string][]byte{}, receipts: map[string][]byte{}, brakes: map[string][]byte{}, proposals: map[string][]byte{}, kv: map[string]string{}, effects: map[string]fakeEffect{}, seqs: map[string]int{}}
 }
 
 // fakeEffect is a queued effect, as Enqueue leaves it.
@@ -51,6 +52,7 @@ func (r *memRepos) Tx(fn func(Tx) error) error {
 		threads:   cloneMap(r.threads),
 		receipts:  cloneMap(r.receipts),
 		brakes:    cloneMap(r.brakes),
+		proposals: cloneMap(r.proposals),
 		kv:        map[string]string{},
 		effects:   map[string]fakeEffect{},
 		seqs:      map[string]int{},
@@ -75,6 +77,7 @@ func (r *memRepos) Tx(fn func(Tx) error) error {
 	}
 	r.tickets, r.triggers, r.decisions, r.approvals, r.seqs = tx.tickets, tx.triggers, tx.decisions, tx.approvals, tx.seqs
 	r.threads, r.kv, r.effects, r.receipts, r.brakes = tx.threads, tx.kv, tx.effects, tx.receipts, tx.brakes
+	r.proposals = tx.proposals
 	return nil
 }
 
@@ -157,7 +160,7 @@ func (r *memRepos) counts() (tickets, triggers, decisions int) {
 
 type memTx struct {
 	tickets, triggers, decisions, approvals, threads map[string][]byte
-	receipts, brakes                                 map[string][]byte
+	receipts, brakes, proposals                      map[string][]byte
 	kv                                               map[string]string
 	effects                                          map[string]fakeEffect
 	seqs                                             map[string]int
@@ -717,4 +720,53 @@ func (tx *memTx) TicketReceipts(ticketID string) ([]*Receipt, error) {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Seq < out[j].Seq })
 	return out, nil
+}
+
+func (tx *memTx) GetProposal(id string) (*Proposal, error) {
+	raw, ok := tx.proposals[id]
+	if !ok {
+		return nil, nil
+	}
+	var p Proposal
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return nil, err
+	}
+	return &p, nil
+}
+
+func (tx *memTx) PutProposal(p *Proposal) error {
+	raw, err := json.Marshal(p)
+	if err != nil {
+		return err
+	}
+	tx.proposals[p.ID] = raw
+	return nil
+}
+
+// proposalList lists the Proposals oldest first, those of ticketID only when it is not empty and only the pending ones
+// when pending is true.
+func (tx *memTx) proposalList(ticketID string, pending bool) ([]*Proposal, error) {
+	var out []*Proposal
+	for id := range tx.proposals {
+		p, err := tx.GetProposal(id)
+		if err != nil {
+			return nil, err
+		}
+		if (ticketID == "" || p.TicketID == ticketID) && (!pending || p.State == ProposalPending) {
+			out = append(out, p)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].CreatedAt.Before(out[j].CreatedAt)
+		}
+		return out[i].ID < out[j].ID
+	})
+	return out, nil
+}
+
+func (tx *memTx) PendingProposals() ([]*Proposal, error) { return tx.proposalList("", true) }
+
+func (tx *memTx) TicketProposals(ticketID string) ([]*Proposal, error) {
+	return tx.proposalList(ticketID, false)
 }
