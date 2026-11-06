@@ -54,11 +54,13 @@ type Proposal struct {
 	// replaced it.
 	State   string `json:"state"`
 	Summary string `json:"summary"`
-	// Payload: reply {"receiptId"}; push {"branch","sha"}; pull_request {"args":[...],"branch"}.
+	// Payload: reply {"receiptId"}; push {"branch","sha"}; pull_request {"title","body","base","draft"}.
 	Payload   json.RawMessage `json:"payload,omitempty"`
 	CreatedAt time.Time       `json:"createdAt"`
-	DecidedAt *time.Time      `json:"decidedAt,omitempty"`
-	Error     string          `json:"error,omitempty"`
+	// StartedAt is when the node began to apply a push or pull request (StartProposal); nil until then.
+	StartedAt *time.Time `json:"startedAt,omitempty"`
+	DecidedAt *time.Time `json:"decidedAt,omitempty"`
+	Error     string     `json:"error,omitempty"`
 }
 
 // Propose records a pending Proposal for an open Ticket and shows the Ticket as waiting for the owner. A pending push
@@ -183,6 +185,27 @@ func (e *Engine) DiscardProposal(id string) error {
 		}
 		return o.syncProposals(p.TicketID)
 	})
+}
+
+// StartProposal marks a pending push or pull request as being applied, just before the node makes it happen outside:
+// first is false when it was marked before, by a run that never settled it (Athena stopped in the middle), and the
+// caller must not make it happen again. A Proposal that is not pending is a UserError.
+func (e *Engine) StartProposal(id string) (first bool, err error) {
+	err = e.command(cmdStartProposal, func(o *op) error {
+		p, err := o.pendingProposal(id)
+		if err != nil {
+			return err
+		}
+		if p.StartedAt != nil {
+			return nil
+		}
+		first, p.StartedAt = true, o.timestamp()
+		return o.tx.PutProposal(p)
+	})
+	if err != nil {
+		return false, err
+	}
+	return first, nil
 }
 
 // SettleProposal records the result the node reports for a push or pull request it was told to apply: applied when err

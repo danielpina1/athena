@@ -152,7 +152,7 @@ func TestApplyPullFailedPushNotRetried(t *testing.T) {
 		t.Fatal(err)
 	}
 	pull, err := d.eng.Propose(core.Proposal{TicketID: "T-0001", Kind: core.ProposalPull, Summary: "pr",
-		Payload: json.RawMessage(`{"args":["pr","create","--title","T"],"branch":"athena/t-0001"}`)})
+		Payload: json.RawMessage(`{"title":"T"}`)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,16 +180,92 @@ func TestApplyPullFailedPushNotRetried(t *testing.T) {
 		t.Fatal(err)
 	}
 	pp, pr := got[push.ID], got[pull.ID]
-	if pp.State != core.ProposalFailed || pr.State != core.ProposalFailed || pr.Error != pp.Error || !strings.Contains(pp.Error, "worktree") {
+	if pp.State != core.ProposalFailed || pr.State != core.ProposalFailed || pr.Error != pp.Error || pp.Error == "" {
 		t.Fatalf("push %s %q, pull %s %q; want both failed with the push's error", pp.State, pp.Error, pr.State, pr.Error)
 	}
 	time.Sleep(300 * time.Millisecond)
 	if fx, err := d.fx.Pending(core.EffectApplyProposal); err != nil || len(fx) != 0 {
 		t.Fatalf("apply effects left = %+v %v, want none (not retried)", fx, err)
 	}
-	for _, r := range g.requestLog() {
-		if strings.Contains(r, "/pulls") && strings.HasPrefix(r, "POST") {
-			t.Fatalf("a pull request was opened: %v", g.requestLog())
+	if n := len(g.openedPulls()); n != 0 {
+		t.Fatalf("%d pull requests opened", n)
+	}
+}
+
+// settledProposal waits for a Proposal to leave pending and returns it.
+func settledProposal(t *testing.T, d *Dispatcher, id string) core.Proposal {
+	t.Helper()
+	var p *core.Proposal
+	eventually(t, "proposal "+id+" settled", func() bool {
+		if err := d.st.Tx(func(tx *store.Tx) error {
+			var err error
+			p, err = tx.GetProposal(id)
+			return err
+		}); err != nil {
+			t.Fatal(err)
 		}
+		return p != nil && p.State != core.ProposalPending
+	})
+	return *p
+}
+
+// An applied pull request with no push pending opens through GitHub's API with exactly the held fields and the
+// Ticket's branch as its head, with a write token minted for it and revoked after.
+func TestApplyPullOpensThroughAPI(t *testing.T) {
+	g := newFakeGitHub(t)
+	_, d, _, _ := startRoutedTicket(t, g, nil)
+	pull, err := d.eng.Propose(core.Proposal{TicketID: "T-0001", Kind: core.ProposalPull, Summary: "pr",
+		Payload: json.RawMessage(`{"title":"Fix the flaky test","body":"Done.","base":"main","draft":true}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.eng.ApplyProposal(pull.ID); err != nil {
+		t.Fatal(err)
+	}
+	if p := settledProposal(t, d, pull.ID); p.State != core.ProposalApplied {
+		t.Fatalf("pull request = %s %q, want applied", p.State, p.Error)
+	}
+	opened := g.openedPulls()
+	if len(opened) != 1 {
+		t.Fatalf("opened %d pull requests, want 1", len(opened))
+	}
+	want := map[string]any{"title": "Fix the flaky test", "body": "Done.", "base": "main", "head": "athena/t-0001", "draft": true}
+	if got := opened[0].Body; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("POST /repos/o/r/pulls = %v, want %v", got, want)
+	}
+	var perms map[string]string
+	for _, m := range g.minted() {
+		if m.Token == opened[0].Token {
+			perms = m.Perms
+		}
+	}
+	if perms["pull_requests"] != "write" {
+		t.Fatalf("the pull request's token had %v, want a write token minted for it", perms)
+	}
+	eventually(t, "its token revoked", func() bool { return slices.Contains(g.revokedTokens(), opened[0].Token) })
+}
+
+// R11: an apply that finds its Proposal started by an earlier run that never settled it (Athena stopped in the middle)
+// settles it failed and calls nothing out.
+func TestApplyPullStartedBeforeFails(t *testing.T) {
+	g := newFakeGitHub(t)
+	_, d, _, _ := startRoutedTicket(t, g, nil)
+	pull, err := d.eng.Propose(core.Proposal{TicketID: "T-0001", Kind: core.ProposalPull, Summary: "pr",
+		Payload: json.RawMessage(`{"title":"Fix the flaky test"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first, err := d.eng.StartProposal(pull.ID); err != nil || !first {
+		t.Fatalf("start = %v %v", first, err)
+	}
+	if _, err := d.eng.ApplyProposal(pull.ID); err != nil {
+		t.Fatal(err)
+	}
+	p := settledProposal(t, d, pull.ID)
+	if p.State != core.ProposalFailed || p.Error != "Athena stopped while applying this; check GitHub before applying again." {
+		t.Fatalf("pull request = %s %q, want failed as started before", p.State, p.Error)
+	}
+	if n := len(g.openedPulls()); n != 0 {
+		t.Fatalf("%d pull requests opened", n)
 	}
 }

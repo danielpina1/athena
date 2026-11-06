@@ -197,3 +197,22 @@ func TestHoldWaitingHoldsRepoReplies(t *testing.T) {
 	h.must(err)
 	eq(t, "released", h.receipt(id).State, ReceiptWaiting)
 }
+
+// StartProposal marks a push being applied once: a second start (a run after one that never settled) is not first.
+func TestStartProposalOnce(t *testing.T) {
+	h := newEvals(t)
+	a := h.shadowed("c:1", true)
+	p, err := h.eng.Propose(Proposal{TicketID: a, Kind: ProposalPush, Summary: "push", Payload: json.RawMessage(`{"branch":"b","sha":"1"}`)})
+	h.must(err)
+	first, err := h.eng.StartProposal(p.ID)
+	h.must(err)
+	eq(t, "first start", first, true)
+	eq(t, "started at", h.proposals(a)[0].StartedAt != nil, true)
+	again, err := h.eng.StartProposal(p.ID)
+	h.must(err)
+	eq(t, "second start", again, false)
+	h.must(h.eng.SettleProposal(p.ID, errors.New("x")))
+	_, err = h.eng.StartProposal(p.ID)
+	var ue *UserError
+	eq(t, "settled: a UserError", errors.As(err, &ue), true)
+}

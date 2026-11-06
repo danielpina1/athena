@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -165,7 +167,7 @@ func TestShadowGhPrCreateProposes(t *testing.T) {
 	if err := os.WriteFile(body, []byte("Fixes the typo.\n\nDetails here."), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	code, out, errOut := h.ghPrCreate(tk, a, ghDir, "--title", "T", "--body-file", body)
+	code, out, errOut := h.ghPrCreate(tk, a, ghDir, "--title", "T", "--body-file", body, "-B", "main", "--draft")
 	if code != 0 || strings.TrimSpace(out) != "Held for the owner (shadow mode): the pull request is proposed and opens when they apply it." {
 		t.Fatalf("gh pr create = exit %d, out %q, err %q", code, out, errOut)
 	}
@@ -176,13 +178,8 @@ func TestShadowGhPrCreateProposes(t *testing.T) {
 	if len(ps) != 1 || ps[0].Kind != core.ProposalPull || ps[0].State != core.ProposalPending || ps[0].Repo != "o/r" {
 		t.Fatalf("proposals = %+v, want one pending pull_request", ps)
 	}
-	var pl pullPayload
-	if err := json.Unmarshal(ps[0].Payload, &pl); err != nil {
-		t.Fatal(err)
-	}
-	want := []string{"pr", "create", "--title", "T", "--body", "Fixes the typo.\n\nDetails here."}
-	if !slices.Equal(pl.Args, want) || pl.Branch != branchName(tk) {
-		t.Fatalf("payload = %+v, want args %q on %s", pl, want, branchName(tk))
+	if got, want := string(ps[0].Payload), `{"title":"T","body":"Fixes the typo.\n\nDetails here.","base":"main","draft":true}`; got != want {
+		t.Fatalf("payload = %s, want %s", got, want)
 	}
 	if !strings.Contains(ps[0].Summary, `"T"`) || !strings.Contains(ps[0].Summary, "held for you") {
 		t.Errorf("summary = %q", ps[0].Summary)
@@ -243,34 +240,74 @@ func TestProposeBranchOnReport(t *testing.T) {
 	}
 }
 
-// writeApplyGh puts a gh on a new PATH directory that records its arguments, its token and repository, and the
-// branch's commit in the bare repository when it runs, then prints a pull request URL.
-func writeApplyGh(t *testing.T, bare, branch string) (dir, record string) {
-	t.Helper()
-	dir = t.TempDir()
-	record = filepath.Join(t.TempDir(), "gh.rec")
-	script := "#!/bin/sh\n{ echo \"args=$*\"; echo \"GH_TOKEN=$GH_TOKEN\"; echo \"GH_REPO=$GH_REPO\"; " +
-		"echo \"ref=$(git --git-dir=" + bare + " rev-parse --verify -q refs/heads/" + branch + ")\"; } > " + record +
-		"\necho https://github.com/o/r/pull/9\n"
-	if err := os.WriteFile(filepath.Join(dir, "gh"), []byte(script), 0o755); err != nil {
-		t.Fatal(err)
+// The held pull request takes only its title, body (or body file), base and draft: anything else is refused by
+// `athena gh`, and the node refuses a propose request with any other field or with fields it would not hold, whoever
+// sends it. Nothing is proposed and gh never runs.
+func TestHostileProposeRefused(t *testing.T) {
+	h := newGHHarness(t, &fakeCreds{}, func(c *Config) { c.Policy = newShadowPolicy("o/r") })
+	tk, a := h.accept("github:issuecomment:1", "o/r", 12, "")
+	ghDir, record := writeFakeGh(t)
+	for _, args := range [][]string{
+		{"--title", "x", "--recover", "f"}, {"--title", "x", "-H", "evil"}, {"--title", "x", "--head=evil"},
+		{"--title", "x", "-R", "o/x"}, {"--title", "x", "-Ro/x"}, {"--title", "x", "--repo=o/x"}, {"--fill"},
+		{"--title", "x", "extra"}, {"--body", "no title"}, {"--title", "x", "--web"}, {"--title", "x", "-B", "../main"},
+	} {
+		code, _, errOut := h.ghPrCreate(tk, a, ghDir, args...)
+		if code != 1 || errOut == "" {
+			t.Errorf("gh pr create %q: exit %d %q, want a refusal", args, code, errOut)
+		}
 	}
-	return dir, record
+	// Sent to the node directly, past the shim.
+	pem := filepath.Join(h.cfg.StateDir, "app.pem")
+	for _, raw := range []string{
+		`{"op":"propose","ticket":%q,"assignment":%q,"args":["pr","create","--title","x","--body-file",` + strconvQuote(pem) + `]}`,
+		`{"op":"propose","ticket":%q,"assignment":%q,"pull":{"title":"x","head":"evil"}}`,
+		`{"op":"propose","ticket":%q,"assignment":%q,"pull":{"title":"x","bodyFile":"/etc/passwd"}}`,
+		`{"op":"propose","ticket":%q,"assignment":%q,"pull":{"title":""}}`,
+		`{"op":"propose","ticket":%q,"assignment":%q,"pull":{"title":"x\nmore"}}`,
+		`{"op":"propose","ticket":%q,"assignment":%q,"pull":{"title":"x","base":"-main"}}`,
+		`{"op":"propose","ticket":%q,"assignment":%q,"pull":{"title":"x","base":"a..b"}}`,
+		`{"op":"propose","ticket":%q,"assignment":%q,"pull":{"title":"x","body":"` + strings.Repeat("y", maxPullBody+1) + `"}}`,
+		`{"op":"propose","ticket":%q,"assignment":%q}`,
+	} {
+		var resp ProposeResponse
+		if err := callNode(h.cfg.SocketPath, json.RawMessage(fmt.Sprintf(raw, tk.ID, a.ID)), &resp); err != nil {
+			t.Fatal(err)
+		}
+		if resp.OK || resp.Held || resp.Error == "" {
+			t.Errorf("%.120s = %+v, want refused", raw, resp)
+		}
+	}
+	if ps := h.proposalsOf(tk.ID); len(ps) != 0 {
+		t.Fatalf("proposals = %+v, want none", ps)
+	}
+	if _, err := os.Stat(record); err == nil {
+		t.Fatal("gh ran")
+	}
 }
 
-// Applying a pull request applies the Ticket's pending push first: the branch is on GitHub before gh opens the pull
-// request, with write tokens minted for each and revoked after, and both Proposals end applied. A push that fails fails
-// the pull request with its error, and no pull request is opened.
+func strconvQuote(s string) string { b, _ := json.Marshal(s); return string(b) }
+
+// Applying a pull request applies the Ticket's pending push first: the branch is on GitHub before the pull request
+// opens, through the API with exactly the held fields and the Ticket's branch as head; the push's write token is minted
+// for it and revoked after, and both Proposals end applied. A push that fails fails the pull request with its error,
+// and no pull request is opened.
 func TestApplyPullAppliesPushFirst(t *testing.T) {
-	h := newGHHarness(t, &fakeCreds{}, func(c *Config) { c.Policy = newShadowPolicy("o/r") })
+	creds := &fakeCreds{}
+	h := newGHHarness(t, creds, func(c *Config) { c.Policy = newShadowPolicy("o/r") })
 	bare := git(t, h.work, "remote", "get-url", "origin")
+	var refAtPull []string
+	creds.onPull = func(repo, head string) {
+		out, _ := exec.Command("git", "--git-dir="+bare, "rev-parse", "--verify", "-q", "refs/heads/"+head).Output()
+		refAtPull = append(refAtPull, strings.TrimSpace(string(out)))
+	}
 	tk, a := h.accept("github:issuecomment:1", "o/r", 12, "")
 	sha := h.commit(tk, "fix the typo")
 	if resp := h.report(tk.ID, a.ID, core.ReportProgress, "fixed"); !resp.OK {
 		t.Fatalf("report = %+v", resp)
 	}
-	ghDir, record := writeApplyGh(t, bare, branchName(tk))
-	if code, _, errOut := h.ghPrCreate(tk, a, ghDir, "--title", "Fix the typo", "--body", "Done."); code != 0 {
+	ghDir, record := writeFakeGh(t)
+	if code, _, errOut := h.ghPrCreate(tk, a, ghDir, "--title", "Fix the typo", "--body", "Done.", "--base", "trunk"); code != 0 {
 		t.Fatalf("gh pr create: exit %d %s", code, errOut)
 	}
 	ps := h.proposalsOf(tk.ID)
@@ -278,8 +315,7 @@ func TestApplyPullAppliesPushFirst(t *testing.T) {
 		t.Fatalf("proposals = %+v, want a push and a pull request", ps)
 	}
 	pull := ps[1]
-	t.Setenv("PATH", ghDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	before := len(h.creds.asked())
+	before := len(creds.asked())
 	err := h.n.ApplyProposal(context.Background(), *pull)
 	if err != nil {
 		t.Fatalf("apply: %v", err)
@@ -290,30 +326,24 @@ func TestApplyPullAppliesPushFirst(t *testing.T) {
 	if got := git(t, bare, "rev-parse", "refs/heads/"+branchName(tk)); got != sha {
 		t.Fatalf("GitHub's %s = %s, want %s", branchName(tk), got, sha)
 	}
-	rec, rerr := os.ReadFile(record)
-	if rerr != nil {
-		t.Fatal(rerr)
+	want := []openedPull{{Repo: "o/r", Head: branchName(tk), Pull: HeldPull{Title: "Fix the typo", Body: "Done.", Base: "trunk"}}}
+	if got := creds.opened(); !slices.Equal(got, want) || !slices.Equal(refAtPull, []string{sha}) {
+		t.Fatalf("opened %+v with the branch at %v; want %+v with it at %s", got, refAtPull, want, sha)
 	}
-	for _, want := range []string{"args=pr create --title Fix the typo --body Done. --head " + branchName(tk), "GH_REPO=o/r",
-		"ref=" + sha, "GH_TOKEN=" + fakeToken} {
-		if !strings.Contains(string(rec), want) {
-			t.Errorf("gh got:\n%s\nwant %q", rec, want)
-		}
+	if asked := creds.asked()[before:]; len(asked) != 1 || !asked[0] {
+		t.Errorf("apply asked write = %v, want the push's write token", asked)
 	}
-	if asked := h.creds.asked()[before:]; len(asked) != 2 || !asked[0] || !asked[1] {
-		t.Errorf("apply asked write = %v, want two write tokens (the push's, the pull request's)", asked)
-	}
-	h.eventually("the write tokens revoked", func() bool { return len(h.creds.revokedTokens()) >= 2 })
+	h.eventually("the push's token revoked", func() bool { return len(creds.revokedTokens()) >= 1 })
 	for _, p := range h.proposalsOf(tk.ID) {
 		if p.State != core.ProposalApplied {
 			t.Errorf("proposal %s (%s) = %s %q, want applied", p.ID, p.Kind, p.State, p.Error)
 		}
 	}
-
-	// A push GitHub refuses (the branch moved there meanwhile): the pull request fails with its error, and gh never runs.
-	if err := os.Remove(record); err != nil {
-		t.Fatal(err)
+	if _, err := os.Stat(record); err == nil {
+		t.Fatal("gh ran to apply a pull request")
 	}
+
+	// A push GitHub refuses (the branch moved there meanwhile): the pull request fails with its error, none opens.
 	t2, a2 := h.accept("github:issuecomment:2", "o/r", 13, "")
 	h.commit(t2, "another fix")
 	if resp := h.report(t2.ID, a2.ID, core.ReportProgress, "fixed"); !resp.OK {
@@ -341,7 +371,82 @@ func TestApplyPullAppliesPushFirst(t *testing.T) {
 		t.Fatalf("after a refused push: push %s %q, pull %s %q; want both failed with the push's error",
 			ps[0].State, ps[0].Error, ps[1].State, ps[1].Error)
 	}
-	if _, err := os.Stat(record); err == nil {
-		t.Fatal("gh ran after the push failed")
+	if n := len(creds.opened()); n != 1 {
+		t.Fatalf("%d pull requests opened, want only the first", n)
+	}
+}
+
+// The push the node applies never reads the config a worker can write: a pushInsteadOf, a case-variant URL's
+// curloptResolve and sslVerify, a core.askPass and a pre-push hook planted in the clone's config and the worktree's
+// config.worktree change nothing. The commit lands on the real remote, and neither the askPass nor the hook runs. A
+// second apply of the same Proposal (a run after one that never settled) goes nowhere.
+func TestApplyPushIgnoresHostileConfig(t *testing.T) {
+	creds := &fakeCreds{}
+	h := newGHHarness(t, creds, func(c *Config) { c.Policy = newShadowPolicy("o/r") })
+	bare := git(t, h.work, "remote", "get-url", "origin")
+	tk, a := h.accept("github:issuecomment:1", "o/r", 12, "")
+	sha := h.commit(tk, "fix the typo")
+	if resp := h.report(tk.ID, a.ID, core.ReportProgress, "fixed"); !resp.OK {
+		t.Fatalf("report = %+v", resp)
+	}
+	ps := h.proposalsOf(tk.ID)
+	if len(ps) != 1 {
+		t.Fatalf("proposals = %+v", ps)
+	}
+
+	evil := t.TempDir()
+	git(t, evil, "init", "-q", "--bare", filepath.Join(evil, "o", "r.git"))
+	marks := t.TempDir()
+	askPass := filepath.Join(marks, "askpass.sh")
+	hooks := filepath.Join(marks, "hooks")
+	if err := os.MkdirAll(hooks, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for path, body := range map[string]string{askPass: "touch " + marks + "/askpass-ran\necho x\n",
+		filepath.Join(hooks, "pre-push"): "touch " + marks + "/hook-ran\n"} {
+		if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	clone := CloneDir(h.cfg.StateDir, "o/r")
+	admin := worktreeAdmin(filepath.Join(clone, ".git"), TicketDir(h.cfg.WorkRoot, tk))
+	hostile := [][2]string{
+		{"url.file://" + evil + "/.pushInsteadOf", "https://github.com/"},
+		{"url.file://" + evil + "/o/r.git.pushInsteadOf", "file://"},
+		{"http.https://github.com/O/R.git.curloptResolve", "github.com:443:127.0.0.1"},
+		{"http.https://github.com/O/R.git.sslVerify", "false"},
+		{"core.askPass", askPass},
+		{"core.hooksPath", hooks},
+	}
+	for _, file := range []string{filepath.Join(clone, ".git", "config"), filepath.Join(admin, "config.worktree")} {
+		for _, kv := range hostile {
+			git(t, clone, "config", "--file", file, "--add", kv[0], kv[1])
+		}
+	}
+	git(t, clone, "config", "--file", filepath.Join(clone, ".git", "config"), "extensions.worktreeConfig", "true")
+
+	if err := h.n.ApplyProposal(context.Background(), *ps[0]); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if got := git(t, bare, "rev-parse", "refs/heads/"+branchName(tk)); got != sha {
+		t.Fatalf("the real remote's %s = %s, want %s", branchName(tk), got, sha)
+	}
+	if out, err := exec.Command("git", "--git-dir="+filepath.Join(evil, "o", "r.git"), "for-each-ref").Output(); err != nil || len(out) != 0 {
+		t.Fatalf("the planted remote got refs %q (%v)", out, err)
+	}
+	for _, m := range []string{"askpass-ran", "hook-ran"} {
+		if _, err := os.Stat(filepath.Join(marks, m)); err == nil {
+			t.Errorf("%s: the planted command ran", m)
+		}
+	}
+
+	// Applied again before it was settled, as after a crash: nothing goes out.
+	asked := len(creds.asked())
+	err := h.n.ApplyProposal(context.Background(), *ps[0])
+	if err == nil || err.Error() != "Athena stopped while applying this; check GitHub before applying again." {
+		t.Fatalf("second apply = %v, want the started-before error", err)
+	}
+	if n := len(creds.asked()); n != asked {
+		t.Fatalf("a second apply minted a token")
 	}
 }

@@ -163,6 +163,7 @@ type EngineCallbacks interface {
 	Propose(p core.Proposal) (core.Proposal, error)
 	PendingProposals() ([]core.Proposal, error)
 	SettleProposal(id string, applyErr error) error
+	StartProposal(id string) (first bool, err error)
 	// RecordUsage adds what the node observed to the Ticket's stats. It takes the Engine's lock: never call it while
 	// holding a node lock that Start, Deliver or Stop also take.
 	RecordUsage(ticketID, assignmentID string, u core.UsageDelta) error

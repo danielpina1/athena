@@ -43,6 +43,31 @@ type fakeCreds struct {
 	writes     []bool // each request's write flag
 	revoked    []string
 	revokeErr  error
+	// pulls are the pull requests OpenPull opened; onPull, when set, runs in each call.
+	pulls  []openedPull
+	onPull func(repo, head string)
+}
+
+type openedPull struct {
+	Repo, Head string
+	Pull       HeldPull
+}
+
+// OpenPull records the pull request (PullOpener).
+func (f *fakeCreds) OpenPull(_ context.Context, repo, head string, p HeldPull) (string, error) {
+	if f.onPull != nil {
+		f.onPull(repo, head)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pulls = append(f.pulls, openedPull{repo, head, p})
+	return "https://github.com/" + repo + "/pull/9", nil
+}
+
+func (f *fakeCreds) opened() []openedPull {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]openedPull(nil), f.pulls...)
 }
 
 func (f *fakeCreds) Token(_ context.Context, repo string, write bool) (string, time.Time, error) {

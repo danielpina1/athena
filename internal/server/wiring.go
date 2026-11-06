@@ -239,7 +239,29 @@ func (c *appCredentials) Token(ctx context.Context, repo string, write bool) (st
 	return t.Value, t.ExpiresAt, nil
 }
 
-var _ node.TokenRevoker = (*appCredentials)(nil)
+var (
+	_ node.TokenRevoker = (*appCredentials)(nil)
+	_ node.PullOpener   = (*appCredentials)(nil)
+)
+
+// OpenPull opens a pull request the owner applied (node.PullOpener): through the API, with a write token minted for
+// this call alone and revoked after.
+func (c *appCredentials) OpenPull(ctx context.Context, repo, head string, p node.HeldPull) (string, error) {
+	t, err := c.app.ScopedToken(ctx, repo, github.WorkerPermissions())
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		rctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := c.app.RevokeToken(rctx, t.Value); err != nil {
+			slog.Warn("revoke the token of an opened pull request; it expires on its own", "repo", repo, "error", err)
+		}
+	}()
+	_, url, err := c.app.CreatePull(ctx, t.Value, repo, github.NewPull{Title: p.Title, Body: p.Body, Base: p.Base, Head: head,
+		Draft: p.Draft})
+	return url, err
+}
 
 // Revoke revokes a worker's token the node dropped (node.TokenRevoker).
 func (c *appCredentials) Revoke(ctx context.Context, token string) error {

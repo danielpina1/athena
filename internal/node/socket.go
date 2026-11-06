@@ -167,9 +167,8 @@ func (n *Node) handleConn(ctx context.Context, conn net.Conn) {
 				resp = n.handleCredential(ctx, req)
 			}
 		case OpPropose:
-			var req ProposeRequest
-			if err := json.Unmarshal(line, &req); err != nil {
-				resp = ProposeResponse{Error: "malformed propose request"}
+			if req, err := decodePropose(line); err != nil {
+				resp = ProposeResponse{Error: "malformed propose request: " + err.Error()}
 			} else {
 				resp = n.handlePropose(req)
 			}

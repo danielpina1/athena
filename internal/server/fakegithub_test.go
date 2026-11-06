@@ -43,9 +43,16 @@ type fakeGitHub struct {
 	// the tokens revoked.
 	mints   []fakeMint
 	revoked []string
-	nextID  int64
+	// opened are the bodies of the pull requests created, with the token each was created with.
+	opened []openedPull
+	nextID int64
 	// repos is what GET /installation/repositories lists.
 	repos []string
+}
+
+type openedPull struct {
+	Token string
+	Body  map[string]any
 }
 
 type fakeMint struct {
@@ -179,6 +186,17 @@ func newFakeGitHub(t *testing.T) *fakeGitHub {
 		}
 		g.json(w, r, p)
 	})
+	mux.HandleFunc("POST /repos/o/r/pulls", func(w http.ResponseWriter, r *http.Request) {
+		g.record(r)
+		var in map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&in)
+		_, tok, _ := strings.Cut(r.Header.Get("Authorization"), " ")
+		g.mu.Lock()
+		g.opened = append(g.opened, openedPull{Token: tok, Body: in})
+		g.mu.Unlock()
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{"number": 21, "html_url": "https://github.com/o/r/pull/21"})
+	})
 	mux.HandleFunc("GET /repos/o/r/pulls/{n}/reviews", func(w http.ResponseWriter, r *http.Request) { g.json(w, r, []any{}) })
 	mux.HandleFunc("GET /repos/o/r/branches/{b}", func(w http.ResponseWriter, r *http.Request) {
 		g.json(w, r, map[string]any{"name": r.PathValue("b"), "commit": map[string]any{"sha": strings.Repeat("a", 40)}})
@@ -281,6 +299,12 @@ func (g *fakeGitHub) minted() []fakeMint {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return append([]fakeMint(nil), g.mints...)
+}
+
+func (g *fakeGitHub) openedPulls() []openedPull {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return append([]openedPull(nil), g.opened...)
 }
 
 func (g *fakeGitHub) revokedTokens() []string {

@@ -80,8 +80,8 @@ func RunGitCredential(args []string, stdin io.Reader, stdout, stderr io.Writer, 
 // RunGh implements `athena gh <args>`: it runs the real gh with the session's token in gh's environment only
 // (GH_TOKEN, GH_HOST=github.com, GH_CONFIG_DIR=<TicketDir>/.athena/gh, GH_PROMPT_DISABLED=1). It refuses gh auth and
 // the other subcommands in ghRefused, and returns gh's exit code. A `gh pr create` asks the node first: in a repository
-// in shadow mode it is held for the owner as a Proposal, and gh does not run (exit 0). env is the session's
-// environment.
+// in shadow mode it is held for the owner as a Proposal of its title, body, base and draft (parsePull: any other option
+// is refused), and gh does not run (exit 0). env is the session's environment.
 func RunGh(args []string, stdin io.Reader, stdout, stderr io.Writer, env []string) int {
 	getenv := envLookup(env)
 	if sub := firstArg(args); ghRefused[sub] {
@@ -91,13 +91,14 @@ func RunGh(args []string, stdin io.Reader, stdout, stderr io.Writer, env []strin
 	// A pull request in a repository in shadow mode is held for the owner. In a live one gh runs as it always did: the
 	// same arguments, and whatever stdin a body file of - consumed given back to it.
 	var consumed bytes.Buffer
-	if pr, ok, perr := prCreateArgs(args, io.TeeReader(stdin, &consumed)); ok {
-		if perr != nil {
-			pr = nil // the node holds nothing it cannot read; a live gh reports the error itself
+	if pr, ok, perr := parsePull(args, io.TeeReader(stdin, &consumed)); ok {
+		var pull *HeldPull
+		if perr == nil {
+			pull = &pr // else the node holds nothing; a live gh reports its own errors
 		}
 		var held ProposeResponse
 		err := callNode(getenv("ATHENA_SOCKET"), ProposeRequest{Op: OpPropose, Ticket: getenv("ATHENA_TICKET"),
-			Assignment: getenv("ATHENA_ASSIGNMENT"), Args: pr}, &held)
+			Assignment: getenv("ATHENA_ASSIGNMENT"), Pull: pull}, &held)
 		switch {
 		case err != nil:
 			fmt.Fprintf(stderr, "athena gh: the athena node is unreachable: %v\n", err)
