@@ -125,7 +125,24 @@ func (n *Node) claudeSandboxRequired() bool {
 }
 
 // RefreshRuntimes checks every runtime but Claude Code (assumedReady) once, so Status shows their readiness before
-// their first launch. The server runs it in the background at start; ctx bounds it.
+// their first launch. ctx bounds it.
+// WatchRuntimes runs RefreshRuntimes at once and then every interval until ctx ends, so Status follows a runtime's
+// readiness without a launch: an owner who logs Codex in after the server started sees it ready on the dashboard.
+// Each check costs nothing while the runtime's own cached answer holds (Codex: a minute when not ready, ten when
+// ready). The server runs it in the background.
+func (n *Node) WatchRuntimes(ctx context.Context, interval time.Duration) {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		n.RefreshRuntimes(ctx)
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
+}
+
 func (n *Node) RefreshRuntimes(ctx context.Context) {
 	for _, name := range slices.Sorted(maps.Keys(n.cfg.Runtimes)) {
 		if r := n.cfg.Runtimes[name]; r.Name() != runtimeClaude {

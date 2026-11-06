@@ -294,11 +294,12 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	defer nodeCancel()
 	served := make(chan error, 1)
 	go func() { served <- n.Serve(nodeCtx) }()
-	// The dashboard shows each runtime's readiness from the start, not only after its first launch.
+	// The dashboard shows each runtime's readiness from the start, not only after its first launch, and follows it
+	// (a Codex login after the start shows within a minute).
 	refreshed := make(chan struct{})
 	go func() {
 		defer close(refreshed)
-		n.RefreshRuntimes(nodeCtx)
+		n.WatchRuntimes(nodeCtx, time.Minute)
 	}()
 	defer func() { nodeCancel(); <-refreshed }()
 	nodeDone := false

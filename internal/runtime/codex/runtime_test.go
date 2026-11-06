@@ -374,3 +374,23 @@ func TestCheckHomeThroughASymlink(t *testing.T) {
 		t.Fatalf("HomeCurrent: exists=%v current=%v err=%v", exists, cur, err)
 	}
 }
+
+// A check that is not ready is kept for a minute only: an owner who logs in after the check sees Codex ready within a
+// minute, without a launch or a restart.
+func TestNotReadyCheckIsCachedBriefly(t *testing.T) {
+	r, _ := newRuntime(t, "ATHENA_FAKE_CODEX_LOGGED_OUT=1")
+	now := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	r.now = func() time.Time { return now }
+	if s := r.Status(context.Background()); s.Ready || s.Why != NotLoggedIn {
+		t.Fatalf("logged out: %+v", s)
+	}
+	t.Setenv("ATHENA_FAKE_CODEX_LOGGED_OUT", "")
+	now = now.Add(50 * time.Second)
+	if s := r.Status(context.Background()); s.Ready {
+		t.Fatalf("within the minute: %+v, want the cached answer", s)
+	}
+	now = now.Add(11 * time.Second)
+	if s := r.Status(context.Background()); !s.Ready {
+		t.Fatalf("after the minute, logged in: %+v, want ready", s)
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -468,4 +469,41 @@ func TestCancelledCheckIsNotKept(t *testing.T) {
 			t.Fatalf("status = %+v, want the cancelled check left out", r)
 		}
 	}
+}
+
+// flipCheck is a runtime whose readiness the test sets.
+type flipCheck struct {
+	claude.Runtime
+	ready *atomic.Bool
+}
+
+func (flipCheck) Name() string { return "flip" }
+func (f flipCheck) Check(context.Context) rt.Info {
+	if f.ready.Load() {
+		return rt.Info{Installed: true, Ready: true, Tested: true}
+	}
+	return rt.Info{Installed: true, Why: "not logged in"}
+}
+
+// WatchRuntimes follows a runtime that becomes ready after the start (an owner's login), with no launch.
+func TestWatchRuntimesFollowsReadiness(t *testing.T) {
+	ready := new(atomic.Bool)
+	h := newHarness(t, func(c *Config) {
+		c.Runtimes = map[string]rt.Runtime{core.RuntimeClaude: claude.Runtime{Binary: c.ClaudeBinary}, "flip": flipCheck{ready: ready}}
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); h.n.WatchRuntimes(ctx, 10*time.Millisecond) }()
+	defer func() { cancel(); <-done }()
+	status := func() RuntimeStatus {
+		for _, r := range h.n.Status().Runtimes {
+			if r.Name == "flip" {
+				return r
+			}
+		}
+		return RuntimeStatus{}
+	}
+	h.eventually("flip checked, not ready", func() bool { s := status(); return !s.Ready && s.Why == "not logged in" })
+	ready.Store(true)
+	h.eventually("flip ready without a launch", func() bool { return status().Ready })
 }

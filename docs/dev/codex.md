@@ -41,7 +41,8 @@ take it); a task that names none, and every Ticket the router accepts, gets `run
 Each Assignment records the runtime its session actually ran on (`Assignment.Runtime`), so one Ticket may move between
 runtimes; the metrics and the per-runtime stats (`stats.byRuntime`) name that runtime. Before each launch the node's
 runtime chooser picks the runtime (§7). A Ticket pinned to `codex` runs only there: the node asks whether Codex is ready
-(the check of §2, cached for 10 minutes) and, when it is not, the Assignment reports failed with why ("codex cannot
+(the check of §2, cached for 10 minutes when ready and 1 minute when not; the server re-checks every minute, so a
+login after the server started shows on the dashboard within a minute) and, when it is not, the Assignment reports failed with why ("codex cannot
 run this ticket: Codex is not logged in for Athena: run athena codex login"); `auto` never chooses a runtime that is
 not ready. A session that refuses to start because a hook or a setting is not Athena's (§4) fails the same way, with the
 refusal's why, and the next launch checks Codex (and trusts Athena's hooks) again. A Codex session's environment has
