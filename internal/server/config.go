@@ -276,10 +276,7 @@ func (c FileConfig) nodeSandbox() *node.SandboxConfig {
 	if !sb.On() {
 		return nil
 	}
-	var denyRead []string
-	if c.GitHub != nil && c.GitHub.KeyFile != "" {
-		denyRead = append(denyRead, c.GitHub.KeyFile)
-	}
+	denyRead := c.nodeSecrets()
 	return &node.SandboxConfig{
 		Required:               sb.Required,
 		AllowedDomains:         slices.Clone(sb.AllowedDomains),
@@ -288,6 +285,15 @@ func (c FileConfig) nodeSandbox() *node.SandboxConfig {
 		WeakerNetworkIsolation: sb.WeakerNetworkIsolationOn(),
 		CAFile:                 sb.CAFile,
 	}
+}
+
+// nodeSecrets are the files no sandboxed command may read (node.Config.Secrets): the GitHub App key. A restricted
+// session is kept from them whether the sandbox is on or off.
+func (c FileConfig) nodeSecrets() []string {
+	if c.GitHub != nil && c.GitHub.KeyFile != "" {
+		return []string{c.GitHub.KeyFile}
+	}
+	return nil
 }
 
 var domainRe = regexp.MustCompile(`^(\*\.)?[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*$`)

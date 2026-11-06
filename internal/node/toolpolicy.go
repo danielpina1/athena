@@ -2,6 +2,8 @@ package node
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"runtime"
 	"slices"
 
@@ -31,6 +33,8 @@ const (
 	restrictedSandboxSummary = "This Ticket came from someone outside your allow list, and it runs only inside the sandbox, which this machine cannot start: "
 	// restrictedFollowReason is why a restricted session cannot follow other Threads.
 	restrictedFollowReason = "work started by someone outside your allow list cannot follow other threads"
+	// restrictedRuntimeSummary is the Failed report of a restricted launch pinned to a runtime other than Claude Code.
+	restrictedRuntimeSummary = "This Ticket came from someone outside your allow list, and such work runs only on Claude Code, whose sandbox can keep it from your secrets."
 )
 
 // toolPolicy is the tool policy of the Ticket's sessions: the Policy's for the trust class of its Mandate. Without a
@@ -59,10 +63,110 @@ func restrictedSandbox(sb *rt.Sandbox) *rt.Sandbox {
 	return &out
 }
 
-// restrictedSandboxConfig is the sandbox of a restricted session on a node whose owner turned the sandbox off: the
-// server's defaults (on macOS, commands reach trustd so that gh can verify GitHub's certificates).
-func restrictedSandboxConfig() *SandboxConfig {
-	return &SandboxConfig{Required: true, WeakerNetworkIsolation: runtime.GOOS == "darwin"}
+// restrictedSandboxConfig is the sandbox configuration of a restricted session working in workDir: the owner's (else
+// the server's defaults: on macOS, commands reach trustd so that gh can verify GitHub's certificates), required, without
+// the owner's extra hosts and writable paths, its own cache directory writable instead (restrictedCacheEnv), and its
+// commands kept from reading the node's secrets (restrictedDenyRead).
+func (n *Node) restrictedSandboxConfig(workDir string) *SandboxConfig {
+	c := SandboxConfig{WeakerNetworkIsolation: runtime.GOOS == "darwin"}
+	if n.cfg.Sandbox != nil {
+		c = *n.cfg.Sandbox
+	}
+	c.Required = true
+	c.AllowedDomains = nil
+	c.AllowWrite = []string{restrictedCacheDir(workDir)}
+	c.DenyRead = append(slices.Clone(c.DenyRead), n.restrictedDenyRead(workDir)...)
+	slices.Sort(c.DenyRead)
+	c.DenyRead = slices.Compact(c.DenyRead)
+	return &c
+}
+
+// restrictedCacheDir holds a restricted session's package and build caches: in the Ticket's own .athena directory,
+// which git ignores, in place of the owner's caches it may not write.
+func restrictedCacheDir(workDir string) string { return filepath.Join(workDir, ".athena", "cache") }
+
+// restrictedCaches are the cache variables a restricted session's commands get, each with its directory under
+// restrictedCacheDir.
+var restrictedCaches = []struct{ env, dir string }{
+	{"GOCACHE", "go-build"}, {"GOMODCACHE", "gomod"}, {"npm_config_cache", "npm"}, {"PIP_CACHE_DIR", "pip"}, {"XDG_CACHE_HOME", "xdg"},
+}
+
+// restrictedCacheEnv is the environment of a restricted session's commands: its caches (restrictedCaches), and Go's
+// module cache left writable, so that the Ticket's directory can be removed when it ends.
+func restrictedCacheEnv(workDir string) []string {
+	root := restrictedCacheDir(workDir)
+	env := make([]string, 0, len(restrictedCaches)+1)
+	for _, c := range restrictedCaches {
+		env = append(env, c.env+"="+filepath.Join(root, c.dir))
+	}
+	return append(env, "GOFLAGS=-modcacherw")
+}
+
+// makeRestrictedCaches creates the cache directories of restrictedCacheEnv.
+func makeRestrictedCaches(workDir string) error {
+	root := restrictedCacheDir(workDir)
+	for _, c := range restrictedCaches {
+		if err := os.MkdirAll(filepath.Join(root, c.dir), 0o700); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// restrictedDenyRead are the paths a restricted session's commands may not read, whatever the owner's sandbox says:
+// the node's secrets (Config.Secrets: the GitHub App key), the owner's credentials the rules know (credRel), and
+// everything in the state directory but what the session needs: its working directory, its git directories, the node
+// socket, the CA bundle and the athena binary.
+func (n *Node) restrictedDenyRead(workDir string) []string {
+	out := slices.Clone(n.cfg.Secrets)
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		for _, rel := range credRel {
+			out = append(out, filepath.Join(home, rel))
+		}
+	}
+	if n.cfg.StateDir == "" {
+		return out
+	}
+	keep := []string{workDir, n.cfg.SocketPath, n.cfg.AthenaBin}
+	if n.cfg.Sandbox != nil {
+		keep = append(keep, n.cfg.Sandbox.CAFile)
+	}
+	gitDir, common := gitDirs(workDir)
+	keep = append(keep, gitDir, common)
+	return append(out, denyAllBut(n.cfg.StateDir, keep)...)
+}
+
+// denyAllBut lists what to deny of root so that only the paths in keep (and what lies below them) stay readable: root
+// itself when it holds none of them, else each of its entries that holds none, and, in an entry that holds one, the
+// same again. A kept path above root keeps nothing of it. Paths compare with their symbolic links resolved; the list
+// is in root's resolved spelling.
+func denyAllBut(root string, keep []string) []string {
+	root = resolvedPath(root)
+	var resolved []string
+	for _, k := range keep {
+		if k != "" {
+			resolved = append(resolved, resolvedPath(k))
+		}
+	}
+	var walk func(dir string) []string
+	walk = func(dir string) []string {
+		if slices.Contains(resolved, dir) {
+			return nil // kept, with everything below it
+		}
+		if !slices.ContainsFunc(resolved, func(k string) bool { return within(dir, k) }) {
+			return []string{dir}
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return []string{dir}
+		}
+		var out []string
+		for _, e := range entries {
+			out = append(out, walk(filepath.Join(dir, e.Name()))...)
+		}
+		return out
+	}
+	return walk(root)
 }
 
 // sandboxUnavailableError is a restricted session's launch on a machine that cannot sandbox it.

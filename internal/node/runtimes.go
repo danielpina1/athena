@@ -121,9 +121,10 @@ const claudeReviewWhy = "a Claude Code review needs sandbox.required: true (an O
 // Claude Code only when the node's Claude sandbox is required on a platform that has one (failIfUnavailable), so that
 // the OS sandbox bounds every command the review runs and the read_only rules are defence in depth; otherwise Claude
 // Code is not ready for it, with claudeReviewWhy. Codex's own read-only sandbox bounds a Codex review. This is the one
-// code path every launch's choice reads, a pinned one's too.
-func (n *Node) eligible(a core.Assignment, r rt.Runtime, info rt.Info) rt.Info {
-	if a.Role != core.RoleReview || r.Name() != runtimeClaude || !info.Ready || n.claudeSandboxRequired() {
+// code path every launch's choice reads, a pinned one's too. A restricted session's sandbox is always required
+// (toolpolicy.go), so its review is eligible wherever it can start one.
+func (n *Node) eligible(a core.Assignment, r rt.Runtime, info rt.Info, restricted bool) rt.Info {
+	if a.Role != core.RoleReview || r.Name() != runtimeClaude || !info.Ready || n.claudeSandboxRequired() || (restricted && n.canSandbox()) {
 		return info
 	}
 	info.Ready = false

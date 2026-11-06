@@ -85,16 +85,18 @@ func (n *Node) sandboxWith(c *SandboxConfig, workDir string) (*rt.Sandbox, []str
 // the Ticket's: of allowWrite it keeps only the owner's paths that neither hold nor lie in workDir or the repository's
 // git directories (a build cache, so that its tests can run), and workDir and the git directories are denied too, since
 // Claude Code's sandbox lets a session write in its working directory whatever allowWrite says. A restricted session's
-// (toolpolicy.go) is always there, even with Config.Sandbox nil, required and reaching GitHub alone
-// (restrictedSandbox).
+// (toolpolicy.go) is always there, even with Config.Sandbox nil: required, reaching GitHub alone (restrictedSandbox),
+// writing its own caches instead of the owner's, and kept from the node's secrets (restrictedSandboxConfig); its env
+// points the caches there (restrictedCacheEnv).
 func (n *Node) sessionSandbox(workDir string, readOnly, restricted bool) (*rt.Sandbox, []string) {
 	c := n.cfg.Sandbox
-	if c == nil && restricted {
-		c = restrictedSandboxConfig()
+	if restricted {
+		c = n.restrictedSandboxConfig(workDir)
 	}
 	sb, env := n.sandboxWith(c, workDir)
 	if restricted {
 		sb = restrictedSandbox(sb)
+		env = append(env, restrictedCacheEnv(workDir)...)
 	}
 	if sb != nil && readOnly {
 		sb.AllowWrite = []string{}
@@ -117,6 +119,10 @@ func (n *Node) sessionSandbox(workDir string, readOnly, restricted bool) (*rt.Sa
 			if !overlaps(p) {
 				sb.AllowWrite = append(sb.AllowWrite, p)
 			}
+		}
+		if restricted {
+			// Its own caches only: a restricted review writes nothing else, the owner's caches included.
+			sb.AllowWrite = append(sb.AllowWrite, restrictedCacheDir(workDir))
 		}
 		sb.DenyWrite = append(sb.DenyWrite, workDir)
 		if common != "" {

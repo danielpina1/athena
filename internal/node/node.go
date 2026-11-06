@@ -109,6 +109,9 @@ type Config struct {
 	ReviewerPrompt func() string
 	// Sandbox, when set, turns on Claude Code's sandbox for worker sessions (sandbox.go); nil leaves it off.
 	Sandbox *SandboxConfig
+	// Secrets are paths no restricted session's commands may read, whether the owner's Sandbox is on or not (the GitHub
+	// App key).
+	Secrets []string
 	// Policy, when set, gives each Ticket's sessions their tool policy by the trust class of its Mandate
 	// (toolpolicy.go): a restricted session always runs sandboxed, reaching GitHub alone, and asks nobody for anything.
 	// nil runs every session standard.
@@ -763,14 +766,17 @@ type session struct {
 	// runtime is the runtime the session's runner chose (chooseRuntime), set before it prepares its directory.
 	runtime string
 	// toolPolicy is the session's tool policy (policy.ToolStandard, policy.ToolRestricted), read once from the Policy
-	// when it prepares its directory, so that a change of the Policy never flips a running session.
+	// when its launch begins (before its runtime is chosen), so that a change of the Policy never flips a session.
 	toolPolicy string
 }
 
-func (s *session) setToolPolicy(p string) {
+// readToolPolicy sets the session's tool policy from read, unless it has one already.
+func (s *session) readToolPolicy(read func() string) {
 	s.mu.Lock()
-	s.toolPolicy = p
-	s.mu.Unlock()
+	defer s.mu.Unlock()
+	if s.toolPolicy == "" {
+		s.toolPolicy = read()
+	}
 }
 
 // restricted reports whether the session runs under the restricted tool policy: any but standard, so a session not
@@ -1155,7 +1161,9 @@ func (r *runner) run() {
 	if s.isStopped() {
 		return
 	}
-	// The runtime first: a launch whose runtime is limited (or at its session cap) waits without a slot, like one
+	// The tool policy first: it decides which runtimes may run the session.
+	s.readToolPolicy(func() string { return n.toolPolicy(s.t) })
+	// The runtime next: a launch whose runtime is limited (or at its session cap) waits without a slot, like one
 	// waiting for credentials; one whose runtime cannot run it fails with why.
 	rtm, ok := r.chooseRuntime()
 	if !ok {
@@ -1326,6 +1334,15 @@ func (r *runner) chooseRuntime() (rt.Runtime, bool) {
 	if p := pinnedRuntime(s.t, s.a); p != "" && !(movable(s.t, s.a) && n.quota.State(p).Limited(time.Now())) {
 		names = []string{p}
 	}
+	restricted := s.restricted()
+	if restricted {
+		// A restricted session runs on Claude Code alone, whose sandbox keeps its commands from the owner's secrets.
+		if p := pinnedRuntime(s.t, s.a); p != "" && p != runtimeClaude {
+			r.fail(restrictedRuntimeSummary)
+			return nil, false
+		}
+		names = []string{runtimeClaude}
+	}
 	cctx, cancel := context.WithCancel(n.ctx)
 	go func() {
 		select {
@@ -1337,7 +1354,7 @@ func (r *runner) chooseRuntime() (rt.Runtime, bool) {
 	ready := map[string]rt.Info{}
 	for _, name := range names {
 		if rtm, ok := n.cfg.Runtimes[name]; ok {
-			ready[name] = n.eligible(s.a, rtm, n.checkRuntime(cctx, name, rtm))
+			ready[name] = n.eligible(s.a, rtm, n.checkRuntime(cctx, name, rtm), restricted)
 		}
 	}
 	cancel()
@@ -2341,7 +2358,7 @@ func WorktreeBranch(t core.Ticket, hasGit func(dir string) bool) string {
 // prepare makes the session's directory and writes its settings and MCP config.
 func (n *Node) prepare(s *session) error {
 	p := s.place
-	s.setToolPolicy(n.toolPolicy(s.t))
+	s.readToolPolicy(func() string { return n.toolPolicy(s.t) })
 	if err := n.checkRestrictedSandbox(s); err != nil {
 		return err
 	}
@@ -2390,6 +2407,11 @@ func (n *Node) prepare(s *session) error {
 	rtm, ok := n.cfg.Runtimes[name]
 	if !ok {
 		return fmt.Errorf("runtime %q is not available on this node", name)
+	}
+	if s.restricted() {
+		if err := makeRestrictedCaches(p.workDir); err != nil {
+			return err
+		}
 	}
 	sb, sbEnv := n.sessionSandbox(p.workDir, s.reviewing(), s.restricted())
 	role := roleWorker

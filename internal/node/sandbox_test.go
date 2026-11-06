@@ -603,8 +603,8 @@ func TestReadOnlySandboxDropsGitDirs(t *testing.T) {
 	}
 }
 
-// A restricted session's sandbox is required and reaches GitHub alone, with the owner's sandbox configured or not; a
-// restricted review's stays read-only too.
+// A restricted session's sandbox is required, reaches GitHub alone and writes its own caches, not the owner's, with the
+// owner's sandbox configured or not; a restricted review's stays read-only too.
 func TestRestrictedSessionSandboxWithoutConfig(t *testing.T) {
 	work := t.TempDir()
 	for _, c := range []*SandboxConfig{nil, {AllowedDomains: []string{"pypi.org"}, AllowWrite: []string{"/cache/go"}}} {
@@ -616,6 +616,10 @@ func TestRestrictedSessionSandboxWithoutConfig(t *testing.T) {
 			}
 			if readOnly == slices.Contains(sb.AllowWrite, work) || readOnly != slices.Contains(sb.DenyWrite, work) {
 				t.Fatalf("config %+v readOnly %v: allowWrite %v denyWrite %v", c, readOnly, sb.AllowWrite, sb.DenyWrite)
+			}
+			// The owner's extra writable paths are dropped; the session's own caches take their place.
+			if slices.Contains(sb.AllowWrite, "/cache/go") || !slices.Contains(sb.AllowWrite, restrictedCacheDir(work)) {
+				t.Fatalf("config %+v readOnly %v: allowWrite %v, want its cache and not the owner's", c, readOnly, sb.AllowWrite)
 			}
 		}
 		if c == nil {

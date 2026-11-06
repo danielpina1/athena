@@ -2,6 +2,8 @@ package node
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -98,7 +100,9 @@ func TestRestrictedSessionSandbox(t *testing.T) {
 		h := newHarness(t, func(c *Config) { c.Sandbox, c.Policy = sbc, restrictOwner })
 		tk := h.submit("Stranger's change", newRepo(t))
 		tk, _ = h.running(tk.ID)
-		sb := readSessionSettings(t, TicketDir(h.cfg.WorkRoot, tk)).Sandbox
+		dir := TicketDir(h.cfg.WorkRoot, tk)
+		settings := readSessionSettings(t, dir)
+		sb := settings.Sandbox
 		if sb == nil {
 			t.Fatalf("config %+v: no sandbox block", sbc)
 		}
@@ -108,6 +112,121 @@ func TestRestrictedSessionSandbox(t *testing.T) {
 		if !slices.Contains(sb.Network.AllowUnixSockets, h.cfg.SocketPath) && !sb.Network.AllowAllUnixSockets {
 			t.Errorf("config %+v: the node socket is unreachable: %+v", sbc, sb.Network)
 		}
+		// The owner's caches are not its to write; its own are, each made at prepare and named in its env.
+		cache := restrictedCacheDir(dir)
+		if slices.Contains(sb.Filesystem.AllowWrite, "/cache/go") || !slices.Contains(sb.Filesystem.AllowWrite, cache) {
+			t.Errorf("config %+v: allowWrite = %v, want its own cache %s and not the owner's", sbc, sb.Filesystem.AllowWrite, cache)
+		}
+		for env, sub := range map[string]string{"GOCACHE": "go-build", "GOMODCACHE": "gomod", "npm_config_cache": "npm",
+			"PIP_CACHE_DIR": "pip", "XDG_CACHE_HOME": "xdg"} {
+			want := filepath.Join(cache, sub)
+			if settings.Env[env] != want {
+				t.Errorf("config %+v: env %s = %q, want %q", sbc, env, settings.Env[env], want)
+			}
+			if st, err := os.Stat(want); err != nil || !st.IsDir() {
+				t.Errorf("config %+v: cache %s not made: %v", sbc, want, err)
+			}
+		}
+		if settings.Env["GOFLAGS"] != "-modcacherw" {
+			t.Errorf("config %+v: GOFLAGS = %q", sbc, settings.Env["GOFLAGS"])
+		}
+	}
+}
+
+// With the owner's sandbox off, a restricted session's commands still cannot read the node's secrets or Athena's
+// state directory, beyond what the session needs: its own directory and git directories, and the node socket.
+func TestRestrictedSessionDeniesSecrets(t *testing.T) {
+	if !SandboxSupported() {
+		t.Skip("no sandbox on this platform")
+	}
+	key := filepath.Join(t.TempDir(), "app.pem")
+	h := newHarness(t, func(c *Config) {
+		c.Sandbox, c.Policy, c.Secrets = nil, restrictOwner, []string{key}
+		c.WorkRoot = filepath.Join(c.StateDir, "work") // as the server places it
+	})
+	if err := os.MkdirAll(h.cfg.StateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	db := filepath.Join(h.cfg.StateDir, "secret.db")
+	if err := os.WriteFile(db, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tk := h.submit("Stranger's change", newRepo(t))
+	tk, _ = h.running(tk.ID)
+	dir := TicketDir(h.cfg.WorkRoot, tk)
+	sb := readSessionSettings(t, dir).Sandbox
+	if sb == nil {
+		t.Fatal("no sandbox block")
+	}
+	deny := sb.Filesystem.DenyRead
+	if !slices.Contains(deny, key) || !slices.Contains(deny, resolvedPath(db)) {
+		t.Fatalf("denyRead = %v, want the key %s and the state dir's %s", deny, key, db)
+	}
+	home, _ := os.UserHomeDir()
+	if !slices.Contains(deny, filepath.Join(home, ".ssh")) {
+		t.Errorf("denyRead = %v lacks ~/.ssh", deny)
+	}
+	for _, d := range deny {
+		for _, need := range []string{dir, h.cfg.SocketPath} {
+			if r := resolvedPath(need); within(d, r) {
+				t.Errorf("denyRead %s covers %s, which the session needs", d, need)
+			}
+		}
+	}
+	// A standard session on the same node has no sandbox at all, as before.
+	if sb, _ := h.n.sessionSandbox(dir, false, false); sb != nil {
+		t.Errorf("standard sandbox = %+v, want none", sb)
+	}
+}
+
+func TestDenyAllBut(t *testing.T) {
+	root := resolvedPath(t.TempDir())
+	for _, d := range []string{"work/a", "work/b", "repos/o/r/.git", "repos/o/s", "keys"} {
+		if err := os.MkdirAll(filepath.Join(root, d), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "athena.db"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := denyAllBut(root, []string{filepath.Join(root, "work/a"), filepath.Join(root, "repos/o/r/.git"), "", "/elsewhere"})
+	slices.Sort(got)
+	want := []string{filepath.Join(root, "athena.db"), filepath.Join(root, "keys"), filepath.Join(root, "repos/o/s"), filepath.Join(root, "work/b")}
+	if !slices.Equal(got, want) {
+		t.Fatalf("denyAllBut = %v, want %v", got, want)
+	}
+	if got := denyAllBut(root, []string{"/elsewhere"}); !slices.Equal(got, []string{root}) {
+		t.Fatalf("nothing kept = %v, want the root", got)
+	}
+}
+
+// A restricted Ticket under auto runs on Claude Code even where Codex is preferred; one pinned to Codex fails without
+// starting anything.
+func TestRestrictedRunsOnClaudeOnly(t *testing.T) {
+	h := newCodexHarness(t, codexTurn(), func(c *Config) {
+		c.Policy = restrictOwner
+		c.Chooser = HeadroomChooser{Preferred: core.RuntimeCodex}
+	})
+	auto, err := h.eng.SubmitOwnerTask("Auto stranger task", core.TaskOptions{Runtime: core.RuntimeAuto})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, a := h.running(auto.ID)
+	if a.Runtime != core.RuntimeClaude {
+		t.Fatalf("auto ran on %q, want claude", a.Runtime)
+	}
+	pinned := h.submitCodex("Pinned stranger task")
+	h.eventually("failed report", func() bool {
+		tk, _ := h.ticket(pinned.ID)
+		r := tk.LatestAssignment().Report
+		return r != nil && r.State == core.ReportFailed
+	})
+	tk, _ := h.ticket(pinned.ID)
+	if got := tk.LatestAssignment().Report.Summary; got != restrictedRuntimeSummary {
+		t.Fatalf("summary = %q, want %q", got, restrictedRuntimeSummary)
+	}
+	if strings.Contains(strings.Join(h.rpc(), "\n"), "thread/start") {
+		t.Fatal("a Codex session started")
 	}
 }
 
@@ -132,13 +251,18 @@ func TestRestrictedNeedsTheSandbox(t *testing.T) {
 }
 
 // A restricted Codex session's network and permission requests are declined without asking anyone.
+// A restricted session never launches on Codex; should one run there anyway, its asks are still declined (defence in
+// depth): the session here is made restricted by hand.
 func TestRestrictedCodexNetworkDeclined(t *testing.T) {
-	h := newCodexHarness(t, codexTurn(), func(c *Config) { c.Policy = restrictOwner })
+	h := newCodexHarness(t, codexTurn(), nil)
 	ce := &countingEngine{EngineCallbacks: h.eng}
 	h.n.SetEngine(ce)
 	tk := h.submitCodex("Stranger's change")
 	var s *session
-	h.eventually("live session", func() bool { s = h.n.liveSession(tk.ID); return s != nil && s.restricted() })
+	h.eventually("live session", func() bool { s = h.n.liveSession(tk.ID); return s != nil })
+	s.mu.Lock()
+	s.toolPolicy = policy.ToolRestricted
+	s.mu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), waitTimeout)
 	defer cancel()
 	for _, req := range []rt.ApprovalRequest{
