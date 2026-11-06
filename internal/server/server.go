@@ -26,6 +26,7 @@ import (
 	"github.com/danielpina1/athena/internal/metrics"
 	"github.com/danielpina1/athena/internal/node"
 	"github.com/danielpina1/athena/internal/outbox"
+	"github.com/danielpina1/athena/internal/pause"
 	"github.com/danielpina1/athena/internal/policy"
 	"github.com/danielpina1/athena/internal/router"
 	"github.com/danielpina1/athena/internal/sources"
@@ -258,6 +259,13 @@ func Run(ctx context.Context, cfg Config) (err error) {
 		logger.Info("event", attrs...)
 	}
 	fx := effects.New(st, logger.With("component", "effects"))
+	killSwitch, err := pause.Open(st, time.Now)
+	if err != nil {
+		return err
+	}
+	if killSwitch.Paused() {
+		logger.Warn("athena is paused; `athena resume` starts the decisions and replies again", "since", killSwitch.State().Since)
+	}
 	eng := core.NewEngineWith(st.Repos(), n, core.Options{Now: time.Now, Emit: emit, Policy: pc.policy, Scope: sourceReg,
 		Wake: fx.Wake, Relays: routerOn, DefaultRuntime: fileCfg.Runtimes.Default, Pairing: pc.pairing})
 	eng.SetMetrics(reg)
@@ -273,12 +281,12 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	if _, ok := gh.checked(); routerOn && ok {
 		registerSource()
 	}
-	fx.Handle(core.EffectReply, outbox.Handler(sourceReg, st), outbox.Options)
+	fx.Handle(core.EffectReply, outbox.Handler(sourceReg, st, killSwitch.Paused), outbox.Options)
 	var host *router.Host
 	if routerOn {
 		host = router.New(router.Config{Bin: ncfg.AthenaBin, StateDir: stateDir, Model: fileCfg.Router.Model,
 			Socket: ncfg.SocketPath, ClaudeBinary: ncfg.ClaudeBinary, KV: st, Policy: pc.settings,
-			Prompt: func() string { return currentPrompt(st, logger, false) }}, eng, fx, sourceReg, logger)
+			Prompt: func() string { return currentPrompt(st, logger, false) }, Paused: killSwitch.Paused}, eng, fx, sourceReg, logger)
 		n.SetRouter(host)
 	}
 	var webEP *webEndpoint
@@ -288,6 +296,14 @@ func Run(ctx context.Context, cfg Config) (err error) {
 		}
 		defer webEP.stop()
 	}
+	// The one seam a change of the switch goes through: the dashboard hears of it here, and the effects that were put off
+	// while paused run again at once. (Task 5 adds the node's parking here.)
+	killSwitch.OnChange(func(pause.State) {
+		if h := hubRef.Load(); h != nil {
+			h.OnCommit(store.Changes{Control: true})
+		}
+		fx.Wake()
+	})
 	expirePendingApprovals(eng, logger)
 
 	nodeCtx, nodeCancel := context.WithCancel(context.Background())
@@ -367,7 +383,7 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	}
 	go func() {
 		defer close(evalDone)
-		evaluate(workCtx, eng, logger)
+		evaluate(workCtx, eng, killSwitch.Paused, logger)
 	}()
 	workStopped := false
 	defer func() {
@@ -387,7 +403,7 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	logger.Info("athena server started", "stateDir", stateDir, "pid", os.Getpid())
 
 	c := &control{stateDir: stateDir, eng: eng, workRoot: ncfg.WorkRoot, model: ncfg.Model, log: logger, reg: reg,
-		st: st, fx: fx, gh: gh, host: host, policy: pc, node: n}
+		st: st, fx: fx, gh: gh, host: host, policy: pc, node: n, pause: killSwitch}
 	if err := c.resumePolicyChange(); err != nil {
 		logger.Error("startup: tell the pending policy change", "error", err)
 	}

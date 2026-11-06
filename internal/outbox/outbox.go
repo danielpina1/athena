@@ -27,6 +27,9 @@ const (
 	lastErrorMax = 300
 )
 
+// PausedWait is how long a reply waits while Athena is paused (a variable so tests may shorten it).
+var PausedWait = 30 * time.Second
+
 // Options are the effects runner's options for the `reply` kind: one at a time, retried after 5 s doubling to 300 s.
 // The kind is not Ordered: the Outbox keeps each Ticket's messages to a conversation in order itself, so a failing
 // message holds back only those, not the messages of other Tickets or conversations.
@@ -34,6 +37,7 @@ var Options = effects.Options{Concurrency: 1, Backoff: effects.Backoff{First: 5 
 
 // Handler returns the `reply` effect handler. For a waiting receipt it:
 //
+//   - waits (effects.Later, PausedWait) while paused() says the owner paused Athena;
 //   - waits (effects.Later, 5 s) while the receipt's Source is not registered or not running;
 //   - waits while an earlier receipt of the same Ticket to the same conversation is waiting and has failed fewer than
 //     three times;
@@ -44,8 +48,11 @@ var Options = effects.Options{Concurrency: 1, Backoff: effects.Backoff{First: 5 
 //     counts an attempt (Attempts) on the receipt and is returned for the runner to back off.
 //
 // A receipt that is missing, sent or dropped needs nothing.
-func Handler(reg *sources.Registry, st *store.Store) effects.Handler {
+func Handler(reg *sources.Registry, st *store.Store, paused func() bool) effects.Handler {
 	return func(ctx context.Context, key string, payload []byte) error {
+		if paused != nil && paused() {
+			return effects.Later(PausedWait) // held, not dropped: the owner paused Athena
+		}
 		var p struct {
 			ReceiptID string `json:"receiptId"`
 		}

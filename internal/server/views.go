@@ -38,6 +38,10 @@ type HealthView struct {
 	Router  RouterHealth      `json:"router"`
 	// GitHubRateRemaining is the installation's rate-limit remaining, when GitHub runs and answered once.
 	GitHubRateRemaining *int `json:"githubRateRemaining,omitempty"`
+	// Paused is the kill switch: set, since when and by whom (cli or web).
+	Paused      bool      `json:"paused,omitempty"`
+	PausedSince time.Time `json:"pausedSince,omitempty"`
+	PausedBy    string    `json:"pausedBy,omitempty"`
 }
 
 // SourceHealth is one Source: its error, empty when it is healthy.
@@ -68,6 +72,11 @@ func (c *control) health() HealthView {
 			if n := c.gh.app.Client().RateRemaining(); n >= 0 {
 				h.GitHubRateRemaining = &n
 			}
+		}
+	}
+	if c.pause != nil {
+		if s := c.pause.State(); s.Paused {
+			h.Paused, h.PausedSince, h.PausedBy = true, s.Since, s.By
 		}
 	}
 	if c.fx != nil {

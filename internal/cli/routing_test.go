@@ -112,6 +112,21 @@ func TestRoutingCommandsAgainstServer(t *testing.T) {
 		}
 	}
 
+	// The kill switch: pause says what stops, status shows it, resume clears it.
+	if code, out, errOut := athena(ctx, "pause", "--state-dir", dir); code != 0 || errOut != "" ||
+		out != "Athena is paused. Running sessions stop at the end of their turn; nothing queued is lost. Resume with: athena resume\n" {
+		t.Fatalf("pause: %d %q %q", code, out, errOut)
+	}
+	if code, out, _ := athena(ctx, "status", "--state-dir", dir); code != 0 || !strings.Contains(out, "paused since ") || !strings.Contains(out, "(by cli)") {
+		t.Fatalf("status while paused: %d %q", code, out)
+	}
+	if code, out, errOut := athena(ctx, "resume", "--state-dir", dir); code != 0 || errOut != "" || out != "Athena resumed.\n" {
+		t.Fatalf("resume: %d %q %q", code, out, errOut)
+	}
+	if code, out, _ := athena(ctx, "status", "--state-dir", dir); code != 0 || strings.Contains(out, "paused") {
+		t.Fatalf("status after resume: %d %q", code, out)
+	}
+
 	code, out, errOut := athena(ctx, "policy", "show", "--state-dir", dir)
 	var shown server.PolicyView
 	if code != 0 || json.Unmarshal([]byte(out), &shown) != nil || shown.Revision != 0 || shown.Settings.Mode != "observe" {

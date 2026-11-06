@@ -12,6 +12,7 @@ import (
 	"github.com/danielpina1/athena/internal/core"
 	"github.com/danielpina1/athena/internal/hub"
 	"github.com/danielpina1/athena/internal/node"
+	"github.com/danielpina1/athena/internal/pause"
 	"github.com/danielpina1/athena/internal/pb/athenav1"
 	"github.com/danielpina1/athena/internal/policy"
 	"github.com/danielpina1/athena/internal/store"
@@ -320,3 +321,11 @@ func (s hubSource) Notifications() ([]string, []string, error) {
 
 // Prompts says which prompt parts the owner overrode.
 func (s hubSource) Prompts() (*athenav1.PromptsView, error) { return promptsView(s.d.st) }
+
+// Control is the kill switch (not paused when the server has none).
+func (s hubSource) Control() pause.State {
+	if s.d.pause == nil {
+		return pause.State{}
+	}
+	return s.d.pause.State()
+}

@@ -19,6 +19,7 @@ import (
 	"github.com/danielpina1/athena/internal/effects"
 	"github.com/danielpina1/athena/internal/metrics"
 	"github.com/danielpina1/athena/internal/node"
+	"github.com/danielpina1/athena/internal/pause"
 	"github.com/danielpina1/athena/internal/pb/athenav1"
 	"github.com/danielpina1/athena/internal/policy"
 	"github.com/danielpina1/athena/internal/router"
@@ -50,6 +51,8 @@ type Dispatcher struct {
 	gh     *gitHub
 	host   *router.Host
 	policy *policyCache
+	// pause is the kill switch; nil (tests) pauses nothing and answers unavailable.
+	pause *pause.Switch
 	// node interrupts sessions; nil (tests) answers unavailable.
 	node *node.Node
 	// auth ends the open connections of a revoked passkey; until SetAuth (no web server) revoking works on the store.
@@ -190,6 +193,8 @@ func (d *Dispatcher) handleRequest(req Request) (any, error) {
 			out = append(out, decisionView(&list[i]))
 		}
 		return out, nil
+	case OpPause, OpResume:
+		return nil, d.setPaused(req.Op == OpPause, "cli")
 	case OpReevaluate:
 		return nil, d.eng.Reevaluate(req.ID)
 	case OpDismiss:
@@ -252,6 +257,20 @@ func (d *Dispatcher) detail(id string) (TicketDetail, error) {
 		}
 	}
 	return out, nil
+}
+
+// setPaused sets or clears the kill switch.
+func (d *Dispatcher) setPaused(on bool, by string) error {
+	if d.pause == nil {
+		return errors.New("the kill switch is not available")
+	}
+	var err error
+	if on {
+		_, err = d.pause.Pause(by)
+	} else {
+		_, err = d.pause.Resume(by)
+	}
+	return err
 }
 
 // --- dashboard commands ---
@@ -366,6 +385,17 @@ func (d *Dispatcher) act(o web.Origin, c *athenav1.Command) *athenav1.CommandRes
 		}
 	case *athenav1.Command_Unsubscribe:
 		if err := d.unsubscribe(a.Unsubscribe.GetThread()); err != nil {
+			return d.failure(err)
+		}
+	case *athenav1.Command_Pause:
+		if err := d.setPaused(true, "web"); err != nil {
+			return d.failure(err)
+		}
+	case *athenav1.Command_Resume:
+		if !o.Sensitive {
+			return proto.Clone(reauthRequired).(*athenav1.CommandResult)
+		}
+		if err := d.setPaused(false, "web"); err != nil {
 			return d.failure(err)
 		}
 	case *athenav1.Command_SetPolicy:

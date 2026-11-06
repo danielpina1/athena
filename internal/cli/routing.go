@@ -278,6 +278,25 @@ func (c *command) routingCommand(args []string) int {
 	return 0
 }
 
+// pauseCommand is athena pause and athena resume: the kill switch.
+func (c *command) pauseCommand(args []string) int {
+	if _, code, ok := c.parse(args, 0, 0); !ok {
+		return code
+	}
+	if c.name == "resume" {
+		if err := call(c.stateDir, server.Request{Op: server.OpResume}, nil); err != nil {
+			return c.fail(err)
+		}
+		fmt.Fprintln(c.stdout, "Athena resumed.")
+		return 0
+	}
+	if err := call(c.stateDir, server.Request{Op: server.OpPause}, nil); err != nil {
+		return c.fail(err)
+	}
+	fmt.Fprintln(c.stdout, "Athena is paused. Running sessions stop at the end of their turn; nothing queued is lost. Resume with: athena resume")
+	return 0
+}
+
 func dash(s string) string {
 	if s == "" {
 		return "-"

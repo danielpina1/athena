@@ -10,14 +10,14 @@ import (
 
 // Changes are the records one committed transaction wrote: the ids of the Tickets, Approvals, Triggers, Threads
 // (by key) and Decisions it put, each once, in the order first written, and whether it saved a Policy revision, a
-// notification-preferences revision or a prompt revision.
+// notification-preferences revision or a prompt revision, or (Control, sent by the server, not a transaction) the kill switch changed.
 type Changes struct {
 	Tickets, Approvals, Triggers, Threads, Decisions []string
-	Policy, Notifications, Prompts                   bool
+	Policy, Notifications, Prompts, Control          bool
 }
 
 func (c *Changes) empty() bool {
-	return !c.Policy && !c.Notifications && !c.Prompts && len(c.Tickets)+len(c.Approvals)+len(c.Triggers)+len(c.Threads)+len(c.Decisions) == 0
+	return !c.Policy && !c.Notifications && !c.Prompts && !c.Control && len(c.Tickets)+len(c.Approvals)+len(c.Triggers)+len(c.Threads)+len(c.Decisions) == 0
 }
 
 // addID appends id to ids unless it is already there.

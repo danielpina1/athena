@@ -32,6 +32,8 @@ message Command {
     GetPrompt get_prompt = 28;
     SetPrompt set_prompt = 29;
     ResetPrompt reset_prompt = 30;
+    Pause pause = 31;
+    Resume resume = 32;
   }
 }
 
@@ -74,6 +76,10 @@ message AnswerApproval {
 message Reevaluate {
   string trigger_id = 1;
 }
+
+message Pause {}
+
+message Resume {}
 
 message Dismiss {
   string decision_id = 1;

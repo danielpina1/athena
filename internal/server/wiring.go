@@ -511,9 +511,12 @@ func (c *policyCache) writePending(p *pendingChange) error {
 }
 
 // evaluate runs the Evals' due work now and then every evaluateEvery, only while a Thread has Triggers queued, an
-// Eval in progress or a candidate held by the brake, until ctx is done.
-func evaluate(ctx context.Context, eng *core.Engine, log *slog.Logger) {
+// Eval in progress or a candidate held by the brake, until ctx is done. While paused() it decides nothing.
+func evaluate(ctx context.Context, eng *core.Engine, paused func() bool, log *slog.Logger) {
 	run := func() {
+		if paused != nil && paused() {
+			return // the owner paused Athena: Triggers stay queued, nothing is decided
+		}
 		active, err := eng.ActiveThreads()
 		if err != nil {
 			log.Error("evaluate: active threads", "error", err)

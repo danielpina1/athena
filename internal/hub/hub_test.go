@@ -16,6 +16,7 @@ import (
 
 	"github.com/danielpina1/athena/internal/core"
 	"github.com/danielpina1/athena/internal/node"
+	"github.com/danielpina1/athena/internal/pause"
 	"github.com/danielpina1/athena/internal/pb/athenav1"
 	"github.com/danielpina1/athena/internal/quota"
 	"github.com/danielpina1/athena/internal/runtime/rt"
@@ -40,6 +41,7 @@ type fakeSource struct {
 	kinds     []string
 	muted     []string
 	prompts   *athenav1.PromptsView
+	control   pause.State
 	// triggerReads counts Trigger calls; triggerErr fails them, as a store that cannot be read does.
 	triggerReads int
 	triggerErr   error
@@ -158,6 +160,12 @@ func (f *fakeSource) Prompts() (*athenav1.PromptsView, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return proto.Clone(f.prompts).(*athenav1.PromptsView), nil
+}
+
+func (f *fakeSource) Control() pause.State {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.control
 }
 
 func (f *fakeSource) setMuted(m ...string) { f.mu.Lock(); f.muted = m; f.mu.Unlock() }
@@ -1109,5 +1117,29 @@ func TestQuotaDeltaThrottled(t *testing.T) {
 	set(busy)
 	if d := next(t, sub); d.GetNode().GetSlotsInUse() != 1 {
 		t.Fatalf("slot change = %v", d)
+	}
+}
+
+func TestHubCarriesControl(t *testing.T) {
+	f := newFake()
+	h := start(t, f)
+	snap, _ := h.Snapshot()
+	if snap.Control.GetPaused() {
+		t.Fatalf("snapshot control before pause = %v", snap.Control)
+	}
+	sub, _ := h.Subscribe(0, h.Epoch())
+	defer sub.Close()
+	since := epoch0.Add(time.Minute)
+	f.mu.Lock()
+	f.control = pause.State{Paused: true, Since: since, By: "cli"}
+	f.mu.Unlock()
+	h.OnCommit(store.Changes{Control: true})
+	d := next(t, sub)
+	if c := d.GetControl(); !c.GetPaused() || c.GetBy() != "cli" || !c.GetSince().AsTime().Equal(since) {
+		t.Fatalf("control delta = %v", d)
+	}
+	snap, _ = h.Snapshot()
+	if !snap.Control.GetPaused() || snap.Control.GetBy() != "cli" {
+		t.Fatalf("snapshot control after pause = %v", snap.Control)
 	}
 }

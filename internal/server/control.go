@@ -44,6 +44,9 @@ const (
 	OpUnsubscribe = "unsubscribe"
 	OpPolicyShow  = "policy.show"
 	OpPolicySet   = "policy.set"
+	// OpPause and OpResume set and clear the kill switch (athena pause, athena resume).
+	OpPause  = "pause"
+	OpResume = "resume"
 	// OpWebRevoke revokes a passkey (ID) inside the server, so its open dashboard connections close.
 	OpWebRevoke = "web.revoke"
 	// OpWebStatus reports the dashboard's endpoint: its URL, its certificate and the open connections.

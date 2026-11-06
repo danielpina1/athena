@@ -19,6 +19,7 @@ import (
 	"github.com/danielpina1/athena/internal/hub"
 	"github.com/danielpina1/athena/internal/link"
 	"github.com/danielpina1/athena/internal/node"
+	"github.com/danielpina1/athena/internal/pause"
 	"github.com/danielpina1/athena/internal/pb/athenav1"
 	"github.com/danielpina1/athena/internal/store"
 )
@@ -63,6 +64,7 @@ func (*connSource) GitFolder(string) bool                      { return false }
 func (*connSource) Trust(core.Trigger) string                  { return "" }
 func (*connSource) Notifications() ([]string, []string, error) { return nil, nil, nil }
 func (*connSource) Prompts() (*athenav1.PromptsView, error)    { return &athenav1.PromptsView{}, nil }
+func (*connSource) Control() pause.State                       { return pause.State{} }
 func (*connSource) Approval(string) (core.Approval, error) {
 	return core.Approval{}, errors.New("none")
 }

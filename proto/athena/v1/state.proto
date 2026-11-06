@@ -22,6 +22,7 @@ message Snapshot {
   repeated RepoView repos = 10;
   NotificationPrefsView notifications = 11;
   PromptsView prompts = 12;
+  Control control = 13;
 }
 
 message Delta {
@@ -40,7 +41,16 @@ message Delta {
     RepoList repos = 19;
     NotificationPrefsView notifications = 20;
     PromptsView prompts = 21;
+    Control control = 22;
   }
+}
+
+// Control is the kill switch: while paused, Athena makes no decisions and sends no replies.
+message Control {
+  bool paused = 1;
+  google.protobuf.Timestamp since = 2;
+  // by is who paused it: cli or web.
+  string by = 3;
 }
 
 message TicketSummary {

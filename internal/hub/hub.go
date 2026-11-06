@@ -18,9 +18,11 @@ import (
 	"time"
 
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/danielpina1/athena/internal/core"
 	"github.com/danielpina1/athena/internal/node"
+	"github.com/danielpina1/athena/internal/pause"
 	"github.com/danielpina1/athena/internal/pb/athenav1"
 	"github.com/danielpina1/athena/internal/store"
 )
@@ -93,6 +95,8 @@ type Source interface {
 	Notifications() (kinds, muted []string, err error)
 	// Prompts returns the prompt revision and which parts the owner overrode.
 	Prompts() (*athenav1.PromptsView, error)
+	// Control returns the kill switch.
+	Control() pause.State
 }
 
 type ringEntry struct {
@@ -373,6 +377,9 @@ func (h *Hub) apply(c store.Changes) {
 			return
 		}
 		h.publish(&athenav1.Delta{Change: &athenav1.Delta_Prompts{Prompts: p}})
+	}
+	if c.Control {
+		h.publish(&athenav1.Delta{Change: &athenav1.Delta_Control{Control: controlView(h.src.Control())}})
 	}
 	if c.Policy {
 		if p, err := h.policyView(); err != nil {
@@ -798,6 +805,7 @@ func (h *Hub) Snapshot() (*athenav1.Snapshot, error) {
 	if s.Prompts, err = h.src.Prompts(); err != nil {
 		return nil, err
 	}
+	s.Control = controlView(h.src.Control())
 	return s, nil
 }
 
@@ -898,4 +906,12 @@ func (h *Hub) replyActors(t *core.Ticket) map[string]string {
 		}
 	}
 	return out
+}
+
+func controlView(c pause.State) *athenav1.Control {
+	v := &athenav1.Control{Paused: c.Paused, By: c.By}
+	if !c.Since.IsZero() {
+		v.Since = timestamppb.New(c.Since)
+	}
+	return v
 }
