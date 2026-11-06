@@ -2,7 +2,8 @@
 // so the Unix socket paths stay short) whose config.json turns the dashboard on at http://localhost:<free port> with
 // TLS off and no GitHub source, fakeclaude as the runtime (`athena server --claude`) and fakecodex as Codex
 // (config.json's runtimes.codex, so no spec reaches this machine's codex or its quota; its CODEX_HOME is
-// <state>/codex, never ~/.codex). fakeclaude replays
+// <state>/codex, never ~/.codex). fakecodex replays <state>/codex-fixture-<ticket>.jsonl on a session's first turn, or
+// codex-fixture-default.jsonl, or nothing when neither exists (harness.ts codexFixture). fakeclaude replays
 // <state>/fixture-<ticket>.jsonl, or fixture-default.jsonl (a turn that never ends, so every Ticket's session stays
 // live) when a spec wrote none; after each later message it replays <state>/later-<ticket>.jsonl if a spec wrote one
 // (R37: each spec gives its own Tickets their fixtures, see harness.ts), its result line waiting while
@@ -80,6 +81,7 @@ export default async function globalSetup() {
       ATHENA_FAKE_LATER_HOLD: join(state, "hold-{ticket}"),
       ATHENA_FAKE_STDIN_LOG: join(state, "stdin-{ticket}.log"),
       ATHENA_FAKE_ENV_LOG: join(state, "env-{ticket}.log"),
+      ATHENA_FAKE_CODEX_FIXTURE: join(state, "codex-fixture-{ticket}.jsonl"),
     },
     stdio: ["ignore", log, log],
   });

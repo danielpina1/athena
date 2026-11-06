@@ -2,6 +2,7 @@ package node
 
 import (
 	"encoding/json"
+	"fmt"
 	"regexp"
 	"slices"
 	"strings"
@@ -173,5 +174,35 @@ func hostileTextCannotForgeHeaders(t *testing.T, sep string) {
 	// The card's own lines stay first and in order; the body's look-alikes are quoted.
 	if !strings.Contains(later, "\n from: octocat\n url: https://evil.example/login\n") || strings.Contains(later, "\nfrom: Boss") {
 		t.Errorf("card body not quoted:\n%q", later)
+	}
+}
+
+// A session that continues after a usage limit opens with the worker preamble and a handoff note (sendFirst): the
+// session view shows the note as its own block, the Inputs it repeats without their ids, and none of the preamble.
+func TestEchoedHandoffRendersAsItsBlock(t *testing.T) {
+	tk := core.Ticket{ID: "T-0009", Title: "Fix the parser", Inputs: []core.Input{
+		{ID: "4ncqjcpkacjlhkrq:01M6K00K8007BTPTH81690PRTA", Kind: core.InputTrigger, Human: true, Text: "Fix the parser."},
+	}}
+	none := func(string) (core.Trigger, bool) { return core.Trigger{}, false }
+	h := Handoff{Ticket: tk, Previous: core.Assignment{ID: "a1", Runtime: core.RuntimeClaude, EndedReason: core.ReasonUsageLimit},
+		Inputs: renderInputs(tk, []string{tk.Inputs[0].ID}, none), LastTurn: "I am halfway through the parser."}
+	first := workerPreamble(tk, []string{"ATHENA_TICKET=T-0009"}) + "\n" + handoffNote(h) + "\n"
+	items := render.Items(echoLine(first), 0)
+	if len(items) != 1 || items[0].Kind != "user" || items[0].Tool != "handoff" {
+		t.Fatalf("items = %+v", items)
+	}
+	text := items[0].Text
+	if !strings.HasPrefix(text, fmt.Sprintf(handoffOpening, "Claude Code")) {
+		t.Fatalf("handoff opens with %q", text)
+	}
+	for _, want := range []string{"message from the owner (not on GitHub):\nFix the parser.", "I am halfway through the parser."} {
+		if !strings.Contains(text, want) {
+			t.Errorf("handoff lacks %q:\n%s", want, text)
+		}
+	}
+	for _, leak := range []string{"[input", "4ncqjcpkacjlhkrq", "ATHENA_", "You are the worker"} {
+		if strings.Contains(text, leak) {
+			t.Errorf("%q shows in the handoff:\n%s", leak, text)
+		}
 	}
 }

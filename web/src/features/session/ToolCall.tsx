@@ -1,8 +1,8 @@
 // One tool call of a session with its result, paired by tool_use_id: a compact row that says what the agent did (a
 // verb and a target, such as "Edited  api/handler.go") and how it went (a check and the time it took, or +N −M for a
 // file change, a ✕ and the error's first line, or a pulsing dot while it runs). Opened, a body made for the tool: a
-// terminal block for Bash, a diff for Edit, a checklist for TodoWrite, the summary for a Report. Rows start closed, and
-// a body is built on its row's first open.
+// terminal block for Bash and Codex's commands, a diff for Edit and Codex's patches, a checklist for TodoWrite and
+// Codex's plan, the summary for a Report. Rows start closed, and a body is built on its row's first open.
 // Hostile text (a 1 MiB result, escapes, RTL) wraps inside its block, which scrolls on its own and takes focus so a
 // keyboard can scroll it.
 import { timestampMs } from "@bufbuild/protobuf/wkt";
@@ -35,19 +35,23 @@ import { cn } from "@/ui/cn";
 import {
   clipped,
   type Counts,
+  type DiffLine,
   describeTool,
   editDiff,
   editsOf,
   errorLine,
   formatDuration,
   linesOf,
+  type PatchFile,
   str,
+  type Todo,
   todoList,
   type ToolInput,
   type ToolKind,
   type ToolView,
   toolInput,
 } from "./tools";
+import { exitStatusText } from "./tools.codex";
 
 export type ToolStatus = "ok" | "error" | "running" | "none";
 
@@ -120,24 +124,30 @@ function Status({ status, took, counts }: { status: ToolStatus; took?: string; c
   }
 }
 
+function DiffLines({ lines }: { lines: DiffLine[] }) {
+  return lines.map((l, k) => (
+    <div
+      key={k}
+      data-line={l.sign === "+" ? "add" : l.sign === "−" ? "del" : "ctx"}
+      className={cn("flex min-w-0", l.sign === "+" && "text-success", l.sign === "−" && "text-danger", l.sign === " " && "text-muted")}
+    >
+      <span aria-hidden={l.sign === " "} className="w-4 shrink-0 select-none">
+        {l.sign}
+      </span>
+      <span className="min-w-0 flex-1 whitespace-pre-wrap wrap-anywhere">{l.text}</span>
+    </div>
+  ));
+}
+
+/** A diff's block: a scroll region of its own, focusable, so a keyboard can scroll a long diff. */
+const DIFF = cn(BLOCK, "grid content-start whitespace-normal");
+
 function Diff({ input, target }: { input: ToolInput; target: string }) {
   return (
     <>
       {editsOf(input).map(({ edit, path }, i) => (
-        // A scroll region of its own: focusable, so a keyboard can scroll a long diff.
-        <div key={i} role="group" tabIndex={0} aria-label={`Changes in ${target}`} className={cn(BLOCK, "grid content-start whitespace-normal")}>
-          {editDiff(str(edit, "old_string"), str(edit, "new_string") || str(edit, "new_source")).map((l, k) => (
-            <div
-              key={k}
-              data-line={l.sign === "+" ? "add" : l.sign === "−" ? "del" : "ctx"}
-              className={cn("flex min-w-0", l.sign === "+" && "text-success", l.sign === "−" && "text-danger", l.sign === " " && "text-muted")}
-            >
-              <span aria-hidden={l.sign === " "} className="w-4 shrink-0 select-none">
-                {l.sign}
-              </span>
-              <span className="min-w-0 flex-1 whitespace-pre-wrap wrap-anywhere">{l.text}</span>
-            </div>
-          ))}
+        <div key={i} role="group" tabIndex={0} aria-label={`Changes in ${target}`} className={DIFF}>
+          <DiffLines lines={editDiff(str(edit, "old_string"), str(edit, "new_string") || str(edit, "new_source"))} />
           {input._lines && Object.keys(input._lines).some((k) => k.startsWith(path)) && (
             <div className="pt-1 text-muted">The edit is longer than shown.</div>
           )}
@@ -147,12 +157,33 @@ function Diff({ input, target }: { input: ToolInput; target: string }) {
   );
 }
 
+const CHANGE: Record<string, string> = { add: "Created", delete: "Deleted", update: "Edited" };
+
+/** A Codex patch: each file's diff under its path (and what was done to it, when the patch has several files). */
+function Patch({ files }: { files: PatchFile[] }) {
+  return (
+    <>
+      {files.map((f, i) => (
+        <div key={i} role="group" tabIndex={0} aria-label={`Changes in ${f.path}`} className={DIFF}>
+          {files.length > 1 && (
+            <div dir="auto" className="pb-1 text-muted wrap-anywhere">
+              {`${CHANGE[f.kind] ?? "Changed"} ${f.path}`}
+            </div>
+          )}
+          <DiffLines lines={f.lines} />
+          {f.clipped && <div className="pt-1 text-muted">The change is longer than shown.</div>}
+        </div>
+      ))}
+    </>
+  );
+}
+
 const TODO_MARK: Record<string, string> = { completed: "✓", in_progress: "●", pending: "○" };
 
-function Todos({ input }: { input: ToolInput }) {
+function Todos({ todos }: { todos: Todo[] }) {
   return (
     <ul aria-label="Plan" className="grid gap-1">
-      {todoList(input).map((t, i) => (
+      {todos.map((t, i) => (
         <li
           key={i}
           data-todo={t.status}
@@ -232,6 +263,14 @@ function Body({ view, input, call, result, active }: { view: ToolView; input: To
       );
     }
     case "write": {
+      if (view.patch) {
+        return (
+          <>
+            <Patch files={view.patch} />
+            {failure}
+          </>
+        );
+      }
       const content = str(input, "content");
       const shown = content ? content.replace(/\n$/, "").split("\n").slice(0, WRITE_LINES) : [];
       const more = linesOf(input, "content", content) - shown.length;
@@ -246,14 +285,14 @@ function Body({ view, input, call, result, active }: { view: ToolView; input: To
     case "edit":
       return (
         <>
-          <Diff input={input} target={view.target} />
+          {view.patch ? <Patch files={view.patch} /> : <Diff input={input} target={view.target} />}
           {failure}
         </>
       );
     case "todo":
       return (
         <>
-          <Todos input={input} />
+          <Todos todos={view.todos ?? todoList(input)} />
           {failure}
         </>
       );
@@ -297,9 +336,12 @@ function Body({ view, input, call, result, active }: { view: ToolView; input: To
           {result && !result.isError ? <Markdown text={itemText(result)} className="text-[13px]" /> : <Output result={result} active={active} />}
         </>
       );
+    case "web":
+      // Codex records no results of a web search: the query, in full.
+      if (call?.tool === "web_search") return <Block label="Query">{str(input, "query") || summary}</Block>;
+      return <Output result={result} active={active} />;
     case "read":
     case "search":
-    case "web":
       return <Output result={result} active={active} />;
     default:
       return (
@@ -342,7 +384,7 @@ export function ToolCall({ call, result, active, ticketId }: { call?: StreamItem
   const input = toolInput(call);
   const view = describeTool(call?.tool ?? "", input, call ? itemText(call) : "");
   const Icon = ICONS[view.kind];
-  const error = status === "error" && result ? errorLine(itemText(result)) : "";
+  const error = status === "error" && result ? errorLine(exitStatusText(call?.tool ?? "", result, itemText(result))) : "";
   // The body is built on the first open, not for every closed row: a long session has hundreds of them.
   const [opened, setOpened] = useState(false);
   const written = (view.kind === "write" || view.kind === "edit") && call?.tool !== "NotebookEdit" ? str(input, "file_path") : "";

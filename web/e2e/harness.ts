@@ -14,6 +14,7 @@
 //     Ticket's worker session through sessionctl (internal/testutil/sessionctl), on the real hook and MCP paths.
 //   - laterFixture(ticket, lines) and stdinLog(ticket): what the Ticket's fakeclaude prints after each later message
 //     (a reply), and what it has read on stdin; holdLaterResult(ticket) holds that fixture's result line back.
+//   - codexFixture(ticket, lines): the app-server lines the Ticket's fakecodex replays on its session's first turn.
 //
 // Every Ticket's session runs fakeclaude replaying the default fixture (global-setup.ts): a turn that never ends.
 import { execFile, spawn, type ChildProcess } from "node:child_process";
@@ -55,6 +56,17 @@ export async function enrollLink(): Promise<string> {
  */
 export function laterFixture(ticket: string, lines: object[]): void {
   writeFileSync(join(env("ATHENA_E2E_STATE"), `later-${ticket}.jsonl`), lines.map((l) => JSON.stringify(l) + "\n").join(""));
+}
+
+/**
+ * Gives the Ticket's fakecodex the app-server lines (and fakecodex directives) to replay on its session's first turn,
+ * returning a function that removes them. Write it before the session starts: ticket "default" serves every Codex
+ * session that has no fixture of its own, for a Ticket whose id is not known before it starts.
+ */
+export function codexFixture(ticket: string, lines: object[]): () => void {
+  const file = join(env("ATHENA_E2E_STATE"), `codex-fixture-${ticket}.jsonl`);
+  writeFileSync(file, lines.map((l) => JSON.stringify(l) + "\n").join(""));
+  return () => rmSync(file, { force: true });
 }
 
 /**

@@ -1,8 +1,12 @@
 // What the session view says about a stream item, as plain data: a tool call as a verb and a target (Bash's own
 // description, a path relative to the Ticket's worktree), its line counts, an error's first useful line, the init
-// line's model and the result line's numbers. The rows in ToolCall.tsx and SessionView.tsx draw it.
+// line's model and the result line's numbers, and the runtime a session ran on. Codex's own tools are in
+// tools.codex.ts. The rows in ToolCall.tsx and SessionView.tsx draw it.
 import type { StreamItem } from "@/gen/athena/v1/stream_pb";
 import { stripAnsi } from "@/lib/text/ansi";
+import { modelName } from "@/lib/text/model";
+import { runtimeLabel } from "@/lib/text/runtime";
+import { codexToolView } from "./tools.codex";
 
 /** A tool call's input: StreamItem.detail parsed, every string stripped of escapes. */
 export type ToolInput = { [key: string]: unknown; _lines?: Record<string, unknown> };
@@ -25,7 +29,11 @@ export type ToolKind =
 /** Lines an edit adds and deletes; about when a value was clipped, so the counts are an estimate. */
 export type Counts = { add: number; del: number; about: boolean };
 
-export type ToolView = { kind: ToolKind; label: string; target: string; counts?: Counts };
+/** One file of a Codex patch: its path as shown, its change (add, update, delete) and its diff's lines. */
+export type PatchFile = { path: string; kind: string; lines: DiffLine[]; clipped: boolean };
+
+/** A row's verb and target, and what its body shows when the input says it another way: a patch, a plan's steps. */
+export type ToolView = { kind: ToolKind; label: string; target: string; counts?: Counts; patch?: PatchFile[]; todos?: Todo[] };
 
 /** A duration as the session view says it: 0.4 s, 1.2 s, 12 s, 2 m 5 s. */
 export function formatDuration(ms: number): string {
@@ -36,7 +44,27 @@ export function formatDuration(ms: number): string {
   return `${m} m ${Math.round(s - m * 60)} s`;
 }
 
-export { modelName } from "@/lib/text/model";
+export { modelName };
+
+/**
+ * A runtime item (a session's start, on what) as the divider says it: "Codex · gpt-5.5", then "· continued after a
+ * usage limit" for a failover and "· review" for a review.
+ */
+export function runtimeLine(item: StreamItem): string {
+  let d: Record<string, unknown> = {};
+  try {
+    const v: unknown = item.detail ? JSON.parse(item.detail) : {};
+    if (v && typeof v === "object" && !Array.isArray(v)) d = v as Record<string, unknown>;
+  } catch {
+    // No detail: the runtime alone.
+  }
+  const model = typeof d.model === "string" ? modelName(stripAnsi(d.model)) : "";
+  const parts = [runtimeLabel(stripAnsi(item.tool)) || "Session"];
+  if (model) parts.push(model);
+  if (d.reason === "failover") parts.push("continued after a usage limit");
+  else if (d.reason === "review" || d.role === "review") parts.push("review");
+  return parts.join(" · ");
+}
 
 // A Ticket's worktree (…/.athena/work/<slug>/) and a home directory, wherever they appear in a text.
 const WORKTREE = /(?:\/[^\s/'"`]+)*\/\.athena\/work\/[^\s/'"`]+(\/?)/g;
@@ -217,6 +245,11 @@ export function describeTool(tool: string, input: ToolInput, summary: string): T
   const path = (key: string) => shortPath(str(input, key));
   const fallback = shortenPaths(firstLine(summary));
   switch (tool) {
+    case "exec_command":
+    case "apply_patch":
+    case "web_search":
+    case "update_plan":
+      return codexToolView(tool, input, summary) ?? { kind: "other", label: tool, target: fallback };
     case "Bash": {
       const cmd = str(input, "command");
       return { kind: "bash", label: firstLine(str(input, "description")) || "Ran a command", target: shortenPaths(firstLine(cmd)) || fallback };

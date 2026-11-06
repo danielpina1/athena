@@ -215,3 +215,39 @@ test("a Write or Edit of a document has an Open link to the viewer", () => {
   show(call("Write", { file_path: `${WT}REPORT.md`, content: "# R\n" }));
   expect(screen.queryByRole("link", { name: /^Open/ })).toBeNull();
 });
+
+test("a Codex command's row shows the command in its shell, and a failure its exit code", () => {
+  const cmd = item({ kind: "tool_call", tool: "exec_command", toolUseId: "tu", text: "x", detail: JSON.stringify({ command: "/bin/zsh -lc 'cat missing.txt'", cwd: WT }) });
+  const exit = item({ kind: "tool_result", toolUseId: "tu", isError: true, text: "cat: missing.txt: No such file or directory\n", detail: '{"exitCode":1}' });
+  const { summary } = row(cmd, exit);
+  expect(within(summary).getByText("Ran")).toBeTruthy();
+  expect(within(summary).getByText("cat missing.txt")).toBeTruthy();
+  expect(within(summary).getByText("Exit code 1: cat: missing.txt: No such file or directory")).toBeTruthy();
+});
+
+test("a Codex patch of several files opens to each file's diff", async () => {
+  const changes = [
+    { path: WT + "notes.md", kind: "add", diff: "+hello\n" },
+    { path: WT + "old.txt", kind: "update", diff: "-a\n+b\n" },
+  ];
+  const { el, summary } = row(call("apply_patch", { changes }), ok("completed"));
+  expect(within(summary).getByText("Edited")).toBeTruthy();
+  expect(within(summary).getByText("2 files")).toBeTruthy();
+  expect(summary.querySelector("[data-counts]")!.textContent).toBe("+2−1");
+  await userEvent.click(summary);
+  const old = within(el).getByRole("group", { name: "Changes in old.txt" });
+  expect(old.textContent).toContain("Edited old.txt");
+  expect([...old.querySelectorAll("[data-line]")].map((l) => l.getAttribute("data-line"))).toEqual(["del", "add"]);
+  expect(within(el).getByRole("group", { name: "Changes in notes.md" }).textContent).toContain("Created notes.md");
+});
+
+test("a Codex plan opens to its steps", async () => {
+  const steps = [
+    { step: "Read the parser", status: "completed" },
+    { step: "Fix the lexer", status: "in_progress" },
+  ];
+  const { el, summary } = row(call("update_plan", { steps }), ok("ok"));
+  expect(within(summary).getByText("1 of 2 done")).toBeTruthy();
+  await userEvent.click(summary);
+  expect([...el.querySelectorAll("[data-todo]")].map((t) => t.getAttribute("data-todo"))).toEqual(["completed", "in_progress"]);
+});

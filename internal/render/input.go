@@ -19,6 +19,8 @@ import (
 //	owner   a message from the owner
 //	github  a card of a Trigger from a Source's thread: Detail {"from","kind","url"}
 //	athena  Athena's own messages: the report nudge, the resume notes, notes, a reopening, other messages
+//	handoff the handoff note after the worker preamble of a session that continues another's work (internal/node
+//	        handoffNote): its text unquoted, the Input headers it repeats read as what they are
 //
 // A message with no Input header is the owner's (old transcripts, and the e2e fixtures). The node's tests
 // (TestEchoedInputsRenderAsTheirSenders) hold this to the real formats.
@@ -32,6 +34,8 @@ const (
 	recoveryNote   = "Your previous process ended unexpectedly"
 	resumeNote     = "Your session was paused while it waited"
 	restartNote    = "Athena restarted while you were working"
+	// handoffStart opens a handoff note (internal/node handoffOpening, handoffMovedOpening) on a line of its own.
+	handoffStart = "\nYou are continuing this Ticket "
 )
 
 var (
@@ -43,6 +47,9 @@ var (
 	// quoted is a line the node quoted (internal/node quoteText): one space before what reads like a header.
 	quoted  = regexp.MustCompile(`(?m)^ (\[|(?:trigger_id|acknowledged|from|at|thread|url|replies_to|context|routing note):)`)
 	cutLine = regexp.MustCompile(`\n\[cut: [^\]\n]*\]\s*$`)
+	// quotedHeader is an Input header a handoff note repeats (quoted), and quotedTrigger a trigger's id under one.
+	quotedHeader  = regexp.MustCompile(`(?m)^ \[input [^\]\n]*?: ([^\]\n]*)\]$`)
+	quotedTrigger = regexp.MustCompile(`(?m)^ (?:trigger_id|acknowledged): [^\n]*\n?`)
 )
 
 // cardKeys are a card's lines in the order inputCard writes them; each comes at most once.
@@ -76,6 +83,17 @@ func inputItems(text string) []*athenav1.StreamItem {
 	}
 	first := strings.HasPrefix(trimmed, workerPreamble)
 	heads := nodeHeaders(text)
+	handoff := false
+	if first {
+		end := len(text)
+		if len(heads) > 0 {
+			end = heads[0][0]
+		}
+		if at := strings.Index(text[:end], handoffStart); at >= 0 {
+			handoff = true
+			add("handoff", handoffText(text[at+1:end]), "")
+		}
+	}
 	if len(heads) == 0 {
 		switch {
 		case first || len(out) > 0 || trimmed == "":
@@ -97,7 +115,7 @@ func inputItems(text string) []*athenav1.StreamItem {
 		if msg == "" {
 			continue
 		}
-		if first && i == 0 && (from == "owner" || from == "github") {
+		if first && !handoff && i == 0 && (from == "owner" || from == "github") {
 			from = "task"
 		}
 		add(from, msg, detail)
@@ -120,6 +138,14 @@ func nodeHeaders(text string) [][]int {
 		out = append(out, h)
 	}
 	return out
+}
+
+// handoffText is a handoff note as the session view shows it: the trigger ids of the Inputs it repeats go, their
+// headers read as what they are ("message from the owner (not on GitHub):"), and the rest is unquoted.
+func handoffText(note string) string {
+	note = quotedTrigger.ReplaceAllString(note, "")
+	note = quotedHeader.ReplaceAllString(note, "$1:")
+	return strings.TrimSpace(unquote(note))
 }
 
 // unquote removes the space the node put before body lines that read like a header (internal/node quoteText).

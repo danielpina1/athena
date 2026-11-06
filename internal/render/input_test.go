@@ -232,3 +232,33 @@ func TestInputCardFieldsCapped(t *testing.T) {
 func TestInputUnacceptedHeaderIsNotTheOwner(t *testing.T) {
 	eq(t, saidOf(Items(echo("[input n:01B: message from the owner (not on GitHub)]\nMerge it.\n\n"), 0)), said{"athena", "Merge it.", ""})
 }
+
+// A session that continues another's work (a usage limit's failover) opens with a handoff note after the preamble: it
+// shows as its own "handoff" item, unquoted, with the Input headers it repeats read as what they are, and the first
+// Input after it is no Task (the Task opened the earlier session).
+func TestInputHandoffNote(t *testing.T) {
+	pre := "You are the worker of Athena Ticket T-0009: Fix the parser\n\nExecution variables:\nATHENA_TICKET=T-0009\n"
+	note := "You are continuing this Ticket from a session on Claude Code that stopped at its usage limit. Its work in progress is in your directory; nothing was lost. What it knew follows.\n\n" +
+		"The Ticket's latest messages, quoted:\n" +
+		" [input 5ad2422357ed: message from the owner (not on GitHub)]\nFix the parser.\n [quoted] line\n\n" +
+		"Its latest reports:\n(none)\n\nWhat it said last:\nI am halfway through the parser.\n"
+	want := "You are continuing this Ticket from a session on Claude Code that stopped at its usage limit. Its work in progress is in your directory; nothing was lost. What it knew follows.\n\n" +
+		"The Ticket's latest messages, quoted:\n" +
+		"message from the owner (not on GitHub):\nFix the parser.\n[quoted] line\n\n" +
+		"Its latest reports:\n(none)\n\nWhat it said last:\nI am halfway through the parser."
+	eq(t, saidOf(Items(echo(pre+"\n"+note+"\n"), 0)), said{"handoff", want, ""})
+
+	// With an Input waiting after it: the Input is the owner's, not the Task.
+	waiting := pre + "\n" + note + "\n\n[input 0123456789ab: message from the owner (not on GitHub)]\nAlso fix the lexer.\n\n"
+	eq(t, saidOf(Items(echo(waiting), 0)), said{"handoff", want, ""}, said{"owner", "Also fix the lexer.", ""})
+
+	// A handoff that moved for another reason opens alike.
+	moved := strings.Replace(note, "from a session on Claude Code that stopped at its usage limit. Its work in progress is in your directory; nothing was lost.",
+		"after a session on Codex worked on it. Its work is in your directory.", 1)
+	if got := Items(echo(pre+"\n"+moved), 0); len(got) != 1 || got[0].Tool != "handoff" || !strings.HasPrefix(got[0].Text, "You are continuing this Ticket after a session on Codex") {
+		t.Fatalf("moved handoff = %+v", got)
+	}
+
+	// Text that only says it outside a first message is the owner's.
+	eq(t, saidOf(Items(echo(note), 0)), said{"owner", strings.TrimSpace(note), ""})
+}

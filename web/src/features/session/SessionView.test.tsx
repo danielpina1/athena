@@ -273,3 +273,59 @@ test("a sender the view does not know is a muted line, never You", () => {
   const who = document.querySelector("[data-kind=github] span")!.textContent!;
   expect(who.length).toBeLessThanOrEqual(80 + " on GitHub".length);
 });
+
+const marker = (offset: bigint, runtime: string, model: string, reason: string, role = "implement") =>
+  item({ offset, kind: "runtime", tool: runtime, text: `${model} · ${reason}`, detail: JSON.stringify({ model, reason, role }) });
+
+test("runtime divider says failover and review", () => {
+  render(<SessionView ticketId="T-1" />);
+  act(() =>
+    link.items("T-1", [
+      marker(0n, "claude", "claude-sonnet-5", "start"),
+      item({ offset: 10n, kind: "say", text: "Halfway there." }),
+      marker(20n, "codex", "gpt-5.5", "failover"),
+      item({ offset: 30n, kind: "say", text: "Picking it up." }),
+      marker(40n, "claude", "", "review", "review"),
+      marker(50n, "codex", "gpt-5.5", "resume"),
+    ]),
+  );
+  const dividers = [...document.querySelectorAll("[data-kind=runtime]")] as HTMLElement[];
+  expect(dividers.map((d) => d.querySelector("[data-runtime-label]")!.textContent)).toEqual([
+    "Claude Code · sonnet 5",
+    "Codex · gpt-5.5 · continued after a usage limit",
+    "Claude Code · review",
+    "Codex · gpt-5.5",
+  ]);
+  // A Mono hairline row, not a card: no border box, the label in the mono face, with its time.
+  const [first] = dividers;
+  expect(hasClasses(first.querySelector("[data-runtime-label]")!, "font-mono", "text-xs")).toBe(true);
+  expect(first.className).not.toContain("border");
+  expect(first.querySelector("time")).toBeTruthy();
+  expect(first.getAttribute("role")).toBe("separator");
+  expect(first.getAttribute("aria-label")).toBe("Claude Code · sonnet 5");
+});
+
+test("a handoff note reads as its own block, the opening first and the rest clamped", async () => {
+  render(<SessionView ticketId="T-1" />);
+  const rest = Array.from({ length: 20 }, (_, i) => `- line ${i + 1}`).join("\n");
+  const opening =
+    "You are continuing this Ticket from a session on Claude Code that stopped at its usage limit. Its work in progress is in your directory; nothing was lost. What it knew follows.";
+  act(() =>
+    link.items("T-1", [
+      marker(0n, "codex", "gpt-5.5", "failover"),
+      item({ offset: 10n, kind: "user", tool: "handoff", text: `${opening}\n\nThe Ticket's latest messages, quoted:\n${rest}` }),
+    ]),
+  );
+  const block = screen.getByRole("region", { name: "Hand-off note" });
+  expect(block.getAttribute("data-kind")).toBe("handoff");
+  expect(within(block).getByText("Hand-off")).toBeTruthy();
+  expect(within(block).getByText(opening)).toBeTruthy();
+  const body = block.querySelector("[data-handoff-body]")!;
+  expect(hasClasses(body as HTMLElement, "font-mono", "whitespace-pre-wrap")).toBe(true);
+  expect(body.textContent).toContain("- line 20");
+  expect(block.querySelector("[data-clamped]")).toBeTruthy();
+  await userEvent.click(within(block).getByRole("button", { name: "Show more" }));
+  expect(block.querySelector("[data-clamped]")).toBeNull();
+  // Never the owner's words.
+  expect(screen.queryByText("You")).toBeNull();
+});
