@@ -338,9 +338,14 @@ func (n *Node) judge(ctx context.Context, s *session, j judgment, start time.Tim
 	}
 	rc := n.ruleContext(s, j.runtime)
 	d, at := EvaluateCalls(rc, j.runtime, j.calls)
-	unsandboxed := d.Verdict == VerdictAllow && j.door != "" && (n.cfg.Sandbox != nil || rc.Restricted) && runsOrWrites(j.calls)
+	outside := j.door != "" && (n.cfg.Sandbox != nil || rc.Restricted) && runsOrWrites(j.calls)
+	unsandboxed := d.Verdict == VerdictAllow && outside
 	if unsandboxed {
 		d = escalate(ruleCodexUnsandboxed, "running outside the sandbox needs approval")
+	} else if d.Verdict == VerdictEscalate && outside {
+		// The rules' escalation is not the only reason to ask: the action also runs outside Codex's sandbox, which no
+		// standing allow rule may allow, so a person is always asked.
+		d = d.merged(escalate(ruleCodexUnsandboxed, "running outside the sandbox needs approval"))
 	}
 	// Never log the tool input: it may name credential paths or carry secrets.
 	s.log.Info("hook decision", "event", j.event, "runtime", j.runtime, "tool", j.tool, "verdict", d.Verdict, "rule", d.Rule)
@@ -517,6 +522,10 @@ func (n *Node) allowedByRule(s *session, ask approvalAsk) (bool, string) {
 func (n *Node) escalate(ctx context.Context, s *session, event string, ask approvalAsk, start time.Time) HookResponse {
 	eng := n.engine()
 	ok, notAllowed := n.allowedByRule(s, ask)
+	if !ok && notAllowed != ask.d.Rule {
+		// The Approval is about the rule no standing rule allows, not the one that was shown first.
+		ask.summary = "Needs approval (" + notAllowed + "): " + ask.summary
+	}
 	if ok {
 		// The owner's standing rule answers it: nobody is asked, no Approval is made and no escalation is counted.
 		n.observeHook(event, VerdictAllow, start)
@@ -536,7 +545,7 @@ func (n *Node) escalate(ctx context.Context, s *session, event string, ask appro
 		s.log.Error("request approval", "error", err)
 		return denied("approval could not be requested: " + err.Error())
 	}
-	s.log.Info("approval requested", "approval", ap.ID, "rule", ask.d.Rule)
+	s.log.Info("approval requested", "approval", ap.ID, "rule", notAllowed)
 	// The wait ends with the session too: nobody can act on an answer once it stopped (a retry, a stop, a shutdown).
 	wctx, cancel := context.WithTimeout(ctx, n.cfg.ApprovalTimeout)
 	go func() {

@@ -7,6 +7,7 @@ import (
 
 	"github.com/danielpina1/athena/internal/core"
 	"github.com/danielpina1/athena/internal/policy"
+	"github.com/danielpina1/athena/internal/runtime/rt"
 )
 
 // allowAllPolicy is a Policy whose allow rules match every action, as a Policy would that was handed rules Validate
@@ -118,10 +119,10 @@ func TestAllowRuleNeedsEveryEscalation(t *testing.T) {
 	}
 	settings, _ := bash("echo x > ../elsewhere; echo '{}' > .claude/settings.json")
 	add("write outside plus session-config", settings, map[string]bool{ruleWrite: true}, false)
-	force, _ := bash("echo x > ../y && make deploy")
-	add("write outside plus deploy", force, map[string]bool{ruleWrite: true}, false)
-	add("write outside plus deploy, only the push allowed", force, map[string]bool{"bash-escalate:deploy": true}, false)
-	add("write outside plus deploy, both allowed", force, map[string]bool{ruleWrite: true, "bash-escalate:deploy": true}, true)
+	mixed, _ := bash("echo x > ../y && make deploy")
+	add("write outside plus deploy", mixed, map[string]bool{ruleWrite: true}, false)
+	add("write outside plus deploy, only deploy allowed", mixed, map[string]bool{"bash-escalate:deploy": true}, false)
+	add("write outside plus deploy, both allowed but write-outside-ticket is never promoted", mixed, map[string]bool{ruleWrite: true, "bash-escalate:deploy": true}, false)
 	two, _ := bash("make deploy && pip install requests")
 	add("two risky commands, the first allowed", two, map[string]bool{"bash-escalate:deploy": true}, false)
 	add("two risky commands, both allowed", two, map[string]bool{"bash-escalate:deploy": true, "bash-escalate:pip-install": true}, true)
@@ -137,6 +138,42 @@ func TestAllowRuleNeedsEveryEscalation(t *testing.T) {
 		n := New(Config{Policy: allowSet(c.allowed)}, nil)
 		if got, _ := n.allowedByRule(sess, approvalAsk{tool: "Bash", d: c.d}); got != c.want {
 			t.Errorf("%s: allowed = %v, want %v (decision %+v)", c.name, got, c.want, c.d)
+		}
+	}
+}
+
+// An ask through Codex's door on a node that sandboxes its workers also runs outside the sandbox, which no standing allow
+// rule may allow: a command and a file ask each make an Approval, whatever rules the Policy allows.
+func TestAllowRuleNeverPassesTheDoor(t *testing.T) {
+	if !SandboxSupported() {
+		t.Skip("no sandbox on this platform")
+	}
+	h := newCodexHarness(t, codexTurn(), func(c *Config) {
+		c.Policy = allowAllPolicy{tools: policy.ToolStandard}
+		c.Sandbox = &SandboxConfig{}
+	})
+	tk := h.submitCodex("Task")
+	h.running(tk.ID) // the session has started: nothing else reads its Ticket now
+	s := h.n.liveSession(tk.ID)
+	setRepo(s, "acme/web")
+	ctx, cancel := context.WithTimeout(context.Background(), waitTimeout)
+	defer cancel()
+	for _, req := range []rt.ApprovalRequest{
+		{Kind: "command", Command: "make deploy; python -c 'print(1)'", TurnID: "t1"},
+		{Kind: "file", Paths: []string{"../out/x.txt"}, TurnID: "t2"},
+	} {
+		done := make(chan rt.Verdict, 1)
+		go func() { done <- h.n.approveRequest(ctx, s, req) }()
+		var pending []core.Approval
+		h.eventually(req.Kind+" ask makes an Approval", func() bool {
+			pending, _ = h.eng.PendingApprovals()
+			return len(pending) == 1
+		})
+		if err := h.eng.AnswerApproval(pending[0].ID, false, ""); err != nil {
+			t.Fatal(err)
+		}
+		if v := <-done; v.Allow {
+			t.Errorf("%s ask answered %+v after a denial", req.Kind, v)
 		}
 	}
 }

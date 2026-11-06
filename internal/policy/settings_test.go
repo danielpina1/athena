@@ -355,8 +355,8 @@ func TestAllowsAndPromoteAfter(t *testing.T) {
 	if New(s, nil, time.Minute).(*policy).PromoteAfter() != 2 {
 		t.Fatal("PromoteAfter override")
 	}
-	if len(NeverPromote) != 9 {
-		t.Fatalf("NeverPromote = %v, want nine rules", NeverPromote)
+	if len(NeverPromote) != 11 {
+		t.Fatalf("NeverPromote = %v, want eleven rules", NeverPromote)
 	}
 	for _, rule := range NeverPromote {
 		s.Allow = []AllowRule{{Tool: "Bash", Rule: rule, Repo: "a/b"}}
