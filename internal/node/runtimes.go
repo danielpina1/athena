@@ -64,6 +64,13 @@ func pinnedRuntime(t core.Ticket, a core.Assignment) string {
 	return runtimeName(t)
 }
 
+// movable reports whether a launch of a, pinned only by the session it resumes, may move to another runtime when that
+// session's runtime is limited (Choice.FailOver): a running Assignment of an auto Ticket, whose runtime only ever comes
+// from its session, or a review, which its Ticket never pins. An Assignment of a Ticket that names its runtime stays.
+func movable(t core.Ticket, a core.Assignment) bool {
+	return a.State == core.AssignmentRunning && (a.Role == core.RoleReview || (t.Execution != nil && t.Execution.Runtime == core.RuntimeAuto))
+}
+
 // assumedReady is the Info of Claude Code, which the node takes as ready without asking it: its sessions fail on their
 // own when it is not, and `claude --version` costs a process per launch. Its version is the one the Config names.
 func (n *Node) assumedReady() rt.Info {
@@ -164,12 +171,15 @@ type ChoiceInput struct {
 // Choice is a Chooser's answer. With Runtime set and a zero Until and no AwaitSession, the session launches on it now.
 // A non-zero Until waits until then; AwaitSession waits for a session of the node to end (a runtime's session cap
 // frees) or for Until, whichever comes first; Runtime then names the runtime waited for, if one. Runtime "" with
-// neither fails the launch with Why. Why says why in every case but a launch.
+// neither fails the launch with Why. Why says why in every case but a launch. FailOver, with Runtime and Until, says
+// the launch would resume a session on Runtime, which is limited until Until, while another runtime is free now: the
+// Assignment ends at that limit instead, and a new one runs where there is headroom (movable).
 type Choice struct {
 	Runtime      string
 	Until        time.Time
 	Why          string
 	AwaitSession bool
+	FailOver     bool
 }
 
 // unknownWait is how long a launch waits when every runtime is limited and none says until when.
@@ -180,7 +190,9 @@ const unknownWait = 15 * time.Minute
 //  1. An Assignment pinned to a runtime (Assignment.Runtime, or the runtime it ran on: a resume keeps its session's)
 //     runs on it, and so does one of a Ticket that names claude or codex, except a review, which is chosen as under
 //     auto. Not ready, the launch fails with its Why; limited, it waits until its reset; at its session cap, for a
-//     session to end. No other runtime takes its place.
+//     session to end. No other runtime takes its place, but for a session whose runtime only its session pinned
+//     (movable): limited, it fails over (Choice.FailOver) when auto would launch now, and otherwise waits until its
+//     reset or until auto's own wait ends, whichever comes first.
 //  2. auto: the candidates are the ready runtimes that are not limited and below their MaxSessions. A review drops the
 //     runtime of the Ticket's latest implement Assignment that ran when another candidate is left (the one code path of
 //     "review on the other runtime"); then the candidates over any AvoidAbove window are dropped,
@@ -220,7 +232,21 @@ func (c HeadroomChooser) pinned(in ChoiceInput, name string) Choice {
 		return Choice{Why: name + " cannot run this ticket: " + whyOf(info)}
 	}
 	if q := in.quota(name); q.Limited(in.Now) {
-		return Choice{Runtime: name, Until: *q.LimitedUntil, Why: name + " is limited until " + stamp(*q.LimitedUntil)}
+		ch := Choice{Runtime: name, Until: *q.LimitedUntil, Why: name + " is limited until " + stamp(*q.LimitedUntil)}
+		if !movable(in.Ticket, in.Assignment) {
+			return ch
+		}
+		switch alt := c.auto(in); {
+		case alt.Runtime != "" && alt.Until.IsZero() && !alt.AwaitSession:
+			ch.FailOver = true
+		default:
+			// Nowhere else to go now: look again when another runtime frees, if that is sooner.
+			if !alt.Until.IsZero() && alt.Until.Before(ch.Until) {
+				ch.Until = alt.Until
+			}
+			ch.AwaitSession = alt.AwaitSession
+		}
+		return ch
 	}
 	if c.atCap(name, in.Live) {
 		return Choice{Runtime: name, AwaitSession: true, Why: c.capWhy(name)}

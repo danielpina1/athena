@@ -301,10 +301,67 @@ func TestPinnedLimitedWaits(t *testing.T) {
 	if c.Runtime != core.RuntimeClaude || !c.Until.Equal(chooseNow.Add(90*time.Minute)) || !strings.Contains(c.Why, "claude") {
 		t.Fatalf("pinned limited: %+v, want a wait for claude's reset", c)
 	}
-	// A resumed Assignment keeps its session's runtime: limited, it waits too.
-	c = defaultChooser.Choose(choiceFor(core.RuntimeAuto, []core.Assignment{ranAssignment("a1", core.RuntimeClaude, "")}, nil, q))
-	if c.Until.IsZero() {
+	// A resumed Assignment of a Ticket that names its runtime keeps its session's: limited, it waits too.
+	c = defaultChooser.Choose(choiceFor(core.RuntimeClaude, []core.Assignment{runningAssignment("a1", core.RuntimeClaude, "")}, nil, q))
+	if c.Until.IsZero() || c.FailOver {
 		t.Fatalf("resumed limited: %+v, want a wait", c)
+	}
+}
+
+// runningAssignment is a running Assignment of role whose session ran on runtime: one that resumes it.
+func runningAssignment(id, runtime, role string) core.Assignment {
+	a := ranAssignment(id, runtime, role)
+	a.State = core.AssignmentRunning
+	return a
+}
+
+// An auto Ticket's Assignment whose runtime comes only from its session (parked on its pull request, idle after a
+// restart, the one that applied a held report, or one whose limit the node knew but the Engine never heard of) fails
+// over when that runtime is limited and another is free now, rather than wait out the reset; so does a review, which
+// its Ticket never pins. A Ticket that names its runtime still waits, and so does a launch with nowhere else to go,
+// though only until another runtime frees.
+func TestSessionPinnedLimitedFailsOver(t *testing.T) {
+	q := map[string]quota.State{core.RuntimeClaude: limitedFor(90 * time.Minute)}
+	failsOver := func(name string, c Choice) {
+		t.Helper()
+		if !c.FailOver || c.Runtime != core.RuntimeClaude || !c.Until.Equal(chooseNow.Add(90*time.Minute)) || c.Why == "" {
+			t.Errorf("%s: %+v, want a failover from claude's limit", name, c)
+		}
+	}
+	parked := runningAssignment("a1", core.RuntimeClaude, "")
+	failsOver("parked or idle", defaultChooser.Choose(choiceFor(core.RuntimeAuto, []core.Assignment{parked}, nil, q)))
+
+	applied := runningAssignment("a3", core.RuntimeClaude, "")
+	applied.Continues = "a1"
+	as := []core.Assignment{ranAssignment("a1", core.RuntimeClaude, ""), ranAssignment("a2", core.RuntimeCodex, core.RoleReview), applied}
+	failsOver("applied held report", defaultChooser.Choose(choiceFor(core.RuntimeAuto, as, nil, q)))
+
+	review := runningAssignment("a2", core.RuntimeClaude, core.RoleReview)
+	as = []core.Assignment{ranAssignment("a1", core.RuntimeCodex, ""), review}
+	failsOver("review of a pinned ticket", defaultChooser.Choose(choiceFor(core.RuntimeCodex, as, nil, q)))
+
+	// A Ticket that names its runtime waits for it.
+	if c := defaultChooser.Choose(choiceFor(core.RuntimeClaude, []core.Assignment{parked}, nil, q)); c.FailOver || c.Until.IsZero() {
+		t.Errorf("pinned ticket: %+v, want a wait", c)
+	}
+	// The other runtime is not ready: wait for the reset.
+	ready := map[string]rt.Info{core.RuntimeClaude: readyInfo, core.RuntimeCodex: loggedOut}
+	if c := defaultChooser.Choose(choiceFor(core.RuntimeAuto, []core.Assignment{parked}, ready, q)); c.FailOver ||
+		!c.Until.Equal(chooseNow.Add(90*time.Minute)) {
+		t.Errorf("other unready: %+v, want a wait for claude's reset", c)
+	}
+	// Both limited: wait, but look again when the other frees first.
+	both := map[string]quota.State{core.RuntimeClaude: limitedFor(90 * time.Minute), core.RuntimeCodex: limitedFor(40 * time.Minute)}
+	if c := defaultChooser.Choose(choiceFor(core.RuntimeAuto, []core.Assignment{parked}, nil, both)); c.FailOver ||
+		c.Runtime != core.RuntimeClaude || !c.Until.Equal(chooseNow.Add(40*time.Minute)) {
+		t.Errorf("both limited: %+v, want a wait until codex frees", c)
+	}
+	// The other is at its session cap: wait, and look again when a session ends.
+	capped := HeadroomChooser{Preferred: core.RuntimeClaude, MaxSessions: map[string]int{core.RuntimeCodex: 1}}
+	in := choiceFor(core.RuntimeAuto, []core.Assignment{parked}, nil, q)
+	in.Live = map[string]int{core.RuntimeCodex: 1}
+	if c := capped.Choose(in); c.FailOver || !c.AwaitSession || !c.Until.Equal(chooseNow.Add(90*time.Minute)) {
+		t.Errorf("other at its cap: %+v, want a wait for a session's end or the reset", c)
 	}
 }
 

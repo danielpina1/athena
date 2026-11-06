@@ -277,8 +277,11 @@ is amber, never orange: it waits by itself and needs nobody.
 **The chooser.** Before each launch, and before it prepares the Ticket's directory, the node chooses the runtime:
 
 1. An Assignment that ran keeps its runtime (a resume continues its session); a Ticket pinned to `claude` or `codex`
-   runs there, except its reviews, which are chosen as under `auto`. Not ready, the launch fails with why; limited, it waits until the reset; at its `maxSessions`, it
-   waits for a session to end. No other runtime takes its place.
+   runs there, except its reviews, which are chosen as under `auto`. Not ready, the launch fails with why; limited, it
+   waits until the reset; at its `maxSessions`, it waits for a session to end. No other runtime takes its place, with
+   one exception: a running Assignment of an `auto` Ticket, or a review, whose runtime only its session pins and is
+   limited when the session would resume fails over (below) when rule 2 would launch it now; otherwise it waits until
+   the reset, or until another runtime frees, whichever comes first.
 2. `auto`: the candidates are the ready runtimes that are not limited and below their `maxSessions`. A review drops the
    implementer's runtime when another candidate is left. Candidates above an `avoidAbove` window are dropped unless
    that leaves none. Then the runtime of the Ticket's latest Assignment of the same role that ran wins (a warm
@@ -309,8 +312,18 @@ resets at that time. The node then:
 
 A limit on a turn in which the worker had already reported `blocked`, `waiting` or `ready` (since its last Input) is
 not failed over: the turn ends as one that ended well (a ready worker on a Ticket that waits for its pull request
-parks), the question or the hand-off stands, and only the quota records the limit. The next Input reaches the limited
-session, whose turn then fails over.
+parks), the question or the hand-off stands, and only the quota records the limit.
+
+**Failover before a resume.** A session with no live process can find its runtime limited when it would resume: a
+worker parked on its pull request whose pull request gets a comment, an idle Assignment after a server restart, the
+Assignment that applied a held review report (§8) when an Input reaches it, or a session whose limit the quota
+recorded before a crash kept the Engine from hearing of it. On an `auto` Ticket (and for a review, which its Ticket
+never pins) the node does not wait out the reset when another runtime is free now: it checkpoints the work, ends the
+Assignment with reason `usage_limit` and the quota's reset, and queues a new one, as in steps 2 and 3 above, before
+any process starts. The new Assignment runs on the free runtime with the handoff note, and the Input that woke the
+session goes to it. With no runtime free, it waits until its runtime's reset or until another frees, whichever is
+first, and then looks again. A Ticket pinned to `claude` or `codex` waits for its runtime's reset, then resumes its
+session.
 
 The new Assignment launches through the chooser, the only wait there is: an `auto` Ticket goes to the other runtime
 (the limited one is no candidate), or, with both limited, waits until the earliest reset; a pinned Ticket waits for its

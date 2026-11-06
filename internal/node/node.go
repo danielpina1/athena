@@ -1258,13 +1258,15 @@ func (r *runner) run() {
 }
 
 // chooseRuntime picks the runtime of the launch (Config.Chooser): it asks the runtimes the choice may take for their
-// readiness (only the pinned one, when the launch is pinned; a stop ends the check), then chooses and records the
-// choice on the session in one step with counting the sessions per runtime. A wait puts the launch off (setLaunchWait)
-// and a refusal fails it with why; both report false.
+// readiness (only the pinned one, when the launch is pinned and cannot fail over; a stop ends the check), then chooses
+// and records the choice on the session in one step with counting the sessions per runtime. A wait puts the launch off
+// (setLaunchWait), a failover ends the Assignment at its limit (failOver) and a refusal fails it with why; all three
+// report false.
 func (r *runner) chooseRuntime() (rt.Runtime, bool) {
 	s, n := r.s, r.n
 	names := slices.Sorted(maps.Keys(n.cfg.Runtimes))
-	if p := pinnedRuntime(s.t, s.a); p != "" {
+	// A session pinned only by itself (movable) whose runtime is limited may fail over: the others are asked too.
+	if p := pinnedRuntime(s.t, s.a); p != "" && !(movable(s.t, s.a) && n.quota.State(p).Limited(time.Now())) {
 		names = []string{p}
 	}
 	cctx, cancel := context.WithCancel(n.ctx)
@@ -1305,6 +1307,9 @@ func (r *runner) chooseRuntime() (rt.Runtime, bool) {
 	}
 	n.chooseMu.Unlock()
 	switch {
+	case c.FailOver:
+		r.failOver(c)
+		return nil, false
 	case launch:
 		rtm, ok := n.cfg.Runtimes[c.Runtime]
 		if !ok {
@@ -1917,6 +1922,26 @@ func (r *runner) usageLimited(e rt.TurnEnd) {
 		return
 	}
 	r.log.Info("usage limit reached; the ticket continues in a new assignment", "runtime", r.runtime, "resetsAt", l.ResetsAt)
+	s.stop(core.ReasonUsageLimit, false)
+}
+
+// failOver ends the Assignment at its session's runtime's limit before that session resumes (Choice.FailOver: the
+// runtime only its session pinned is limited and another is free): as for a limit inside a turn (usageLimited), the
+// work in progress is checkpointed and the Engine ends the Assignment with the quota's reset and queues a new one
+// (UsageLimited), which the chooser places on the free runtime and which gets the handoff note. No session ran, so
+// nothing has to exit first. When the Engine cannot take the fact, the launch waits for the reset instead.
+func (r *runner) failOver(c Choice) {
+	s, n := r.s, r.n
+	if !s.reviewing() {
+		n.checkpointSession(s)
+	}
+	reset := c.Until.UTC()
+	if err := r.eng.UsageLimited(s.t.ID, s.a.ID, core.UsageLimit{Runtime: c.Runtime, ResetsAt: &reset}); err != nil {
+		r.log.Error("record the usage limit; the launch waits for the reset", "error", err)
+		s.setLaunchWait(max(time.Until(c.Until), minLaunchWait), c.Why)
+		return
+	}
+	r.log.Info("the session's runtime is limited; the ticket continues in a new assignment", "runtime", c.Runtime, "resetsAt", reset)
 	s.stop(core.ReasonUsageLimit, false)
 }
 

@@ -3174,3 +3174,90 @@ func TestLimitAfterReadyReportParks(t *testing.T) {
 		t.Fatalf("stage %+v, waits %v", st, cur.WaitsForPerson())
 	}
 }
+
+// parkOnPull runs an owner task on runtime until its worker reported ready on a bound pull request and its session
+// parked, then limits Claude Code in the quota and lets a person's review comment reach the Ticket. It returns the
+// Ticket and its repository.
+func parkOnPull(h *codexHarness, runtime string) (core.Ticket, string) {
+	t := h.t
+	t.Helper()
+	hold := filepath.Join(t.TempDir(), "turn-may-end")
+	t.Setenv("ATHENA_FAKE_HOLD_RESULT", hold)
+	repo := newRepo(t)
+	tk, err := h.eng.SubmitOwnerTask("Open a pull request", core.TaskOptions{Dir: repo, Runtime: runtime})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, a := h.running(tk.ID)
+	pull := "github:o/r#7"
+	if err := h.eng.BindThread(tk.ID, pull, true); err != nil {
+		t.Fatal(err)
+	}
+	if r := h.report(tk.ID, a.ID, core.ReportReady, "opened #7"); !r.OK {
+		t.Fatalf("ready report = %+v", r)
+	}
+	if err := os.WriteFile(hold, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.eventually("the session parks", func() bool { return h.n.liveSession(tk.ID) == nil })
+	reset := time.Now().Add(2 * time.Hour)
+	h.n.Quota().Hit(core.RuntimeClaude, rt.LimitHit{Runtime: core.RuntimeClaude, ResetsAt: &reset})
+	review := core.Trigger{ID: "github:review:1", Source: "github", Kind: core.KindMessage, Human: true,
+		Actor: core.ActorRef{Source: "github", ID: "alice"}, Threads: []string{pull}, At: time.Now(),
+		Text: "please rename the flag (review-c4d1)"}
+	if _, err := h.eng.Receive(review); err != nil {
+		t.Fatal(err)
+	}
+	return tk, repo
+}
+
+// I2: an auto Ticket parked on its pull request, whose session's runtime (Claude Code) is limited when a review comment
+// arrives, does not wait out the reset: its Assignment ends at the limit (checkpointed, with the quota's reset) and
+// Codex continues with the handoff note and the comment. Claude Code never launches again.
+func TestParkedAutoTicketFailsOverFromLimitedRuntime(t *testing.T) {
+	h := newCodexHarness(t, codexTurn(), nil)
+	tk, repo := parkOnPull(h, core.RuntimeAuto)
+	h.eventually("codex gets its first message", func() bool { return h.codexTurnStart() != "" })
+	cur, st := h.ticket(tk.ID)
+	if len(cur.Assignments) != 2 {
+		t.Fatalf("assignments = %+v", cur.Assignments)
+	}
+	limited, next := cur.Assignments[0], cur.Assignments[1]
+	if limited.EndedReason != core.ReasonUsageLimit || limited.Limit == nil || limited.Limit.Runtime != core.RuntimeClaude ||
+		limited.Limit.ResetsAt == nil || limited.Limit.ResetsAt.Before(time.Now().Add(time.Hour)) {
+		t.Fatalf("limited assignment = %+v, limit %+v", limited, limited.Limit)
+	}
+	if next.Runtime != core.RuntimeCodex || next.Role != "" {
+		t.Fatalf("next assignment = %+v", next)
+	}
+	if st.Stage != "working" || cur.Attention != nil {
+		t.Fatalf("stage %+v, attention %+v", st, cur.Attention)
+	}
+	if text := h.codexTurnStart(); !strings.Contains(text, fmt.Sprintf(handoffOpening, "Claude Code")) || !strings.Contains(text, "Open a pull request") {
+		t.Fatalf("codex's first message lacks the handoff:\n%s", text)
+	}
+	h.eventually("the comment reaches codex", func() bool { return h.rpcHas("review-c4d1") })
+	if n := len(h.invocations()); n != 1 {
+		t.Fatalf("claude launched %d times, want only the first", n)
+	}
+	if !h.rpcHas(`"method":"thread/start"`) {
+		t.Fatal("codex started no new thread")
+	}
+	if ref := "refs/athena/" + strings.ToLower(tk.ID) + "/checkpoint"; git(t, repo, "rev-parse", ref+"^") != git(t, repo, "rev-parse", "refs/heads/"+branchName(tk)) {
+		t.Fatal("no checkpoint on the branch's head")
+	}
+}
+
+// A Ticket that names its runtime keeps it: parked on its pull request with Claude Code limited, the review comment
+// waits for the reset, in the same Assignment, and nothing launches.
+func TestParkedPinnedTicketWaitsForItsRuntime(t *testing.T) {
+	h := newCodexHarness(t, codexTurn(), nil)
+	tk, _ := parkOnPull(h, core.RuntimeClaude)
+	h.never("a launch before the reset", 1500*time.Millisecond, func() bool {
+		return len(h.invocations()) > 1 || h.rpcHas(`"method":"thread/start"`)
+	})
+	cur, _ := h.ticket(tk.ID)
+	if len(cur.Assignments) != 1 || cur.Assignments[0].State != core.AssignmentRunning || len(cur.Undelivered) != 1 {
+		t.Fatalf("assignments %+v, undelivered %v", cur.Assignments, cur.Undelivered)
+	}
+}
