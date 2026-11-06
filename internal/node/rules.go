@@ -22,6 +22,19 @@ type Decision struct {
 	Verdict string
 	Reason  string
 	Rule    string
+	// Also names the other rules an escalation triggers beyond Rule (a command can need approval for several reasons):
+	// a standing allow rule lets the call through only when every one of them is allowed.
+	Also []string
+}
+
+// merged is escalation d with the rules of escalation o added; d stays the one shown.
+func (d Decision) merged(o Decision) Decision {
+	for _, r := range append([]string{o.Rule}, o.Also...) {
+		if r != d.Rule && r != "" && !slices.Contains(d.Also, r) {
+			d.Also = append(slices.Clone(d.Also), r)
+		}
+	}
+	return d
 }
 
 // RuleContext carries what the rules need to know about the worker.
@@ -161,11 +174,18 @@ func evaluate(ctx RuleContext, tool string, input json.RawMessage) Decision {
 		}
 	}
 	if tool == "Bash" {
-		if d, ok := bashWriteRule(ctx, str(in, "command"), str(in, "workdir")); ok {
-			return d
-		}
-		if d, ok := bashEscalateRule(ctx, str(in, "command")); ok {
-			return d
+		// Every escalation the command triggers, not only the first: an allow rule for one must not pass the others.
+		w, wok := bashWriteRule(ctx, str(in, "command"), str(in, "workdir"))
+		e, eok := bashEscalateRule(ctx, str(in, "command"))
+		switch {
+		case wok && w.Verdict == VerdictDeny:
+			return w
+		case wok && eok:
+			return w.merged(e)
+		case wok:
+			return w
+		case eok:
+			return e
 		}
 	}
 	return allow()
@@ -1192,6 +1212,8 @@ func bashWriteRule(ctx RuleContext, command, workdir string) (Decision, bool) {
 	note := func(d Decision) {
 		if esc == nil {
 			esc = &d
+		} else {
+			*esc = esc.merged(d)
 		}
 	}
 	for _, t := range ctx.bashWriteTargets(command, start, 0) {
@@ -1224,16 +1246,28 @@ func bashWriteRule(ctx RuleContext, command, workdir string) (Decision, bool) {
 	return Decision{}, false
 }
 
+// bashEscalateRule is the escalation of the first risky pattern the command matches, naming the rest in Also.
 func bashEscalateRule(ctx RuleContext, command string) (Decision, bool) {
+	var out *Decision
+	note := func(d Decision) {
+		if out == nil {
+			out = &d
+		} else {
+			*out = out.merged(d)
+		}
+	}
 	for _, p := range bashEscalations {
 		if p.re.MatchString(command) {
-			return escalate(ruleBashPrefix+p.name, "command needs approval ("+p.name+")"), true
+			note(escalate(ruleBashPrefix+p.name, "command needs approval ("+p.name+")"))
 		}
 	}
 	if pipInstallRe.MatchString(command) && !ctx.VenvActive && !venvInCmdRe.MatchString(command) {
-		return escalate(ruleBashPrefix+"pip-install", "pip install outside a virtualenv needs approval"), true
+		note(escalate(ruleBashPrefix+"pip-install", "pip install outside a virtualenv needs approval"))
 	}
-	return Decision{}, false
+	if out == nil {
+		return Decision{}, false
+	}
+	return *out, true
 }
 
 // ---------------------------------------------------------------------------

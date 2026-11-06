@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/danielpina1/athena/internal/policy"
@@ -22,6 +23,16 @@ func TestOffersAtThreshold(t *testing.T) {
 	}
 	if got := Offers(streak("credential-read", 10), none, nil); len(got) != 0 {
 		t.Errorf("credential-read at 10 = %+v, want none", got)
+	}
+	for _, rule := range policy.NeverPromote {
+		if got := Offers(streak(rule, 10), none, nil); len(got) != 0 {
+			t.Errorf("%s at 10 = %+v, want none", rule, got)
+		}
+	}
+	for _, rule := range []string{"network_access", "codex_permissions", "codex_unsandboxed"} {
+		if !slices.Contains(policy.NeverPromote, rule) {
+			t.Errorf("NeverPromote lacks %s", rule)
+		}
 	}
 	withRule := policy.Settings{Allow: []policy.AllowRule{{Tool: "Bash", Rule: "bash-escalate:npm", Repo: "acme/web"}}}
 	if got := Offers(streak("bash-escalate:npm", 9), withRule, nil); len(got) != 0 {

@@ -226,6 +226,10 @@ func EvaluateCalls(ctx RuleContext, runtime string, calls []ToolCall) (Decision,
 	}
 	for _, c := range calls {
 		d := evaluateCall(ctx, runtime, c)
+		if d.Verdict == VerdictEscalate && best.Verdict == VerdictEscalate {
+			best = best.merged(d) // the first stays the one shown; the others are still named
+			continue
+		}
 		if strictness(d.Verdict) > strictness(best.Verdict) {
 			best, at = d, c
 		}

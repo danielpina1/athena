@@ -497,20 +497,27 @@ func (n *Node) escalateShared(ctx context.Context, s *session, event, key, door 
 }
 
 // allowedByRule reports whether the owner's allow rules let the session do what it asks with no Approval: only a
-// standard session, never a rule the owner always decides, and only in a repository.
-func (n *Node) allowedByRule(s *session, ask approvalAsk) bool {
+// standard session, in a repository, and only when every rule the ask triggers is allowed and none is one the owner
+// always decides. When not, it names the first rule that is not allowed.
+func (n *Node) allowedByRule(s *session, ask approvalAsk) (bool, string) {
 	repo := s.ticketRepo()
-	if n.cfg.Policy == nil || s.restricted() || repo == "" || slices.Contains(policy.NeverPromote, ask.d.Rule) {
-		return false
+	if n.cfg.Policy == nil || s.restricted() || repo == "" {
+		return false, ask.d.Rule
 	}
-	return n.cfg.Policy.Allows(ask.tool, ask.d.Rule, repo)
+	for _, rule := range append([]string{ask.d.Rule}, ask.d.Also...) {
+		if slices.Contains(policy.NeverPromote, rule) || !n.cfg.Policy.Allows(ask.tool, rule, repo) {
+			return false, rule
+		}
+	}
+	return true, ""
 }
 
 // escalate asks a person through an Approval and waits up to ApprovalTimeout, or until the session stops, for the
 // answer; no answer is a deny and the Approval expires.
 func (n *Node) escalate(ctx context.Context, s *session, event string, ask approvalAsk, start time.Time) HookResponse {
 	eng := n.engine()
-	if n.allowedByRule(s, ask) {
+	ok, notAllowed := n.allowedByRule(s, ask)
+	if ok {
 		// The owner's standing rule answers it: nobody is asked, no Approval is made and no escalation is counted.
 		n.observeHook(event, VerdictAllow, start)
 		repo := s.ticketRepo()
@@ -520,8 +527,9 @@ func (n *Node) escalate(ctx context.Context, s *session, event string, ask appro
 		}
 		return allowed("allowed by your standing rule")
 	}
+	// The Approval names the first rule no standing rule allows.
 	ap, err := eng.RequestApproval(core.Approval{
-		TicketID: s.t.ID, AssignmentID: s.a.ID, Tool: ask.tool, Rule: ask.d.Rule, Input: ask.input, Summary: ask.summary,
+		TicketID: s.t.ID, AssignmentID: s.a.ID, Tool: ask.tool, Rule: notAllowed, Input: ask.input, Summary: ask.summary,
 	})
 	n.observeHook(event, VerdictEscalate, start)
 	if err != nil {

@@ -141,7 +141,9 @@ type AllowRule struct {
 }
 
 // NeverPromote lists the rules no allow rule may name: the owner always decides these.
-var NeverPromote = []string{"credential-read", "credential-env", "blocked-command", "session-config-write", "protected_path", "attribution"}
+var NeverPromote = []string{"credential-read", "credential-env", "blocked-command", "session-config-write", "protected_path", "attribution",
+	// What these escalate leaves out what the worker chose (a host, a path, any command): a rule could not say what it allows.
+	"network_access", "codex_permissions", "codex_unsandboxed"}
 
 // trustClasses are the trust classes a Trigger's sender falls into.
 var trustClasses = []string{"owner", "allowed", "collaborator", "stranger", "bot", "ci"}

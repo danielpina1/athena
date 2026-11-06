@@ -306,6 +306,9 @@ func TestValidateRejectsBadPlan10Settings(t *testing.T) {
 		"empty repo":   func(s *Settings) { s.Allow = []AllowRule{{Tool: "Bash", Rule: "r"}} },
 		"never":        func(s *Settings) { s.Allow = []AllowRule{{Tool: "Bash", Rule: "protected_path", Repo: "a/b"}} },
 		"promote":      func(s *Settings) { s.PromoteAfter = -1 },
+		"network":      func(s *Settings) { s.Allow = []AllowRule{{Tool: "Bash", Rule: "network_access", Repo: "a/b"}} },
+		"permissions":  func(s *Settings) { s.Allow = []AllowRule{{Tool: "Bash", Rule: "codex_permissions", Repo: "a/b"}} },
+		"unsandboxed":  func(s *Settings) { s.Allow = []AllowRule{{Tool: "Bash", Rule: "codex_unsandboxed", Repo: "a/b"}} },
 	}
 	for name, mut := range bad {
 		s := Defaults(nil)
@@ -352,9 +355,14 @@ func TestAllowsAndPromoteAfter(t *testing.T) {
 	if New(s, nil, time.Minute).(*policy).PromoteAfter() != 2 {
 		t.Fatal("PromoteAfter override")
 	}
-	s.Allow = []AllowRule{{Tool: "Bash", Rule: "protected_path", Repo: "a/b"}}
-	if New(s, nil, time.Minute).(*policy).Allows("Bash", "protected_path", "a/b") {
-		t.Fatal("never-promote rule must not be allowed")
+	if len(NeverPromote) != 9 {
+		t.Fatalf("NeverPromote = %v, want nine rules", NeverPromote)
+	}
+	for _, rule := range NeverPromote {
+		s.Allow = []AllowRule{{Tool: "Bash", Rule: rule, Repo: "a/b"}}
+		if New(s, nil, time.Minute).(*policy).Allows("Bash", rule, "a/b") {
+			t.Fatalf("never-promote rule %s must not be allowed", rule)
+		}
 	}
 }
 
