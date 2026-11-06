@@ -297,7 +297,7 @@ func TestReviewFailureNeverPersonStage(t *testing.T) {
 				t.Fatalf("a failed review applies the held ready: ended %+v, stage %+v", tk.Ended, TicketStage(tk))
 			}
 			ra := findAssignment(tk, rv)
-			eq(t, "outcome", *ra.ReviewOutcome, ReviewOutcome{Verdict: ReviewFailed, First: ReviewFailed})
+			eq(t, "outcome", *ra.ReviewOutcome, ReviewOutcome{Verdict: ReviewFailed, First: ReviewFailed, Why: "session crashed"})
 			eq(t, "no report on the review", ra.Report == nil, true)
 			eq(t, "rounds", tk.Stats.ReviewRounds, 1)
 		})

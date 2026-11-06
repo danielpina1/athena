@@ -935,7 +935,7 @@ func TestReportFiledSaysWhatFollows(t *testing.T) {
 // A review session of a GitHub Ticket gets no GitHub credentials: the node refuses it a token, and its environment has
 // no credential helper of Athena's or the owner's.
 func TestReviewSessionHasNoGitHubCredentials(t *testing.T) {
-	h := newGHHarness(t, &fakeCreds{}, nil)
+	h := newGHHarness(t, &fakeCreds{}, requiredSandbox)
 	t.Setenv("ATHENA_FAKE_FIXTURE", openTurnFixture(t))
 	tk, a := h.accept("github:issuecomment:1", "o/r", 12, "")
 	if err := h.st.Repos().Tx(func(tx core.Tx) error {

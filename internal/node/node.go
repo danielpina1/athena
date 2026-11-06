@@ -1278,7 +1278,7 @@ func (r *runner) chooseRuntime() (rt.Runtime, bool) {
 	ready := map[string]rt.Info{}
 	for _, name := range names {
 		if rtm, ok := n.cfg.Runtimes[name]; ok {
-			ready[name] = n.checkRuntime(cctx, name, rtm)
+			ready[name] = n.eligible(s.a, rtm, n.checkRuntime(cctx, name, rtm))
 		}
 	}
 	cancel()

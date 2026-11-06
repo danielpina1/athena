@@ -94,6 +94,29 @@ func (n *Node) checkRuntime(ctx context.Context, name string, r rt.Runtime) rt.I
 	return info
 }
 
+// claudeReviewWhy is why Claude Code cannot run a review on a node whose Claude sandbox is not required.
+const claudeReviewWhy = "a Claude Code review needs sandbox.required: true (an OS sandbox that always starts)"
+
+// eligible is the readiness of runtime r for Assignment a, given r's readiness info: a review (RoleReview) runs on
+// Claude Code only when the node's Claude sandbox is required on a platform that has one (failIfUnavailable), so that
+// the OS sandbox bounds every command the review runs and the read_only rules are defence in depth; otherwise Claude
+// Code is not ready for it, with claudeReviewWhy. Codex's own read-only sandbox bounds a Codex review. This is the one
+// code path every launch's choice reads, a pinned one's too.
+func (n *Node) eligible(a core.Assignment, r rt.Runtime, info rt.Info) rt.Info {
+	if a.Role != core.RoleReview || r.Name() != runtimeClaude || !info.Ready || n.claudeSandboxRequired() {
+		return info
+	}
+	info.Ready = false
+	info.Why = claudeReviewWhy
+	return info
+}
+
+// claudeSandboxRequired reports whether every Claude Code session of this node runs in an OS sandbox that fails its
+// start when it cannot start (Config.Sandbox with Required, on a platform that has one).
+func (n *Node) claudeSandboxRequired() bool {
+	return n.cfg.Sandbox != nil && n.cfg.Sandbox.Required && SandboxSupported()
+}
+
 // RefreshRuntimes checks every runtime but Claude Code (assumedReady) once, so Status shows their readiness before
 // their first launch. The server runs it in the background at start; ctx bounds it.
 func (n *Node) RefreshRuntimes(ctx context.Context) {

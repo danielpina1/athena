@@ -143,7 +143,7 @@ func TestReviewToolOnlyForReviewRole(t *testing.T) {
 	}
 
 	// The worker reports ready on a paired Ticket: the review runs on Claude Code, the only runtime.
-	p := newHarness(t, nil)
+	p := newHarness(t, requiredSandbox)
 	t.Setenv("ATHENA_FAKE_FIXTURE", openTurnFixture(t))
 	ptk := p.submitPaired("Paired task", "")
 	_, impl := p.running(ptk.ID)
@@ -208,6 +208,9 @@ func TestReviewToolOnlyForReviewRole(t *testing.T) {
 	}
 }
 
+// requiredSandbox gives a node the required Claude sandbox a review on Claude Code needs.
+func requiredSandbox(c *Config) { c.Sandbox = &SandboxConfig{Required: true} }
+
 // connect is an in-memory MCP client of server s.
 func connect(t *testing.T, s *mcp.Server) *mcp.ClientSession {
 	t.Helper()
@@ -229,7 +232,7 @@ func connect(t *testing.T, s *mcp.Server) *mcp.ClientSession {
 // A review whose turn ends without a verdict is nudged once; the next such turn is a review failure, which applies the
 // held report: the Ticket never waits for a person.
 func TestReviewNudgeThenFailure(t *testing.T) {
-	h := newHarness(t, nil)
+	h := newHarness(t, requiredSandbox)
 	fixture := perTicketFixture(t, "T-0001")
 	copyFile(t, openTurnFixture(t), fixture)
 	t.Setenv("ATHENA_FAKE_LATER_FIXTURE", fixtureLines(t, "simple-turn.jsonl", func(_ int, l string) bool {
@@ -300,7 +303,7 @@ func TestCodexReviewerAskDenied(t *testing.T) {
 // once the review is done, whether it approved or failed: the parked implementer is launched again, not left waiting.
 func TestInputDuringReviewReachesImplementer(t *testing.T) {
 	for _, fail := range []bool{false, true} {
-		h := newHarness(t, nil)
+		h := newHarness(t, requiredSandbox)
 		t.Setenv("ATHENA_FAKE_FIXTURE", openTurnFixture(t))
 		tk := h.submitPaired("Paired task", "")
 		_, impl := h.running(tk.ID)
@@ -340,5 +343,73 @@ func TestInputDuringReviewReachesImplementer(t *testing.T) {
 		if cur, _ := h.ticket(tk.ID); cur.Ended != nil || len(cur.Undelivered) != 0 {
 			t.Fatalf("fail=%v: ended %+v, undelivered %v", fail, cur.Ended, cur.Undelivered)
 		}
+	}
+}
+
+// A review runs on Claude Code only when the node's Claude sandbox is required, so that the OS sandbox bounds every
+// command it runs. Without it a Claude-only node has no runtime for the review, which fails: the held report applies
+// and the review's outcome says why.
+func TestClaudeReviewNeedsRequiredSandbox(t *testing.T) {
+	h := newHarness(t, nil)
+	t.Setenv("ATHENA_FAKE_FIXTURE", openTurnFixture(t))
+	tk := h.submitPaired("Paired task", "")
+	_, impl := h.running(tk.ID)
+	if r := h.report(tk.ID, impl.ID, core.ReportReady, "done"); !r.OK {
+		t.Fatalf("ready = %+v", r)
+	}
+	h.eventually("the review fails and the held report applies", func() bool {
+		cur, _ := h.ticket(tk.ID)
+		return cur.Ended != nil
+	})
+	cur, _ := h.ticket(tk.ID)
+	if cur.Ended.Outcome != core.OutcomeCompleted || cur.LatestAssignment().Report.Summary != "done" {
+		t.Fatalf("ended %+v, latest %+v", cur.Ended, cur.LatestAssignment())
+	}
+	var rv core.Assignment
+	for _, a := range cur.Assignments {
+		if a.Role == core.RoleReview {
+			rv = a
+		}
+	}
+	if o := rv.ReviewOutcome; o == nil || o.Verdict != core.ReviewFailed || !strings.Contains(o.Why, "sandbox.required") {
+		t.Fatalf("review outcome = %+v", rv.ReviewOutcome)
+	}
+	if rv.StartedAt != nil || len(h.invocations()) != 1 {
+		t.Fatalf("a review session launched: %+v, %d processes", rv, len(h.invocations()))
+	}
+
+	// With the sandbox required, the review runs on Claude Code.
+	if !SandboxSupported() {
+		t.Skip("no Claude Code sandbox on this platform")
+	}
+	r := newHarness(t, func(c *Config) { c.Sandbox = &SandboxConfig{Required: true} })
+	t.Setenv("ATHENA_FAKE_FIXTURE", openTurnFixture(t))
+	rtk := r.submitPaired("Paired task", "")
+	_, rimpl := r.running(rtk.ID)
+	if res := r.report(rtk.ID, rimpl.ID, core.ReportReady, "done"); !res.OK {
+		t.Fatalf("ready = %+v", res)
+	}
+	r.eventually("the review runs on claude", func() bool {
+		cur, _ := r.ticket(rtk.ID)
+		a := cur.LatestAssignment()
+		return a.Role == core.RoleReview && a.State == core.AssignmentRunning && a.Runtime == core.RuntimeClaude
+	})
+}
+
+// On a node with Claude Code unsandboxed and Codex, a review goes to Codex even when Codex implemented the Ticket.
+func TestUnsandboxedReviewGoesToCodex(t *testing.T) {
+	h := newCodexHarness(t, codexTurn(
+		`{"fake":"mcp","tool":"report","arguments":{"status":"ready","summary":"all done"}}`,
+	), nil)
+	tk := h.submitPaired("Fix the login page", core.RuntimeCodex)
+	var rv core.Assignment
+	h.eventually("the review runs", func() bool {
+		cur, _ := h.ticket(tk.ID)
+		rv = *cur.LatestAssignment()
+		return rv.Role == core.RoleReview && rv.State == core.AssignmentRunning && rv.Runtime != ""
+	})
+	cur, _ := h.ticket(tk.ID)
+	if impl := cur.Assignments[0]; impl.Runtime != core.RuntimeCodex || rv.Runtime != core.RuntimeCodex {
+		t.Fatalf("implementer on %q, review on %q: want both on codex", impl.Runtime, rv.Runtime)
 	}
 }

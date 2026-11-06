@@ -482,7 +482,7 @@ func (e *Engine) FileReport(ticketID string, r ReportInput) error {
 			if r.State != ReportFailed && r.State != ReportBlocked {
 				return userErrorf("a review of ticket %s gives its verdict with the review tool, not a %s report", ticketID, r.State)
 			}
-			if err := o.reviewFailed(t, a); err != nil {
+			if err := o.reviewFailed(t, a, r.Summary); err != nil {
 				return err
 			}
 			return o.tx.PutTicket(t)

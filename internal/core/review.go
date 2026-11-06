@@ -20,6 +20,8 @@ const (
 	PairingOff = "off"
 	// defaultReviewRounds is PairingDefaults.MaxRounds when it names none.
 	defaultReviewRounds = 2
+	// reviewWhyMax bounds ReviewOutcome.Why, in runes.
+	reviewWhyMax = 500
 )
 
 // The verdicts of a review: the reviewer's approved or changes, and failed for a review that could not finish.
@@ -57,6 +59,8 @@ type ReviewState struct {
 type ReviewOutcome struct {
 	Verdict string `json:"verdict"`
 	First   string `json:"first"`
+	// Why says why a review failed: what its session, or its launch, reported.
+	Why string `json:"why,omitempty"`
 }
 
 // findingRe is one line of a review's findings: a severity-tagged finding at a file and line, or "- none".
@@ -234,19 +238,24 @@ func (o *op) endReview(t *Ticket, a *Assignment, outcome ReviewOutcome) ReviewSt
 	t.Stats.ReviewRounds++
 	t.UpdatedAt = o.at
 	o.endAssignment(t, a, ReasonReviewed)
-	o.event(EventReviewFiled, t, a.ID, map[string]any{"verdict": outcome.Verdict, "round": held.Round})
+	data := map[string]any{"verdict": outcome.Verdict, "round": held.Round}
+	if outcome.Why != "" {
+		data["why"] = outcome.Why
+	}
+	o.event(EventReviewFiled, t, a.ID, data)
 	o.stop(t, a.ID, ReasonReviewed)
 	return held
 }
 
 // reviewFailed is a review that could not finish: its session reported failed or blocked (it crashed past its
-// restarts, its launch failed, or it ended its turn twice without a verdict). The review ends with the failed outcome
+// restarts, its launch failed, no runtime may run it, or it ended its turn twice without a verdict), and why says
+// what it reported. The review ends with the failed outcome
 // and the held ready report is applied, as on approved: review never asks a person.
-func (o *op) reviewFailed(t *Ticket, a *Assignment) error {
+func (o *op) reviewFailed(t *Ticket, a *Assignment, why string) error {
 	if t.Review == nil {
 		return userErrorf("assignment %s of ticket %s reviews nothing", a.ID, t.ID)
 	}
-	held := o.endReview(t, a, ReviewOutcome{Verdict: ReviewFailed, First: ReviewFailed})
+	held := o.endReview(t, a, ReviewOutcome{Verdict: ReviewFailed, First: ReviewFailed, Why: truncateRunes(why, reviewWhyMax)})
 	return o.applyHeld(t, held)
 }
 

@@ -284,6 +284,11 @@ func TestTimelineAssignmentEnds(t *testing.T) {
 				{ID: "b", State: core.AssignmentPending, CreatedAt: *at(2 * time.Minute)},
 			}
 		}, "assignment/started  · |assignment/limited claude · 2026-11-06T14:00:00Z|assignment/queued  · "},
+		{"review failed", func(tk *core.Ticket) {
+			tk.Assignments = []core.Assignment{{ID: "a", State: core.AssignmentEnded, Role: core.RoleReview, EndedAt: at(2 * time.Minute),
+				EndedReason: core.ReasonReviewed, ReviewOutcome: &core.ReviewOutcome{Verdict: core.ReviewFailed, First: core.ReviewFailed,
+					Why: "no runtime is ready: claude: a Claude Code review needs sandbox.required: true"}}}
+		}, "assignment/started  · |assignment/ended  · review failed: no runtime is ready: claude: a Claude Code review needs sandbox.required: true"},
 		{"limited, reset unknown", func(tk *core.Ticket) {
 			tk.Assignments = []core.Assignment{{ID: "a", State: core.AssignmentEnded, Runtime: core.RuntimeCodex, EndedAt: at(2 * time.Minute),
 				EndedReason: core.ReasonUsageLimit, Limit: &core.UsageLimit{Runtime: core.RuntimeCodex}}}

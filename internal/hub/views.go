@@ -295,6 +295,9 @@ func assignmentEnd(t *core.Ticket, a *core.Assignment, latest bool) (sub, subjec
 		return "retried", "", ""
 	case strings.Contains(reason, "restart"):
 		return "interrupted", "", reason
+	case a.ReviewOutcome != nil && a.ReviewOutcome.Verdict == core.ReviewFailed && a.ReviewOutcome.Why != "":
+		// A review that could not finish has no Report: its end says why.
+		return "ended", "", "review failed: " + firstLine(clean(a.ReviewOutcome.Why))
 	case a.Report != nil && a.Report.State == core.ReportFailed:
 		// The failed Report says why on its own row: the end is only the end.
 		return "ended", "", ""

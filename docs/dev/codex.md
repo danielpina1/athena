@@ -154,6 +154,8 @@ they leave it as it is and say when it differs; restarting the server rewrites i
 - `claude.maxSessions`, `codex.maxSessions`: how many sessions the runtime runs at once; 0 is no cap (the node's slots
   still bound them).
 - `enabled`: on unless set to `false`. An enabled Codex that is not ready is never chosen, and the dashboard says why.
+- Reviews (§8): Codex reviews whenever it is ready. Claude Code reviews only with `sandbox.required: true` in
+  `config.json` (on macOS or Linux), so a node that pairs Tickets with review needs one of the two.
 - `binary`: the codex executable; `athena server --codex PATH` overrides it.
 - `model`: the default Codex model; empty leaves it to Codex.
 
@@ -323,8 +325,14 @@ task) has each ready report of its implementer reviewed before it counts:
 2. The chooser places the review on the other runtime than the implementer's when that one is ready (a pinned Ticket
    pins its implementer, not its reviews); with one runtime, it reviews on that one. A limit on a review fails over
    like any session's, with no handoff note.
+   - **A review runs on Claude Code only when `sandbox.required` is `true`** (on macOS or Linux), so that Claude Code's
+     OS sandbox bounds every command the review runs. Otherwise Claude Code is not eligible for reviews ("a Claude Code
+     review needs sandbox.required: true"), and the review goes to Codex, even when Codex implemented the Ticket, and
+     whatever runtime the Ticket names. With no eligible runtime (a Claude-only node without a required sandbox, or
+     Codex not ready) the review fails at once: the held report applies (6) and the timeline's review row says why.
 3. The review session starts fresh, in the implementer's directory, after the implementer's process has exited, and
-   is read-only as far as these layers make it:
+   is read-only through these layers. The OS sandbox is the guarantee: Codex's `read-only` sandbox, or Claude Code's
+   required sandbox. The hook rules and the rest are defence in depth:
    - **Always: the hook rules** (rule `read_only`). Write tools, Bash write targets and Codex's `write_stdin` are
      denied, and a Bash command runs only when every command in it is on an allowlist: `git status|diff|log|show|
      blame|grep|rev-parse|ls-files|merge-base|cat-file` (no `--output`, `-c`, `--config-env`, `--exec-path`,
@@ -337,18 +345,18 @@ task) has each ready report of its implementer reviewed before it counts:
      `--node-options`; pytest's `-p`, `-c`, `--config-file`, `-o`, `--override-ini`. A command named by a path runs
      only from `/bin`, `/usr/bin`, `/usr/local/bin`, `/opt/homebrew/bin`, `/usr/sbin` or `/sbin` (`./bin/cat` is
      denied). Everything else, `gh`, `curl` and `sudo` included, is denied, and so is a variable assignment before a
-     command (`GIT_PAGER=… git log`). **Accepted residual:** a test runner runs the repository's own code, which can do
-     anything the reviewer's OS user can; only the sandbox, when on, confines that.
+     command (`GIT_PAGER=… git log`). The allowlist was written and tested case by case, not probed adversarially:
+     it is not what keeps a review read-only. A test runner runs the repository's own code, which the review's OS
+     sandbox confines.
    - **Always: no escalation.** Whatever would ask the owner (a rules escalation, a Codex approval request for a
      command, a file or permissions, whether or not `sandbox` is configured) is denied: a review never makes a person
      stage.
    - **Always: no GitHub credentials.** A review gets no token: `athena git-credential` and `athena gh` refuse it, and
      its git has no credential helper. It reviews the local branch.
    - **Codex:** the `read-only` sandbox, always.
-   - **Claude Code:** started without its file-writing tools, and, only when the node's `sandbox` is configured and
-     Claude Code's sandbox starts (see `required`), a sandbox that keeps the owner's `allowWrite` paths outside the
-     working directory (build caches, so tests can run), not the git directory, and denies the working directory.
-     Without a started sandbox, the hook rules are its only confinement.
+   - **Claude Code:** started without its file-writing tools, in its required sandbox, which keeps the owner's
+     `allowWrite` paths outside the working directory (build caches, so tests can run), not the git directory, and
+     denies the working directory.
 
    Its MCP server (`athena mcp --ticket <id> --role review`) has only the `review` tool. Its first message names the
    round, the branch, its base, `git diff --stat <base>...HEAD` and the held report's summary; its system prompt is the
