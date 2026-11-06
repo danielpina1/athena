@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/danielpina1/athena/internal/quota"
+	"github.com/danielpina1/athena/internal/runtime/rt"
 )
 
 // Status is what a dashboard shows of the node: its slots, the Tickets with a live session, the launches queued, and
@@ -23,10 +24,12 @@ type Status struct {
 }
 
 // RuntimeStatus is one runtime of the node: its last known readiness (Claude Code is taken as ready; another runtime's
-// is its last check, Why "not checked yet" before the first), its quota, and how many live sessions run on it.
+// is its last check, Why "not checked yet" before the first), the models a task may pick on it (from the same check),
+// its quota, and how many live sessions run on it.
 type RuntimeStatus struct {
 	Name, Version, Why string
 	Ready, Tested      bool
+	Models             []rt.ModelInfo
 	Quota              quota.State
 	Live               int
 }
@@ -45,7 +48,7 @@ func (n *Node) Status() Status {
 	for _, name := range slices.Sorted(maps.Keys(n.cfg.Runtimes)) {
 		info := n.knownInfo(name, n.cfg.Runtimes[name])
 		rts = append(rts, RuntimeStatus{Name: name, Version: info.Version, Why: info.Why, Ready: info.Ready, Tested: info.Tested,
-			Quota: n.quota.State(name), Live: live[name]})
+			Models: info.Models, Quota: n.quota.State(name), Live: live[name]})
 	}
 	return Status{Name: n.cfg.Name, Slots: n.cfg.Slots, SlotsInUse: len(ids), LiveTicketIDs: ids,
 		Queued: int(n.queued.Load()), ClaudeVersion: n.cfg.ClaudeVersion, Runtimes: rts}

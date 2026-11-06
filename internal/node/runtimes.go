@@ -71,10 +71,23 @@ func movable(t core.Ticket, a core.Assignment) bool {
 	return a.State == core.AssignmentRunning && (a.Role == core.RoleReview || (t.Execution != nil && t.Execution.Runtime == core.RuntimeAuto))
 }
 
+// claudeModels are the models a task may pick on Claude Code: the CLI's aliases, which follow its latest models.
+var claudeModels = []rt.ModelInfo{{ID: "opus", Name: "Opus"}, {ID: "sonnet", Name: "Sonnet"}, {ID: "haiku", Name: "Haiku"}}
+
 // assumedReady is the Info of Claude Code, which the node takes as ready without asking it: its sessions fail on their
-// own when it is not, and `claude --version` costs a process per launch. Its version is the one the Config names.
+// own when it is not, and `claude --version` costs a process per launch. Its version is the one the Config names. Its
+// models are claudeModels, the node's model (Config.Model) the default: added as its own entry when it is none of them.
 func (n *Node) assumedReady() rt.Info {
-	return rt.Info{Installed: true, Ready: true, Tested: true, Version: n.cfg.ClaudeVersion}
+	models := slices.Clone(claudeModels)
+	found := false
+	for i := range models {
+		models[i].Default = models[i].ID == n.cfg.Model
+		found = found || models[i].Default
+	}
+	if !found && n.cfg.Model != "" {
+		models = append(models, rt.ModelInfo{ID: n.cfg.Model, Name: n.cfg.Model, Default: true})
+	}
+	return rt.Info{Installed: true, Ready: true, Tested: true, Version: n.cfg.ClaudeVersion, Models: models}
 }
 
 // checkRuntime is what the node knows of a runtime's readiness now: Claude Code is assumed ready (assumedReady);
@@ -95,7 +108,7 @@ func (n *Node) checkRuntime(ctx context.Context, name string, r rt.Runtime) rt.I
 	old, had := n.infos[name]
 	n.infos[name] = info
 	n.infoMu.Unlock()
-	if !had || old != info {
+	if !had || !old.Equal(info) {
 		n.statusChanged()
 	}
 	return info

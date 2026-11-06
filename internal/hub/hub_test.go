@@ -18,6 +18,7 @@ import (
 	"github.com/danielpina1/athena/internal/node"
 	"github.com/danielpina1/athena/internal/pb/athenav1"
 	"github.com/danielpina1/athena/internal/quota"
+	"github.com/danielpina1/athena/internal/runtime/rt"
 	"github.com/danielpina1/athena/internal/store"
 )
 
@@ -1032,6 +1033,29 @@ func TestPromptsDeltaOnSave(t *testing.T) {
 	d := next(t, sub)
 	if p := d.GetPrompts(); p.GetRevision() != 2 || !p.Parts[0].DefaultUpdated {
 		t.Fatalf("prompts delta = %v", d)
+	}
+}
+
+// A runtime's models changing (Codex checked after the start) reaches the dashboard in a node delta at once.
+func TestNodeDeltaCarriesRuntimeModels(t *testing.T) {
+	f := newFake()
+	f.node = node.Status{Name: "mac", Slots: 4, Runtimes: []node.RuntimeStatus{{Name: "codex", Why: "not checked yet"}}}
+	h := New(f, quiet())
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	h.Start(ctx)
+	sub, _ := h.Subscribe(0, h.Epoch())
+	defer sub.Close()
+	f.mu.Lock()
+	f.node = node.Status{Name: "mac", Slots: 4, Runtimes: []node.RuntimeStatus{{Name: "codex", Ready: true,
+		Models: []rt.ModelInfo{{ID: "gpt-5-codex", Name: "GPT-5 Codex", Default: true}, {ID: "gpt-5-codex-mini", Name: "GPT-5 Codex Mini"}}}}}
+	f.mu.Unlock()
+	h.NodeChanged()
+	d := next(t, sub)
+	m := d.GetNode().GetRuntimes()[0].GetModels()
+	if len(m) != 2 || m[0].GetId() != "gpt-5-codex" || m[0].GetName() != "GPT-5 Codex" || !m[0].GetDefault() ||
+		m[1].GetId() != "gpt-5-codex-mini" || m[1].GetDefault() {
+		t.Fatalf("node delta = %v", d)
 	}
 }
 

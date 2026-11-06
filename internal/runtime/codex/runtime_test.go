@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -61,11 +62,13 @@ func methods(t *testing.T, rpcLog string) []string {
 func TestCheckReady(t *testing.T) {
 	r, rpcLog := newRuntime(t)
 	s := r.Status(context.Background())
-	want := Status{Info: rt.Info{Installed: true, Ready: true, Tested: true, Version: VerifiedVersion}, Account: "chatgpt", Hooks: "trusted", AccountAsked: true}
-	if s != want {
+	want := Status{Info: rt.Info{Installed: true, Ready: true, Tested: true, Version: VerifiedVersion, Models: fakeModels}, Account: "chatgpt",
+		Hooks: "trusted", AccountAsked: true}
+	if !reflect.DeepEqual(s, want) {
 		t.Fatalf("status = %+v, want %+v", s, want)
 	}
-	if got := methods(t, rpcLog); !slices.Equal(got, []string{"initialize", "account/read", "hooks/list"}) {
+	// model/list over its two pages: fakecodex's first page has a next cursor.
+	if got := methods(t, rpcLog); !slices.Equal(got, []string{"initialize", "account/read", "model/list", "model/list", "hooks/list"}) {
 		t.Fatalf("requests = %v", got)
 	}
 	if m := mode(t, filepath.Join(r.Home, "config.toml")); m != 0o600 {
@@ -76,11 +79,65 @@ func TestCheckReady(t *testing.T) {
 	}
 }
 
-func TestCheckNotLoggedIn(t *testing.T) {
-	r, _ := newRuntime(t, "ATHENA_FAKE_CODEX_LOGGED_OUT=1")
+// fakeModels are the models fakecodex lists, as Check keeps them: its hidden one dropped, its isDefault one marked.
+var fakeModels = []rt.ModelInfo{{ID: "gpt-5-codex", Name: "GPT-5 Codex", Default: true}, {ID: "gpt-5-codex-mini", Name: "GPT-5 Codex Mini"}}
+
+// The model Athena's config.toml names is the default, whatever model/list marks; one the list lacks is added.
+func TestCheckModelsHomeModelIsTheDefault(t *testing.T) {
+	r, _ := newRuntime(t)
+	r.Model = "gpt-5-codex-mini"
+	want := []rt.ModelInfo{{ID: "gpt-5-codex", Name: "GPT-5 Codex"}, {ID: "gpt-5-codex-mini", Name: "GPT-5 Codex Mini", Default: true}}
+	if s := r.Status(context.Background()); !s.Ready || !slices.Equal(s.Models, want) {
+		t.Fatalf("status = %+v, want models %+v", s, want)
+	}
+	r, _ = newRuntime(t)
+	r.Model = "gpt-5-private"
+	want = []rt.ModelInfo{{ID: "gpt-5-codex", Name: "GPT-5 Codex"}, {ID: "gpt-5-codex-mini", Name: "GPT-5 Codex Mini"},
+		{ID: "gpt-5-private", Name: "gpt-5-private", Default: true}}
+	if s := r.Status(context.Background()); !s.Ready || !slices.Equal(s.Models, want) {
+		t.Fatalf("status = %+v, want models %+v", s, want)
+	}
+}
+
+// A model/list that fails, hangs or never stops paging leaves the models empty (or bounded) and readiness as it is.
+func TestCheckModelListFailureKeepsReadiness(t *testing.T) {
+	r, _ := newRuntime(t, "ATHENA_FAKE_CODEX_MODELS=error")
+	if s := r.Status(context.Background()); !s.Ready || s.Why != "" || s.Models != nil || s.Hooks != "trusted" {
+		t.Fatalf("model/list error: %+v", s)
+	}
+	r, _ = newRuntime(t, "ATHENA_FAKE_CODEX_MODELS=hang")
+	r.modelsTimeout = 200 * time.Millisecond
+	start := time.Now()
+	if s := r.Status(context.Background()); !s.Ready || s.Why != "" || s.Models != nil || s.Hooks != "trusted" {
+		t.Fatalf("model/list hangs: %+v", s)
+	}
+	if d := time.Since(start); d > 5*time.Second {
+		t.Fatalf("the check took %s past a hanging model/list", d)
+	}
+	r, rpcLog := newRuntime(t, "ATHENA_FAKE_CODEX_MODELS=endless")
 	s := r.Status(context.Background())
-	if s.Ready || !s.Installed || s.Why != NotLoggedIn || s.Account != "" || !s.AccountAsked {
+	if !s.Ready || len(s.Models) != maxModelPages {
+		t.Fatalf("endless model/list: %+v, want %d models", s, maxModelPages)
+	}
+	n := 0
+	for _, m := range methods(t, rpcLog) {
+		if m == "model/list" {
+			n++
+		}
+	}
+	if n != maxModelPages {
+		t.Fatalf("%d model/list pages asked, want %d", n, maxModelPages)
+	}
+}
+
+func TestCheckNotLoggedIn(t *testing.T) {
+	r, rpcLog := newRuntime(t, "ATHENA_FAKE_CODEX_LOGGED_OUT=1")
+	s := r.Status(context.Background())
+	if s.Ready || !s.Installed || s.Why != NotLoggedIn || s.Account != "" || !s.AccountAsked || s.Models != nil {
 		t.Fatalf("status = %+v", s)
+	}
+	if slices.Contains(methods(t, rpcLog), "model/list") {
+		t.Fatal("model/list asked of a logged-out Codex")
 	}
 	if NotLoggedIn != "Codex is not logged in for Athena: run athena codex login" {
 		t.Fatalf("NotLoggedIn = %q", NotLoggedIn)

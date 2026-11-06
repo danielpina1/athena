@@ -7,6 +7,7 @@ package rt
 import (
 	"context"
 	"errors"
+	"slices"
 	"time"
 )
 
@@ -38,6 +39,22 @@ type Info struct {
 	Version                  string
 	// Why says what keeps the runtime from being ready, or what was found about it otherwise; empty when all is well.
 	Why string
+	// Models are the models a session of the runtime may name, in the runtime's order; empty when none are known (the
+	// runtime was not asked, or could not say). They never change readiness.
+	Models []ModelInfo
+}
+
+// ModelInfo is one model a runtime offers. ID is what a session is started with, Name what a person reads; Default
+// marks the one a session runs when it names none (at most one).
+type ModelInfo struct {
+	ID, Name string
+	Default  bool
+}
+
+// Equal reports whether i and o say the same, their models included.
+func (i Info) Equal(o Info) bool {
+	return i.Installed == o.Installed && i.Ready == o.Ready && i.Tested == o.Tested && i.Version == o.Version &&
+		i.Why == o.Why && slices.Equal(i.Models, o.Models)
 }
 
 // Prepare is what a runtime's per-session files are written from.

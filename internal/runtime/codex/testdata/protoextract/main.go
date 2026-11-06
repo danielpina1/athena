@@ -34,7 +34,7 @@ import (
 var used = map[string][]string{
 	"ClientRequest.json": {
 		"initialize", "thread/start", "thread/resume", "turn/start", "turn/steer", "turn/interrupt", "hooks/list",
-		"config/batchWrite", "config/read", "account/read", "account/rateLimits/read",
+		"config/batchWrite", "config/read", "account/read", "account/rateLimits/read", "model/list",
 	},
 	"ClientNotification.json": {"initialized"},
 	"ServerNotification.json": {

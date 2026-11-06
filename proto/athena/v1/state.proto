@@ -234,6 +234,19 @@ message RuntimeStatus {
   bool measured = 9;
   // live is how many sessions run on it now.
   uint32 live = 10;
+  // models are the models a task may pick on it, in the runtime's order; empty when none are known yet (not checked,
+  // or not ready).
+  repeated RuntimeModel models = 11;
+}
+
+// RuntimeModel is one model a runtime offers.
+message RuntimeModel {
+  // id is what the task sends as its model.
+  string id = 1;
+  // name is what the dashboard shows.
+  string name = 2;
+  // default marks the model a task that names none runs on (at most one).
+  bool default = 3;
 }
 
 message Health {

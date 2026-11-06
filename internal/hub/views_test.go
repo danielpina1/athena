@@ -13,6 +13,7 @@ import (
 	"github.com/danielpina1/athena/internal/node"
 	"github.com/danielpina1/athena/internal/pb/athenav1"
 	"github.com/danielpina1/athena/internal/quota"
+	"github.com/danielpina1/athena/internal/runtime/rt"
 )
 
 func TestTicketSummaryFlags(t *testing.T) {
@@ -633,7 +634,8 @@ func TestNodeStatusRuntimesWithQuota(t *testing.T) {
 	reset := epoch0.Add(2 * time.Hour)
 	until := epoch0.Add(time.Hour)
 	v := nodeStatus(node.Status{Name: "n", ClaudeVersion: "2.1", Runtimes: []node.RuntimeStatus{
-		{Name: "claude", Ready: true, Tested: true, Live: 1, Quota: quota.State{}},
+		{Name: "claude", Ready: true, Tested: true, Live: 1, Quota: quota.State{},
+			Models: []rt.ModelInfo{{ID: "opus", Name: "Opus"}, {ID: "sonnet", Name: "Sonnet", Default: true}}},
 		{Name: "codex", Version: "0.160.1", Ready: true, Tested: true, Live: 2, Quota: quota.State{
 			Measured: true, ReadAt: epoch0, LimitedUntil: &until,
 			Windows: []quota.Window{{Bucket: "codex", Name: "5h", Used: 0.5, ResetsAt: &reset}, {Name: "7d", Used: 0.25, Stale: true}}}},
@@ -645,7 +647,10 @@ func TestNodeStatusRuntimesWithQuota(t *testing.T) {
 	if c.Name != "claude" || !c.Ready || c.Measured || c.Live != 1 || len(c.Windows) != 0 || c.LimitedUntil != nil || c.ReadAt != nil {
 		t.Errorf("claude = %v", c)
 	}
-	if x.Name != "codex" || x.Version != "0.160.1" || !x.Ready || !x.Tested || !x.Measured || x.Live != 2 ||
+	if m := c.Models; len(m) != 2 || m[0].Id != "opus" || m[0].Name != "Opus" || m[0].Default || m[1].Id != "sonnet" || !m[1].Default {
+		t.Errorf("claude models = %v", m)
+	}
+	if x.Name != "codex" || x.Version != "0.160.1" || !x.Ready || !x.Tested || !x.Measured || x.Live != 2 || len(x.Models) != 0 ||
 		!x.LimitedUntil.AsTime().Equal(until) || !x.ReadAt.AsTime().Equal(epoch0) || len(x.Windows) != 2 {
 		t.Fatalf("codex = %v", x)
 	}

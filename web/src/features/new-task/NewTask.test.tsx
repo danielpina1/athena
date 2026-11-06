@@ -134,14 +134,24 @@ test("cmd-enter submits once, enter adds a line, composition does not submit", a
 });
 
 const suggested = () => Array.from(document.querySelectorAll("datalist option")).map((o) => o.getAttribute("value"));
+const modelSelect = () => screen.getByRole("combobox", { name: "Model" }) as HTMLSelectElement;
+const options = () => Array.from(modelSelect().options).map((o) => o.textContent);
+const otherBox = () => screen.queryByRole("combobox", { name: "Other model" });
 
-test("model suggestions are the recent models, and an empty model sends none", async () => {
+test("with no models known, the model is Default or Other…, whose text keeps the recent models", async () => {
   const user = setup();
-  expect(suggested()).toEqual(["opus", "sonnet"]);
+  submitTask.mockResolvedValue(create(CommandResultSchema, { ok: false, code: "unavailable" }));
+  expect(options()).toEqual(["Default", "Other…"]);
+  expect(modelSelect().value).toBe("");
+  expect(otherBox()).toBeNull();
   await user.type(task(), "x");
-  await user.type(screen.getByRole("combobox", { name: "Model" }), "haiku");
   await user.click(start());
-  expect(submitTask).toHaveBeenCalledWith({ text: "x", model: "haiku", runtime: "auto" });
+  expect(submitTask).toHaveBeenLastCalledWith({ text: "x", runtime: "auto" });
+  await user.selectOptions(modelSelect(), "Other…");
+  expect(suggested()).toEqual(["opus", "sonnet"]);
+  await user.type(otherBox() as HTMLElement, "haiku");
+  await user.click(start());
+  expect(submitTask).toHaveBeenLastCalledWith({ text: "x", model: "haiku", runtime: "auto" });
 });
 
 test("a bare slash is refused as a directory", async () => {
@@ -193,12 +203,23 @@ test("a pointercancel never collapses the list", async () => {
   expect(list().className).not.toContain("invisible");
 });
 
+const claudeModels = [
+  { id: "opus", name: "Opus" },
+  { id: "sonnet", name: "Sonnet", default: true },
+  { id: "haiku", name: "Haiku" },
+];
+const codexModels = [
+  { id: "gpt-5-codex", name: "GPT-5 Codex", default: true },
+  { id: "gpt-5-codex-mini", name: "GPT-5 Codex Mini" },
+];
 const both = [
-  { name: "claude", ready: true, tested: true },
-  { name: "codex", ready: true, tested: true, version: "0.160.1" },
+  { name: "claude", ready: true, tested: true, models: claudeModels },
+  { name: "codex", ready: true, tested: true, version: "0.160.1", models: codexModels },
 ];
 
-function withRuntimes(runtimes: Array<{ name: string; ready: boolean; tested?: boolean; why?: string }>, settingsJson = "{}") {
+type RuntimeInit = { name: string; ready: boolean; tested?: boolean; why?: string; models?: Array<{ id: string; name: string; default?: boolean }> };
+
+function withRuntimes(runtimes: RuntimeInit[], settingsJson = "{}") {
   load({
     repos: [],
     tickets: [],
@@ -242,7 +263,51 @@ test("the review switch starts at the Policy's default and sends only when toggl
   expect(submitTask).toHaveBeenLastCalledWith({ text: "x", runtime: "auto", review: false });
 });
 
-test("model suggestions follow the chosen runtime; under Auto the model is Claude Code's", async () => {
+test("the model select lists the chosen runtime's models; Default sends none, a picked one is sent", async () => {
+  withRuntimes(both);
+  const user = setup();
+  submitTask.mockResolvedValue(create(CommandResultSchema, { ok: false, code: "unavailable" }));
+  // Auto: Claude Code's models, and the hint that Codex keeps its own.
+  expect(options()).toEqual(["Default · Sonnet", "Opus", "Sonnet", "Haiku", "Other…"]);
+  const hint = screen.getByText("Model on Claude Code — Codex uses its default");
+  expect(modelSelect().getAttribute("aria-describedby")).toBe(hint.id);
+  await user.type(task(), "Port the parser");
+  await user.selectOptions(modelSelect(), "Opus");
+  await user.click(start());
+  expect(submitTask).toHaveBeenLastCalledWith({ text: "Port the parser", model: "opus", runtime: "auto" });
+
+  // Codex: its own list, no hint; Opus is not on it, so the choice goes back to Default.
+  await user.click(screen.getByRole("radio", { name: "Codex" }));
+  expect(options()).toEqual(["Default · GPT-5 Codex", "GPT-5 Codex", "GPT-5 Codex Mini", "Other…"]);
+  expect(screen.queryByText(/Codex uses its default/)).toBeNull();
+  expect(modelSelect().getAttribute("aria-describedby")).toBeNull();
+  expect(modelSelect().value).toBe("");
+  await user.click(start());
+  expect(submitTask).toHaveBeenLastCalledWith({ text: "Port the parser", runtime: "codex" });
+  await user.selectOptions(modelSelect(), "GPT-5 Codex Mini");
+  await user.click(start());
+  expect(submitTask).toHaveBeenLastCalledWith({ text: "Port the parser", model: "gpt-5-codex-mini", runtime: "codex" });
+  await user.selectOptions(modelSelect(), "Default · GPT-5 Codex");
+  await user.click(start());
+  expect(submitTask).toHaveBeenLastCalledWith({ text: "Port the parser", runtime: "codex" });
+});
+
+test("switching runtime keeps a choice the new runtime lists and resets one it does not", async () => {
+  withRuntimes(both);
+  const user = setup();
+  await user.click(screen.getByRole("radio", { name: "Claude Code" }));
+  await user.selectOptions(modelSelect(), "Haiku");
+  // Auto lists Claude Code's models: Haiku stays.
+  await user.click(screen.getByRole("radio", { name: "Auto" }));
+  expect(modelSelect().value).toBe("haiku");
+  await user.click(screen.getByRole("radio", { name: "Codex" }));
+  expect(modelSelect().value).toBe("");
+  // Back on Claude Code it is still Default: the reset is a choice, not a view.
+  await user.click(screen.getByRole("radio", { name: "Claude Code" }));
+  expect(modelSelect().value).toBe("");
+});
+
+test("Other… shows the text input with the runtime's recent models, and keeps it across runtimes", async () => {
   load({
     repos: [],
     tickets: [
@@ -254,13 +319,31 @@ test("model suggestions follow the chosen runtime; under Auto the model is Claud
     policy: { revision: 1, settingsJson: "{}" },
   });
   const user = setup();
+  submitTask.mockResolvedValue(create(CommandResultSchema, { ok: false, code: "unavailable" }));
+  await user.selectOptions(modelSelect(), "Other…");
+  expect(otherBox()).toBeTruthy();
   expect(suggested()).toEqual(["opus", "sonnet"]);
-  expect(screen.getByText("Under Auto, the model applies on Claude Code; Codex runs its own default.")).toBeTruthy();
   await user.click(screen.getByRole("radio", { name: "Codex" }));
+  expect(modelSelect().value).not.toBe("");
   expect(suggested()).toEqual(["gpt-5.5"]);
-  expect(screen.queryByText(/Under Auto/)).toBeNull();
-  await user.click(screen.getByRole("radio", { name: "Claude Code" }));
-  expect(suggested()).toEqual(["opus", "sonnet"]);
+  await user.type(task(), "x");
+  // An empty Other… sends no model.
+  await user.click(start());
+  expect(submitTask).toHaveBeenLastCalledWith({ text: "x", runtime: "codex" });
+  await user.type(otherBox() as HTMLElement, " gpt-5.5 ");
+  await user.click(start());
+  expect(submitTask).toHaveBeenLastCalledWith({ text: "x", model: "gpt-5.5", runtime: "codex" });
+  await user.selectOptions(modelSelect(), "GPT-5 Codex");
+  expect(otherBox()).toBeNull();
+  await user.click(start());
+  expect(submitTask).toHaveBeenLastCalledWith({ text: "x", model: "gpt-5-codex", runtime: "codex" });
+});
+
+test("a ready runtime whose models are not known yet offers Default and Other…", async () => {
+  withRuntimes([both[0], { name: "codex", ready: true, tested: true }]);
+  const user = setup();
+  await user.click(screen.getByRole("radio", { name: "Codex" }));
+  expect(options()).toEqual(["Default", "Other…"]);
 });
 
 test("review switch with two ready runtimes, or whenever the Policy pairs", async () => {

@@ -34,6 +34,9 @@
 //	                                 does anything (its answer and its turn); a turn/interrupt meanwhile finds no turn
 //	ATHENA_FAKE_CODEX_HOLD_TURN_START_REPLY  path of a file: a turn/start between turns starts its turn at once, but
 //	                                 its answer waits until the file exists
+//	ATHENA_FAKE_CODEX_MODELS         how model/list answers: by default with fakeModels over two pages (the first
+//	                                 with a nextCursor; a hidden model on it); "error" (a -32603 error), "hang" (no
+//	                                 answer at all), or "endless" (one model a page, always with a nextCursor)
 //	ATHENA_FAKE_CODEX_VERSION        the version --version prints (default 0.160.1)
 //	ATHENA_FAKE_CODEX_PROTOCOL       path of protocol.json (default: testdata/codex/protocol.json of the source tree it
 //	                                 was built from); every request it knows is checked against it, as the real server
@@ -46,8 +49,8 @@
 // turn/start (during a turn it steers into it, as the real server does), turn/steer, turn/interrupt (the turn ends
 // "interrupted"), hooks/list, config/batchWrite (it records only the hooks.state."<key>".trusted_hash edits),
 // config/read (the [features] and [mcp_servers.<name>] of $CODEX_HOME/config.toml and of a project's .codex/config.toml,
-// see ATHENA_FAKE_CODEX_TRUST_PROJECT), account/read (acct_fixture) and account/rateLimits/read; any other request
-// gets a -32601 error.
+// see ATHENA_FAKE_CODEX_TRUST_PROJECT), account/read (acct_fixture), account/rateLimits/read and model/list (see
+// ATHENA_FAKE_CODEX_MODELS); any other request gets a -32601 error.
 //
 // Hooks are listed as Codex lists them: key "<config path>:<snake_event>:<group>:<handler>" (the path with the home's
 // symlinks resolved, as in sourcePath), source "user", their timeout (600 when the handler names none), async flag and
@@ -439,8 +442,43 @@ func (s *server) request(w wire) {
 			"primary":   map[string]any{"usedPercent": 12, "windowDurationMins": 300, "resetsAt": t0 + 18000},
 			"secondary": map[string]any{"usedPercent": 4, "windowDurationMins": 10080, "resetsAt": t0 + 604800},
 		}})
+	case "model/list":
+		var lp struct {
+			Cursor string `json:"cursor"`
+		}
+		_ = json.Unmarshal(w.Params, &lp)
+		switch os.Getenv("ATHENA_FAKE_CODEX_MODELS") {
+		case "error":
+			s.replyError(w.ID, -32603, "model/list: the model catalog is not available")
+		case "hang":
+		case "endless":
+			n, _ := strconv.Atoi(strings.TrimPrefix(lp.Cursor, "fixture_cursor_"))
+			id := fmt.Sprintf("gpt-fixture-%d", n)
+			s.reply(w.ID, map[string]any{"data": []any{model(id, id, false, false)}, "nextCursor": fmt.Sprintf("fixture_cursor_%d", n+1)})
+		default:
+			if lp.Cursor == "" {
+				s.reply(w.ID, map[string]any{"data": []any{
+					model("gpt-5-codex", "GPT-5 Codex", true, false),
+					model("codex-auto-review", "Codex Auto Review", false, true),
+				}, "nextCursor": "fixture_cursor_2"})
+				return
+			}
+			s.reply(w.ID, map[string]any{"data": []any{model("gpt-5-codex-mini", "GPT-5 Codex Mini", false, false)}, "nextCursor": nil})
+		}
 	default:
 		s.replyError(w.ID, -32601, "method not found: "+w.Method)
+	}
+}
+
+// model is one Model of a model/list answer, with the fields the schema requires.
+func model(id, name string, isDefault, hidden bool) map[string]any {
+	return map[string]any{
+		"id": id, "model": id, "displayName": name, "description": name + " (fixture)", "hidden": hidden, "isDefault": isDefault,
+		"defaultReasoningEffort": "medium",
+		"supportedReasoningEfforts": []any{
+			map[string]any{"reasoningEffort": "low", "description": "Faster"},
+			map[string]any{"reasoningEffort": "medium", "description": "Balanced"},
+		},
 	}
 }
 
