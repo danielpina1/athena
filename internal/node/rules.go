@@ -49,6 +49,9 @@ type RuleContext struct {
 	// sandbox cannot keep them read-only (Codex's). A write to one is denied.
 	Protected []string
 
+	// ReadOnly is set for a session that may change nothing (a review): every write it names is denied (readOnlyRule).
+	ReadOnly bool
+
 	// tainted names the expandable variables a Bash command assigns or may change; set by bashWriteRule.
 	tainted map[string]bool
 }
@@ -65,6 +68,7 @@ const (
 	ruleRouterTools   = "router-tools"
 	ruleProtectedPath = "protected_path"
 	ruleAttribution   = "attribution"
+	ruleReadOnly      = "read_only"
 )
 
 // routerToolPrefix names the tools of Athena's MCP server, the only server the router session has.
@@ -91,8 +95,8 @@ func escalate(rule, reason string) Decision {
 	return Decision{Verdict: VerdictEscalate, Reason: reason, Rule: rule}
 }
 
-// Evaluate applies the hook rules in order: credential reads (deny), blocked
-// commands (deny), an AI attribution in a commit or pull request (deny), writes
+// Evaluate applies the hook rules in order: credential reads (deny), any write of a
+// read-only session (deny), blocked commands (deny), an AI attribution in a commit or pull request (deny), writes
 // to a protected path (deny) or outside the ticket dir (escalate; for Bash the
 // redirections and file commands that name a target), risky Bash commands
 // (escalate); anything else is allowed. Malformed input is denied. A Bash
@@ -103,6 +107,9 @@ func Evaluate(ctx RuleContext, tool string, input json.RawMessage) Decision {
 		return deny(ruleInput, "tool input is not a JSON object")
 	}
 	if d, ok := credentialRule(ctx, tool, in); ok {
+		return d
+	}
+	if d, ok := readOnlyRule(ctx, tool, in); ok {
 		return d
 	}
 	if tool == "Bash" {
@@ -692,6 +699,78 @@ func writeRule(ctx RuleContext, in map[string]any) (Decision, bool) {
 }
 
 // ---------------------------------------------------------------------------
+// read-only sessions
+
+// readOnlyGit are the git subcommands that change a repository, its working tree or a remote.
+var readOnlyGit = map[string]bool{
+	"commit": true, "push": true, "merge": true, "rebase": true, "reset": true, "checkout": true, "switch": true,
+	"stash": true, "add": true, "rm": true, "mv": true, "restore": true, "clean": true, "cherry-pick": true,
+	"revert": true, "am": true, "apply": true, "pull": true, "tag": true, "worktree": true, "init": true,
+}
+
+// readOnlyGh are the gh commands that change a pull request or an issue, or post on one; "api" reaches anything.
+var readOnlyGh = map[string]bool{
+	"pr create": true, "pr edit": true, "pr merge": true, "pr close": true, "pr reopen": true, "pr comment": true,
+	"pr review": true, "pr ready": true, "issue create": true, "issue edit": true, "issue comment": true,
+	"issue close": true, "issue reopen": true, "api": true,
+}
+
+// readOnlyRule denies, in a read-only session (ctx.ReadOnly), every write it can see: a write tool, a Bash command
+// that names a write target (bashWriteTargets) or runs a git or gh command that changes a repository or a pull
+// request (readOnlyGit, readOnlyGh). It is best effort, like the write rules: the session's sandbox is the complete
+// answer (Codex's read-only sandbox; Claude Code's with no writable path).
+func readOnlyRule(ctx RuleContext, tool string, in map[string]any) (Decision, bool) {
+	if !ctx.ReadOnly {
+		return Decision{}, false
+	}
+	const why = "this review session is read-only (" + ruleReadOnly + "): it changes nothing; report what should change " +
+		"as a finding with the review tool"
+	if writeTools[tool] {
+		return deny(ruleReadOnly, why), true
+	}
+	if tool != "Bash" {
+		return Decision{}, false
+	}
+	command := str(in, "command")
+	if targets := ctx.bashWriteTargets(command, "", 0); len(targets) > 0 {
+		return deny(ruleReadOnly, why+"; the command writes to "+targets[0].path), true
+	}
+	match := func(words []string) (string, string) {
+		switch words[0] {
+		case "git":
+			if sub := gitSubcommand(words[1:]); readOnlyGit[sub] {
+				return "git " + sub, why + "; git " + sub + " changes the repository"
+			}
+		case "gh":
+			if sub := ghCommand(words[1:]); readOnlyGh[sub] || readOnlyGh[strings.SplitN(sub, " ", 2)[0]] {
+				return "gh " + sub, why + "; gh " + sub + " changes GitHub"
+			}
+		}
+		return "", ""
+	}
+	if hit, reason := findBlocked(command, match, 0); hit != "" {
+		return deny(ruleReadOnly, reason), true
+	}
+	return Decision{}, false
+}
+
+// ghCommand is the command gh's arguments run: its first two words that are neither flags nor a flag's value (the
+// repository of -R/--repo, the host of --hostname), joined by a space.
+func ghCommand(args []string) string {
+	var words []string
+	for i := 0; i < len(args) && len(words) < 2; i++ {
+		switch a := args[i]; {
+		case a == "-R" || a == "--repo" || a == "--hostname":
+			i++
+		case strings.HasPrefix(a, "-"):
+		default:
+			words = append(words, a)
+		}
+	}
+	return strings.Join(words, " ")
+}
+
+// ---------------------------------------------------------------------------
 // risky shell commands
 
 type bashPattern struct {
@@ -725,7 +804,7 @@ const (
 
 // redirectRe finds an output redirection and its target: >, >>, >|, &> and N>, as in `echo x > file` or `cmd 2>>log`.
 // A target that starts with ampFd is a file descriptor (2>&1) unless it names a file (>&file).
-var redirectRe = regexp.MustCompile(`(?:\d*|` + ampOut + `)>>?` + ampFd + `?\s*(\S+)`)
+var redirectRe = regexp.MustCompile(`(?:\d*|` + ampOut + `)>>?\s*(` + ampFd + `?\S+)`)
 
 // writeTargetCmds are commands whose arguments name the files they create or change: every argument for
 // the first group, the last one for the second (cp a b, mv a b, ln -s a b).

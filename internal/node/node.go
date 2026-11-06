@@ -103,6 +103,9 @@ type Config struct {
 	// WorkerPrompt returns the system prompt a new worker session starts with (the owner's overrides applied); nil
 	// gives prompts.Worker. A resumed session keeps the prompt it started with (see sessionPrompt).
 	WorkerPrompt func() string
+	// ReviewerPrompt returns the system prompt a review session starts with (the owner's override applied); nil gives
+	// prompts.Reviewer. A review session always starts anew, so it is never kept.
+	ReviewerPrompt func() string
 	// Sandbox, when set, turns on Claude Code's sandbox for worker sessions (sandbox.go); nil leaves it off.
 	Sandbox *SandboxConfig
 	// Logger receives the node's log lines (default slog.Default()).
@@ -130,6 +133,8 @@ type EngineCallbacks interface {
 	// over, with no person stage.
 	UsageLimited(ticketID, assignmentID string, l core.UsageLimit) error
 	FileReport(ticketID string, r core.ReportInput) error
+	// FileReview files a review session's verdict (implement + review pairing).
+	FileReview(ticketID, assignmentID, verdict, findings string) error
 	Ticket(id string) (core.Ticket, core.Stage, error)
 	RequestApproval(a core.Approval) (core.Approval, error)
 	WaitApproval(ctx context.Context, id string) (core.Approval, error)
@@ -1136,8 +1141,8 @@ func (r *runner) run() {
 	// restart), was paused, not interrupted: it resumes with the resume note instead of the crash note.
 	r.paused = recovering && pausedAt(s.a)
 	r.restarted = recovering && !r.paused && restartInterrupted(s.a)
-	if recovering {
-		r.seedUnread()
+	if recovering && !s.reviewing() {
+		r.seedUnread() // a review is sent no Inputs
 	}
 	// The Ticket's model, else the node's default for Claude Code; Codex runs its own default (config.toml), which its
 	// session names at start (Init). An auto Ticket's model is a Claude Code model (the only kind a task named before
@@ -1152,13 +1157,23 @@ func (r *runner) run() {
 	adir := filepath.Join(s.place.workDir, ".athena")
 	env := append([]string{"ATHENA_ASSIGNMENT=" + s.a.ID}, n.variables(s)...)
 	env = append(env, n.githubEnv(s)...)
-	systemPrompt := n.sessionPrompt(s.t.ID, resumeID != "")
+	role, markerRole := roleWorker, roleImplement
+	var systemPrompt string
+	if s.reviewing() {
+		// A review starts fresh with its own prompt, and leaves the worker's kept prompt alone.
+		systemPrompt, role, markerRole = n.reviewerPrompt(), core.RoleReview, core.RoleReview
+	} else {
+		systemPrompt = n.sessionPrompt(s.t.ID, resumeID != "")
+	}
 	trPath := n.transcriptPath(s.t.ID)
 	if trPath == "" {
 		trPath = filepath.Join(adir, "transcript.jsonl")
 	}
-	sandbox, sandboxEnv := n.sandboxFor(s.place.workDir)
-	roots := n.writableRoots(s.place.workDir)
+	sandbox, sandboxEnv := n.sessionSandbox(s.place.workDir, s.reviewing())
+	var roots []string
+	if !s.reviewing() {
+		roots = n.writableRoots(s.place.workDir)
+	}
 	// A new Assignment after a usage limit (or after another runtime's work) tells its session what the one before knew.
 	failover := false
 	if !recovering {
@@ -1180,9 +1195,12 @@ func (r *runner) run() {
 		if failover {
 			reason, failover = "failover", false // its first process only
 		}
+		if s.reviewing() && resumeID == "" {
+			reason = "review"
+		}
 		// Its model is the one the session runs with, once known: Codex's own default is named by its first process.
 		tr.Append(render.MarkerLine(render.Marker{At: time.Now(), Runtime: rtm.Name(), Model: r.model, Assignment: s.a.ID,
-			Role: roleImplement, Reason: reason}))
+			Role: markerRole, Reason: reason}))
 		// The transcript keeps what the worker was sent, so the session view shows it (internal/render); the echo is no
 		// event the runner acts on (onEvent and account ignore rt.UserEcho).
 		sess, err := rtm.Start(n.ctx, rt.StartOptions{
@@ -1192,7 +1210,8 @@ func (r *runner) run() {
 			SystemPrompt:  systemPrompt,
 			Env:           env,
 			Transcript:    tr,
-			Role:          roleWorker,
+			Role:          role,
+			ReadOnly:      s.reviewing(),
 			Sandbox:       sandbox,
 			SandboxEnv:    sandboxEnv,
 			Approve:       func(ctx context.Context, req rt.ApprovalRequest) rt.Verdict { return n.approveRequest(ctx, s, req) },
@@ -1432,6 +1451,8 @@ func (r *runner) sendFirst(sess rt.Session, recovering bool) {
 		b.WriteString(restartNote + recoveryAdvice + "\n")
 	} else if recovering {
 		b.WriteString(recoveryNote + recoveryAdvice + "\n")
+	} else if s.reviewing() {
+		b.WriteString(r.reviewBrief(t))
 	} else {
 		b.WriteString(workerPreamble(t, r.n.variables(s)))
 		if r.handoff != "" {
@@ -1519,8 +1540,12 @@ func (r *runner) seedUnread() {
 	}
 }
 
-// pending returns the Ticket's waiting Inputs not yet sent to this Assignment, in order.
+// pending returns the Ticket's waiting Inputs not yet sent to this Assignment, in order; none to a review, whose
+// Inputs wait for the implementer.
 func (r *runner) pending(t core.Ticket) []string {
+	if r.s.reviewing() {
+		return nil
+	}
 	var ids []string
 	for _, id := range t.Undelivered {
 		if !r.sent[id] {
@@ -1777,13 +1802,14 @@ func (r *runner) turnEnded() {
 		r.nudged = false
 		return
 	}
+	nudge, summary := r.s.nudge()
 	if !r.nudged {
 		r.nudged = true
 		if r.send == nil {
 			return
 		}
 		r.log.Info("turn ended without a report; nudging the worker")
-		if err := r.send(nudgeText); err != nil {
+		if err := r.send(nudge); err != nil {
 			r.log.Warn("send nudge", "error", err)
 			return
 		}
@@ -1799,7 +1825,7 @@ func (r *runner) turnEnded() {
 		return
 	}
 	r.log.Warn("worker ended its turn twice without reporting")
-	if err := r.eng.FileReport(r.s.t.ID, core.ReportInput{AssignmentID: r.s.a.ID, State: core.ReportBlocked, Summary: blockedSummary}); err != nil {
+	if err := r.eng.FileReport(r.s.t.ID, core.ReportInput{AssignmentID: r.s.a.ID, State: core.ReportBlocked, Summary: summary}); err != nil {
 		r.log.Error("file blocked report", "error", err)
 	}
 }
@@ -1966,6 +1992,8 @@ func renderInputs(t core.Ticket, ids []string, trigger func(id string) (core.Tri
 			fmt.Fprintf(&b, "[input %s: the Ticket was resumed by the message that follows]\n\n", in.ID)
 		case core.InputNote:
 			fmt.Fprintf(&b, "[input %s: note]\nNote: %s\n\n", in.ID, quoteText(in.Text))
+		case core.InputReview:
+			fmt.Fprintf(&b, "[input %s: review]\n%s\n\nAddress the findings, then report ready again.\n\n", in.ID, quoteText(in.Text))
 		default:
 			var tr core.Trigger
 			found := false
@@ -2043,6 +2071,14 @@ func (n *Node) sessionPrompt(ticketID string, resumed bool) string {
 		}
 	}
 	return p
+}
+
+// reviewerPrompt is the system prompt of a review session: the current reviewer prompt, overrides applied.
+func (n *Node) reviewerPrompt() string {
+	if n.cfg.ReviewerPrompt != nil {
+		return n.cfg.ReviewerPrompt()
+	}
+	return prompts.Reviewer
 }
 
 // transcriptPath is the Ticket's TranscriptPath, or "" (the session's own default) without a state directory.
@@ -2250,10 +2286,15 @@ func (n *Node) prepare(s *session) error {
 	if !ok {
 		return fmt.Errorf("runtime %q is not available on this node", name)
 	}
-	sb, sbEnv := n.sandboxFor(p.workDir)
+	sb, sbEnv := n.sessionSandbox(p.workDir, s.reviewing())
+	role := roleWorker
+	if s.reviewing() {
+		role = core.RoleReview
+	}
 	return rtm.Prepare(rt.Prepare{
 		WorkDir: p.workDir, AthenaBin: n.cfg.AthenaBin, Socket: n.cfg.SocketPath, TicketID: s.t.ID, AssignmentID: s.a.ID,
-		HookTimeout: n.cfg.ApprovalTimeout + hookTimeoutMargin, Sandbox: sb, SandboxEnv: sbEnv, Role: roleWorker,
+		HookTimeout: n.cfg.ApprovalTimeout + hookTimeoutMargin, Sandbox: sb, SandboxEnv: sbEnv, Role: role,
+		ReadOnly: s.reviewing(),
 	})
 }
 

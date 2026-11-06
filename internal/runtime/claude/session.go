@@ -54,6 +54,8 @@ type Options struct {
 	// ReplayUserMessages passes --replay-user-messages: each user message comes back as a UserEcho once a turn takes
 	// it in.
 	ReplayUserMessages bool
+	// DisallowedTools, when set, is passed as --disallowedTools: the comma-separated tools the session may not use.
+	DisallowedTools string
 }
 
 // buildArgs returns the argument list for o.
@@ -72,6 +74,9 @@ func buildArgs(o Options) []string {
 	}
 	if o.ReplayUserMessages {
 		args = append(args, "--replay-user-messages")
+	}
+	if o.DisallowedTools != "" {
+		args = append(args, "--disallowedTools", o.DisallowedTools)
 	}
 	// Always passed: with --setting-sources "" the --settings file is the only
 	// source of hooks, so a session without it would run without Athena's hooks.

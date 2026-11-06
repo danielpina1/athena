@@ -116,7 +116,7 @@ func (d *Dispatcher) handleRequest(req Request) (any, error) {
 	case OpPing:
 		return nil, nil
 	case OpSubmit:
-		t, err := d.submit(req.Text, req.Dir, req.Model, req.Repo, req.Runtime, "")
+		t, err := d.submit(req.Text, req.Dir, req.Model, req.Repo, req.Runtime, pairingOf(req.Review), "")
 		if err != nil {
 			return nil, err
 		}
@@ -222,7 +222,7 @@ func (d *Dispatcher) detail(id string) (TicketDetail, error) {
 		return TicketDetail{}, err
 	}
 	out := TicketDetail{TicketSummary: summary(&t), Ended: t.Ended, Assignments: t.Assignments, Undelivered: len(t.Undelivered),
-		Stats: t.Stats, Repo: t.Repo}
+		Stats: t.Stats, Repo: t.Repo, Pairing: t.Pairing}
 	if out.Assignments == nil {
 		out.Assignments = []core.Assignment{}
 	}
@@ -330,7 +330,7 @@ func (d *Dispatcher) act(o web.Origin, c *athenav1.Command) *athenav1.CommandRes
 	switch a := c.GetAction().(type) {
 	case *athenav1.Command_SubmitTask:
 		s := a.SubmitTask
-		t, err := d.submit(s.GetText(), s.GetDir(), s.GetModel(), s.GetRepo(), "", requestID(o, c))
+		t, err := d.submit(s.GetText(), s.GetDir(), s.GetModel(), s.GetRepo(), "", "", requestID(o, c))
 		if err != nil {
 			return d.failure(err)
 		}
@@ -484,7 +484,18 @@ func (d *Dispatcher) failure(err error) *athenav1.CommandResult {
 
 // submit records an owner task. A relative directory would resolve against the server's working directory, not the
 // client's; a repository must be one GitHub serves. A requestID seen before returns the Ticket it created.
-func (d *Dispatcher) submit(text, dir, model, repo, runtime, requestID string) (core.Ticket, error) {
+// pairingOf is the TaskOptions.Pairing of a submit's review switch: on, off, or unset for the Policy's default.
+func pairingOf(review *bool) string {
+	switch {
+	case review == nil:
+		return ""
+	case *review:
+		return core.PairingReview
+	}
+	return core.PairingOff
+}
+
+func (d *Dispatcher) submit(text, dir, model, repo, runtime, pairing, requestID string) (core.Ticket, error) {
 	if dir != "" {
 		if !filepath.IsAbs(dir) {
 			return core.Ticket{}, userErrorf("directory %s must be an absolute path", dir)
@@ -501,7 +512,8 @@ func (d *Dispatcher) submit(text, dir, model, repo, runtime, requestID string) (
 		}
 		repo = name
 	}
-	t, err := d.eng.SubmitOwnerTask(text, core.TaskOptions{Dir: dir, Model: model, Repo: repo, Runtime: runtime, RequestID: requestID})
+	t, err := d.eng.SubmitOwnerTask(text, core.TaskOptions{Dir: dir, Model: model, Repo: repo, Runtime: runtime, Pairing: pairing,
+		RequestID: requestID})
 	if errors.Is(err, core.ErrDuplicate) {
 		return t, nil
 	}

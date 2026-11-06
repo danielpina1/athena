@@ -47,9 +47,10 @@ func ranOn(t core.Ticket, a core.Assignment) string {
 	return runtimeName(t)
 }
 
-// pinnedRuntime is the runtime an Assignment must launch on, "" when the chooser may pick (auto): the Assignment's own
-// (pinned when it was made, or the one it ran on, which a resume keeps), else the Ticket's when it names claude or codex
-// (or none, from before runtimes: Claude Code).
+// pinnedRuntime is the runtime an Assignment must launch on, "" when the chooser may pick (auto, and a review): the
+// Assignment's own (pinned when it was made, or the one it ran on, which a resume keeps), else the Ticket's when it
+// names claude or codex (or none, from before runtimes: Claude Code). A review is never pinned by its Ticket: it runs
+// on the other runtime than the implementer's when that one is ready (HeadroomChooser).
 func pinnedRuntime(t core.Ticket, a core.Assignment) string {
 	if a.Runtime != "" {
 		return a.Runtime
@@ -57,7 +58,7 @@ func pinnedRuntime(t core.Ticket, a core.Assignment) string {
 	if r := ranOn(t, a); r != "" {
 		return r
 	}
-	if t.Execution != nil && t.Execution.Runtime == core.RuntimeAuto {
+	if a.Role == core.RoleReview || (t.Execution != nil && t.Execution.Runtime == core.RuntimeAuto) {
 		return ""
 	}
 	return runtimeName(t)
@@ -154,10 +155,11 @@ const unknownWait = 15 * time.Minute
 // HeadroomChooser chooses by readiness and quota headroom:
 //
 //  1. An Assignment pinned to a runtime (Assignment.Runtime, or the runtime it ran on: a resume keeps its session's)
-//     runs on it; a Ticket that names claude or codex too. Not ready, the launch fails with its Why; limited, it waits
+//     runs on it; a Ticket that names claude or codex too, but for a review, which is chosen as under auto. Not ready, the launch fails with its Why; limited, it waits
 //     until its reset; at its session cap, for a session to end. No other runtime takes its place.
 //  2. auto: the candidates are the ready runtimes that are not limited and below their MaxSessions. A review drops the
-//     implementer's runtime when another candidate is left; then the candidates over any AvoidAbove window are dropped,
+//     runtime of the Ticket's latest implement Assignment that ran when another candidate is left (the one code path of
+//     "review on the other runtime"); then the candidates over any AvoidAbove window are dropped,
 //     unless that leaves none. The runtime of the Ticket's latest Assignment of the same role that ran (a warm
 //     session) wins, else Preferred, else the largest headroom (ties: by name).
 //  3. No candidate: the launch waits until the earliest reset (unknownWait when none is known), or for a session to

@@ -254,6 +254,9 @@ func evaluateCall(ctx RuleContext, runtime string, c ToolCall) Decision {
 		return Evaluate(ctx, c.Tool, c.Input)
 	}
 	switch {
+	case c.Tool == "write_stdin" && ctx.ReadOnly:
+		// What it types runs in a process the rules no longer see: a read-only session types nothing.
+		return deny(ruleReadOnly, "this review session is read-only ("+ruleReadOnly+"): it types into no running process")
 	case c.Tool == "write_stdin":
 		return stdinRule(ctx, c.Input)
 	case c.Tool == "Bash":

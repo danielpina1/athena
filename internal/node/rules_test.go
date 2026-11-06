@@ -1052,3 +1052,63 @@ func TestAttributionAllowsPlainMessage(t *testing.T) {
 		}
 	}
 }
+
+func TestReadOnlyDeniesEveryWrite(t *testing.T) {
+	e := newRuleEnv(t)
+	ro := e.ctx
+	ro.ReadOnly = true
+	inside := filepath.Join(ro.TicketDir, "a.go")
+	for _, tc := range []struct {
+		tool string
+		in   map[string]any
+	}{
+		{"Write", map[string]any{"file_path": inside, "content": "x"}},
+		{"Edit", map[string]any{"file_path": inside, "old_string": "a", "new_string": "b"}},
+		{"MultiEdit", map[string]any{"file_path": inside, "edits": []any{}}},
+		{"NotebookEdit", map[string]any{"notebook_path": filepath.Join(ro.TicketDir, "n.ipynb")}},
+		{"Bash", map[string]any{"command": "echo x > notes.txt"}},
+		{"Bash", map[string]any{"command": "touch a.go"}},
+		{"Bash", map[string]any{"command": "git commit -am fix"}},
+		{"Bash", map[string]any{"command": "git -C . push origin HEAD"}},
+		{"Bash", map[string]any{"command": "git status && git stash"}},
+		{"Bash", map[string]any{"command": "git merge main"}},
+		{"Bash", map[string]any{"command": "git rebase main"}},
+		{"Bash", map[string]any{"command": "git reset --hard HEAD~1"}},
+		{"Bash", map[string]any{"command": "git checkout -- a.go"}},
+		{"Bash", map[string]any{"command": "git switch -c other"}},
+		{"Bash", map[string]any{"command": "gh pr create --fill"}},
+		{"Bash", map[string]any{"command": "gh -R o/r pr edit 3 --title x"}},
+		{"Bash", map[string]any{"command": "gh pr merge 3"}},
+		{"Bash", map[string]any{"command": "sh -c 'git commit -m x'"}},
+	} {
+		d := Evaluate(ro, tc.tool, in(tc.in))
+		if d.Verdict != VerdictDeny || d.Rule != ruleReadOnly {
+			t.Errorf("%s %v under read-only = %+v, want a read_only deny", tc.tool, tc.in, d)
+		}
+		if w := Evaluate(e.ctx, tc.tool, in(tc.in)); w.Rule == ruleReadOnly {
+			t.Errorf("%s %v denied read_only in a writable session", tc.tool, tc.in)
+		}
+	}
+	for _, cmd := range []string{"git status", "git diff main...HEAD", "git log --oneline -5", "git show HEAD:a.go",
+		"go test ./...", "grep -rn foo . | head", "ls > /dev/null", "gh pr view 3", "gh pr diff 3", "git diff --stat 2>&1"} {
+		if d := Evaluate(ro, "Bash", in(map[string]any{"command": cmd})); d.Verdict != VerdictAllow {
+			t.Errorf("read-only %q = %+v, want allowed", cmd, d)
+		}
+	}
+	if d := Evaluate(ro, "Read", in(map[string]any{"file_path": inside})); d.Verdict != VerdictAllow {
+		t.Errorf("read-only Read = %+v", d)
+	}
+	// Codex's own writes too: a patch, a shell command, and typing into a running process.
+	for _, tc := range []struct {
+		tool string
+		in   map[string]any
+	}{
+		{"apply_patch", map[string]any{"command": "*** Begin Patch\n*** Add File: a.txt\n+x\n*** End Patch\n"}},
+		{"exec_command", map[string]any{"cmd": []any{"bash", "-lc", "echo x > out.txt"}}},
+		{"write_stdin", map[string]any{"session_id": 1, "chars": "ls\n"}},
+	} {
+		if d := codexEval(ro, tc.tool, in(tc.in)); d.Verdict != VerdictDeny || d.Rule != ruleReadOnly {
+			t.Errorf("codex %s under read-only = %+v, want a read_only deny", tc.tool, d)
+		}
+	}
+}

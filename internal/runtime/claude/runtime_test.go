@@ -171,3 +171,49 @@ func TestRuntimeCheck(t *testing.T) {
 		t.Fatal("name")
 	}
 }
+
+// A read-only session (a review): Prepare gives its MCP server only the review tool, and Start runs it without the
+// tools that write files; a directory prepared for a worker never starts read-only.
+func TestRuntimeReadOnlyReview(t *testing.T) {
+	dir := t.TempDir()
+	r := Runtime{Binary: fakeBinary(t)}
+	p := rt.Prepare{WorkDir: dir, AthenaBin: "/bin/athena", Socket: "/run/a.sock", TicketID: "T-1", AssignmentID: "A-2", Role: "review", ReadOnly: true}
+	if err := r.Prepare(p); err != nil {
+		t.Fatal(err)
+	}
+	mcp, _ := os.ReadFile(filepath.Join(dir, ".athena", "mcp.json"))
+	if !bytes.Contains(mcp, []byte(`"--ticket",
+        "T-1",
+        "--role",
+        "review"`)) {
+		t.Fatalf("review mcp.json = %s", mcp)
+	}
+	tr, err := rt.OpenTranscript(filepath.Join(t.TempDir(), "t.jsonl"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tr.Close()
+	argsLog := filepath.Join(t.TempDir(), "args.json")
+	s, err := r.Start(context.Background(), rt.StartOptions{Dir: dir, Transcript: tr, Role: "review", ReadOnly: true,
+		Env: []string{"ATHENA_FAKE_ARGS_LOG=" + argsLog}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = s.Close()
+	for range s.Events() {
+	}
+	_ = s.Wait()
+	args, _ := os.ReadFile(argsLog)
+	if !bytes.Contains(args, []byte(`"--disallowedTools","Write,Edit,MultiEdit,NotebookEdit"`)) {
+		t.Fatalf("read-only args = %s", args)
+	}
+
+	// The worker's files of the same directory: a read-only start is refused.
+	p.ReadOnly, p.Role = false, "worker"
+	if err := r.Prepare(p); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Start(context.Background(), rt.StartOptions{Dir: dir, Transcript: tr, ReadOnly: true}); err == nil {
+		t.Fatal("a read-only session started with a worker's files")
+	}
+}

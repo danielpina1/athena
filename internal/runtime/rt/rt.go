@@ -53,8 +53,10 @@ type Prepare struct {
 	// Sandbox, when set, confines the session's commands; SandboxEnv is the environment its commands need with it.
 	Sandbox    *Sandbox
 	SandboxEnv []string
-	// Role is the session's role ("worker").
-	Role string
+	// Role is the session's role ("worker", or "review"); ReadOnly asks for files that let the session change nothing
+	// (Claude Code's MCP server of a review, with only its review tool).
+	Role     string
+	ReadOnly bool
 }
 
 // StartOptions configures one session's process.
@@ -73,7 +75,8 @@ type StartOptions struct {
 	// its responses to Athena's requests), and a {"at":…,"athena":{"declined":<method>,"id":<request id>,"reason":…}}
 	// line for each approval the session declined on its own. The caller opens it and closes it after Session.Wait.
 	Transcript *Transcript
-	// Role is the session's role ("worker"); ReadOnly asks for a session that may not change its directory.
+	// Role is the session's role ("worker", or "review"); ReadOnly asks for a session that may not change its directory
+	// (a review's). A runtime that cannot run one refuses to start, never starting it writable.
 	Role     string
 	ReadOnly bool
 	// Sandbox is the sandbox description Prepare also gets. Neither runtime reads it at start: Claude Code takes it from

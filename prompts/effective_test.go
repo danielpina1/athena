@@ -13,11 +13,11 @@ func TestPartsOrderAndDefaults(t *testing.T) {
 			t.Errorf("part %s default is empty or keeps a comment", p.Name)
 		}
 	}
-	if got := strings.Join(names, ","); got != "worker,router,admission,replies,subscriptions" {
+	if got := strings.Join(names, ","); got != "worker,router,admission,replies,subscriptions,reviewer" {
 		t.Fatalf("parts = %s", got)
 	}
 	w, r := Effective(nil)
-	if w != Worker || r != Router {
+	if w != Worker || r != Router || EffectiveReviewer(nil) != Reviewer {
 		t.Error("Effective(nil) differs from the defaults' compositions")
 	}
 }
@@ -32,7 +32,7 @@ func TestEffectiveReplacesOnePart(t *testing.T) {
 	}
 	for _, p := range Parts() {
 		switch p.Name {
-		case PartWorker, PartAdmission:
+		case PartWorker, PartAdmission, PartReviewer:
 		default:
 			if !strings.Contains(r, p.Default) {
 				t.Errorf("router prompt lost the %s part", p.Name)
@@ -45,6 +45,14 @@ func TestEffectiveReplacesOnePart(t *testing.T) {
 	w, r = Effective(map[string]string{PartWorker: "W", "nonsense": "x"})
 	if w != "W" || r != Router {
 		t.Error("worker override or unknown part mishandled")
+	}
+	// The reviewer's part is its own prompt: it never reaches the router's or the worker's (F-32).
+	w, r = Effective(map[string]string{PartReviewer: "REVIEWER OVERRIDE"})
+	if w != Worker || r != Router || strings.Contains(r, Reviewer) {
+		t.Error("the reviewer part leaked into the worker or router prompt")
+	}
+	if EffectiveReviewer(map[string]string{PartReviewer: "REVIEWER OVERRIDE"}) != "REVIEWER OVERRIDE" {
+		t.Error("the reviewer override is not the reviewer prompt")
 	}
 }
 

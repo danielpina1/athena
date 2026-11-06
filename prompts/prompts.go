@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	_ "embed"
 	"encoding/hex"
+	"slices"
 	"strings"
 )
 
@@ -15,6 +16,7 @@ const (
 	PartAdmission     = "admission"
 	PartReplies       = "replies"
 	PartSubscriptions = "subscriptions"
+	PartReviewer      = "reviewer"
 )
 
 // Part is one overridable piece of a system prompt and its compiled-in default.
@@ -34,6 +36,8 @@ var (
 	replies string
 	//go:embed subscriptions.md
 	subscriptions string
+	//go:embed reviewer.md
+	reviewer string
 )
 
 // Worker is the system prompt appended to every worker session.
@@ -43,8 +47,15 @@ var Worker = worker
 // and subscriptions, without the files' comment headers.
 var Router = compose(router, admission, replies, subscriptions)
 
-// Parts returns the overridable parts in order: worker, router, admission, replies, subscriptions. The router's parts
-// are their files without comment lines, as compose joins them.
+// Reviewer is the system prompt appended to a review session (implement + review pairing): what to read, that it
+// changes nothing, and the review tool's output format and verdict rule.
+var Reviewer = compose1(reviewer) + "\n"
+
+// routerParts are the parts the router prompt is composed of, in order.
+var routerParts = []string{PartRouter, PartAdmission, PartReplies, PartSubscriptions}
+
+// Parts returns the overridable parts in order: worker, router, admission, replies, subscriptions, reviewer. The
+// router's and the reviewer's parts are their files without comment lines, as compose joins them.
 func Parts() []Part {
 	return []Part{
 		{PartWorker, worker},
@@ -52,24 +63,31 @@ func Parts() []Part {
 		{PartAdmission, compose1(admission)},
 		{PartReplies, compose1(replies)},
 		{PartSubscriptions, compose1(subscriptions)},
+		{PartReviewer, Reviewer},
 	}
 }
 
 // Effective returns the worker and router prompts with each part in over replacing that part's default before the
-// router parts are composed. Names that are not parts are ignored.
+// router parts (routerParts, and only those) are composed. Names that are not parts are ignored.
 func Effective(over map[string]string) (workerPrompt, routerPrompt string) {
-	pick := func(name, def string) string {
-		if t, ok := over[name]; ok {
-			return t
+	texts := make([]string, 0, len(routerParts))
+	for _, p := range Parts() {
+		if slices.Contains(routerParts, p.Name) {
+			texts = append(texts, pick(over, p.Name, p.Default))
 		}
-		return def
 	}
-	parts := Parts()
-	texts := make([]string, 0, len(parts)-1)
-	for _, p := range parts[1:] {
-		texts = append(texts, pick(p.Name, p.Default))
+	return pick(over, PartWorker, worker), compose(texts...)
+}
+
+// EffectiveReviewer returns the reviewer prompt, the part in over replacing its default.
+func EffectiveReviewer(over map[string]string) string { return pick(over, PartReviewer, Reviewer) }
+
+// pick is over's text for the part name, or def when over has none.
+func pick(over map[string]string, name, def string) string {
+	if t, ok := over[name]; ok {
+		return t
 	}
-	return pick(PartWorker, worker), compose(texts...)
+	return def
 }
 
 // Hash is the SHA-256 of s in hex: it tells whether a default changed under an override.

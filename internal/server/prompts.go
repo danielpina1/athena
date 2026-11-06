@@ -123,6 +123,17 @@ func (d *Dispatcher) setPrompt(name string, base uint32, text *string) error {
 	return err
 }
 
+// currentReviewerPrompt is the prompt a new review session starts with; like currentPrompt, the default when the store
+// cannot be read.
+func currentReviewerPrompt(st *store.Store, log *slog.Logger) string {
+	texts, _, err := overrideTexts(st)
+	if err != nil {
+		log.Error("read prompt overrides; using the defaults", "error", err)
+		return prompts.Reviewer
+	}
+	return prompts.EffectiveReviewer(texts)
+}
+
 // currentPrompt is the worker (or router) prompt a new session starts with. A store that cannot be read gives the
 // defaults, so a session never fails to start over an override.
 func currentPrompt(st *store.Store, log *slog.Logger, worker bool) string {

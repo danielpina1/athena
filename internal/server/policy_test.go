@@ -152,3 +152,30 @@ func TestPolicyChangeRetriedAfterFailure(t *testing.T) {
 		t.Fatalf("startup told %v, want %v once", *pairs2, want)
 	}
 }
+
+// The Engine's pairing default is the saved settings' pairing: off until the owner turns review on, which owner tasks
+// that name none then take.
+func TestPairingDefaultFromSettings(t *testing.T) {
+	st := openStore(t)
+	c, _, _ := newPolicyControl(t, st)
+	if d := c.policy.pairing(); d != (core.PairingDefaults{MaxRounds: 2}) {
+		t.Fatalf("default pairing = %+v", d)
+	}
+	s := policy.Defaults(nil)
+	s.Pairing = policy.Pairing{Review: policy.PairingOn, MaxRounds: 1}
+	raw, err := json.Marshal(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.policySet(raw); err != nil {
+		t.Fatal(err)
+	}
+	if d := c.policy.pairing(); d != (core.PairingDefaults{Mode: core.PairingReview, MaxRounds: 1}) {
+		t.Fatalf("pairing after the save = %+v", d)
+	}
+	eng := core.NewEngineWith(st.Repos(), nopExec{}, core.Options{Pairing: c.policy.pairing})
+	tk, err := eng.SubmitOwnerTask("Task", core.TaskOptions{Dir: "/w"})
+	if err != nil || tk.Pairing != core.PairingReview {
+		t.Fatalf("task pairing = %q %v", tk.Pairing, err)
+	}
+}

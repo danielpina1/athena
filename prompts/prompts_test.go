@@ -53,3 +53,25 @@ func TestWorkerPrompt(t *testing.T) {
 		}
 	}
 }
+
+func TestPartsIncludeReviewer(t *testing.T) {
+	parts := Parts()
+	if last := parts[len(parts)-1]; last.Name != PartReviewer || last.Default != Reviewer {
+		t.Fatalf("last part = %s, want the reviewer", last.Name)
+	}
+	if strings.Contains(Router, Reviewer) || strings.Contains(Worker, Reviewer) {
+		t.Error("the reviewer prompt is part of another session's prompt")
+	}
+	// What to read, the closed output, the verdict rule, and no writes.
+	for _, want := range []string{"git diff", "tests", "`review`", "verdict", "approved", "changes", "- none",
+		"[high]", "[medium]", "[low]", "<file>:<line>", "high or medium", "Never edit", "commit", "push"} {
+		if !strings.Contains(Reviewer, want) {
+			t.Errorf("reviewer prompt lacks %q", want)
+		}
+	}
+	for _, banned := range []string{"`report`", "orchestrator_", "nucleos"} {
+		if strings.Contains(Reviewer, banned) {
+			t.Errorf("reviewer prompt mentions %q", banned)
+		}
+	}
+}

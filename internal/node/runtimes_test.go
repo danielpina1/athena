@@ -321,6 +321,10 @@ func TestReviewPrefersOtherRuntime(t *testing.T) {
 	as = []core.Assignment{ranAssignment("a1", core.RuntimeClaude, ""), review}
 	ready := map[string]rt.Info{core.RuntimeClaude: readyInfo, core.RuntimeCodex: loggedOut}
 	wantLaunch(t, defaultChooser.Choose(choiceFor(core.RuntimeAuto, as, ready, nil)), core.RuntimeClaude)
+
+	// A Ticket pinned to a runtime pins its implementer, not its review.
+	as = []core.Assignment{ranAssignment("a1", core.RuntimeClaude, ""), review}
+	wantLaunch(t, defaultChooser.Choose(choiceFor(core.RuntimeClaude, as, nil, nil)), core.RuntimeCodex)
 }
 
 // A runtime at its session cap is not chosen; with every candidate at its cap, the launch waits for a session to end

@@ -34,8 +34,8 @@ const (
 
 // Serve serves the node's Unix socket (mode 0600) until ctx is done: one JSON request line and one response line per
 // connection. Ops: hook (the hook rules, Approvals for escalations, Stop as the end of a turn, SessionStart context),
-// report (a worker's Report), worker (a worker's other tools), credential (a session's GitHub token, for its credential
-// helper and gh wrapper), router (the router's tools) and ping. Every op names its Ticket and Assignment, and one that does not match a live
+// report (a worker's Report), review (a review session's verdict), worker (a worker's other tools), credential (a
+// session's GitHub token, for its credential helper and gh wrapper), router (the router's tools) and ping. Every op names its Ticket and Assignment, and one that does not match a live
 // session is refused: a hook is denied (a Stop is still allowed), a report fails.
 func (n *Node) Serve(ctx context.Context) error {
 	path := n.cfg.SocketPath
@@ -136,6 +136,13 @@ func (n *Node) handleConn(ctx context.Context, conn net.Conn) {
 				resp = RouterResponse{Error: "malformed router request"}
 			} else {
 				resp = n.handleRouter(ctx, req)
+			}
+		case OpReview:
+			var req ReviewRequest
+			if err := json.Unmarshal(line, &req); err != nil {
+				resp = Response{Error: "malformed review request"}
+			} else {
+				resp = n.handleReview(req)
 			}
 		case OpWorker:
 			var req WorkerRequest
@@ -245,11 +252,11 @@ func (n *Node) recordUsage(s *session, u core.UsageDelta) {
 func hookRuntime(s *session) string { return s.currentRuntime() }
 
 // ruleContext is what the rules know of a session; a Codex session's protected paths are denied by the rules, since
-// its sandbox cannot keep them read-only.
+// its sandbox cannot keep them read-only, and a review session writes nothing.
 func (n *Node) ruleContext(s *session, runtime string) RuleContext {
 	home, _ := os.UserHomeDir()
 	c := RuleContext{TicketDir: s.place.workDir, Blocked: n.cfg.Blocked, Home: home, StateDir: n.cfg.StateDir,
-		AthenaBin: n.cfg.AthenaBin, VenvActive: false}
+		AthenaBin: n.cfg.AthenaBin, VenvActive: false, ReadOnly: s.reviewing()}
 	if runtime == core.RuntimeCodex {
 		c.Protected = ProtectedPaths(s.place.workDir)
 	}
@@ -409,8 +416,15 @@ func callSubject(c ToolCall) string {
 // its sandbox through its PermissionRequest hook and through an approval request, in either order. The first ask
 // creates the Approval; the other door's ask with the same key, while it waits or within shareWindow of its answer,
 // gets the same answer, and the answer is then dropped. The same door asking again (the action run again) asks anew.
-// An empty key shares nothing.
+// An empty key shares nothing. A review session's ask is denied: it asks no person.
 func (n *Node) escalateShared(ctx context.Context, s *session, event, key, door string, ask approvalAsk, start time.Time) HookResponse {
+	if s.reviewing() {
+		// A review asks no person: an Approval would put the Ticket in a person stage, which a review never does.
+		s.log.Info("review session's escalation denied", "rule", ask.d.Rule)
+		n.observeHook(event, VerdictDeny, start)
+		return denied("this review session is read-only and asks no one for approval (" + ask.d.Reason + "); review " +
+			"without it, and say in a finding what you could not check")
+	}
 	if key == "" {
 		return n.escalate(ctx, s, event, ask, start)
 	}
@@ -641,6 +655,9 @@ func (n *Node) handleReport(req ReportRequest) Response {
 	if s == nil {
 		return Response{Error: fmt.Sprintf("%s: ticket %q assignment %q", denyNoSession, req.Ticket, req.Assignment)}
 	}
+	if s.reviewing() {
+		return Response{Error: "a review session gives its verdict with the review tool"}
+	}
 	if (req.Status == string(core.ReportReady) || req.Status == string(core.ReportDropped)) && s.hasUnseenFailure() {
 		s.log.Warn("report refused", "state", req.Status, "error", "tool call failed in the same step")
 		return Response{Error: "a tool call of yours failed in the step that filed this report, so you cannot have seen its result; " +
@@ -671,10 +688,10 @@ func (n *Node) handleReport(req ReportRequest) Response {
 		return Response{Error: err.Error()}
 	}
 	// A ready report on a Ticket that stays open (it waits for its pull request) hands the work off: the session pauses
-	// once its turn is over (I1, R34).
+	// once its turn is over (I1, R34). One that waits for its review ended the Assignment: the Engine stops the session.
 	handoff := false
 	if req.Status == string(core.ReportReady) {
-		if t, _, err := n.engine().Ticket(req.Ticket); err == nil && t.Ended == nil {
+		if t, _, err := n.engine().Ticket(req.Ticket); err == nil && t.HandedOff() {
 			handoff = true
 		}
 	}

@@ -9,6 +9,7 @@ import (
 	"os"
 
 	"github.com/danielpina1/athena/internal/cli"
+	"github.com/danielpina1/athena/internal/core"
 	"github.com/danielpina1/athena/internal/node"
 )
 
@@ -52,26 +53,28 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 }
 
-// runMCP implements `athena mcp --ticket <id>`, the stdio MCP server of one worker session, and
-// `athena mcp --role router`, the router session's.
+// runMCP implements `athena mcp --ticket <id>`, the stdio MCP server of one worker session, `athena mcp --ticket <id>
+// --role review`, a review session's, and `athena mcp --role router`, the router session's.
 func runMCP(args []string, stderr io.Writer) int {
 	fs := flag.NewFlagSet("athena mcp", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	ticket := fs.String("ticket", "", "the Ticket whose session this server serves")
-	role := fs.String("role", "", "router: serve the router session's tools")
+	role := fs.String("role", "", "router: serve the router session's tools; review (with --ticket): a review session's")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	var err error
 	switch {
-	case fs.NArg() > 0, *role != "" && (*role != node.RoleRouter || *ticket != ""):
-		fmt.Fprintln(stderr, "usage: athena mcp --ticket <id> | athena mcp --role router")
+	case fs.NArg() > 0, *role == node.RoleRouter && *ticket != "", *role != "" && *role != node.RoleRouter && *role != core.RoleReview:
+		fmt.Fprintln(stderr, mcpUsage)
 		return 2
 	case *role == node.RoleRouter:
 		err = runRouterMCPServer(os.Getenv("ATHENA_SOCKET"), os.Getenv("ATHENA_ROUTER_TOKEN"))
 	case *ticket == "":
-		fmt.Fprintln(stderr, "usage: athena mcp --ticket <id> | athena mcp --role router")
+		fmt.Fprintln(stderr, mcpUsage)
 		return 2
+	case *role == core.RoleReview:
+		err = runReviewMCPServer(*ticket, os.Getenv("ATHENA_SOCKET"))
 	default:
 		err = runMCPServer(*ticket, os.Getenv("ATHENA_SOCKET"))
 	}
@@ -82,8 +85,11 @@ func runMCP(args []string, stderr io.Writer) int {
 	return 0
 }
 
-// runMCPServer and runRouterMCPServer serve MCP on stdio; tests replace them.
+const mcpUsage = "usage: athena mcp --ticket <id> [--role review] | athena mcp --role router"
+
+// runMCPServer, runReviewMCPServer and runRouterMCPServer serve MCP on stdio; tests replace them.
 var (
 	runMCPServer       = node.RunMCP
+	runReviewMCPServer = node.RunReviewMCP
 	runRouterMCPServer = node.RunRouterMCP
 )

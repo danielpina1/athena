@@ -362,6 +362,13 @@ func (c *policyCache) policy() core.Policy {
 	return c.pol
 }
 
+// pairing is the Engine's pairing defaults: the current settings' (policy.Settings.PairingDefaults).
+func (c *policyCache) pairing() core.PairingDefaults {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.cur.PairingDefaults()
+}
+
 // settings is the router's: the current settings.
 func (c *policyCache) settings() (policy.Settings, error) {
 	c.mu.RLock()

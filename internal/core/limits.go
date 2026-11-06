@@ -16,9 +16,9 @@ type UsageLimit struct {
 // UsageLimited is the Executor's fact that the session of the Assignment that runs the open Ticket stopped at its
 // runtime's usage limit l. No person needs to act: the Assignment ends with ReasonUsageLimit and l, the trigger Inputs
 // its worker never read go back ahead of what waits, and a new pending Assignment of the same role takes over, pinned
-// to l's runtime when the Ticket names one (claude or codex) and else left for the Executor to place (auto). The old
-// one stops and the new one starts. No Report is filed and no Attention raised, so the Ticket never waits for a person
-// because of a limit. A fact about any other Assignment changes nothing.
+// to l's runtime when the Ticket names one (claude or codex) and else left for the Executor to place (auto, and every
+// review). The old one stops and the new one starts. No Report is filed and no Attention raised, so the Ticket never
+// waits for a person because of a limit. A fact about any other Assignment changes nothing.
 func (e *Engine) UsageLimited(ticketID, assignmentID string, l UsageLimit) error {
 	return e.command(cmdUsageLimited, func(o *op) error {
 		t, err := o.running(ticketID, assignmentID)
@@ -35,8 +35,8 @@ func (e *Engine) UsageLimited(ticketID, assignmentID string, l UsageLimit) error
 		next := o.newAssignment(t)
 		n := findAssignment(t, next)
 		n.Role = role
-		if x := t.Execution; x != nil && (x.Runtime == RuntimeClaude || x.Runtime == RuntimeCodex) {
-			n.Runtime = l.Runtime
+		if x := t.Execution; role != RoleReview && x != nil && (x.Runtime == RuntimeClaude || x.Runtime == RuntimeCodex) {
+			n.Runtime = l.Runtime // a review is never pinned: it moves to whichever runtime is free
 		}
 		t.UpdatedAt = o.at
 		o.stop(t, assignmentID, ReasonUsageLimit)

@@ -73,6 +73,9 @@ type TaskOptions struct {
 	// RequestID makes the submit idempotent: a task submitted again with an id already stored creates nothing and
 	// returns the stored Ticket with ErrDuplicate.
 	RequestID string
+	// Pairing pairs the task: PairingReview with a review of each ready report, PairingOff with nothing, and empty as
+	// the Engine's Options.Pairing says. Any other value is a UserError.
+	Pairing string
 }
 
 // ReportInput is a worker's report on its Ticket. A Question asks a person (an empty one keeps the current question);
@@ -110,6 +113,8 @@ type Engine struct {
 	relays bool
 	// defaultRuntime is Options.DefaultRuntime, RuntimeClaude when it was empty or not a runtime.
 	defaultRuntime string
+	// pairing is Options.Pairing, nil without one.
+	pairing func() PairingDefaults
 }
 
 // Options configure an Engine beyond its Repositories and Executor. Every field may be left zero.
@@ -131,6 +136,10 @@ type Options struct {
 	// Ticket the router accepts. Empty, or a name that is not a runtime, is RuntimeClaude; the server passes its
 	// configuration's (auto by default).
 	DefaultRuntime string
+	// Pairing returns the Policy's pairing of the Tickets that name none (owner tasks without TaskOptions.Pairing, and
+	// every Ticket the router accepts) and the rounds a review may take. Without it no Ticket is paired unless its task
+	// asks, and a review takes at most 2 rounds. Like Policy, it runs inside a command's transaction.
+	Pairing func() PairingDefaults
 }
 
 // NewEngine returns an Engine with the plan 1 options: a clock and an event sink (see Options).
@@ -154,7 +163,7 @@ func NewEngineWith(repos Repositories, exec Executor, opts Options) *Engine {
 		def = RuntimeClaude // empty, or not a runtime: never a Ticket on a runtime nobody has
 	}
 	return &Engine{repos: repos, exec: exec, now: now, emit: emit, waiters: map[string]chan struct{}{},
-		policy: opts.Policy, scope: opts.Scope, wake: opts.Wake, relays: opts.Relays, defaultRuntime: def}
+		policy: opts.Policy, scope: opts.Scope, wake: opts.Wake, relays: opts.Relays, defaultRuntime: def, pairing: opts.Pairing}
 }
 
 // ValidRuntime reports whether name is a runtime a Ticket may run on: RuntimeClaude, RuntimeCodex or RuntimeAuto.
@@ -190,6 +199,9 @@ func (e *Engine) SubmitOwnerTask(text string, opts TaskOptions) (Ticket, error) 
 		return Ticket{}, err
 	}
 	opts.Runtime = runtime
+	if !validPairing(opts.Pairing) {
+		return Ticket{}, userErrorf("pairing %q is not %s or %s", opts.Pairing, PairingReview, PairingOff)
+	}
 	if opts.Repo != "" {
 		if !validRepo(opts.Repo) {
 			return Ticket{}, userErrorf("repository %q is not owner/name", opts.Repo)
@@ -232,6 +244,7 @@ func (e *Engine) SubmitOwnerTask(text string, opts TaskOptions) (Ticket, error) 
 			Execution: &Execution{Directory: opts.Dir, Runtime: opts.Runtime, Model: opts.Model},
 			Repo:      opts.Repo,
 			RequestID: opts.RequestID,
+			Pairing:   o.ticketPairing(opts.Pairing),
 		}
 		assignment := o.newAssignment(t)
 		input := Input{ID: newID(), Kind: InputTrigger, At: o.at, TriggerID: trigger.ID, Text: text, Human: true}
@@ -427,7 +440,9 @@ func (e *Engine) TurnEnded(ticketID, assignmentID string) error {
 // question replaces the current one, and a ready report clears it). A blocked or failed report holds back automatic
 // Inputs until a person's message arrives; a dropped report ends the Ticket dropped, and a ready one ends it completed.
 // A Ticket that follows Threads ends with them instead (FollowsDone): a ready report ends it only once it is done with
-// them, as the latest close did, and a dropped one after such a close ends it as that close did.
+// them, as the latest close did, and a dropped one after such a close ends it as that close did. On a Ticket paired
+// with review, its implementer's ready report waits for a review first (review.go), and a review's own report is only
+// ever the node's word that the review could not finish.
 func (e *Engine) FileReport(ticketID string, r ReportInput) error {
 	switch r.State {
 	case ReportProgress, ReportWaiting, ReportReady, ReportBlocked, ReportFailed, ReportDropped:
@@ -462,6 +477,16 @@ func (e *Engine) FileReport(ticketID string, r ReportInput) error {
 		if a.State == AssignmentEnded {
 			return userErrorf("assignment %s of ticket %s has ended", a.ID, ticketID)
 		}
+		if a.Role == RoleReview {
+			// A review gives its verdict with FileReview; a report from it is the node's word that it could not finish.
+			if r.State != ReportFailed && r.State != ReportBlocked {
+				return userErrorf("a review of ticket %s gives its verdict with the review tool, not a %s report", ticketID, r.State)
+			}
+			if err := o.reviewFailed(t, a); err != nil {
+				return err
+			}
+			return o.tx.PutTicket(t)
+		}
 		// A worker may file its report in the same step as a tool call that waits for approval (the real CLI runs
 		// them in parallel); a result claim then cannot be true yet, and the denial may make it false.
 		if t.PendingApproval != "" && (r.State == ReportReady || r.State == ReportDropped) {
@@ -495,37 +520,44 @@ func (e *Engine) FileReport(ticketID string, r ReportInput) error {
 				t.Undelivered = nil
 			}
 		}
-		data := map[string]any{"state": r.State, "summary": r.Summary}
-		if r.Question != "" {
-			data["question"] = r.Question
+		if r.State == ReportReady && o.holdsForReview(t, a) {
+			// The report waits for its review (review.go), which applies it later: nothing is said or ended yet.
+			o.startReview(t, a)
+			return o.tx.PutTicket(t)
 		}
-		o.event(EventReportFiled, t, a.ID, data)
-		if err := o.reportRelay(t, a, raised); err != nil {
+		if err := o.settleReport(t, a, raised); err != nil {
 			return err
-		}
-		// A Ticket that follows Threads ends with them: ready ends it only once it is done with them, as they ended, and
-		// dropped after a close it deferred ends it as that close did.
-		done, isDone := t.FollowsDone()
-		switch {
-		case r.State == ReportDropped && isDone:
-			if err := o.end(t, EndByExecutor, done, ""); err != nil {
-				return err
-			}
-		case r.State == ReportDropped:
-			if err := o.end(t, EndByExecutor, OutcomeDropped, ""); err != nil {
-				return err
-			}
-		case r.State == ReportReady && len(t.Follows) == 0:
-			if err := o.end(t, EndByExecutor, OutcomeCompleted, ""); err != nil {
-				return err
-			}
-		case r.State == ReportReady && isDone:
-			if err := o.end(t, EndByExecutor, done, ""); err != nil {
-				return err
-			}
 		}
 		return o.tx.PutTicket(t)
 	})
+}
+
+// settleReport does what the Report just recorded on Assignment a (a.Report) brings: its Event, its relay to the main
+// Session (raised is the Attention it raised, if any), and the Ticket's end. A dropped report ends the Ticket dropped,
+// a ready one completed; a Ticket that follows Threads ends with them instead: ready ends it only once it is done with
+// them, as they ended, and dropped after a close it deferred ends it as that close did.
+func (o *op) settleReport(t *Ticket, a *Assignment, raised *Attention) error {
+	r := a.Report
+	data := map[string]any{"state": r.State, "summary": r.Summary}
+	if r.Question != "" {
+		data["question"] = r.Question
+	}
+	o.event(EventReportFiled, t, a.ID, data)
+	if err := o.reportRelay(t, a, raised); err != nil {
+		return err
+	}
+	done, isDone := t.FollowsDone()
+	switch {
+	case r.State == ReportDropped && isDone:
+		return o.end(t, EndByExecutor, done, "")
+	case r.State == ReportDropped:
+		return o.end(t, EndByExecutor, OutcomeDropped, "")
+	case r.State == ReportReady && len(t.Follows) == 0:
+		return o.end(t, EndByExecutor, OutcomeCompleted, "")
+	case r.State == ReportReady && isDone:
+		return o.end(t, EndByExecutor, done, "")
+	}
+	return nil
 }
 
 // --- Person commands ---
@@ -700,6 +732,8 @@ type op struct {
 	metrics []func(*metrics.Registry)
 	// defaultRuntime is the Engine's: the runtime of a Ticket the router accepts.
 	defaultRuntime string
+	// pairing is the Engine's Options.Pairing (pairingDefaults).
+	pairing func() PairingDefaults
 }
 
 // observe queues a metrics observation that runs once the command committed. Callers check o.reg first, so that no
@@ -725,7 +759,8 @@ func (e *Engine) run(fn func(o *op) error) error {
 	var o *op
 	err := e.repos.Tx(func(tx Tx) error {
 		// A fresh op per attempt, so nothing collected by a failed attempt leaks.
-		o = &op{tx: tx, at: e.now(), reg: e.reg, policy: e.policy, relays: e.relays, defaultRuntime: e.defaultRuntime}
+		o = &op{tx: tx, at: e.now(), reg: e.reg, policy: e.policy, relays: e.relays, defaultRuntime: e.defaultRuntime,
+			pairing: e.pairing}
 		return fn(o)
 	})
 	if err != nil {
@@ -1103,6 +1138,7 @@ func cloneTicket(t *Ticket) Ticket {
 			a.DeliveredAt = clonePtr(a.DeliveredAt)
 			a.IdleAt = clonePtr(a.IdleAt)
 			a.Report = clonePtr(a.Report)
+			a.ReviewOutcome = clonePtr(a.ReviewOutcome)
 			if a.Limit != nil {
 				l := *a.Limit
 				l.ResetsAt = clonePtr(l.ResetsAt)
@@ -1131,6 +1167,7 @@ func cloneTicket(t *Ticket) Ticket {
 	c.Delivery = clonePtr(t.Delivery)
 	c.SessionCosts = maps.Clone(t.SessionCosts)
 	c.Stats.ByRuntime = maps.Clone(t.Stats.ByRuntime)
+	c.Review = clonePtr(t.Review)
 	return c
 }
 

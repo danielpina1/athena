@@ -164,6 +164,10 @@ func TestHandoffOnlyAfterALimitOrAnotherRuntime(t *testing.T) {
 			ran("a2", "codex", core.ReasonUsageLimit, "")}, next, "claude", "s-a1", "a2", true},
 		{"a resume of the runtime that worked last (its reset came)", []core.Assignment{ran("a1", "claude", core.ReasonUsageLimit, "")},
 			next, "claude", "s-a1", "", false},
+		{"a review's changes resume the implementer's own session", []core.Assignment{ran("a1", "claude", core.ReasonReview, ""),
+			ran("r1", "codex", core.ReasonReviewed, core.RoleReview)}, next, "claude", "s-a1", "", false},
+		{"a review's changes in a new session on the other runtime", []core.Assignment{ran("a1", "claude", core.ReasonReview, ""),
+			ran("r1", "codex", core.ReasonReviewed, core.RoleReview)}, next, "codex", "", "a1", false},
 	} {
 		tk := core.Ticket{ID: "T-1", Execution: &core.Execution{Runtime: core.RuntimeAuto}, Assignments: append(c.as, c.a)}
 		prev, failover := handoffFrom(tk, c.a, c.runtime, c.resumeID)

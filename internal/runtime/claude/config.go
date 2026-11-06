@@ -184,18 +184,51 @@ type mcpServer struct {
 // named "athena" running `<athenaBin> mcp --ticket <ticketID>`, with the
 // socket, ticket and assignment in its env (not left to env inheritance).
 func WriteMCPConfig(path, athenaBin, socket, ticketID, assignmentID string) error {
+	return writeTicketMCP(path, athenaBin, socket, ticketID, assignmentID, false)
+}
+
+// WriteReviewMCPConfig is WriteMCPConfig for a review session: its server runs `<athenaBin> mcp --ticket <ticketID>
+// --role review`, which offers only the review tool.
+func WriteReviewMCPConfig(path, athenaBin, socket, ticketID, assignmentID string) error {
+	return writeTicketMCP(path, athenaBin, socket, ticketID, assignmentID, true)
+}
+
+// reviewRole is the role a review session's MCP server runs with.
+const reviewRole = "review"
+
+func writeTicketMCP(path, athenaBin, socket, ticketID, assignmentID string, review bool) error {
 	if athenaBin == "" || socket == "" || ticketID == "" || assignmentID == "" {
 		return errors.New("claude: athena binary, socket, ticket and assignment are all required")
 	}
-	cfg := struct {
-		MCPServers map[string]mcpServer `json:"mcpServers"`
-	}{map[string]mcpServer{"athena": {
+	args := []string{"mcp", "--ticket", ticketID}
+	if review {
+		args = append(args, "--role", reviewRole)
+	}
+	return writeJSON(path, mcpFile{map[string]mcpServer{"athena": {
 		Type:    "stdio",
 		Command: athenaBin,
-		Args:    []string{"mcp", "--ticket", ticketID},
+		Args:    args,
 		Env:     map[string]string{"ATHENA_SOCKET": socket, "ATHENA_TICKET": ticketID, "ATHENA_ASSIGNMENT": assignmentID},
-	}}}
-	return writeJSON(path, cfg)
+	}}})
+}
+
+// mcpFile is a --mcp-config file.
+type mcpFile struct {
+	MCPServers map[string]mcpServer `json:"mcpServers"`
+}
+
+// isReviewMCP reports whether the --mcp-config file at path runs Athena's server for a review session alone.
+func isReviewMCP(path string) bool {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	var f mcpFile
+	if json.Unmarshal(b, &f) != nil || len(f.MCPServers) != 1 {
+		return false
+	}
+	a := f.MCPServers["athena"].Args
+	return len(a) == 5 && a[0] == "mcp" && a[1] == "--ticket" && a[3] == "--role" && a[4] == reviewRole
 }
 
 // WriteRouterMCPConfig writes the router's --mcp-config: one stdio server named "athena" running

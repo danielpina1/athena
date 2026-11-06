@@ -252,7 +252,7 @@ each window with its `read_at`, the limit and the backoff count. There is no his
 **The chooser.** Before each launch, and before it prepares the Ticket's directory, the node chooses the runtime:
 
 1. An Assignment that ran keeps its runtime (a resume continues its session); a Ticket pinned to `claude` or `codex`
-   runs there. Not ready, the launch fails with why; limited, it waits until the reset; at its `maxSessions`, it
+   runs there, except its reviews, which are chosen as under `auto`. Not ready, the launch fails with why; limited, it waits until the reset; at its `maxSessions`, it
    waits for a session to end. No other runtime takes its place.
 2. `auto`: the candidates are the ready runtimes that are not limited and below their `maxSessions`. A review drops the
    implementer's runtime when another candidate is left. Candidates above an `avoidAbove` window are dropped unless
@@ -313,7 +313,34 @@ the branch instead would be a small change.
 
 ## 8. Review pairing
 
-*To be written.*
+A Ticket paired with review (`athena task --review`, the submit op's `review`, or the Policy's
+`"pairing": {"review": "on", "maxRounds": 2}` for every Ticket that names none; `--review=false` turns it off for one
+task) has each ready report of its implementer reviewed before it counts:
+
+1. The ready report is recorded and held (`Ticket.review`); the implementer's Assignment ends with reason `review` and a
+   pending review Assignment (role `review`) starts. Nothing is said yet: no report event, no relay to the router, no
+   reply. The Ticket shows working.
+2. The chooser places the review on the other runtime than the implementer's when that one is ready (a pinned Ticket
+   pins its implementer, not its reviews); with one runtime, it reviews on that one. A limit on a review fails over
+   like any session's, with no handoff note.
+3. The review session is read-only and starts fresh, in the implementer's directory, after the implementer's process
+   has exited. Codex runs it with the `read-only` sandbox; Claude Code with no writable path (its working directory
+   denied too) and without its file-writing tools. The hook rules deny every write it names (rule `read_only`: write
+   tools, Bash write targets, `git commit|push|merge|rebase|reset|checkout|switch|stash|…`, `gh pr create|edit|merge|…`,
+   `gh api`, Codex's `write_stdin`), and anything that would ask the owner is denied: a review never makes a person
+   stage. Its MCP server (`athena mcp --ticket <id> --role review`) has only the `review` tool. Its first message names
+   the round, the branch, its base, `git diff --stat <base>...HEAD` and the held report's summary; its system prompt is
+   the `reviewer` prompt part. Inputs that reach the Ticket meanwhile wait for the implementer.
+4. `review(verdict, findings)`: findings are lines `- [high|medium|low] <file>:<line> — <what>`, or `- none`; a high or
+   medium finding needs `changes`, `- none` needs `approved`, and anything else is refused for the reviewer to correct.
+   The review ends with reason `reviewed` and its outcome (verdict and first finding).
+5. `approved`, or `changes` once `maxRounds` rounds are used: the held report applies as if the implementer filed it
+   now, on a new Assignment that continues the implementer's session. Without a pull request the Ticket ends completed
+   with the usual result reply; with one it waits handed off, and the next Input resumes the implementer's session.
+   `changes` within the rounds: a new implement Assignment (pinned to the implementer's runtime when the Ticket names
+   one) resumes the implementer's session with the findings as a `review` Input; its next ready starts the next round.
+6. A review that reports failure (it crashed past its restarts, its launch failed, or it ended two turns without a
+   verdict after one nudge) applies the held report too, outcome `failed`.
 
 ## 9. Fixtures
 

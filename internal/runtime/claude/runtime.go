@@ -85,27 +85,39 @@ func newerVersion(a, b string) (newer, ok bool) {
 }
 
 // Prepare writes the session's .athena/settings.json (Athena's hooks, the sandbox block, the settings env) and
-// .athena/mcp.json (Athena's MCP server for the Ticket and Assignment).
+// .athena/mcp.json (Athena's MCP server for the Ticket and Assignment; for a ReadOnly session, a review's, with only
+// its review tool). A read-only session's sandbox is the caller's to make read-only (p.Sandbox).
 func (Runtime) Prepare(p rt.Prepare) error {
 	adir := filepath.Join(p.WorkDir, ".athena")
 	if err := WriteSettingsWith(filepath.Join(adir, "settings.json"), p.AthenaBin, p.Socket, p.HookTimeout, p.Sandbox, p.SandboxEnv...); err != nil {
 		return err
 	}
+	if p.ReadOnly {
+		return WriteReviewMCPConfig(filepath.Join(adir, "mcp.json"), p.AthenaBin, p.Socket, p.TicketID, p.AssignmentID)
+	}
 	return WriteMCPConfig(filepath.Join(adir, "mcp.json"), p.AthenaBin, p.Socket, p.TicketID, p.AssignmentID)
 }
+
+// readOnlyTools are the built-in tools a read-only session goes without: those that write files.
+const readOnlyTools = "Write,Edit,MultiEdit,NotebookEdit"
 
 // Start launches a worker session in o.Dir with the files Prepare wrote there. The CLI echoes each message it takes
 // in (--replay-user-messages), so the transcript keeps what the worker was sent. Its approvals go through Athena's
 // hooks and its sandbox is in its settings: o.Approve, o.Sandbox and o.WritableRoots are not used. A read-only session
-// is not supported yet and is refused, never started writable.
+// (a review) goes without the built-in tools that write files (--disallowedTools), and starts only when Prepare wrote
+// its files read-only (its MCP server a review's), never writable; its hooks deny every write (the node's rules).
 func (r Runtime) Start(ctx context.Context, o rt.StartOptions) (rt.Session, error) {
+	adir := filepath.Join(o.Dir, ".athena")
+	var disallowed string
 	if o.ReadOnly {
-		return nil, errors.New("claude: read-only sessions are not supported")
+		if !isReviewMCP(filepath.Join(adir, "mcp.json")) {
+			return nil, errors.New("claude: a read-only session needs files prepared read-only")
+		}
+		disallowed = readOnlyTools
 	}
 	if o.Transcript == nil {
 		return nil, errors.New("claude: StartOptions.Transcript is required")
 	}
-	adir := filepath.Join(o.Dir, ".athena")
 	s, err := start(ctx, Options{
 		Binary:             r.binary(),
 		Dir:                o.Dir,
@@ -118,6 +130,7 @@ func (r Runtime) Start(ctx context.Context, o rt.StartOptions) (rt.Session, erro
 		CloseGrace:         o.CloseGrace,
 		Transcript:         o.Transcript,
 		ReplayUserMessages: true,
+		DisallowedTools:    disallowed,
 	}, true)
 	if err != nil {
 		return nil, err

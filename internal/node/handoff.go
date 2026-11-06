@@ -186,9 +186,9 @@ func (r *runner) handoffFor(runtime, resumeID string) (note string, failover boo
 
 // handoffFrom is the previous worker Assignment whose work a session of Assignment a on runtime (resuming resumeID, ""
 // for a new session) hears of, its Runtime the one it ran on; nil when the session gets no handoff: a is no worker, no
-// earlier worker Assignment ran, a new session's previous one did not end at its usage limit (a retry, a reopened
-// Ticket), or a resumed session's previous one ran on its own runtime (it remembers that work). failover reports a
-// limit's move to another runtime.
+// earlier worker Assignment ran, a new session's previous one did not end at its usage limit or, on another runtime,
+// for a review (a retry, a reopened Ticket), or a resumed session's previous one ran on its own runtime (it remembers
+// that work). failover reports a limit's move to another runtime.
 func handoffFrom(t core.Ticket, a core.Assignment, runtime, resumeID string) (prev *core.Assignment, failover bool) {
 	if a.Role != "" {
 		return nil, false
@@ -203,7 +203,9 @@ func handoffFrom(t core.Ticket, a core.Assignment, runtime, resumeID string) (pr
 		return nil, false
 	}
 	limited, moved := prev.EndedReason == core.ReasonUsageLimit, prev.Runtime != runtime
-	if (resumeID == "" && !limited) || (resumeID != "" && !moved) {
+	// A review's changes that reach a new session on another runtime (the implementer's was limited) carry its work too.
+	handsOver := limited || (prev.EndedReason == core.ReasonReview && moved)
+	if (resumeID == "" && !handsOver) || (resumeID != "" && !moved) {
 		return nil, false
 	}
 	return prev, limited && moved

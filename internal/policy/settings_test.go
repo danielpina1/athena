@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -8,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/danielpina1/athena/internal/core"
 	"github.com/danielpina1/athena/internal/store"
 )
 
@@ -220,5 +222,54 @@ func TestSaveDoesNotAliasCaller(t *testing.T) {
 	got, _, _ := s.Current()
 	if len(got.Rules[0].Instructions) != 1<<16 {
 		t.Fatal("rule text truncated")
+	}
+}
+
+func TestPairingDefaultRoundTrips(t *testing.T) {
+	d := Defaults([]string{"a"})
+	if d.Pairing != (Pairing{Review: PairingOff, MaxRounds: 2}) {
+		t.Fatalf("default pairing = %+v", d.Pairing)
+	}
+	if got := d.PairingDefaults(); got != (core.PairingDefaults{Mode: "", MaxRounds: 2}) {
+		t.Fatalf("default pairing defaults = %+v", got)
+	}
+	s := openStore(t)
+	cur, _, _ := s.Current()
+	version := Version(cur)
+	cur.Pairing = Pairing{Review: PairingOn, MaxRounds: 3}
+	if _, err := s.Save(cur, 0, "cli"); err != nil {
+		t.Fatal(err)
+	}
+	got, _, err := s.Current()
+	if err != nil || got.Pairing != (Pairing{Review: PairingOn, MaxRounds: 3}) {
+		t.Fatalf("saved pairing = %+v %v", got.Pairing, err)
+	}
+	if pd := got.PairingDefaults(); pd != (core.PairingDefaults{Mode: core.PairingReview, MaxRounds: 3}) {
+		t.Fatalf("pairing defaults = %+v", pd)
+	}
+	if Version(got) != version {
+		t.Error("the pairing default changed the Policy version, which Mandates revalidate against")
+	}
+	raw, err := json.Marshal(got)
+	if err != nil || !strings.Contains(string(raw), `"pairing":{"review":"on","maxRounds":3}`) {
+		t.Fatalf("settings JSON = %s %v", raw, err)
+	}
+	// Settings saved before pairing existed read as the default; half a pairing block gets the rest from it.
+	var old Settings
+	if err := json.Unmarshal([]byte(`{"mode":"observe","rules":[],"sources":{},"pairing":{"review":"on"}}`), &old); err != nil {
+		t.Fatal(err)
+	}
+	if n := normalize(old); n.Pairing != (Pairing{Review: PairingOn, MaxRounds: 2}) {
+		t.Fatalf("normalized = %+v", n.Pairing)
+	}
+	if n := normalize(Settings{Mode: "observe"}); n.Pairing != d.Pairing {
+		t.Fatalf("no pairing block = %+v", n.Pairing)
+	}
+	for _, bad := range []Pairing{{Review: "maybe"}, {Review: PairingOn, MaxRounds: -1}, {Review: PairingOn, MaxRounds: 11}} {
+		s := Defaults(nil)
+		s.Pairing = bad
+		if err := Validate(s); err == nil {
+			t.Errorf("pairing %+v validated", bad)
+		}
 	}
 }

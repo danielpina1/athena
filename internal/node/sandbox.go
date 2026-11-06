@@ -77,6 +77,18 @@ func (n *Node) sandboxFor(workDir string) (*rt.Sandbox, []string) {
 	return sb, env
 }
 
+// sessionSandbox is sandboxFor for a session working in workDir; a read-only session's (a review's) may write nothing
+// but the sandbox's own temporary directory: no allowWrite, and its working directory denied too, since Claude Code's
+// sandbox lets a session write there whatever allowWrite says.
+func (n *Node) sessionSandbox(workDir string, readOnly bool) (*rt.Sandbox, []string) {
+	sb, env := n.sandboxFor(workDir)
+	if sb != nil && readOnly {
+		sb.AllowWrite = []string{}
+		sb.DenyWrite = append(sb.DenyWrite, workDir)
+	}
+	return sb, env
+}
+
 // ProtectedPaths are the paths of a session working in workDir that nothing the session runs may write, each with
 // everything below it:
 //   - Athena's own files in .athena (settings.json, mcp.json, .gitignore): a worker that rewrote them would run its next

@@ -205,6 +205,8 @@ func (c *command) task(args []string) int {
 	repo := c.fs.String("repo", "", "GitHub repository (owner/name) the task works in, through the App")
 	model := c.fs.String("model", "", "model for this task")
 	runtime := c.fs.String("runtime", "", "runtime the task runs on: claude, codex or auto (default: runtimes.default of config.json)")
+	var review optionalBool
+	c.fs.Var(&review, "review", "have a read-only session review each ready report first (--review=false: none; default: the policy's pairing)")
 	pos, code, ok := c.parse(args, 1, -1)
 	if !ok {
 		return code
@@ -227,7 +229,7 @@ func (c *command) task(args []string) int {
 		ID string `json:"id"`
 	}
 	if err := call(c.stateDir, server.Request{Op: server.OpSubmit, Text: strings.Join(pos, " "), Dir: taskDir, Repo: *repo, Model: *model,
-		Runtime: *runtime}, &out); err != nil {
+		Runtime: *runtime, Review: review.value}, &out); err != nil {
 		return c.fail(err)
 	}
 	fmt.Fprintln(c.stdout, out.ID)
@@ -675,3 +677,24 @@ func stream(ctx context.Context, stateDir string, req server.Request, fn func(js
 	}
 	return nil
 }
+
+// optionalBool is a boolean flag that tells unset (nil) from false: --name sets it true, --name=false false.
+type optionalBool struct{ value *bool }
+
+func (b *optionalBool) String() string {
+	if b == nil || b.value == nil {
+		return ""
+	}
+	return strconv.FormatBool(*b.value)
+}
+
+func (b *optionalBool) Set(s string) error {
+	v, err := strconv.ParseBool(s)
+	if err != nil {
+		return err
+	}
+	b.value = &v
+	return nil
+}
+
+func (b *optionalBool) IsBoolFlag() bool { return true }

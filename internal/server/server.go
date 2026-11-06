@@ -179,6 +179,7 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	}
 	ncfg.StateDir = stateDir
 	ncfg.WorkerPrompt = func() string { return currentPrompt(st, logger, true) }
+	ncfg.ReviewerPrompt = func() string { return currentReviewerPrompt(st, logger) }
 	ncfg.SocketPath = filepath.Join(stateDir, NodeSocket)
 	if ncfg.Sandbox == nil {
 		ncfg.Sandbox = fileCfg.nodeSandbox()
@@ -258,7 +259,7 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	}
 	fx := effects.New(st, logger.With("component", "effects"))
 	eng := core.NewEngineWith(st.Repos(), n, core.Options{Now: time.Now, Emit: emit, Policy: pc.policy, Scope: sourceReg,
-		Wake: fx.Wake, Relays: routerOn, DefaultRuntime: fileCfg.Runtimes.Default})
+		Wake: fx.Wake, Relays: routerOn, DefaultRuntime: fileCfg.Runtimes.Default, Pairing: pc.pairing})
 	eng.SetMetrics(reg)
 	n.SetEngine(eng)
 	// registerSource registers the GitHub Source once the App passed its check: here, or later in the background.

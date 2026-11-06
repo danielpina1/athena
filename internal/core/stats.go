@@ -17,6 +17,7 @@ const (
 	cmdUsageLimited          = "usage_limited"
 	cmdTurnEnded             = "turn_ended"
 	cmdFileReport            = "file_report"
+	cmdFileReview            = "file_review"
 	cmdPersonInput           = "person_input"
 	cmdStop                  = "stop"
 	cmdRetry                 = "retry"
@@ -45,7 +46,7 @@ const (
 
 var commandNames = []string{
 	cmdSubmit, cmdAssignmentStarted, cmdInputsDelivered, cmdDeliveryFailed, cmdInputsRead, cmdTurnEnded, cmdAssignmentInterrupted,
-	cmdUsageLimited, cmdFileReport, cmdPersonInput, cmdStop, cmdRetry, cmdRequestApproval, cmdAnswerApproval, cmdExpireApproval,
+	cmdUsageLimited, cmdFileReport, cmdFileReview, cmdPersonInput, cmdStop, cmdRetry, cmdRequestApproval, cmdAnswerApproval, cmdExpireApproval,
 	cmdRecordUsage, cmdReceive, cmdBindThread, cmdThreadClosed, cmdEvaluateDue, cmdCandidateDelivered, cmdDecide,
 	cmdAttach, cmdHandback, cmdReevaluate, cmdDismiss, cmdPolicyChanged, cmdFollowForContext, cmdMarkUnrelated,
 	cmdUnsubscribe, cmdNote, cmdRequestStatus, cmdReply,
@@ -78,6 +79,8 @@ type TicketStats struct {
 	PersonMessages int `json:"personMessages"`
 	Retries        int `json:"retries"`
 	Crashes        int `json:"crashes"`
+	// ReviewRounds counts the reviews of the Ticket's ready reports that ended (review.go), failed ones included.
+	ReviewRounds int `json:"reviewRounds"`
 
 	InputTokens     int64 `json:"inputTokens"`
 	OutputTokens    int64 `json:"outputTokens"`

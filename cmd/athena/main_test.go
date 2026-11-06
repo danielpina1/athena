@@ -130,6 +130,22 @@ func TestMCPRunsServerForTicket(t *testing.T) {
 	}
 }
 
+func TestMCPRunsReviewServer(t *testing.T) {
+	t.Setenv("ATHENA_SOCKET", "/tmp/athena-test.sock")
+	var gotTicket string
+	orig, origWorker := runReviewMCPServer, runMCPServer
+	runReviewMCPServer = func(ticket, socket string) error { gotTicket = ticket; return nil }
+	runMCPServer = func(string, string) error { t.Error("the worker's server ran for a review"); return nil }
+	t.Cleanup(func() { runReviewMCPServer, runMCPServer = orig, origWorker })
+	var out, errb bytes.Buffer
+	if code := run([]string{"mcp", "--ticket", "T-0007", "--role", "review"}, &out, &errb); code != 0 || gotTicket != "T-0007" {
+		t.Fatalf("exit code = %d, ticket %q (stderr %q)", code, gotTicket, errb.String())
+	}
+	if code := run([]string{"mcp", "--role", "review"}, &out, &errb); code != 2 {
+		t.Fatalf("a review server without a ticket: exit %d", code)
+	}
+}
+
 func TestMCPRunsRouterServer(t *testing.T) {
 	t.Setenv("ATHENA_SOCKET", "/tmp/athena-test.sock")
 	t.Setenv("ATHENA_ROUTER_TOKEN", "tok")

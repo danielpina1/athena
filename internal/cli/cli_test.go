@@ -478,3 +478,23 @@ func TestTaskRuntimeFlag(t *testing.T) {
 		t.Fatalf("task --runtime gemini: exit %d, stderr %q", code, errOut)
 	}
 }
+
+// `athena task --review` pairs the task with a review of its ready reports; --review=false pairs it with none, and
+// without the flag the Policy's pairing default (off) holds.
+func TestTaskReviewFlag(t *testing.T) {
+	dir := startServer(t)
+	ctx := context.Background()
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{{[]string{"--review"}, "review"}, {[]string{"--review=false"}, ""}, {nil, ""}} {
+		args := append([]string{"task", "Reviewed task"}, tc.args...)
+		code, out, errOut := athena(ctx, append(args, "--state-dir", dir)...)
+		if code != 0 {
+			t.Fatalf("task %v: exit %d, stderr %q", tc.args, code, errOut)
+		}
+		if d := detail(t, dir, strings.TrimSpace(out)); d.Pairing != tc.want {
+			t.Errorf("task %v: pairing %q, want %q", tc.args, d.Pairing, tc.want)
+		}
+	}
+}

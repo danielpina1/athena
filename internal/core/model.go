@@ -66,6 +66,8 @@ type Assignment struct {
 	Role string `json:"role,omitempty"`
 	// Limit is the usage limit its session stopped at, for an Assignment that ended with ReasonUsageLimit.
 	Limit *UsageLimit `json:"limit,omitempty"`
+	// ReviewOutcome is what a review Assignment (RoleReview) concluded, once it ended with ReasonReviewed.
+	ReviewOutcome *ReviewOutcome `json:"reviewOutcome,omitempty"`
 }
 
 // RoleReview is the Role of an Assignment that reviews the Ticket's work.
@@ -98,6 +100,8 @@ const (
 	InputText    InputKind = "text"
 	InputNote    InputKind = "note"
 	InputResumed InputKind = "resumed"
+	// InputReview carries a review's findings to the implementer whose ready report it sent back (FileReview).
+	InputReview InputKind = "review"
 )
 
 // Input is something that reached a Ticket after it started.
@@ -269,6 +273,11 @@ type Ticket struct {
 	Repo string `json:"repo,omitempty"`
 	// RequestID is the client's id for the submit that created the Ticket; a second submit under it is a duplicate.
 	RequestID string `json:"requestId,omitempty"`
+	// Pairing is how the Ticket's work is paired: PairingReview has each ready report reviewed first (review.go), ""
+	// none.
+	Pairing string `json:"pairing,omitempty"`
+	// Review is the review in progress, nil when none is.
+	Review *ReviewState `json:"review,omitempty"`
 }
 
 // Follow is a Thread a Ticket follows: Own when the Ticket opened it, Closed once the Thread closed.
