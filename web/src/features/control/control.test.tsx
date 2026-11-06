@@ -57,7 +57,7 @@ test("Pause Athena asks first, and Pause calls pause()", async () => {
   render(<PauseControl variant="sidebar" />);
   await user.click(screen.getByRole("button", { name: "Pause Athena" }));
   expect(pause).not.toHaveBeenCalled();
-  const dialog = screen.getByRole("dialog");
+  const dialog = await screen.findByRole("dialog");
   expect(dialog.textContent).toContain(
     "Pause Athena?Running sessions stop at the end of their current turn, no new work starts, and replies wait. Nothing queued is lost.",
   );
@@ -65,12 +65,17 @@ test("Pause Athena asks first, and Pause calls pause()", async () => {
   expect(pause).toHaveBeenCalledTimes(1);
 });
 
+test("the control waits for the first Snapshot", () => {
+  const { container } = render(<PauseControl variant="sidebar" />);
+  expect(container.textContent).toBe("");
+});
+
 test("Cancel does not pause", async () => {
   const user = userEvent.setup();
   load({ paused: false });
   render(<PauseControl variant="phone" />);
   await user.click(screen.getByRole("button", { name: "Pause Athena" }));
-  await user.click(screen.getByRole("button", { name: "Cancel" }));
+  await user.click(await screen.findByRole("button", { name: "Cancel" }));
   expect(pause).not.toHaveBeenCalled();
 });
 
