@@ -27,6 +27,9 @@ type placementRecord struct {
 	Common  string `json:"common,omitempty"`
 	DirKey  string `json:"dirKey,omitempty"`
 	GitHub  string `json:"github,omitempty"`
+	// WorktreeConfig is the worktree's config.worktree as git made it ("" for none), recorded at the Ticket's first
+	// launch (recordWorktreeConfig); absent in a record made before the node kept it.
+	WorktreeConfig *string `json:"worktreeConfig,omitempty"`
 }
 
 // placementsDir holds the records, one file per Ticket.
@@ -62,7 +65,8 @@ func (n *Node) recordedPlacement(t core.Ticket) (placement, bool, error) {
 	if err != nil {
 		return placement{}, true, fmt.Errorf("the placement record of %s: %w", t.ID, err)
 	}
-	p := placement{workDir: r.WorkDir, repo: r.Repo, common: r.Common, dirKey: r.DirKey, github: r.GitHub}
+	p := placement{workDir: r.WorkDir, repo: r.Repo, common: r.Common, dirKey: r.DirKey, github: r.GitHub,
+		worktreeConfig: r.WorktreeConfig}
 	// The state directory is refused whenever it is asked, as when the placement was made.
 	if dir := p.dirKey; dir != "" || (p.repo != "" && p.github == "") {
 		if dir == "" {
@@ -75,8 +79,8 @@ func (n *Node) recordedPlacement(t core.Ticket) (placement, bool, error) {
 	return p, true, nil
 }
 
-// recordPlacement records t's placement p, made now.
-func (n *Node) recordPlacement(t core.Ticket, p placement) error {
+// writePlacement writes t's placement record of p.
+func (n *Node) writePlacement(t core.Ticket, p placement) error {
 	path := n.placementPath(t.ID)
 	if path == "" {
 		return nil
@@ -84,12 +88,24 @@ func (n *Node) recordPlacement(t core.Ticket, p placement) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	b, err := json.Marshal(placementRecord{WorkDir: p.workDir, Repo: p.repo, Common: p.common, DirKey: p.dirKey, GitHub: p.github})
+	b, err := json.Marshal(placementRecord{WorkDir: p.workDir, Repo: p.repo, Common: p.common, DirKey: p.dirKey, GitHub: p.github,
+		WorktreeConfig: p.worktreeConfig})
 	if err != nil {
 		return err
 	}
 	if err := writeFileAtomic(path, string(b)+"\n"); err != nil {
 		return fmt.Errorf("record the placement of %s: %w", t.ID, err)
+	}
+	return nil
+}
+
+// recordPlacement records t's placement p, made now.
+func (n *Node) recordPlacement(t core.Ticket, p placement) error {
+	if n.placementPath(t.ID) == "" {
+		return nil
+	}
+	if err := n.writePlacement(t, p); err != nil {
+		return err
 	}
 	kind := "directory"
 	switch {

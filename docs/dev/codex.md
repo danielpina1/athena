@@ -226,6 +226,28 @@ commands inherit. It is not the same sandbox as Claude Code's, and three things 
   `config.worktree` and `gitdir`, and the working directory's `.git` file (§1). `<gitDir>/config.worktree` stays
   writable under the roots above, so the rules are what protect it.
 
+**The git links are put back after each session.** The rules read a command's text, so an indirect write gets past
+them: a script, `python3 -c "open('.git','w')…"`, a test or a Makefile target can repoint the working directory's
+`.git` file, or the git directory's `commondir` or `gitdir`, at a directory of the worker's, or write
+`config.worktree`. The node's own git never reads those files (its git directories are pinned), but the owner's git
+does: run in the worktree, by hand or by an IDE or a shell prompt, it would follow them to a config of the worker's
+(`core.fsmonitor`, `core.hooksPath`, a filter) and run a program outside any sandbox. So after each Codex session
+process ends, and again before an ended Ticket's worktree is kept or removed, the node checks the three link files
+against the Ticket's placement record (the git directory Athena made, the repository's git directory) and rewrites
+any that differ, and puts `config.worktree` back to what git made when the worktree was created (recorded at the
+Ticket's first launch: git copies the main worktree's when the repository has `extensions.worktreeConfig`), removing
+one git did not make. Each restore is logged as a warning ("restored a git link a session changed"). What is left:
+
+- **While a Codex session runs**, the links may point elsewhere. Do not run git (or open an IDE) in the worktree of a
+  running Codex Ticket.
+- A process the session left running after it ended could write them again. Whether Codex's background terminals
+  leave the session's process group is not verified yet ([smoke test](smoke-test.md), Manual Codex session).
+- A Ticket placed before the node recorded `config.worktree` has its `config.worktree` left as it is (the links are
+  still checked), and a worktree made before Athena checked its git directory's name is checked only while its
+  `gitdir` still names it; otherwise the node logs "git links not checked" and keeps away from it.
+- A kept worktree's files are the worker's. The log line that keeps it says so: read them before running anything
+  there (a `Makefile`, an `.envrc`, a test).
+
 Found with Codex 0.160.1's `codex sandbox`: Codex keeps a workspace's own git directory read-only even inside a
 writable root, so a worktree commits only with the roots above. This was verified with `codex sandbox -c
 sandbox_workspace_write.writable_roots=…`, not with a session's `sandboxPolicy.writableRoots` (checking that takes a

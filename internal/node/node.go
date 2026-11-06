@@ -556,7 +556,9 @@ func (n *Node) onStop(st *loopState, t core.Ticket, a core.Assignment, reason st
 		go func() {
 			defer n.runners.Done()
 			if p, err := n.place(t); err == nil {
-				cleanupWorktree(p, t, n.cfg.WorkRoot, n.log.With("ticket", t.ID, "assignment", a.ID))
+				log := n.log.With("ticket", t.ID, "assignment", a.ID)
+				n.restoreGitLinks(t, log)
+				cleanupWorktree(p, t, n.cfg.WorkRoot, log)
 			}
 		}()
 	}
@@ -1100,6 +1102,7 @@ func (n *Node) run(s *session) {
 	r := &runner{n: n, s: s, eng: n.engine(), log: s.log, sent: map[string]bool{}, started: s.a.State == core.AssignmentRunning}
 	r.run()
 	if s.endedTicket() {
+		n.restoreGitLinks(s.t, s.log)
 		cleanupWorktree(s.place, s.t, n.cfg.WorkRoot, s.log)
 	}
 }
@@ -1235,6 +1238,10 @@ func (r *runner) run() {
 		r.log.Info("session started", "resume", resumeID != "", "recovering", recovering)
 		crashed, cause := r.drive(sess, recovering)
 		_ = tr.Close()
+		if rtm.Name() == core.RuntimeCodex {
+			// Codex's sandbox let the process write the worktree's git links: they are put back before anything reads them.
+			n.restoreGitLinks(s.t, r.log)
+		}
 		if !crashed {
 			return
 		}
@@ -2161,6 +2168,9 @@ type placement struct {
 	github  string
 	// common is repo's git directory (repoGitDir) when the placement was first made; "" without a repo.
 	common string
+	// worktreeConfig is the worktree's config.worktree as git made it ("" for none); nil until recorded
+	// (recordWorktreeConfig).
+	worktreeConfig *string
 }
 
 // place is a Ticket's placement on this node (placements.go): the one recorded at its first placement, or a new one,
@@ -2284,6 +2294,7 @@ func (n *Node) prepare(s *session) error {
 		if err := n.prepareGitHub(s); err != nil {
 			return err
 		}
+		n.recordWorktreeConfig(s.t, s.log)
 	case p.repo != "":
 		if err := os.MkdirAll(filepath.Dir(p.workDir), 0o700); err != nil {
 			return err
@@ -2291,6 +2302,7 @@ func (n *Node) prepare(s *session) error {
 		if err := ensureWorktreeIn(p.repo, p.common, p.workDir, branchName(s.t), "HEAD", nil); err != nil {
 			return err
 		}
+		n.recordWorktreeConfig(s.t, s.log)
 	case p.dirKey != "":
 		// A non-git directory is used as it is.
 	default:
@@ -2478,6 +2490,11 @@ func gitBase(env []string) []string {
 	return slices.Clone(env)
 }
 
+// keptNote is what the log says of a kept worktree: its git links were put back (restoreGitLinks), but the files in
+// it are the worker's.
+const keptNote = "its git links were checked against the placement record; its files are the worker's: " +
+	"read them before you run anything there (docs/dev/codex.md §5)"
+
 // cleanupWorktree removes an ended Ticket's worktree when nothing in it would be lost: no uncommitted or untracked
 // changes (Athena's own .athena directory is ignored) and no commits on its branch that exist nowhere else (no other
 // branch, no remote). Otherwise it keeps it and logs why. The branch itself is kept; the Ticket's checkpoint ref goes
@@ -2522,7 +2539,7 @@ func cleanupWorktree(p placement, t core.Ticket, workRoot string, log *slog.Logg
 		return
 	}
 	if dirty != "" {
-		log.Info("kept worktree with uncommitted changes", "dir", p.workDir)
+		log.Info("kept worktree with uncommitted changes", "dir", p.workDir, "note", keptNote)
 		return
 	}
 	branch := branchName(t)
@@ -2532,7 +2549,7 @@ func cleanupWorktree(p placement, t core.Ticket, workRoot string, log *slog.Logg
 		return
 	}
 	if count != "0" {
-		log.Info("kept worktree with unpushed commits", "dir", p.workDir, "branch", branch, "commits", count)
+		log.Info("kept worktree with unpushed commits", "dir", p.workDir, "branch", branch, "commits", count, "note", keptNote)
 		return
 	}
 	// No --force: git itself refuses if anything changed since the check.
