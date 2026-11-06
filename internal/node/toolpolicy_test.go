@@ -200,8 +200,8 @@ func TestDenyAllBut(t *testing.T) {
 	}
 }
 
-// A restricted Ticket under auto runs on Claude Code even where Codex is preferred; one pinned to Codex fails without
-// starting anything.
+// A restricted Ticket runs on Claude Code whatever runtime it names: under auto even where Codex is preferred, and
+// pinned to Codex (a stranger's Ticket gets the server's default) too. The runtime it ran on is recorded as ever.
 func TestRestrictedRunsOnClaudeOnly(t *testing.T) {
 	h := newCodexHarness(t, codexTurn(), func(c *Config) {
 		c.Policy = restrictOwner
@@ -211,19 +211,45 @@ func TestRestrictedRunsOnClaudeOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, a := h.running(auto.ID)
-	if a.Runtime != core.RuntimeClaude {
+	if _, a := h.running(auto.ID); a.Runtime != core.RuntimeClaude {
 		t.Fatalf("auto ran on %q, want claude", a.Runtime)
 	}
-	pinned := h.submitCodex("Pinned stranger task")
+	pinned, err := h.eng.SubmitOwnerTask("Pinned stranger task", core.TaskOptions{Runtime: core.RuntimeCodex, Model: "gpt-5-codex"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, a := h.running(pinned.ID); a.Runtime != core.RuntimeClaude {
+		t.Fatalf("codex-pinned ran on %q, want claude", a.Runtime)
+	}
+	inv := h.invocations()
+	if len(inv) != 2 {
+		t.Fatalf("invocations = %+v, want two Claude Code sessions", inv)
+	}
+	for _, i := range inv {
+		if i.Env["ATHENA_RUNTIME"] != core.RuntimeClaude || slices.Contains(i.Args, "gpt-5-codex") {
+			t.Errorf("invocation = %+v, want Claude Code without Codex's model", i)
+		}
+	}
+	if strings.Contains(strings.Join(h.rpc(), "\n"), "thread/start") {
+		t.Fatal("a Codex session started")
+	}
+}
+
+// Where Claude Code cannot run, a restricted Ticket fails, saying why, and nothing starts.
+func TestRestrictedWithoutClaudeFails(t *testing.T) {
+	h := newCodexHarness(t, codexTurn(), func(c *Config) {
+		c.Policy = restrictOwner
+		delete(c.Runtimes, core.RuntimeClaude)
+	})
+	tk := h.submitCodex("Stranger's change")
 	h.eventually("failed report", func() bool {
-		tk, _ := h.ticket(pinned.ID)
+		tk, _ := h.ticket(tk.ID)
 		r := tk.LatestAssignment().Report
 		return r != nil && r.State == core.ReportFailed
 	})
-	tk, _ := h.ticket(pinned.ID)
-	if got := tk.LatestAssignment().Report.Summary; got != restrictedRuntimeSummary {
-		t.Fatalf("summary = %q, want %q", got, restrictedRuntimeSummary)
+	tk, _ = h.ticket(tk.ID)
+	if got := tk.LatestAssignment().Report.Summary; !strings.HasPrefix(got, restrictedRuntimeSummary) || len(got) == len(restrictedRuntimeSummary) {
+		t.Fatalf("summary = %q, want %q and a cause", got, restrictedRuntimeSummary)
 	}
 	if strings.Contains(strings.Join(h.rpc(), "\n"), "thread/start") {
 		t.Fatal("a Codex session started")

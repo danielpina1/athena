@@ -33,8 +33,8 @@ const (
 	restrictedSandboxSummary = "This Ticket came from someone outside your allow list, and it runs only inside the sandbox, which this machine cannot start: "
 	// restrictedFollowReason is why a restricted session cannot follow other Threads.
 	restrictedFollowReason = "work started by someone outside your allow list cannot follow other threads"
-	// restrictedRuntimeSummary is the Failed report of a restricted launch pinned to a runtime other than Claude Code.
-	restrictedRuntimeSummary = "This Ticket came from someone outside your allow list, and such work runs only on Claude Code, whose sandbox can keep it from your secrets."
+	// restrictedRuntimeSummary heads the Failed report of a restricted launch where Claude Code cannot run.
+	restrictedRuntimeSummary = "This Ticket came from someone outside your allow list, and such work runs only on Claude Code, which is not available on this machine: "
 )
 
 // toolPolicy is the tool policy of the Ticket's sessions: the Policy's for the trust class of its Mandate. Without a

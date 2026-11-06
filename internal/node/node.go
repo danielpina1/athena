@@ -1206,7 +1206,9 @@ func (r *runner) run() {
 	// session names at start (Init). An auto Ticket's model is a Claude Code model (the only kind a task named before
 	// runtimes): on Codex it runs Codex's default rather than a model Codex does not have.
 	model := ""
-	if x := s.t.Execution; x != nil && x.Model != "" && (x.Runtime != core.RuntimeAuto || rtm.Name() == runtimeClaude) {
+	// A restricted Ticket that names Codex runs on Claude Code (chooseRuntime): its model is Codex's, not one to run.
+	if x := s.t.Execution; x != nil && x.Model != "" && (x.Runtime != core.RuntimeAuto || rtm.Name() == runtimeClaude) &&
+		!(s.restricted() && x.Runtime == core.RuntimeCodex) {
 		model = x.Model
 	} else if rtm.Name() == runtimeClaude {
 		model = n.cfg.Model
@@ -1334,14 +1336,14 @@ func (r *runner) chooseRuntime() (rt.Runtime, bool) {
 	if p := pinnedRuntime(s.t, s.a); p != "" && !(movable(s.t, s.a) && n.quota.State(p).Limited(time.Now())) {
 		names = []string{p}
 	}
+	// A restricted session runs on Claude Code alone, whose sandbox keeps its commands from the owner's secrets, whatever
+	// runtime its Ticket names (a stranger's Ticket gets the server's default, which no person chose): the Chooser sees
+	// its launch pinned to Claude Code.
 	restricted := s.restricted()
+	t, a := s.t, s.a
 	if restricted {
-		// A restricted session runs on Claude Code alone, whose sandbox keeps its commands from the owner's secrets.
-		if p := pinnedRuntime(s.t, s.a); p != "" && p != runtimeClaude {
-			r.fail(restrictedRuntimeSummary)
-			return nil, false
-		}
 		names = []string{runtimeClaude}
+		a.Runtime = runtimeClaude
 	}
 	cctx, cancel := context.WithCancel(n.ctx)
 	go func() {
@@ -1365,7 +1367,7 @@ func (r *runner) chooseRuntime() (rt.Runtime, bool) {
 	n.mu.Lock()
 	live, gen := n.liveRuntimesLocked(s), n.endGen
 	n.mu.Unlock()
-	c := n.chooser.Choose(ChoiceInput{Ticket: s.t, Assignment: s.a, Ready: ready, Quota: n.quota.State, Live: live, Now: time.Now()})
+	c := n.chooser.Choose(ChoiceInput{Ticket: t, Assignment: a, Ready: ready, Quota: n.quota.State, Live: live, Now: time.Now()})
 	launch := c.Runtime != "" && c.Until.IsZero() && !c.AwaitSession
 	if info, checked := ready[c.Runtime]; launch && (!checked || !info.Ready) {
 		// Whatever the Chooser says, nothing launches on a runtime the node did not find ready.
@@ -1403,6 +1405,9 @@ func (r *runner) chooseRuntime() (rt.Runtime, bool) {
 		if c.AwaitSession {
 			s.awaitSessionEnd(gen)
 		}
+		return nil, false
+	case restricted:
+		r.fail(restrictedRuntimeSummary + redact.String(c.Why))
 		return nil, false
 	default:
 		r.fail(redact.String(c.Why))
