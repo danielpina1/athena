@@ -196,6 +196,12 @@ func TestNodePolicyReadsCurrentPolicy(t *testing.T) {
 	if got := np.ToolPolicy(core.TrustOwner); got != policy.ToolStandard {
 		t.Fatalf("owner = %q, want standard", got)
 	}
+	if got := np.Trust(core.Trigger{Source: "github", Actor: core.ActorRef{Source: "github", ID: "nobody"}}); got == core.TrustOwner {
+		t.Fatalf("an unknown sender = %q", got)
+	}
+	if got := (nodePolicy{&policyCache{}}).Trust(core.Trigger{}); got != core.TrustStranger {
+		t.Fatalf("no policy = %q, want stranger", got)
+	}
 	s, rev := pc.current()
 	s.Trust = map[string]string{core.TrustCollaborator: policy.ToolRestricted, core.TrustStranger: policy.ToolStandard}
 	s.Repos = map[string]policy.RepoSettings{"o/r": {Mode: policy.RepoShadow}}

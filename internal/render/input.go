@@ -28,6 +28,9 @@ import (
 // githubFieldMaxRunes caps who wrote a card and its kind in the detail.
 const githubFieldMaxRunes = 80
 
+// outsideNote opens the text of a card whose sender is outside the owner's allow list (its trust header).
+const outsideNote = "From outside your allow list"
+
 const (
 	workerPreamble = "You are the worker of Athena Ticket "
 	nudgeText      = "Your turn ended without a report."
@@ -43,9 +46,9 @@ var (
 	// command's <client id>:<ULID>.
 	inputHeader = regexp.MustCompile(`(?m)^\[input ([0-9a-f]{12}|[A-Za-z0-9._-]{1,64}:[0-9A-HJKMNP-TV-Z]{26}): ([^\]\n]*)\]$`)
 	anyHeader   = regexp.MustCompile(`(?m)^\[input [^\n]*\]\n?`)
-	cardLine    = regexp.MustCompile(`^(trigger_id|acknowledged|from|at|thread|url|replies_to|context|routing note): (.*)$`)
+	cardLine    = regexp.MustCompile(`^(trigger_id|acknowledged|from|at|thread|url|replies_to|context|routing note|trust): (.*)$`)
 	// quoted is a line the node quoted (internal/node quoteText): one space before what reads like a header.
-	quoted  = regexp.MustCompile(`(?m)^ (\[|(?:trigger_id|acknowledged|from|at|thread|url|replies_to|context|routing note):)`)
+	quoted  = regexp.MustCompile(`(?m)^ (\[|(?:trigger_id|acknowledged|from|at|thread|url|replies_to|context|routing note|trust):)`)
 	cutLine = regexp.MustCompile(`\n\[cut: [^\]\n]*\]\s*$`)
 	// quotedHeader is an Input header a handoff note repeats (quoted), and quotedTrigger a trigger's id under one.
 	quotedHeader  = regexp.MustCompile(`(?m)^ \[input [^\]\n]*?: ([^\]\n]*)\]$`)
@@ -53,7 +56,7 @@ var (
 )
 
 // cardKeys are a card's lines in the order inputCard writes them; each comes at most once.
-var cardKeys = []string{"trigger_id", "acknowledged", "from", "at", "thread", "url", "replies_to", "context", "routing note"}
+var cardKeys = []string{"trigger_id", "acknowledged", "from", "at", "thread", "url", "replies_to", "context", "routing note", "trust"}
 
 // githubFrom is a card's Detail.
 type githubFrom struct {
@@ -181,6 +184,10 @@ func inputBlock(what, body string) (from, text, detail string) {
 		return "athena", strings.TrimSpace(unquote(body)), ""
 	}
 	msg := cutLine.ReplaceAllString(strings.Join(lines[n:], "\n"), "")
+	if tr, ok := card["trust"]; ok {
+		class, _, _ := strings.Cut(tr, " ")
+		msg = outsideNote + " (" + truncate(class, githubFieldMaxRunes) + ").\n\n" + msg
+	}
 	d, _ := json.Marshal(githubFrom{
 		From: truncate(redact.String(card["from"]), githubFieldMaxRunes),
 		Kind: truncate(strings.TrimSuffix(what, " from a person"), githubFieldMaxRunes),

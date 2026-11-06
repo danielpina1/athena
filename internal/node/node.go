@@ -1549,10 +1549,10 @@ func (r *runner) sendFirst(sess rt.Session, recovering bool) {
 	r.handoff = "" // once: a restarted process gets the recovery note
 	// Inputs a crashed process received but never took into a step go again, ahead of what waits.
 	if len(r.unread) > 0 {
-		b.WriteString("\n" + renderInputs(t, r.unreadIDs(), r.trigger))
+		b.WriteString("\n" + renderInputs(t, r.unreadIDs(), r.trigger, r.n.trustOf))
 	}
 	if len(ids) > 0 {
-		b.WriteString("\n" + renderInputs(t, ids, r.trigger))
+		b.WriteString("\n" + renderInputs(t, ids, r.trigger, r.n.trustOf))
 	}
 	if r.firstSent.IsZero() {
 		r.firstSent = time.Now()
@@ -1597,7 +1597,7 @@ func (r *runner) deliver(sess rt.Session) {
 	if len(ids) == 0 {
 		return
 	}
-	if err := sess.Send(renderInputs(t, ids, r.trigger), ""); err != nil {
+	if err := sess.Send(renderInputs(t, ids, r.trigger, r.n.trustOf), ""); err != nil {
 		if errors.Is(err, rt.ErrExited) {
 			return // still waiting: the restarted process takes them
 		}
@@ -2086,8 +2086,8 @@ func (r *runner) trigger(id string) (core.Trigger, bool) {
 }
 
 // renderInputs renders Inputs for the session, in order; an Input whose Trigger came from a Source's Thread is a
-// Trigger card (inputCard), trigger reading the Trigger.
-func renderInputs(t core.Ticket, ids []string, trigger func(id string) (core.Trigger, bool)) string {
+// Trigger card (inputCard), trigger reading the Trigger and trust the trust class of its sender (nil: none is marked).
+func renderInputs(t core.Ticket, ids []string, trigger func(id string) (core.Trigger, bool), trust func(core.Trigger) string) string {
 	var b strings.Builder
 	for _, id := range ids {
 		var in *core.Input
@@ -2112,7 +2112,7 @@ func renderInputs(t core.Ticket, ids []string, trigger func(id string) (core.Tri
 			found := false
 			if in.TriggerID != "" && trigger != nil {
 				if tr, found = trigger(in.TriggerID); found && len(tr.Threads) > 0 {
-					b.WriteString(inputCard(t.ID, *in, tr))
+					b.WriteString(inputCard(t.ID, *in, tr, trustOf(trust, tr)))
 					continue
 				}
 			}

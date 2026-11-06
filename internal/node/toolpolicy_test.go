@@ -27,6 +27,7 @@ func (f fakeToolPolicy) ToolPolicy(class string) string {
 }
 func (fakeToolPolicy) Allows(tool, rule, repo string) bool { return false }
 func (fakeToolPolicy) Shadow(repo string) bool             { return false }
+func (fakeToolPolicy) Trust(core.Trigger) string           { return core.TrustOwner }
 
 // restrictOwner makes the owner's own tasks restricted, so a harness's submit runs one.
 var restrictOwner = fakeToolPolicy{core.TrustOwner: policy.ToolRestricted}

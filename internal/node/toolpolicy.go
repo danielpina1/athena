@@ -21,6 +21,8 @@ type Policy interface {
 	Allows(tool, rule, repo string) bool
 	// Shadow reports whether the repository's work is held for the owner.
 	Shadow(repo string) bool
+	// Trust is the trust class of the Trigger's sender.
+	Trust(t core.Trigger) string
 }
 
 // The restricted tool policy's words to the model and the owner.
@@ -36,6 +38,15 @@ const (
 	// restrictedRuntimeSummary heads the Failed report of a restricted launch where Claude Code cannot run.
 	restrictedRuntimeSummary = "This Ticket came from someone outside your allow list, and such work runs only on Claude Code, which is not available on this machine: "
 )
+
+// trustOf is the trust class the worker is told of a Trigger's text: the Policy's, or "" (no Policy: nothing is marked,
+// as without a Policy every tool policy is standard).
+func (n *Node) trustOf(t core.Trigger) string {
+	if n.cfg.Policy == nil {
+		return ""
+	}
+	return n.cfg.Policy.Trust(t)
+}
 
 // toolPolicy is the tool policy of the Ticket's sessions: the Policy's for the trust class of its Mandate. Without a
 // Policy it is standard; a tool policy the node does not know is restricted.

@@ -396,6 +396,13 @@ func (p nodePolicy) Shadow(repo string) bool {
 	return true
 }
 
+func (p nodePolicy) Trust(t core.Trigger) string {
+	if np := p.current(); np != nil {
+		return np.Trust(t)
+	}
+	return core.TrustStranger
+}
+
 // pairing is the Engine's pairing defaults: the current settings' (policy.Settings.PairingDefaults).
 func (c *policyCache) pairing() core.PairingDefaults {
 	c.mu.RLock()

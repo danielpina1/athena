@@ -159,7 +159,7 @@ func (r *runner) handoffFor(runtime, resumeID string) (note string, failover boo
 	for _, in := range t.Inputs[max(len(t.Inputs)-handoffInputs, 0):] {
 		ids = append(ids, in.ID)
 	}
-	h.Inputs = renderInputs(t, ids, r.trigger)
+	h.Inputs = renderInputs(t, ids, r.trigger, r.n.trustOf)
 	for _, a := range t.Assignments {
 		if a.Report != nil && a.ID != s.a.ID {
 			h.Reports = append(h.Reports, *a.Report)
