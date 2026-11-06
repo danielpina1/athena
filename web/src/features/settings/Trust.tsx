@@ -81,10 +81,10 @@ export function Trust() {
             ) : (
               <ul className="grid gap-2">
                 {value.allow.map((a, i) => (
-                  <li key={`${a.tool}|${a.rule}|${a.repo}`} className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 rounded-md border border-line-soft px-3 py-2">
+                  <li key={`${i}|${a.tool}|${a.rule}|${a.repo}|${a.added}`} className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 rounded-md border border-line-soft px-3 py-2">
                     <span className="min-w-0 flex-1 text-sm break-words">
                       <span className="font-semibold">{a.tool}</span> · <span className="font-mono">{a.rule}</span> in {a.repo}, added{" "}
-                      <time dateTime={a.added}>{date(a.added)}</time>
+                      <span title={a.added}>{date(a.added)}</span>
                     </span>
                     <Button
                       size="sm"
