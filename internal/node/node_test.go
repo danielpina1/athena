@@ -2762,3 +2762,84 @@ func TestStatusFiresOnQuotaChange(t *testing.T) {
 		t.Fatalf("runtimes = %+v", st.Runtimes)
 	}
 }
+
+// countingChooser counts its choices per Ticket.
+type countingChooser struct {
+	Chooser
+	mu sync.Mutex
+	n  map[string]int
+}
+
+func (c *countingChooser) Choose(in ChoiceInput) Choice {
+	c.mu.Lock()
+	c.n[in.Ticket.ID]++
+	c.mu.Unlock()
+	return c.Chooser.Choose(in)
+}
+
+func (c *countingChooser) count(id string) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.n[id]
+}
+
+// A launch held back by its runtime's session cap waits, queued, for a session to end: it is not chosen again in a
+// loop meanwhile, and it starts once the session holding the cap ends. Auto and pinned launches alike, and one whose
+// other runtime is limited as well.
+func TestSessionCapWaitsWithoutLooping(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		runtime string
+		codex   bool // Codex is there too, limited
+	}{
+		{"auto", core.RuntimeAuto, false},
+		{"pinned", core.RuntimeClaude, false},
+		{"capped plus limited", core.RuntimeAuto, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			tr := newTracker(t)
+			ch := &countingChooser{Chooser: HeadroomChooser{Preferred: core.RuntimeClaude, MaxSessions: map[string]int{core.RuntimeClaude: 1}},
+				n: map[string]int{}}
+			mod := func(cfg *Config) { cfg.Quota, cfg.Chooser = tr, ch }
+			var h *harness
+			if c.codex {
+				reset := time.Now().Add(time.Hour)
+				tr.Hit(core.RuntimeCodex, rt.LimitHit{Runtime: core.RuntimeCodex, ResetsAt: &reset})
+				h = newCodexHarness(t, codexTurn(), mod).harness
+			} else {
+				h = newHarness(t, mod)
+			}
+			t.Setenv("ATHENA_FAKE_FIXTURE", openTurnFixture(t))
+			submit := func(text string) core.Ticket {
+				tk, err := h.eng.SubmitOwnerTask(text, core.TaskOptions{Runtime: c.runtime})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return tk
+			}
+			first := submit("Holds the cap")
+			_, a := h.running(first.ID)
+			second := submit("Waits for the cap")
+			h.never("the second ticket starts while the cap is held", time.Second, func() bool {
+				cur, st := h.ticket(second.ID)
+				if st != (core.Stage{Stage: "working", Action: "queued"}) {
+					t.Fatalf("stage while waiting = %+v", st)
+				}
+				return cur.LatestAssignment().SessionID != ""
+			})
+			if n := ch.count(second.ID); n < 1 || n > 3 {
+				t.Fatalf("the waiting launch was chosen %d times in 1 s, want 1 to 3", n)
+			}
+			if r := h.report(first.ID, a.ID, core.ReportReady, "done"); !r.OK {
+				t.Fatalf("report = %+v", r)
+			}
+			_, a2 := h.running(second.ID)
+			if a2.Runtime != core.RuntimeClaude {
+				t.Fatalf("second ran on %q", a2.Runtime)
+			}
+			if n := ch.count(second.ID); n > 4 {
+				t.Fatalf("the waiting launch was chosen %d times in all", n)
+			}
+		})
+	}
+}

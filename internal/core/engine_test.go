@@ -1091,7 +1091,7 @@ func TestDefaultRuntimeAuto(t *testing.T) {
 	eq(t, "router ticket without a default", plain.ticket(id).Execution.Runtime, RuntimeClaude)
 }
 
-// A runtime the Engine does not know is refused, whether the task names it or the Engine's default is.
+// A runtime the Engine does not know is refused when a task names it; a default that is not one is Claude Code.
 func TestUnknownRuntimeRejected(t *testing.T) {
 	h := newHarness(t)
 	_, err := h.eng.SubmitOwnerTask("Task", TaskOptions{Runtime: "gemini"})
@@ -1099,9 +1099,14 @@ func TestUnknownRuntimeRejected(t *testing.T) {
 	if !strings.Contains(err.Error(), `"gemini"`) {
 		t.Fatalf("error %q does not name the runtime", err)
 	}
-	bad := newHarnessWith(t, func(o *Options) { o.DefaultRuntime = "gemini" })
-	_, err = bad.eng.SubmitOwnerTask("Task", TaskOptions{})
-	wantUserError(t, "unknown default runtime", err)
 	tickets, _, _ := h.repos.counts()
 	eq(t, "tickets stored", tickets, 0)
+	// An Engine given a default that is not a runtime falls back to Claude Code, for owner and router Tickets alike.
+	bad := newHarnessWith(t, func(o *Options) { o.DefaultRuntime = "gemini" })
+	tk, err := bad.eng.SubmitOwnerTask("Task", TaskOptions{})
+	bad.must(err)
+	eq(t, "owner ticket with a bad default", bad.ticket(tk.ID).Execution.Runtime, RuntimeClaude)
+	ev := newEvalsWith(t, func(o *Options) { o.DefaultRuntime = "gemini" })
+	id := ev.acceptRequest("tr-1", "github:o/r#1")
+	eq(t, "router ticket with a bad default", ev.ticket(id).Execution.Runtime, RuntimeClaude)
 }

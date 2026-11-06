@@ -203,8 +203,8 @@ type Node struct {
 	// chooseMu makes a launch's choice and its count of the sessions per runtime one step, so two launches never both
 	// take a runtime's last session.
 	chooseMu sync.Mutex
-	// endGen counts the sessions that left the registry (under mu): a launch waiting for a session to end is due once
-	// it moved.
+	// endGen counts the sessions that left the registry holding a runtime they chose (under mu): a launch waiting for a
+	// session to end is due once it moved.
 	endGen int64
 	// infos is the last readiness each runtime reported (checkRuntime), for Status.
 	infoMu sync.Mutex
@@ -558,7 +558,11 @@ func (n *Node) onEnded(st *loopState, s *session) {
 	n.mu.Lock()
 	if n.live[s.t.ID] == s {
 		delete(n.live, s.t.ID)
-		n.endGen++
+		if s.chosenRuntime() != "" {
+			// A session that took a runtime frees it. A launch that only chose to wait took none: counting its own
+			// end would wake it at once, and it would choose again in a loop.
+			n.endGen++
+		}
 	}
 	n.mu.Unlock()
 	n.slotsGauge.Set(float64(n.liveCount()))
@@ -1255,6 +1259,15 @@ func (r *runner) chooseRuntime() (rt.Runtime, bool) {
 	n.mu.Unlock()
 	c := n.chooser.Choose(ChoiceInput{Ticket: s.t, Assignment: s.a, Ready: ready, Quota: n.quota.State, Live: live, Now: time.Now()})
 	launch := c.Runtime != "" && c.Until.IsZero() && !c.AwaitSession
+	if info, checked := ready[c.Runtime]; launch && (!checked || !info.Ready) {
+		// Whatever the Chooser says, nothing launches on a runtime the node did not find ready.
+		launch = false
+		why := fmt.Sprintf("runtime %q is not available on this node", c.Runtime)
+		if checked {
+			why = c.Runtime + " cannot run this ticket: " + whyOf(info)
+		}
+		c = Choice{Why: why}
+	}
 	if launch {
 		s.setRuntime(c.Runtime)
 	}

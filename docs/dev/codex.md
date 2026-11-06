@@ -145,10 +145,12 @@ they leave it as it is and say when it differs; restarting the server rewrites i
               "codex": {"enabled": true, "binary": "codex", "model": "", "maxSessions": 0}}}
 ```
 
-- `default`: the runtime of a task that names none: `claude`, `codex` or `auto` (the default).
+- `default`: the runtime of a task that names none: `claude`, `codex` or `auto` (the default). `codex` needs Codex
+  enabled.
 - `preferred`: the runtime `auto` picks when no warm session decides (§7): `claude` (the default) or `codex`.
-- `avoidAbove`: per quota window, the percent used above which `auto` avoids a runtime unless every runtime is above
-  (nucleos' quota brake). Left out it is `{"5h": 85, "7d": 90}`; `{}` brakes nothing.
+- `avoidAbove`: per quota window (`5h`, `7d`, or `<n>m` for a window of n minutes; any other key is an error), the
+  percent used above which `auto` avoids a runtime unless every runtime is above (nucleos' quota brake). Left out it is
+  `{"5h": 85, "7d": 90}`; `{}` brakes nothing.
 - `claude.maxSessions`, `codex.maxSessions`: how many sessions the runtime runs at once; 0 is no cap (the node's slots
   still bound them).
 - `enabled`: on unless set to `false`. An enabled Codex that is not ready is never chosen, and the dashboard says why.
@@ -235,7 +237,9 @@ built by command substitution is not read, nor is a file outside the Ticket's di
 `account/rateLimits/updated`, Claude Code from `rate_limit_event` (a window is limited only by `status: "rejected"`).
 The node's tracker (`internal/quota`) keeps the latest reading of every window per runtime, keyed by bucket and name:
 a Codex window's bucket is its snapshot's `limitId` (`codex`, or a per-model limit's id), so two limits' `5h` windows
-never overwrite each other; Claude Code's windows have no bucket. A window whose reset has passed is stale and no
+never overwrite each other; Claude Code's windows have no bucket. The runtime is judged as a whole, conservatively: a
+limited window in any one Codex bucket limits all of Codex, and every bucket's windows count toward its headroom and
+`avoidAbove` (Athena does not yet know which models a bucket covers). A window whose reset has passed is stale and no
 longer counts. A runtime's headroom is 1 − the largest `used` of its windows that have not reset (1 while nothing is
 measured).
 

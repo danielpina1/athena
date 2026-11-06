@@ -108,7 +108,7 @@ type Engine struct {
 	wake   func()
 	// relays is Options.Relays.
 	relays bool
-	// defaultRuntime is Options.DefaultRuntime, RuntimeClaude when it was empty.
+	// defaultRuntime is Options.DefaultRuntime, RuntimeClaude when it was empty or not a runtime.
 	defaultRuntime string
 }
 
@@ -128,7 +128,8 @@ type Options struct {
 	// router runs, or they pile up unread.
 	Relays bool
 	// DefaultRuntime is the runtime of a Ticket that names none: an owner task without TaskOptions.Runtime and every
-	// Ticket the router accepts. Empty is RuntimeClaude; the server passes its configuration's (auto by default).
+	// Ticket the router accepts. Empty, or a name that is not a runtime, is RuntimeClaude; the server passes its
+	// configuration's (auto by default).
 	DefaultRuntime string
 }
 
@@ -149,8 +150,8 @@ func NewEngineWith(repos Repositories, exec Executor, opts Options) *Engine {
 		emit = func(Event) {}
 	}
 	def := opts.DefaultRuntime
-	if def == "" {
-		def = RuntimeClaude
+	if !ValidRuntime(def) {
+		def = RuntimeClaude // empty, or not a runtime: never a Ticket on a runtime nobody has
 	}
 	return &Engine{repos: repos, exec: exec, now: now, emit: emit, waiters: map[string]chan struct{}{},
 		policy: opts.Policy, scope: opts.Scope, wake: opts.Wake, relays: opts.Relays, defaultRuntime: def}

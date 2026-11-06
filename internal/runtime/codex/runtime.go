@@ -20,8 +20,10 @@ import (
 const (
 	// checkTimeout bounds a whole Check: `codex --version` and the short-lived app-server.
 	checkTimeout = 30 * time.Second
-	// checkTTL is how long a Check result is reused.
-	checkTTL = 10 * time.Minute
+	// checkTTL is how long a Check result is reused; timeoutTTL how long one its own bound cut short is (a hanging codex
+	// would otherwise cost every launch the bound).
+	checkTTL   = 10 * time.Minute
+	timeoutTTL = time.Minute
 	// NotLoggedIn is Check's Why when Athena's CODEX_HOME holds no account.
 	NotLoggedIn = "Codex is not logged in for Athena: run athena codex login"
 )
@@ -48,6 +50,7 @@ type Runtime struct {
 	mu      sync.Mutex
 	cached  *Status
 	at      time.Time
+	ttl     time.Duration    // of cached
 	now     func() time.Time // tests
 	timeout time.Duration    // tests; zero is checkTimeout
 }
@@ -146,11 +149,12 @@ func (r *Runtime) Invalidate() {
 // app-server (no thread), and asks it for the account (account/read) and, through TrustHooks, for Athena's hooks in
 // the work root. It is Ready when the version is supported, an account is logged in and the hooks are Athena's alone;
 // a version newer than VerifiedVersion is Ready but not Tested. The result is reused for 10 minutes, or until
-// Invalidate; one cut short (by ctx, or by the check's own 30-second bound) is not kept. Calls are serialised.
+// Invalidate; one the check's own 30-second bound cut short for a minute only, and one ctx cut short not at all. Calls
+// are serialised.
 func (r *Runtime) Status(ctx context.Context) Status {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.cached != nil && r.clock().Sub(r.at) < checkTTL {
+	if r.cached != nil && r.clock().Sub(r.at) < r.ttl {
 		return *r.cached
 	}
 	timeout := r.timeout
@@ -160,8 +164,12 @@ func (r *Runtime) Status(ctx context.Context) Status {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	s := r.check(cctx)
-	if cctx.Err() == nil {
-		r.cached, r.at = &s, r.clock()
+	switch {
+	case cctx.Err() == nil:
+		r.cached, r.at, r.ttl = &s, r.clock(), checkTTL
+	case ctx.Err() == nil:
+		// Its own bound cut it short: codex hangs. Not ready, and asked again in a minute.
+		r.cached, r.at, r.ttl = &s, r.clock(), timeoutTTL
 	}
 	return s
 }

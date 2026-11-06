@@ -208,9 +208,12 @@ func TestCheckIsCachedUntilInvalidated(t *testing.T) {
 	}
 }
 
-// A check its own 30-second bound cut short is not kept: the next Check asks again.
-func TestCheckTimeoutIsNotCached(t *testing.T) {
+// A check its own 30-second bound cut short is kept for a minute only: a hanging codex does not cost every launch
+// the bound, and the minute after it is asked again.
+func TestCheckTimeoutIsCachedBriefly(t *testing.T) {
 	r, _ := newRuntime(t)
+	now := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	r.now = func() time.Time { return now }
 	slow := filepath.Join(t.TempDir(), "codex")
 	if err := os.WriteFile(slow, []byte("#!/bin/sh\nexec sleep 5\n"), 0o700); err != nil {
 		t.Fatal(err)
@@ -225,8 +228,26 @@ func TestCheckTimeoutIsNotCached(t *testing.T) {
 		t.Fatalf("the check took %s, past its bound", d)
 	}
 	r.Binary, r.timeout = fake, 0
+	start = time.Now()
+	now = now.Add(50 * time.Second)
+	if s := r.Status(context.Background()); s.Ready || !strings.HasPrefix(s.Why, "codex --version") {
+		t.Fatalf("within the minute: %+v, want the timed-out answer again", s)
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("the cached answer took %s", d)
+	}
+	now = now.Add(11 * time.Second)
 	if s := r.Status(context.Background()); !s.Ready {
-		t.Fatalf("the timed-out check was cached: %+v", s)
+		t.Fatalf("after the minute: %+v, want a new check", s)
+	}
+	// Invalidate drops a timed-out answer too.
+	r.Binary, r.timeout = slow, 200*time.Millisecond
+	r.Invalidate()
+	r.Status(context.Background())
+	r.Binary, r.timeout = fake, 0
+	r.Invalidate()
+	if s := r.Status(context.Background()); !s.Ready {
+		t.Fatalf("after Invalidate: %+v", s)
 	}
 }
 

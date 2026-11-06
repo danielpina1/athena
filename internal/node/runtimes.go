@@ -70,13 +70,17 @@ func (n *Node) assumedReady() rt.Info {
 }
 
 // checkRuntime is what the node knows of a runtime's readiness now: Claude Code is assumed ready (assumedReady);
-// another runtime is asked (Codex caches its answer). The answer is kept for Status. ctx bounds the check.
+// another runtime is asked (Codex caches its answer). The answer is kept for Status, unless ctx ended meanwhile. ctx
+// bounds the check.
 func (n *Node) checkRuntime(ctx context.Context, name string, r rt.Runtime) rt.Info {
 	info := n.assumedReady()
 	if r.Name() != runtimeClaude {
 		info = r.Check(ctx)
 		if !info.Ready && info.Why == "" {
 			info.Why = "it is not ready"
+		}
+		if ctx.Err() != nil {
+			return info // cut short (a stop): no answer for Status
 		}
 	}
 	n.infoMu.Lock()

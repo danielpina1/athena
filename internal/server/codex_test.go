@@ -166,6 +166,11 @@ func TestRuntimesConfigDefaultsAndChooser(t *testing.T) {
 	if again, err := LoadConfig(dir); err != nil || again.Runtimes.Preferred != core.RuntimeCodex || again.Runtimes.Claude.MaxSessions != 2 {
 		t.Fatalf("after save: %+v, %v", again.Runtimes, err)
 	}
+	// A window of minutes is a window name too.
+	writeConfigFile(t, dir, `{"runtimes": {"avoidAbove": {"45m": 50, "7d": 95}, "default": "auto", "codex": {"enabled": false}}}`)
+	if c, err = LoadConfig(dir); err != nil || c.Runtimes.chooser().AvoidAbove["45m"] != 0.5 {
+		t.Fatalf("minutes window: %+v, %v", c.Runtimes, err)
+	}
 	// An empty brake brakes nothing.
 	writeConfigFile(t, dir, `{"runtimes": {"avoidAbove": {}}}`)
 	if c, err = LoadConfig(dir); err != nil || len(c.Runtimes.chooser().AvoidAbove) != 0 {
@@ -179,6 +184,11 @@ func TestRuntimesConfigDefaultsAndChooser(t *testing.T) {
 		{`{"runtimes": {"avoidAbove": {"5h": 0}}}`, "runtimes.avoidAbove"},
 		{`{"runtimes": {"claude": {"maxSessions": -1}}}`, "maxSessions"},
 		{`{"runtimes": {"codex": {"maxSessions": -2}}}`, "maxSessions"},
+		// A window name no runtime reports would brake nothing.
+		{`{"runtimes": {"avoidAbove": {"5hr": 80}}}`, `runtimes.avoidAbove "5hr"`},
+		{`{"runtimes": {"avoidAbove": {"0m": 80}}}`, `runtimes.avoidAbove "0m"`},
+		// The default must be a runtime that is there.
+		{`{"runtimes": {"default": "codex", "codex": {"enabled": false}}}`, "runtimes.default"},
 	} {
 		writeConfigFile(t, dir, bad.body)
 		if _, err := LoadConfig(dir); err == nil || !strings.Contains(err.Error(), bad.want) {

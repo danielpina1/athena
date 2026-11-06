@@ -93,6 +93,10 @@ type ClaudeConfig struct {
 	MaxSessions int `json:"maxSessions,omitempty"`
 }
 
+// windowNameRe matches the quota windows a runtime reports (rt.Window.Name): "5h", "7d", or "<n>m" for a window of n
+// minutes.
+var windowNameRe = regexp.MustCompile(`^(5h|7d|[1-9][0-9]*m)$`)
+
 func (r RuntimesConfig) validate() error {
 	if r.Default != "" && !core.ValidRuntime(r.Default) {
 		return fmt.Errorf("runtimes.default %q is not claude, codex or auto", r.Default)
@@ -100,7 +104,13 @@ func (r RuntimesConfig) validate() error {
 	if r.Preferred != "" && r.Preferred != core.RuntimeClaude && r.Preferred != core.RuntimeCodex {
 		return fmt.Errorf("runtimes.preferred %q is not claude or codex", r.Preferred)
 	}
+	if r.Default == core.RuntimeCodex && !r.Codex.On() {
+		return errors.New(`runtimes.default is "codex", but runtimes.codex.enabled is false`)
+	}
 	for name, pct := range r.AvoidAbove {
+		if !windowNameRe.MatchString(name) {
+			return fmt.Errorf(`runtimes.avoidAbove %q is not a quota window: name "5h", "7d" or "<minutes>m"`, name)
+		}
 		if !(pct > 0 && pct <= 100) {
 			return fmt.Errorf("runtimes.avoidAbove %q is %v: it must be a percent above 0, at most 100", name, pct)
 		}

@@ -11,6 +11,7 @@ import (
 	"github.com/danielpina1/athena/internal/core"
 	"github.com/danielpina1/athena/internal/quota"
 	"github.com/danielpina1/athena/internal/runtime/claude"
+	"github.com/danielpina1/athena/internal/runtime/codex"
 	"github.com/danielpina1/athena/internal/runtime/rt"
 )
 
@@ -353,5 +354,57 @@ func TestMaxSessionsPerRuntime(t *testing.T) {
 	in.Live = map[string]int{core.RuntimeCodex: 1}
 	if c := ch.Choose(in); c.Runtime != core.RuntimeCodex || !c.AwaitSession || !c.Until.IsZero() {
 		t.Fatalf("pinned at its cap: %+v", c)
+	}
+}
+
+// fixedChooser always chooses its runtime.
+type fixedChooser string
+
+func (f fixedChooser) Choose(ChoiceInput) Choice { return Choice{Runtime: string(f)} }
+
+// The node never launches on a runtime the readiness it gathered says is not ready, whatever a Chooser answers: the
+// launch fails with that runtime's why.
+func TestNodeRefusesAnUnreadyChoice(t *testing.T) {
+	t.Setenv("ATHENA_FAKE_CODEX_LOGGED_OUT", "1")
+	h := newCodexHarness(t, codexTurn(), func(c *Config) { c.Chooser = fixedChooser(core.RuntimeCodex) })
+	tk, err := h.eng.SubmitOwnerTask("Auto, chosen badly", core.TaskOptions{Runtime: core.RuntimeAuto})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.eventually("the launch failed", func() bool {
+		cur, _ := h.ticket(tk.ID)
+		r := cur.LatestAssignment().Report
+		return r != nil && r.State == core.ReportFailed
+	})
+	cur, _ := h.ticket(tk.ID)
+	if s := cur.LatestAssignment().Report.Summary; !strings.Contains(s, "codex cannot run this ticket: "+codex.NotLoggedIn) {
+		t.Fatalf("summary = %q", s)
+	}
+	if h.rpcHas(`"method":"thread/start"`) {
+		t.Fatal("a session started on a Codex that is not ready")
+	}
+}
+
+// slowCheck is a runtime whose check answers only once its context ends.
+type slowCheck struct{ claude.Runtime }
+
+func (slowCheck) Name() string { return "slow" }
+func (slowCheck) Check(ctx context.Context) rt.Info {
+	<-ctx.Done()
+	return rt.Info{Why: "check: " + ctx.Err().Error()}
+}
+
+// A check cut short by a stop is no answer: Status keeps what it knew before.
+func TestCancelledCheckIsNotKept(t *testing.T) {
+	h := newHarness(t, func(c *Config) {
+		c.Runtimes = map[string]rt.Runtime{core.RuntimeClaude: claude.Runtime{Binary: c.ClaudeBinary}, "slow": slowCheck{}}
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	h.n.checkRuntime(ctx, "slow", slowCheck{})
+	for _, r := range h.n.Status().Runtimes {
+		if r.Name == "slow" && r.Why != "not checked yet" {
+			t.Fatalf("status = %+v, want the cancelled check left out", r)
+		}
 	}
 }
