@@ -127,3 +127,55 @@ run every 30 s):
   yourself.
 
 The same flow runs unattended with `go test -tags live -run LiveGitHub` (variables and cost in the setup guide).
+
+## Pause, shadow and promotion (needs your GitHub App)
+
+This part uses the same **sandbox repository** and server as the GitHub part, with `"mode": "auto"` in the Policy. The
+new commands are `athena pause`, `athena resume`, `athena proposals`, `athena apply` and `athena discard`; the rest is the
+dashboard ([dashboard.md](dashboard.md)) and the commands above. The brakes are described in [autonomy.md](autonomy.md).
+
+    S=/tmp/athena-smoke
+    ./bin/athena task --repo you/sandbox "Create pause-check.txt containing hi, then report ready." --state-dir $S
+    ./bin/athena pause --state-dir $S               # "Athena is paused. Running sessions stop at the end of their turn..."
+    ./bin/athena status --state-dir $S              # a "paused since ..." line
+    ./bin/athena task --repo you/sandbox "Create second.txt containing two, then report ready." --state-dir $S
+    ./bin/athena resume --state-dir $S              # "Athena resumed."
+
+Pause and resume:
+
+- After `pause`, the first Ticket's session stops at the end of its current turn (the dashboard shows the paused
+  banner), and the second Ticket is created but does not start: its `status` stays queued. Mention the App in a sandbox
+  issue: the Trigger is listed by `athena triggers`, but `athena decisions` shows no new decision and no reply is posted.
+- Stop the server with Ctrl-C and start it again while paused: it logs "athena is paused", the dashboard still shows
+  the banner, and nothing starts.
+- `resume` starts the queued Ticket, and the held reply goes out within a few seconds. In the dashboard, **Resume**
+  asks you to confirm with your passkey first; **Pause** does not.
+
+Brake and holding a repository for you. In the dashboard, Settings > Repositories: set the sandbox repository to
+"Shadow (held for you)" and save (confirm with your passkey). Then:
+
+    ./bin/athena task --repo you/sandbox "Create held.txt containing held, commit it, open a pull request, then report ready." --state-dir $S
+    ./bin/athena proposals --state-dir $S           # one line per held step: id, repository, kind and summary
+    ./bin/athena apply <proposal id> --state-dir $S # prints "<id>: applied"
+    ./bin/athena discard <proposal id> --state-dir $S
+
+- Until you apply, GitHub shows no `athena/<ticket>` branch and no pull request, and the Ticket shows "Review what
+  Athena holds for you" in Needs you. `athena proposals` lists a push ("Push athena/<ticket> to you/sandbox: 1 new
+  commit, held for you") and a pull request ("Open the pull request ... held for you").
+- Apply the push: the branch appears on GitHub, pushed by `<slug>[bot]`. Apply the pull request: it opens from that
+  branch with exactly the title and body the worker gave. Discard one instead: nothing reaches GitHub, and a held
+  reply is never sent.
+- To see the waiting-on-you brake: in Settings > Repositories set "Hold work in you/sandbox when this many wait on
+  you" to 1, leave one Proposal pending, and open a second sandbox issue that does not mention the App. Its decision
+  (`athena decisions`, or the dashboard) reads "Held: 1 things already wait on you in you/sandbox (limit 1)." and no
+  Ticket starts for it until you apply or discard the pending Proposal.
+
+Promotion:
+
+- Approve the same kind of escalation (for example a `pip install` outside a virtualenv) five times in a row in the
+  same repository, in the dashboard. Needs you then shows "Always allow it here?" for that
+  class. Dismiss it, and it stays away until five more approvals. Allow it (with a passkey confirmation), and the next
+  such ask runs with no Approval; Settings > Trust lists the standing rule with a Remove button.
+- A rule such as `credential-read` or `write-outside-ticket` is never offered, however often you approve it.
+
+Clean up: set the repository back to Live, remove the standing rule, and `rm -rf` the state dir as above.
