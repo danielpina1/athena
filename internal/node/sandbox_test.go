@@ -24,6 +24,7 @@ type sandboxBlock struct {
 		AllowWrite []string `json:"allowWrite"`
 		DenyWrite  []string `json:"denyWrite"`
 		DenyRead   []string `json:"denyRead"`
+		AllowRead  []string `json:"allowRead"`
 	} `json:"filesystem"`
 	Network struct {
 		AllowedDomains      []string `json:"allowedDomains"`

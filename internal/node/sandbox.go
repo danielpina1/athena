@@ -26,6 +26,9 @@ type SandboxConfig struct {
 	AllowWrite []string
 	// DenyRead are absolute paths sandboxed commands cannot read (the server puts the GitHub App key here).
 	DenyRead []string
+	// AllowRead are absolute paths readable again inside DenyRead (Claude Code's allowRead, which takes precedence):
+	// the node sets them for a restricted session (restrictedReads), never from the owner's configuration.
+	AllowRead []string
 	// WeakerNetworkIsolation (macOS) lets commands reach the trustd service, which Go programs such as gh verify every
 	// TLS certificate through: without it gh cannot reach GitHub. It opens a path out of the sandbox through that
 	// service.
@@ -62,6 +65,7 @@ func (n *Node) sandboxWith(c *SandboxConfig, workDir string) (*rt.Sandbox, []str
 		// Athena's own files, and a repository's git config and hooks (ProtectedPaths).
 		DenyWrite:              ProtectedPaths(workDir),
 		DenyRead:               slices.Clone(c.DenyRead),
+		AllowRead:              slices.Clone(c.AllowRead),
 		AllowedDomains:         append(slices.Clone(GitHubDomains), c.AllowedDomains...),
 		UnixSockets:            []string{n.cfg.SocketPath},
 		AllowAllUnixSockets:    runtime.GOOS == "linux", // Linux cannot allow a socket by path; without this the node socket is unreachable
@@ -89,13 +93,20 @@ func (n *Node) sandboxWith(c *SandboxConfig, workDir string) (*rt.Sandbox, []str
 // writing its own caches instead of the owner's, and kept from the node's secrets (restrictedSandboxConfig); its env
 // points the caches there (restrictedCacheEnv).
 func (n *Node) sessionSandbox(workDir string, readOnly, restricted bool) (*rt.Sandbox, []string) {
+	return n.sessionSandboxOn(runtime.GOOS, workDir, readOnly, restricted)
+}
+
+// sessionSandboxOn is sessionSandbox on the operating system goos.
+func (n *Node) sessionSandboxOn(goos, workDir string, readOnly, restricted bool) (*rt.Sandbox, []string) {
 	c := n.cfg.Sandbox
 	if restricted {
-		c = n.restrictedSandboxConfig(workDir)
+		c = n.restrictedSandboxConfig(goos, workDir)
 	}
 	sb, env := n.sandboxWith(c, workDir)
 	if restricted {
 		sb = restrictedSandbox(sb)
+		// The daemons' sockets are masked for writes too: on Linux connecting to one takes no read.
+		sb.DenyWrite = append(sb.DenyWrite, daemonSockets(goos, os.Getenv("XDG_RUNTIME_DIR"), n.cfg.SocketPath)...)
 		env = append(env, restrictedCacheEnv(workDir)...)
 	}
 	if sb != nil && readOnly {

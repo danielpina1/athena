@@ -3,9 +3,11 @@ package node
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
 
 	"github.com/danielpina1/athena/internal/core"
 	"github.com/danielpina1/athena/internal/policy"
@@ -29,6 +31,8 @@ type Policy interface {
 const (
 	// restrictedEscalateReason is the reason of what a restricted session's rules would escalate.
 	restrictedEscalateReason = "Work started by someone outside your allow list cannot ask for this; the owner can rerun it as their own task."
+	// restrictedReadReason is the reason a restricted session's file tools may not read a path.
+	restrictedReadReason = "Work started by someone outside your allow list reads only its own working directory and the system's tools."
 	// restrictedWebReason is the reason a restricted session's web tools are denied.
 	restrictedWebReason = "Work started by someone outside your allow list has no web access beyond GitHub."
 	// restrictedSandboxSummary heads the Failed report of a restricted session that cannot be sandboxed.
@@ -67,6 +71,7 @@ func restrictedSandbox(sb *rt.Sandbox) *rt.Sandbox {
 	if sb != nil {
 		out = *sb
 		out.AllowWrite, out.DenyWrite, out.DenyRead = slices.Clone(sb.AllowWrite), slices.Clone(sb.DenyWrite), slices.Clone(sb.DenyRead)
+		out.AllowRead = slices.Clone(sb.AllowRead)
 		out.UnixSockets = slices.Clone(sb.UnixSockets)
 	}
 	out.Required = true
@@ -74,21 +79,23 @@ func restrictedSandbox(sb *rt.Sandbox) *rt.Sandbox {
 	return &out
 }
 
-// restrictedSandboxConfig is the sandbox configuration of a restricted session working in workDir: the owner's (else
-// the server's defaults: on macOS, commands reach trustd so that gh can verify GitHub's certificates), required, without
-// the owner's extra hosts and writable paths, its own cache directory writable instead (restrictedCacheEnv), and its
-// commands kept from reading the node's secrets (restrictedDenyRead).
-func (n *Node) restrictedSandboxConfig(workDir string) *SandboxConfig {
-	c := SandboxConfig{WeakerNetworkIsolation: runtime.GOOS == "darwin"}
+// restrictedSandboxConfig is the sandbox configuration of a restricted session working in workDir on the operating
+// system goos: the owner's (else the server's defaults: on macOS, commands reach trustd so that gh can verify GitHub's
+// certificates), required, without the owner's extra hosts and writable paths, its own cache directory writable instead
+// (restrictedCacheEnv), and its commands kept to what the session needs (restrictedReads).
+func (n *Node) restrictedSandboxConfig(goos, workDir string) *SandboxConfig {
+	c := SandboxConfig{WeakerNetworkIsolation: goos == "darwin"}
 	if n.cfg.Sandbox != nil {
 		c = *n.cfg.Sandbox
 	}
 	c.Required = true
 	c.AllowedDomains = nil
 	c.AllowWrite = []string{restrictedCacheDir(workDir)}
-	c.DenyRead = append(slices.Clone(c.DenyRead), n.restrictedDenyRead(workDir)...)
+	deny, allow := n.restrictedReads(goos, workDir)
+	c.DenyRead = append(slices.Clone(c.DenyRead), deny...)
 	slices.Sort(c.DenyRead)
 	c.DenyRead = slices.Compact(c.DenyRead)
+	c.AllowRead = allow
 	return &c
 }
 
@@ -100,17 +107,20 @@ func restrictedCacheDir(workDir string) string { return filepath.Join(workDir, "
 // restrictedCacheDir.
 var restrictedCaches = []struct{ env, dir string }{
 	{"GOCACHE", "go-build"}, {"GOMODCACHE", "gomod"}, {"npm_config_cache", "npm"}, {"PIP_CACHE_DIR", "pip"}, {"XDG_CACHE_HOME", "xdg"},
+	{"XDG_CONFIG_HOME", "config"},
 }
 
-// restrictedCacheEnv is the environment of a restricted session's commands: its caches (restrictedCaches), and Go's
-// module cache left writable, so that the Ticket's directory can be removed when it ends.
+// restrictedCacheEnv is the environment of a restricted session's commands: its caches and configuration directory
+// (restrictedCaches), Go's module cache left writable, so that the Ticket's directory can be removed when it ends, and
+// no global git configuration: the owner's home is unreadable to the session, and git stops when it cannot read
+// ~/.gitconfig.
 func restrictedCacheEnv(workDir string) []string {
 	root := restrictedCacheDir(workDir)
-	env := make([]string, 0, len(restrictedCaches)+1)
+	env := make([]string, 0, len(restrictedCaches)+2)
 	for _, c := range restrictedCaches {
 		env = append(env, c.env+"="+filepath.Join(root, c.dir))
 	}
-	return append(env, "GOFLAGS=-modcacherw")
+	return append(env, "GOFLAGS=-modcacherw", "GIT_CONFIG_GLOBAL="+os.DevNull)
 }
 
 // makeRestrictedCaches creates the cache directories of restrictedCacheEnv.
@@ -124,27 +134,132 @@ func makeRestrictedCaches(workDir string) error {
 	return nil
 }
 
-// restrictedDenyRead are the paths a restricted session's commands may not read, whatever the owner's sandbox says:
-// the node's secrets (Config.Secrets: the GitHub App key), the owner's credentials the rules know (credRel), and
-// everything in the state directory but what the session needs: its working directory, its git directories, the node
-// socket, the CA bundle and the athena binary.
-func (n *Node) restrictedDenyRead(workDir string) []string {
-	out := slices.Clone(n.cfg.Secrets)
-	if home, err := os.UserHomeDir(); err == nil && home != "" {
+// restrictedReads are what a restricted session's commands may not read, whatever the owner's sandbox says, and what
+// they may read again inside that (Claude Code's allowRead, which takes precedence over denyRead):
+//   - denied: the node's secrets (Config.Secrets: the GitHub App key) and the owner's credentials the rules know
+//     (credRel), each in its configured and its resolved spelling; the owner's home directory, Athena's state directory,
+//     the work root, the transcripts and Claude Code's session transcripts, each as a whole, so that what appears there
+//     later (another Ticket's directory or transcript) is denied too; and on Linux the daemons' sockets (daemonSockets).
+//   - read again: what the session needs: its working directory and git directories, the node socket, the gh shim, the
+//     athena binary, the CA bundle, Claude Code's shell snapshots and install, and the toolchains on PATH under the
+//     home directory (homeToolchains). Nothing that holds or lies in a secret or credential is read again.
+func (n *Node) restrictedReads(goos, workDir string) (deny, allow []string) {
+	home, _ := os.UserHomeDir()
+	var guarded []string
+	for _, k := range n.cfg.Secrets {
+		guarded = append(guarded, spellings(k)...)
+	}
+	if home != "" {
 		for _, rel := range credRel {
-			out = append(out, filepath.Join(home, rel))
+			guarded = append(guarded, spellings(filepath.Join(home, filepath.FromSlash(rel)))...)
 		}
 	}
-	if n.cfg.StateDir == "" {
-		return out
+	deny = slices.Clone(guarded)
+	wholes := []string{home, n.cfg.StateDir, n.cfg.WorkRoot}
+	if home != "" {
+		wholes = append(wholes, filepath.Join(home, ".claude", "projects"))
 	}
-	keep := []string{workDir, n.cfg.SocketPath, n.cfg.AthenaBin}
-	if n.cfg.Sandbox != nil {
-		keep = append(keep, n.cfg.Sandbox.CAFile)
+	if n.cfg.StateDir != "" {
+		wholes = append(wholes, filepath.Dir(TranscriptPath(n.cfg.StateDir, "x")))
 	}
+	for _, w := range wholes {
+		if w != "" {
+			deny = append(deny, spellings(w)...)
+		}
+	}
+	deny = append(deny, daemonSockets(goos, os.Getenv("XDG_RUNTIME_DIR"), n.cfg.SocketPath)...)
+
 	gitDir, common := gitDirs(workDir)
-	keep = append(keep, gitDir, common)
-	return append(out, denyAllBut(n.cfg.StateDir, keep)...)
+	need := []string{workDir, gitDir, common, n.cfg.SocketPath, n.cfg.AthenaBin}
+	if n.cfg.StateDir != "" {
+		need = append(need, filepath.Join(n.cfg.StateDir, ShimsDir))
+	}
+	if n.cfg.Sandbox != nil {
+		need = append(need, n.cfg.Sandbox.CAFile)
+	}
+	if home != "" {
+		need = append(need, filepath.Join(home, ".claude", "shell-snapshots"))
+	}
+	if bin := n.cfg.ClaudeBinary; bin != "" {
+		if p, err := exec.LookPath(bin); err == nil {
+			need = append(need, filepath.Dir(resolvedPath(p)))
+		}
+	}
+	need = append(need, homeToolchains(home, os.Getenv("PATH"))...)
+	for _, p := range need {
+		if p == "" || !filepath.IsAbs(p) {
+			continue
+		}
+		for _, v := range spellings(p) {
+			if !slices.ContainsFunc(guarded, func(g string) bool { return within(g, v) || within(v, g) }) {
+				allow = append(allow, v)
+			}
+		}
+	}
+	slices.Sort(deny)
+	slices.Sort(allow)
+	return slices.Compact(deny), slices.Compact(allow)
+}
+
+// spellings are p cleaned and, when different, with its symbolic links resolved: a sandbox may match either.
+func spellings(p string) []string {
+	c, r := filepath.Clean(p), resolvedPath(p)
+	if r == c {
+		return []string{c}
+	}
+	return []string{c, r}
+}
+
+// homeToolchains are the toolchains a restricted session's commands may run from the owner's home directory: each
+// directory on path that lies below home, and, for one named bin, its parent too when that is a toolchain's own
+// install two levels or more below home (~/.nvm/versions/node/v22, not ~/.local), whose libraries the binaries need.
+func homeToolchains(home, path string) []string {
+	if home == "" {
+		return nil
+	}
+	home = filepath.Clean(home)
+	var out []string
+	for _, e := range filepath.SplitList(path) {
+		if !filepath.IsAbs(e) {
+			continue
+		}
+		e = filepath.Clean(e)
+		if e == home || !within(home, e) {
+			continue
+		}
+		out = append(out, e)
+		if parent := filepath.Dir(e); filepath.Base(e) == "bin" && strings.Count(relWithin(home, parent), string(filepath.Separator)) >= 1 {
+			out = append(out, parent)
+		}
+	}
+	return out
+}
+
+// daemonSockets are the paths that hold the sockets of the machine's daemons (Docker, containerd, Podman, and the
+// user's runtime directory, but for the node socket in it), on Linux, where Claude Code's sandbox cannot allow one
+// socket by path and lets commands reach every one: denied, the sandbox masks them. Elsewhere there are none (macOS
+// allows the node socket alone).
+func daemonSockets(goos, runtimeDir, nodeSocket string) []string {
+	if goos != "linux" {
+		return nil
+	}
+	out := []string{"/var/run/docker.sock", "/run/docker.sock", "/run/containerd", "/run/podman"}
+	if runtimeDir != "" && filepath.IsAbs(runtimeDir) {
+		out = append(out, denyAllBut(runtimeDir, []string{nodeSocket})...)
+	}
+	return out
+}
+
+// restrictedSystemRoots are the system's directories a restricted session's file tools may read: its programs,
+// libraries, headers and configuration, and the developer tools'.
+var restrictedSystemRoots = []string{"/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32", "/opt", "/etc", "/nix",
+	"/snap", "/System", "/Library/Developer", "/Applications/Xcode.app"}
+
+// restrictedReadRoots are, besides its working directory, what a restricted session's file tools may read
+// (RuleContext.ReadRoots): the system's roots and the toolchains under the home directory.
+func restrictedReadRoots() []string {
+	home, _ := os.UserHomeDir()
+	return append(slices.Clone(restrictedSystemRoots), homeToolchains(home, os.Getenv("PATH"))...)
 }
 
 // denyAllBut lists what to deny of root so that only the paths in keep (and what lies below them) stay readable: root

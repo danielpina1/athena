@@ -1308,3 +1308,129 @@ func TestRestrictedDeniesWebTools(t *testing.T) {
 		t.Errorf("restricted Read = %+v, want allow", d)
 	}
 }
+
+// The node's secrets (the GitHub App key) are unreadable by every session's file tools and Bash text, in any spelling:
+// a key outside the state directory, reached directly, through a symbolic link, by a search of a directory holding it,
+// or named in a command.
+func TestSecretsDenied(t *testing.T) {
+	e := newRuleEnv(t)
+	keys := filepath.Join(e.root, "keys")
+	if err := os.MkdirAll(keys, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	key := filepath.Join(keys, "athena-app.pem")
+	if err := os.WriteFile(key, []byte("k"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(key, filepath.Join(e.ctx.TicketDir, "keylink")); err != nil {
+		t.Fatal(err)
+	}
+	// The key configured through a symbolic link to its directory: its real path is denied too.
+	if err := os.Symlink(keys, filepath.Join(e.root, "keyslink")); err != nil {
+		t.Fatal(err)
+	}
+	for _, restricted := range []bool{false, true} {
+		for _, configured := range []string{key, filepath.Join(e.root, "keyslink", "athena-app.pem")} {
+			c := e.ctx
+			c.Restricted, c.Secrets = restricted, []string{configured}
+			for _, x := range []struct {
+				name, tool string
+				input      json.RawMessage
+			}{
+				{"read", "Read", in(map[string]any{"file_path": key})},
+				{"read through a link", "Read", in(map[string]any{"file_path": filepath.Join(c.TicketDir, "keylink")})},
+				{"read the configured spelling", "Read", in(map[string]any{"file_path": configured})},
+				{"grep its directory", "Grep", in(map[string]any{"pattern": "PRIVATE", "path": keys})},
+				{"grep a directory above it", "Grep", in(map[string]any{"pattern": "PRIVATE", "path": e.root})},
+				{"glob its path", "Glob", in(map[string]any{"pattern": keys + "/*.pem"})},
+				{"glob its name", "Glob", in(map[string]any{"pattern": "**/athena-app.pem"})},
+				{"cat it", "Bash", in(map[string]any{"command": "cat " + key})},
+				{"cat it by name", "Bash", in(map[string]any{"command": "cd ../../keys && cat athena-app.pem | base64"})},
+			} {
+				d := Evaluate(c, x.tool, x.input)
+				if d.Verdict != VerdictDeny || d.Rule != ruleCredential {
+					t.Errorf("restricted=%v key %s: %s = %+v, want a credential deny", restricted, configured, x.name, d)
+				}
+			}
+			// A file beside the key that is not one is no secret.
+			if !restricted {
+				other := in(map[string]any{"file_path": filepath.Join(e.outDir, "notes.txt")})
+				if d := Evaluate(c, "Read", other); d.Verdict != VerdictAllow {
+					t.Errorf("standard read of another file = %+v, want allow", d)
+				}
+			}
+		}
+	}
+}
+
+// Plain-text git credentials (a GitHub token git stores) are credential files for every session.
+func TestGitCredentialsDenied(t *testing.T) {
+	e := newRuleEnv(t)
+	h := e.ctx.Home
+	for _, restricted := range []bool{false, true} {
+		c := e.ctx
+		c.Restricted = restricted
+		for _, x := range []struct {
+			tool  string
+			input json.RawMessage
+		}{
+			{"Read", in(map[string]any{"file_path": h + "/.git-credentials"})},
+			{"Read", in(map[string]any{"file_path": h + "/.config/git/credentials"})},
+			{"Grep", in(map[string]any{"pattern": "ghp_", "path": h + "/.config/git"})},
+			{"Bash", in(map[string]any{"command": "cat ~/.git-credentials"})},
+			{"Bash", in(map[string]any{"command": "cat $HOME/.config/git/credentials"})},
+			{"Bash", in(map[string]any{"command": "cd ~ && grep ghp_ .git-credentials"})},
+			{"Glob", in(map[string]any{"pattern": "**/.git-credentials"})},
+		} {
+			if d := Evaluate(c, x.tool, x.input); d.Verdict != VerdictDeny || d.Rule != ruleCredential {
+				t.Errorf("restricted=%v %s %s = %+v, want a credential deny", restricted, x.tool, x.input, d)
+			}
+		}
+	}
+	// A repository's own .git/credentials-like names are not the owner's store.
+	if d := Evaluate(e.ctx, "Bash", in(map[string]any{"command": "git config credential.helper"})); d.Verdict == VerdictDeny {
+		t.Errorf("git config credential.helper = %+v, want not denied as a credential read", d)
+	}
+}
+
+// A restricted session's file tools read only its own directory and the system's and toolchains' roots (ReadRoots); a
+// standard one reads outside as before.
+func TestRestrictedReadsOnlyTicketAndSystem(t *testing.T) {
+	e := newRuleEnv(t)
+	sys := filepath.Join(e.root, "usr")
+	if err := os.MkdirAll(filepath.Join(sys, "include"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	c := e.ctx
+	c.Restricted, c.ReadRoots = true, []string{sys}
+	other := filepath.Join(e.root, "work", "T2")
+	for _, x := range []struct {
+		name, tool string
+		input      json.RawMessage
+		want       string
+	}{
+		{"its own file", "Read", in(map[string]any{"file_path": filepath.Join(c.TicketDir, "main.go")}), VerdictAllow},
+		{"a relative file", "Read", in(map[string]any{"file_path": "main.go"}), VerdictAllow},
+		{"grep its directory", "Grep", in(map[string]any{"pattern": "x"}), VerdictAllow},
+		{"a system header", "Read", in(map[string]any{"file_path": filepath.Join(sys, "include", "stdio.h")}), VerdictAllow},
+		{"glob a system root", "Glob", in(map[string]any{"pattern": sys + "/include/*.h"}), VerdictAllow},
+		{"another ticket", "Read", in(map[string]any{"file_path": filepath.Join(other, "secret.go")}), VerdictDeny},
+		{"a file outside", "Read", in(map[string]any{"file_path": filepath.Join(e.outDir, "notes.txt")}), VerdictDeny},
+		{"outside through a link", "Read", in(map[string]any{"file_path": filepath.Join(c.TicketDir, "link", "notes.txt")}), VerdictDeny},
+		{"up and out", "Read", in(map[string]any{"file_path": "../T2/secret.go"}), VerdictDeny},
+		{"grep outside", "Grep", in(map[string]any{"pattern": "x", "path": e.outDir}), VerdictDeny},
+		{"glob outside", "Glob", in(map[string]any{"pattern": "*", "path": e.outDir}), VerdictDeny},
+		{"glob an absolute pattern", "Glob", in(map[string]any{"pattern": e.outDir + "/**"}), VerdictDeny},
+	} {
+		d := Evaluate(c, x.tool, x.input)
+		if d.Verdict != x.want {
+			t.Errorf("restricted %s = %+v, want %s", x.name, d, x.want)
+		}
+		if x.want == VerdictDeny && d.Reason != restrictedReadReason {
+			t.Errorf("restricted %s: reason %q, want %q", x.name, d.Reason, restrictedReadReason)
+		}
+		if std := Evaluate(e.ctx, x.tool, x.input); std.Verdict != VerdictAllow {
+			t.Errorf("standard %s = %+v, want allow", x.name, std)
+		}
+	}
+}

@@ -9,8 +9,9 @@ type Sandbox struct {
 	// commands unsandboxed.
 	Required bool
 	// AllowWrite are paths writable besides the working directory; DenyWrite are paths never writable, even inside
-	// an allowed one; DenyRead are paths that cannot be read.
-	AllowWrite, DenyWrite, DenyRead []string
+	// an allowed one; DenyRead are paths that cannot be read; AllowRead are paths readable again inside DenyRead (they
+	// take precedence over it).
+	AllowWrite, DenyWrite, DenyRead, AllowRead []string
 	// AllowedDomains are the hosts commands may reach ("*.example.com" matches the subdomains).
 	AllowedDomains []string
 	// UnixSockets are the Unix sockets commands may connect to (macOS only: Linux cannot filter sockets by path).

@@ -134,13 +134,23 @@ func TestRestrictedSessionSandbox(t *testing.T) {
 	}
 }
 
-// With the owner's sandbox off, a restricted session's commands still cannot read the node's secrets or Athena's
-// state directory, beyond what the session needs: its own directory and git directories, and the node socket.
+// With the owner's sandbox off, a restricted session's commands still cannot read the node's secrets (a key outside
+// the state directory, in its configured and its resolved spelling), the owner's credentials, the home directory, or
+// Athena's state directory and work root as wholes: a Ticket directory made later is denied too. What the session
+// needs is read again (allowRead): its own directory, the node socket. Nothing read again holds a secret or credential.
 func TestRestrictedSessionDeniesSecrets(t *testing.T) {
 	if !SandboxSupported() {
 		t.Skip("no sandbox on this platform")
 	}
-	key := filepath.Join(t.TempDir(), "app.pem")
+	keys := t.TempDir()
+	if err := os.WriteFile(filepath.Join(keys, "app.pem"), []byte("k"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	keysLink := filepath.Join(t.TempDir(), "keys")
+	if err := os.Symlink(keys, keysLink); err != nil {
+		t.Fatal(err)
+	}
+	key := filepath.Join(keysLink, "app.pem") // configured through a link: its real path is denied too
 	h := newHarness(t, func(c *Config) {
 		c.Sandbox, c.Policy, c.Secrets = nil, restrictOwner, []string{key}
 		c.WorkRoot = filepath.Join(c.StateDir, "work") // as the server places it
@@ -148,35 +158,98 @@ func TestRestrictedSessionDeniesSecrets(t *testing.T) {
 	if err := os.MkdirAll(h.cfg.StateDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	db := filepath.Join(h.cfg.StateDir, "secret.db")
-	if err := os.WriteFile(db, []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	tk := h.submit("Stranger's change", newRepo(t))
 	tk, _ = h.running(tk.ID)
 	dir := TicketDir(h.cfg.WorkRoot, tk)
-	sb := readSessionSettings(t, dir).Sandbox
+	settings := readSessionSettings(t, dir)
+	sb := settings.Sandbox
 	if sb == nil {
 		t.Fatal("no sandbox block")
 	}
-	deny := sb.Filesystem.DenyRead
-	if !slices.Contains(deny, key) || !slices.Contains(deny, resolvedPath(db)) {
-		t.Fatalf("denyRead = %v, want the key %s and the state dir's %s", deny, key, db)
-	}
+	deny, allow := sb.Filesystem.DenyRead, sb.Filesystem.AllowRead
 	home, _ := os.UserHomeDir()
-	if !slices.Contains(deny, filepath.Join(home, ".ssh")) {
-		t.Errorf("denyRead = %v lacks ~/.ssh", deny)
+	covered := func(list []string, p string) bool {
+		return slices.ContainsFunc(list, func(d string) bool { return within(d, p) || within(d, resolvedPath(p)) })
 	}
-	for _, d := range deny {
-		for _, need := range []string{dir, h.cfg.SocketPath} {
-			if r := resolvedPath(need); within(d, r) {
-				t.Errorf("denyRead %s covers %s, which the session needs", d, need)
+	for _, want := range []string{key, resolvedPath(key), home, filepath.Join(home, ".ssh"), filepath.Join(home, ".git-credentials"),
+		filepath.Join(home, ".config", "git", "credentials"), h.cfg.StateDir, h.cfg.WorkRoot} {
+		if !slices.Contains(deny, want) && !slices.Contains(deny, resolvedPath(want)) {
+			t.Errorf("denyRead lacks %s: %v", want, deny)
+		}
+	}
+	// Whole directories, not a snapshot of their entries: a sibling Ticket made after the session started is denied.
+	later := filepath.Join(h.cfg.WorkRoot, "later-ticket-t-9")
+	if err := os.MkdirAll(later, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if !covered(deny, later) || covered(allow, later) {
+		t.Errorf("a later Ticket's directory is readable: deny %v, allow %v", deny, allow)
+	}
+	for _, need := range []string{dir, h.cfg.SocketPath} {
+		if !covered(allow, need) {
+			t.Errorf("allowRead %v does not give back %s, which the session needs", allow, need)
+		}
+	}
+	for _, a := range allow {
+		for _, guarded := range []string{key, resolvedPath(key), filepath.Join(home, ".ssh"), filepath.Join(home, ".git-credentials")} {
+			if within(a, guarded) || within(guarded, a) {
+				t.Errorf("allowRead %s gives back %s", a, guarded)
 			}
 		}
+	}
+	// Git reads no global config of the owner's (unreadable, it would stop git), and its XDG files are the session's.
+	if settings.Env["GIT_CONFIG_GLOBAL"] != os.DevNull || !strings.HasPrefix(settings.Env["XDG_CONFIG_HOME"], restrictedCacheDir(dir)) {
+		t.Errorf("env = %v, want GIT_CONFIG_GLOBAL=%s and XDG_CONFIG_HOME in the session's cache", settings.Env, os.DevNull)
 	}
 	// A standard session on the same node has no sandbox at all, as before.
 	if sb, _ := h.n.sessionSandbox(dir, false, false); sb != nil {
 		t.Errorf("standard sandbox = %+v, want none", sb)
+	}
+}
+
+// On Linux, where the sandbox lets commands reach any Unix socket, a restricted session's commands cannot see the
+// daemons' sockets (Docker, containerd, Podman, and the user's runtime directory but for the node socket): the paths
+// are denied to reads and writes, so that the sandbox masks them. Elsewhere, and for a standard session, nothing
+// changes.
+func TestRestrictedSandboxMasksDaemonSockets(t *testing.T) {
+	xdg := t.TempDir()
+	for _, d := range []string{"podman", "athena"} {
+		if err := os.MkdirAll(filepath.Join(xdg, d), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(xdg, "bus"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sock := filepath.Join(xdg, "athena", "node.sock")
+	if err := os.WriteFile(sock, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_RUNTIME_DIR", xdg)
+	n := New(Config{SocketPath: sock, StateDir: t.TempDir(), Sandbox: &SandboxConfig{}}, nil)
+	work := t.TempDir()
+	masked := []string{"/var/run/docker.sock", "/run/docker.sock", "/run/containerd", "/run/podman",
+		resolvedPath(filepath.Join(xdg, "podman")), resolvedPath(filepath.Join(xdg, "bus"))}
+
+	sb, _ := n.sessionSandboxOn("linux", work, false, true)
+	for _, m := range masked {
+		if !slices.Contains(sb.DenyRead, m) || !slices.Contains(sb.DenyWrite, m) {
+			t.Errorf("linux restricted: %s not masked: denyRead %v, denyWrite %v", m, sb.DenyRead, sb.DenyWrite)
+		}
+	}
+	for _, d := range append(slices.Clone(sb.DenyRead), sb.DenyWrite...) {
+		if within(d, resolvedPath(sock)) {
+			t.Errorf("linux restricted: %s masks the node socket", d)
+		}
+	}
+	for _, c := range []struct {
+		goos       string
+		restricted bool
+	}{{"darwin", true}, {"linux", false}} {
+		sb, _ := n.sessionSandboxOn(c.goos, work, false, c.restricted)
+		if slices.Contains(sb.DenyRead, "/var/run/docker.sock") || slices.Contains(sb.DenyWrite, "/var/run/docker.sock") {
+			t.Errorf("%s restricted=%v: daemon sockets masked: %+v", c.goos, c.restricted, sb)
+		}
 	}
 }
 

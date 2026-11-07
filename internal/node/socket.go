@@ -272,7 +272,10 @@ func (n *Node) ruleContext(s *session, runtime string) RuleContext {
 	home, _ := os.UserHomeDir()
 	c := RuleContext{TicketDir: s.place.workDir, Blocked: n.cfg.Blocked, Home: home, StateDir: n.cfg.StateDir,
 		AthenaBin: n.cfg.AthenaBin, VenvActive: false, ReadOnly: s.reviewing(), Restricted: s.restricted(),
-		Shadow: n.shadow(s.t.Repo)}
+		Shadow: n.shadow(s.t.Repo), Secrets: n.cfg.Secrets}
+	if c.Restricted {
+		c.ReadRoots = restrictedReadRoots()
+	}
 	if runtime == core.RuntimeCodex {
 		c.Protected = ProtectedPaths(s.place.workDir)
 	}
