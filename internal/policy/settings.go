@@ -9,6 +9,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -346,13 +348,22 @@ func Validate(s Settings) error {
 	return nil
 }
 
-// validateAutonomy checks the repositories, ceilings, trust map, allow rules and promotion count.
+// validateAutonomy checks the repositories (no two keys that name one repository once trimmed and lower-cased), ceilings,
+// trust map, allow rules and promotion count.
 func validateAutonomy(s Settings) error {
 	if s.WIPCeiling < 0 {
 		return fmt.Errorf("policy: wipCeiling %d is negative", s.WIPCeiling)
 	}
 	if s.PromoteAfter < 0 {
 		return fmt.Errorf("policy: promoteAfter %d is negative", s.PromoteAfter)
+	}
+	seen := make(map[string]string, len(s.Repos))
+	for _, repo := range slices.Sorted(maps.Keys(s.Repos)) {
+		key := strings.ToLower(strings.TrimSpace(repo))
+		if other, ok := seen[key]; ok {
+			return fmt.Errorf("policy: repositories %q and %q are the same repository; keep one", other, repo)
+		}
+		seen[key] = repo
 	}
 	for repo, r := range s.Repos {
 		switch r.Mode {

@@ -309,6 +309,11 @@ func TestValidateRejectsBadPlan10Settings(t *testing.T) {
 		"network":      func(s *Settings) { s.Allow = []AllowRule{{Tool: "Bash", Rule: "network_access", Repo: "a/b"}} },
 		"permissions":  func(s *Settings) { s.Allow = []AllowRule{{Tool: "Bash", Rule: "codex_permissions", Repo: "a/b"}} },
 		"unsandboxed":  func(s *Settings) { s.Allow = []AllowRule{{Tool: "Bash", Rule: "codex_unsandboxed", Repo: "a/b"}} },
+		// Two keys of one repository would collapse in normalize in no set order, and could drop shadow mode.
+		"repo case": func(s *Settings) {
+			s.Repos = map[string]RepoSettings{"Acme/Web": {Mode: RepoShadow}, "acme/web": {Mode: RepoLive}}
+		},
+		"repo space": func(s *Settings) { s.Repos = map[string]RepoSettings{" a/b": {Mode: RepoShadow}, "a/b": {}} },
 	}
 	for name, mut := range bad {
 		s := Defaults(nil)
