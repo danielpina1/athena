@@ -11,7 +11,7 @@ does not do, and where its setting lives. Every claim here is in the code named 
 | --- | --- | --- |
 | **Waiting-on-you brake** (`wip_brake`) | Starting work Athena chose itself (an *inferred* candidate) in a repository where the number of things waiting on you has reached the ceiling. The candidate is held, not dropped, and starts again when you catch up. | Work you ask for: your own `athena task`, a mention that addresses Athena (an *explicit* candidate), and a follow-up that goes to a Ticket's own worker. Work already running. |
 | **Kill switch** (`athena pause`) | Deciding on new Triggers, the router, every new session launch, the sending of replies, and applying a held push or pull request. Running sessions stop at the end of their turn. | Reading GitHub (Sources keep polling, and Triggers queue), the dashboard, your answers to Approvals, your Apply and Discard, and Policy changes. A router turn that was already running when you paused may finish, so one Ticket can still be created right after (not started). Nothing queued is dropped. |
-| **Tool policy** (`restricted`) | What a session started by a sender you did not allow can do: no web beyond GitHub, no escalation, no `follow_thread`, a required sandbox. | A session of someone you trust (standard policy), and everything inside the restricted sandbox. |
+| **Tool policy** (`restricted`) | What a session started by a sender you did not allow can do: no web beyond GitHub, no escalation, no `follow_thread`, a required sandbox, reads kept to its own directory, and its push, pull request and replies held for you. | A session of someone you trust (standard policy), and everything inside the restricted sandbox. |
 | **Shadow mode (held for you)** | Everything a repository's work would send outward: pushes, pull requests and replies are held as Proposals until you apply them. | Reading the repository, working in the worktree, and committing locally. |
 
 ## 2. The count, worked through
@@ -134,17 +134,44 @@ is treated as restricted. What it gets (`internal/node/toolpolicy.go`, `rules.go
    `GOMODCACHE`, `npm_config_cache`, `PIP_CACHE_DIR`, `XDG_CACHE_HOME`) point into the Ticket's own `.athena/cache`
    directory, outside git, so a poisoned cache never reaches your own builds. The first build of such a Ticket is
    slower. (`GOFLAGS=-modcacherw` lets the Ticket directory be removed when it ends.)
-8. **Secrets unreadable to commands.** Commands cannot read `Config.Secrets` (the GitHub App key), the credential
-   files the rules know (`credRel`), or anything in the state directory except the session's working directory, git
-   directories, the node socket, the CA bundle and the `athena` binary.
+8. **Commands read only what the session needs.** The sandbox denies your home directory, the state directory, the
+   work root, the transcripts and Claude Code's own session transcripts, each as a whole directory, so a Ticket
+   directory or transcript made after the session started is denied too. It then gives back (Claude Code's
+   `allowRead`) only what the session needs: its working directory and git directories, the node socket, the `gh`
+   shim, the `athena` binary, the CA bundle, Claude Code's shell snapshots and install, and the toolchains on your
+   `PATH` that live under your home (a `bin` directory, and the install above it when that is two levels or more
+   below home, such as `~/.nvm/versions/node/v22`). `Config.Secrets` (the GitHub App key) and the credential files the
+   rules know (`credRel`, including `~/.git-credentials` and `~/.config/git/credentials`) are denied in their
+   configured and their resolved spelling, and nothing given back holds one. Git reads no global configuration
+   (`GIT_CONFIG_GLOBAL=/dev/null`, `XDG_CONFIG_HOME` in the Ticket's cache): git stops when it cannot read
+   `~/.gitconfig`.
+9. **Claude's file tools read only the Ticket.** `Read`, `Grep` and `Glob` run outside the sandbox, so the hook rules
+   keep them to the working directory and the system's and toolchains' roots (`/usr`, `/opt`, `/etc`, `/nix`, the
+   developer tools, the toolchains on `PATH` under your home), in every spelling, a symbolic link out of the directory
+   included. Anything else is denied with: "Work started by someone outside your allow list reads only its own working
+   directory and the system's tools."
+10. **Held for you, whatever the repository's mode.** A GitHub App token cannot be kept to one branch or thread, so a
+    restricted session is treated as if its repository were held for you (section 6): its tokens are read-only, a `git
+    push` is denied with "Work started by someone outside your allow list is held for the owner: pushes wait for them.
+    Your branch is proposed when you report; carry on as if it will be pushed.", and its push, pull request and
+    replies become Proposals you apply or discard. You click Apply for every stranger Ticket that should reach GitHub.
+11. **No daemon sockets on Linux.** The Linux sandbox lets commands reach any Unix socket (it cannot allow one by
+    path), so for a restricted session the well-known daemon sockets are masked (denied to reads and writes):
+    `/var/run/docker.sock`, `/run/docker.sock`, `/run/containerd`, `/run/podman`, and `$XDG_RUNTIME_DIR` except the
+    node socket.
+
+Every session, standard or restricted, is kept by the hook rules from reading `Config.Secrets` with Claude's file
+tools or naming them in a command, in any spelling (a symbolic link to the key, a search of a directory that holds it,
+its file name in a command), and from the git credential files above.
 
 What the restricted policy does not give you, today:
 
-- **Claude's Read, Grep and Glob tools run outside the OS sandbox.** Their reach is checked only by the hook rules.
-- **The rules' `protectedPath` does not know `Config.Secrets`**, so a `github.keyFile` placed outside the state
-  directory can be read by those tools in any session, standard or restricted. Keep the App key in the state directory
-  (`~/.athena`, as in the [GitHub App guide](github-app.md)) until this is closed.
-- On Linux the sandbox allows all Unix sockets (it cannot allow one by path), and a restricted session inherits that.
+- **Claude's Read, Grep and Glob tools run outside the OS sandbox.** Their reach is checked by the hook rules alone
+  (item 9), by path, not by the kernel.
+- On Linux, a Unix socket outside the masked list stays reachable.
+- The read containment needs a Claude Code that knows `sandbox.filesystem.allowRead`. An older one ignores it: the
+  session's commands then cannot read their own directory when it lies in your home or the state directory, and its
+  commands fail (closed, not open).
 - Text a restricted session reads is still the stranger's text: the policy limits what the worker can do with it, not
   what it reads.
 
@@ -153,18 +180,21 @@ What the restricted policy does not give you, today:
 A repository in shadow mode (held for you) works as usual in its worktree, but nothing it does reaches GitHub until
 you say so. Set it per repository (section 8) or in Settings > Repositories.
 
+A restricted session (section 5, item 10) is held for you the same way in every repository, live ones included: what
+this section says of a session in a repository held for you holds for it too.
+
 **Why a read-only token.** Hook rules are cooperative: a worker can be tricked or can route around a text rule. So the
-hold does not depend on the worker. Every session of a repository held for you gets a **read-only GitHub token**
-(`tokenStore.writable` is `!shadow(repo)`), so even a `git push` the rules missed is refused by GitHub. When you
+hold does not depend on the worker. Every session held for you gets a **read-only GitHub token** (`heldForOwner`:
+`shadow(repo) || restricted`), so even a `git push` the rules missed is refused by GitHub. When you
 switch a repository to shadow mode, the node drops its write tokens (they are revoked, so a copy a worker kept stops
 working), and replies already waiting to go out are held. The cooperative parts then make the hold useful: a `git
 push` is denied with a plain reason, and `athena gh pr create` records a Proposal instead of running.
 
-What a held repository turns into Proposals:
+What a held repository (or a restricted session) turns into Proposals:
 
 - **A reply** to GitHub (an acknowledgement, answer or result): the Receipt is held, nothing is queued.
 - **A push**: each Report of a Ticket proposes its worktree branch when the branch has commits no remote branch has.
-  A newer push supersedes an older pending one.
+  A newer push supersedes an older pending or failed one.
 - **A pull request**: `athena gh pr create` accepts only `--title`, `--body`, `--body-file`, `--base` and `--draft`
   and is stored as the fields title, body, base and draft. Anything else (labels, reviewers, assignees, `--head`,
   `--repo`) is refused, and the fields are checked again when applied.
@@ -189,8 +219,9 @@ and is sent. A push or pull request is made to happen by the node, once:
 **Failure handling.**
 
 - A failed push fails its pull request with the same error, and no pull request is opened.
-- A failed Proposal is closed as failed with its error shown; it is not retried by itself. The Ticket's next Report
-  proposes a branch that is still unpushed again, and you can ask the worker to open the pull request again.
+- A failed Proposal is not retried by itself. It stays in Needs you with its error until you decide: **Try again**
+  (`athena apply <id>`) makes it pending again and applies it afresh, and **Discard** closes it. The Ticket's next
+  Report also proposes a branch that is still unpushed again.
 - **Athena stopping while applying.** If the server stops after the Proposal was marked started and before it settled,
   the next run does not repeat the outward call. It settles the Proposal as failed with: "Athena stopped while applying
   this; check GitHub before applying again." Check GitHub first: the push or the pull request may exist.
@@ -199,7 +230,9 @@ and is sent. A push or pull request is made to happen by the node, once:
   Ticket's branch.
 - **Known limit**: the clone's `objects/info/alternates` is writable by a worker, so a crafted push could carry an
   object the node's user can read, if its id is known. This predates shadow mode (the clone sync has it too).
-- `athena discard <id>` closes a Proposal without applying it; a held reply is dropped and never sent.
+- `athena discard <id>` closes a pending or failed Proposal without applying it; a held reply is dropped and never
+  sent. While Athena is applying a push or pull request, discarding it is refused ("Athena is applying this now"):
+  it may already be on GitHub, and its result settles it.
 
 ## 7. Promotion
 
@@ -249,7 +282,7 @@ Missing fields mean their defaults. These are the fields of the autonomy brakes:
 | --- | --- | --- |
 | `wipCeiling` | How many things may wait on you in a repository before Athena holds back work it chose itself. | 3 (`0` or absent) |
 | `promoteAfter` | Approvals in a row before a standing rule is offered. | 5 (`0` or absent) |
-| `repos` | Per repository, keyed by the lower-case `owner/name`: `mode` (`live` or `shadow`, which holds the repository for you) and `wipCeiling` (its own ceiling). | `live`, the global ceiling |
+| `repos` | Per repository, keyed by the lower-case `owner/name` (two keys that name one repository, such as `Acme/Web` and `acme/web`, are refused): `mode` (`live` or `shadow`, which holds the repository for you) and `wipCeiling` (its own ceiling). | `live`, the global ceiling |
 | `trust` | Trust class (`owner`, `allowed`, `collaborator`, `stranger`, `bot`, `ci`) to `standard` or `restricted`. | `stranger` restricted, the rest `standard` |
 | `allow` | The standing rules: `tool`, `rule`, `repo` and `added`. | none |
 
