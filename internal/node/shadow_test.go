@@ -129,8 +129,12 @@ func TestShadowGitPushDenied(t *testing.T) {
 		{TicketDir: dir, Shadow: true, Blocked: []string{"git push"}}} {
 		for _, cmd := range []string{"git push", "git push origin HEAD:refs/heads/athena/t-0001", "git -C . push --force",
 			"cd sub && GIT_TRACE=1 git push -u origin x", `sh -c 'git push origin main'`, "make && git push"} {
+			want := reason
+			if rc.Restricted { // held because it is restricted: its own words
+				want = restrictedPushReason
+			}
 			d := Evaluate(rc, "Bash", bash(cmd))
-			if d.Verdict != VerdictDeny || d.Reason != reason || d.Rule != ruleShadow {
+			if d.Verdict != VerdictDeny || d.Reason != want || d.Rule != ruleShadow {
 				t.Errorf("%+v %q = %+v, want the shadow deny", rc, cmd, d)
 			}
 		}
@@ -448,5 +452,54 @@ func TestApplyPushIgnoresHostileConfig(t *testing.T) {
 	}
 	if n := len(creds.asked()); n != asked {
 		t.Fatalf("a second apply minted a token")
+	}
+}
+
+// restrictAll is a Policy under which every trust class's work is restricted and no repository is in shadow mode.
+type restrictAll struct{ fakeToolPolicy }
+
+func (restrictAll) ToolPolicy(string) string { return "restricted" }
+
+// A restricted session is held for the owner in a live repository too (R15): its tokens are read-only, its git push is
+// denied with a reason that says why, its pull request and its branch become Proposals.
+func TestRestrictedLiveTicketIsHeld(t *testing.T) {
+	if !SandboxSupported() {
+		t.Skip("no sandbox on this platform")
+	}
+	h := newGHHarness(t, &fakeCreds{}, func(c *Config) { c.Policy = restrictAll{} })
+	tk, a := h.accept("github:issuecomment:1", "o/r", 12, "")
+	if got := h.gitCredential(tk.ID, a.ID, ownRequest); tokenOf(got) == "" {
+		t.Fatalf("restricted session got no token: %q", got)
+	}
+	if asked := h.creds.asked(); len(asked) == 0 || slices.Contains(asked, true) {
+		t.Fatalf("restricted ticket asked write = %v, want only read-only tokens", asked)
+	}
+
+	resp := h.hook(EventPreToolUse, tk.ID, a.ID, map[string]any{"tool_name": "Bash",
+		"tool_input": map[string]any{"command": "git push origin HEAD:main"}})
+	if resp.Verdict != VerdictDeny || resp.Reason != restrictedPushReason {
+		t.Fatalf("push hook = %+v, want denied with %q", resp, restrictedPushReason)
+	}
+
+	ghDir, record := writeFakeGh(t)
+	code, out, errOut := h.ghPrCreate(tk, a, ghDir, "--title", "T", "--body", "B")
+	if code != 0 || strings.TrimSpace(out) != restrictedPullHeld {
+		t.Fatalf("gh pr create = exit %d, out %q, err %q; want held with %q", code, out, errOut, restrictedPullHeld)
+	}
+	if _, err := os.Stat(record); err == nil {
+		t.Fatal("the real gh ran for a restricted session's pull request")
+	}
+	h.commit(tk, "a stranger's fix")
+	if resp := h.report(tk.ID, a.ID, core.ReportProgress, "fixed"); !resp.OK {
+		t.Fatalf("report = %+v", resp)
+	}
+	kinds := map[string]int{}
+	for _, p := range h.proposalsOf(tk.ID) {
+		if p.State == core.ProposalPending {
+			kinds[p.Kind]++
+		}
+	}
+	if kinds[core.ProposalPull] != 1 || kinds[core.ProposalPush] != 1 {
+		t.Fatalf("pending proposals by kind = %v, want one pull request and one push", kinds)
 	}
 }

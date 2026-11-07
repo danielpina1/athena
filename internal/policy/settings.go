@@ -118,8 +118,8 @@ const (
 
 // Tool policies.
 const (
-	ToolStandard   = "standard"
-	ToolRestricted = "restricted"
+	ToolStandard   = core.ToolStandard
+	ToolRestricted = core.ToolRestricted
 )
 
 // Defaults of the autonomy brakes.

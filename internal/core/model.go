@@ -211,6 +211,13 @@ const (
 	TrustCI           = "ci"
 )
 
+// Tool policies of a trust class's work (Policy.ToolPolicy): standard, or restricted (sandboxed, asking nobody, and
+// held for the owner). A value other than standard counts as restricted.
+const (
+	ToolStandard   = "standard"
+	ToolRestricted = "restricted"
+)
+
 // TrustClass is the Mandate's trust class: the recorded one, else, for a Mandate made before classes were recorded,
 // owner when the owner gave it, bot for a bot's, and allowed otherwise (the gate admitted a listed sender).
 func (m Mandate) TrustClass() string {

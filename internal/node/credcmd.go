@@ -79,9 +79,10 @@ func RunGitCredential(args []string, stdin io.Reader, stdout, stderr io.Writer, 
 
 // RunGh implements `athena gh <args>`: it runs the real gh with the session's token in gh's environment only
 // (GH_TOKEN, GH_HOST=github.com, GH_CONFIG_DIR=<TicketDir>/.athena/gh, GH_PROMPT_DISABLED=1). It refuses gh auth and
-// the other subcommands in ghRefused, and returns gh's exit code. A `gh pr create` asks the node first: in a repository
-// in shadow mode it is held for the owner as a Proposal of its title, body, base and draft (parsePull: any other option
-// is refused), and gh does not run (exit 0). env is the session's environment.
+// the other subcommands in ghRefused, and returns gh's exit code. A `gh pr create` asks the node first: in a session
+// held for the owner (its repository in shadow mode, or the session restricted) it is held as a Proposal of its title,
+// body, base and draft (parsePull: any other option is refused), and gh does not run (exit 0). env is the session's
+// environment.
 func RunGh(args []string, stdin io.Reader, stdout, stderr io.Writer, env []string) int {
 	getenv := envLookup(env)
 	if sub := firstArg(args); ghRefused[sub] {
@@ -109,6 +110,9 @@ func RunGh(args []string, stdin io.Reader, stdout, stderr io.Writer, env []strin
 		case !held.OK:
 			fmt.Fprintf(stderr, "athena gh: %s\n", held.Error)
 			return 1
+		case held.Held && held.Restricted:
+			fmt.Fprintln(stdout, restrictedPullHeld)
+			return 0
 		case held.Held:
 			fmt.Fprintln(stdout, shadowPullHeld)
 			return 0

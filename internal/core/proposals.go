@@ -10,12 +10,13 @@ import (
 	"unicode/utf8"
 )
 
-// Proposals: work that waits for the owner to say yes before it leaves the machine. A reply in a repository held for
-// the owner, a push of a branch and a pull request each become a Proposal; the owner applies or discards it.
+// Proposals: work that waits for the owner to say yes before it leaves the machine. A reply of a Ticket held for the
+// owner (its repository in shadow mode, or its sender's class restricted), a push of a branch and a pull request each
+// become a Proposal; the owner applies or discards it.
 
 // Kinds of a Proposal.
 const (
-	// ProposalReply: a reply held in a shadow repository; its payload names the held Receipt.
+	// ProposalReply: a reply held for the owner (heldForOwner); its payload names the held Receipt.
 	ProposalReply = "reply"
 	// ProposalPush: a branch push; its payload names the branch and the commit.
 	ProposalPush = "push"
@@ -404,13 +405,17 @@ func (o *op) proposalEvent(typ string, p *Proposal, data map[string]any) {
 	o.emitEvent(Event{Type: typ, TicketID: p.TicketID, At: o.at, Data: data})
 }
 
-// shadowRepo reports whether the Ticket's repository is held for the owner.
-func (o *op) shadowRepo(t *Ticket) bool {
-	if o.policy == nil || t.Repo == "" {
+// heldForOwner reports whether the Ticket's work is held for the owner: its repository is in shadow mode, or its
+// sender's trust class runs restricted (R15), whatever the repository's mode. Without a Policy nothing is held.
+func (o *op) heldForOwner(t *Ticket) bool {
+	if o.policy == nil {
 		return false
 	}
 	pol := o.policy()
-	return pol != nil && pol.Shadow(t.Repo)
+	if pol == nil {
+		return false
+	}
+	return pol.ToolPolicy(t.Mandate.TrustClass()) != ToolStandard || (t.Repo != "" && pol.Shadow(t.Repo))
 }
 
 // holdReply makes a reply Proposal for a held Receipt.

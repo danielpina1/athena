@@ -327,3 +327,18 @@ func TestPushSupersedesFailedPush(t *testing.T) {
 	h.must(err)
 	eq(t, "the failed push", h.proposal(a, old.ID).State, ProposalSuperseded)
 }
+
+// A Ticket whose sender's class runs restricted is held for the owner whatever its repository's mode (R15): its reply
+// waits as a Proposal in a live repository too.
+func TestRestrictedReplyIsHeldInLiveRepository(t *testing.T) {
+	h := newEvals(t)
+	h.pol.trust = TrustStranger
+	h.pol.restricted = map[string]bool{TrustStranger: true}
+	a := h.shadowed("c:1", false)
+	id := h.reply(ReplyRequest{TicketID: a, TriggerID: "c:1", Purpose: PurposeAnswer, Text: "Done."})
+	eq(t, "receipt held", h.receipt(id).State, ReceiptHeld)
+	eq(t, "nothing queued", len(h.replyEffects()), 0)
+	ps := h.proposals(a)
+	eq(t, "one reply proposal", len(ps) == 1 && ps[0].Kind == ProposalReply, true)
+	eq(t, "stage", TicketStage(h.ticket(a)), Stage{"person", "proposal"})
+}

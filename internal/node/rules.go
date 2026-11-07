@@ -69,7 +69,8 @@ type RuleContext struct {
 	// denied, since nobody is asked, and so are the web tools (restrictRule).
 	Restricted bool
 
-	// Shadow is set for a session of a repository in shadow mode (shadow.go): a git push is denied (shadowPushRule).
+	// Shadow is set for a session whose work is held for the owner (shadow.go: its repository is in shadow mode, or it
+	// is restricted): a git push is denied (shadowPushRule).
 	Shadow bool
 
 	// Secrets are the node's secret files (Config.Secrets: the GitHub App key): no session may read them, in any

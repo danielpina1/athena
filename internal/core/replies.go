@@ -290,8 +290,8 @@ func (o *op) queueReply(r ReplyRequest) (string, bool, error) {
 	}
 	rc := &Receipt{ID: id, TicketID: t.ID, Purpose: r.Purpose, TriggerID: r.TriggerID, Text: r.Text, Channel: ch,
 		Conversation: ch.Thread, State: ReceiptWaiting, Seq: seq, QueuedAt: o.at, Round: round}
-	if o.shadowRepo(t) {
-		// A repository held for the owner: the reply waits as a Proposal, and nothing is queued until it is applied.
+	if o.heldForOwner(t) {
+		// Work held for the owner: the reply waits as a Proposal, and nothing is queued until it is applied.
 		rc.State = ReceiptHeld
 		if err := o.tx.PutReceipt(rc); err != nil {
 			return "", false, err

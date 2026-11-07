@@ -190,4 +190,6 @@ type Policy interface {
 	Shadow(repo string) bool
 	// Trust is the trust class of the Trigger's sender.
 	Trust(t Trigger) string
+	// ToolPolicy is the tool policy (ToolStandard, ToolRestricted) of work a sender of the class started.
+	ToolPolicy(class string) string
 }

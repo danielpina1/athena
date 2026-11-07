@@ -32,6 +32,11 @@ const (
 		"report; carry on as if it will be pushed."
 	// shadowPullHeld is what `athena gh pr create` prints in a repository in shadow mode.
 	shadowPullHeld = "Held for the owner (shadow mode): the pull request is proposed and opens when they apply it."
+	// restrictedPushReason is why a restricted session may not push, whatever its repository's mode (R15).
+	restrictedPushReason = "Work started by someone outside your allow list is held for the owner: pushes wait for them. " +
+		"Your branch is proposed when you report; carry on as if it will be pushed."
+	// restrictedPullHeld is what `athena gh pr create` prints in a restricted session.
+	restrictedPullHeld = "Held for the owner: work started by someone outside your allow list opens its pull request when they apply it."
 	// maxPullTitle and maxPullBody bound a held pull request's title and body, in characters (GitHub's own limit for a
 	// body); maxBodyFile bounds the body file `athena gh pr create` reads.
 	maxPullTitle = 256
@@ -49,15 +54,28 @@ func (n *Node) shadow(repo string) bool {
 	return repo != "" && n.cfg.Policy != nil && n.cfg.Policy.Shadow(repo)
 }
 
-// shadowPushRule denies a `git push` (also inside `sh -c`) of a session in a repository in shadow mode (ctx.Shadow):
-// the read-only token would refuse it anyway, and the reason tells the worker its branch is proposed when it reports.
+// heldForOwner reports whether the session's work is held for the owner: its repository is in shadow mode, or it runs
+// under the restricted tool policy (R15), whatever its repository's mode. A GitHub App token cannot be kept to one
+// branch or thread, so a restricted session gets read-only tokens, and its push, pull request and replies wait for the
+// owner as Proposals.
+func (n *Node) heldForOwner(s *session) bool {
+	return n.shadow(s.ticketRepo()) || (s.ticketRepo() != "" && s.restricted())
+}
+
+// shadowPushRule denies a `git push` (also inside `sh -c`) of a session whose work is held for the owner (ctx.Shadow:
+// its repository is in shadow mode, or it is restricted): the read-only token would refuse it anyway, and the reason
+// tells the worker its branch is proposed when it reports.
 func shadowPushRule(ctx RuleContext, command string) (Decision, bool) {
 	if !ctx.Shadow || !strings.Contains(command, "push") {
 		return Decision{}, false
 	}
+	reason := shadowPushReason
+	if ctx.Restricted {
+		reason = restrictedPushReason
+	}
 	match := func(words []string) (string, string) {
 		if words[0] == "git" && gitSubcommand(words[1:]) == "push" {
-			return "git push", shadowPushReason
+			return "git push", reason
 		}
 		return "", ""
 	}
@@ -73,12 +91,12 @@ type pushPayload struct {
 	SHA    string `json:"sha"`
 }
 
-// proposeBranch proposes the session's worktree branch as a push, for a Ticket of a repository in shadow mode: when
+// proposeBranch proposes the session's worktree branch as a push, for a session held for the owner (heldForOwner): when
 // the branch has commits no remote branch has (the clone's remote-tracking branches, which the node moves when it
 // pushes), and no pending push of the Ticket names its commit already. A newer push supersedes the older one (Propose).
 func (n *Node) proposeBranch(s *session) error {
 	p := s.place
-	if p.github == "" || s.reviewing() || !n.shadow(s.t.Repo) {
+	if p.github == "" || s.reviewing() || !n.heldForOwner(s) {
 		return nil
 	}
 	if _, err := os.Stat(p.workDir); err != nil {
@@ -158,11 +176,13 @@ type ProposeRequest struct {
 	Pull       *HeldPull `json:"pull,omitempty"`
 }
 
-// ProposeResponse says whether the pull request was held (shadow mode) or should run as it is (Held false).
+// ProposeResponse says whether the pull request was held for the owner or should run as it is (Held false), and
+// whether it was held because the session is restricted (Restricted), which `athena gh` says in its own words.
 type ProposeResponse struct {
-	OK    bool   `json:"ok"`
-	Held  bool   `json:"held,omitempty"`
-	Error string `json:"error,omitempty"`
+	OK         bool   `json:"ok"`
+	Held       bool   `json:"held,omitempty"`
+	Restricted bool   `json:"restricted,omitempty"`
+	Error      string `json:"error,omitempty"`
 }
 
 // pullOptions names what a held pull request takes, for the refusals.
@@ -196,9 +216,10 @@ func decodePropose(line []byte) (ProposeRequest, error) {
 	return req, err
 }
 
-// handlePropose holds a live session's pull request when its repository is in shadow mode: the worktree branch is
-// proposed as a push first (proposeBranch), then the pull request, checked again (checkPull), as a pull_request
-// Proposal whose payload is the HeldPull alone. In a live repository it answers Held false and records nothing.
+// handlePropose holds a live session's pull request when its work is held for the owner (heldForOwner: its repository
+// is in shadow mode, or it is restricted): the worktree branch is proposed as a push first (proposeBranch), then the
+// pull request, checked again (checkPull), as a pull_request Proposal whose payload is the HeldPull alone. Otherwise it
+// answers Held false and records nothing.
 func (n *Node) handlePropose(req ProposeRequest) ProposeResponse {
 	s := n.lookup(req.Ticket, req.Assignment)
 	if s == nil || s.over() {
@@ -207,11 +228,11 @@ func (n *Node) handlePropose(req ProposeRequest) ProposeResponse {
 	if s.reviewing() {
 		return ProposeResponse{Error: "a review session opens no pull request: review the local branch"}
 	}
-	if !n.shadow(s.t.Repo) {
+	if !n.heldForOwner(s) {
 		return ProposeResponse{OK: true}
 	}
 	if req.Pull == nil {
-		return ProposeResponse{Error: "in shadow mode a held pull request takes only " + pullOptions}
+		return ProposeResponse{Error: "a pull request held for the owner takes only " + pullOptions}
 	}
 	if err := checkPull(*req.Pull); err != nil {
 		return ProposeResponse{Error: err.Error()}
@@ -230,7 +251,7 @@ func (n *Node) handlePropose(req ProposeRequest) ProposeResponse {
 		return ProposeResponse{Error: err.Error()}
 	}
 	s.log.Info("pull request held for the owner", "proposal", pr.ID)
-	return ProposeResponse{OK: true, Held: true}
+	return ProposeResponse{OK: true, Held: true, Restricted: s.restricted()}
 }
 
 // parsePull reports whether gh's arguments run `gh pr create` (isCreate) and reads them into a HeldPull: --title/-t,
@@ -307,7 +328,7 @@ func parsePull(args []string, stdin io.Reader) (p HeldPull, isCreate bool, err e
 		} else if a == "--draft=false" {
 			p.Draft = false
 		} else {
-			return HeldPull{}, true, fmt.Errorf("in shadow mode a held pull request takes only %s: %q is not one of them", pullOptions, a)
+			return HeldPull{}, true, fmt.Errorf("a pull request held for the owner takes only %s: %q is not one of them", pullOptions, a)
 		}
 	}
 	return p, true, checkPull(p)

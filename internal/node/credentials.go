@@ -114,8 +114,9 @@ func newTokenStore(c Credentials) *tokenStore {
 }
 
 // token returns the Assignment's token for repo, fetching one when it holds none, holds one for another repository or
-// of the other kind (write or read-only, as writable says now), or holds one that expires within tokenRefreshMargin.
-func (ts *tokenStore) token(ctx context.Context, assignmentID, repo string) (string, error) {
+// of the other kind (write or read-only: read-only for a session held for the owner, else as writable says now), or
+// holds one that expires within tokenRefreshMargin.
+func (ts *tokenStore) token(ctx context.Context, assignmentID, repo string, held bool) (string, error) {
 	if ts.creds == nil {
 		return "", errors.New("this node has no GitHub credentials")
 	}
@@ -137,7 +138,7 @@ func (ts *tokenStore) token(ctx context.Context, assignmentID, repo string) (str
 		return "", errors.New("the assignment has ended")
 	}
 	// Asked under the token's own lock: a DropTokens of the repository waits for a fetch in flight and drops what it got.
-	write := ts.writable == nil || ts.writable(repo)
+	write := !held && (ts.writable == nil || ts.writable(repo))
 	if h.value != "" && strings.EqualFold(h.repo, repo) && h.write == write && ts.now().Before(h.expires.Add(-tokenRefreshMargin)) {
 		return string(h.value), nil
 	}
@@ -321,7 +322,7 @@ func (n *Node) handleCredential(ctx context.Context, req CredentialRequest) Cred
 	default:
 		return CredentialResponse{Error: fmt.Sprintf("unknown credential purpose %q", req.Purpose)}
 	}
-	tok, err := n.tokens.token(ctx, s.a.ID, repo)
+	tok, err := n.tokens.token(ctx, s.a.ID, repo, n.heldForOwner(s))
 	if err != nil {
 		s.log.Warn("credential unavailable", "purpose", req.Purpose, "error", err)
 		return CredentialResponse{Error: err.Error()}

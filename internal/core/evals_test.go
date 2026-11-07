@@ -25,6 +25,8 @@ type evalPolicy struct {
 	ceiling int
 	// shadow names the repositories held for the owner.
 	shadow map[string]bool
+	// restricted names the trust classes whose work runs under the restricted tool policy.
+	restricted map[string]bool
 }
 
 func newEvalPolicy() *evalPolicy {
@@ -62,6 +64,12 @@ func (p *evalPolicy) WIPCeiling(string) int {
 }
 func (p *evalPolicy) Shadow(repo string) bool { return p.shadow[repo] }
 func (p *evalPolicy) Trust(Trigger) string    { return p.trust }
+func (p *evalPolicy) ToolPolicy(class string) string {
+	if p.restricted[class] {
+		return ToolRestricted
+	}
+	return ToolStandard
+}
 
 func (p *evalPolicy) Assess(a Assessment, strength string) (string, []Reason, bool, error) {
 	if p.assessErr != nil {
