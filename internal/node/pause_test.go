@@ -223,3 +223,59 @@ func TestPauseBeforeSpawnPutsTheLaunchOff(t *testing.T) {
 		t.Fatalf("launch wait while paused = %+v, want the launch put off", s.launchWaitOf())
 	}
 }
+
+// A session whose process crashes while the node is paused is not started again: it parks owing its Report, and only
+// the resume starts it, with the pause note.
+func TestCrashWhilePausedParks(t *testing.T) {
+	h := newHarness(t, func(c *Config) { c.CloseGrace = 300 * time.Millisecond })
+	t.Setenv("ATHENA_FAKE_EXIT_MID_TURN_ONCE", filepath.Join(t.TempDir(), "crashed"))
+	// The owner pauses just as the process dies.
+	h.n.restartDelay = func(int) time.Duration { h.n.SetPaused(true); return 0 }
+	tk := h.submit("Crashy task", "")
+	h.eventually("the crashed session parked", func() bool { return h.n.liveSession(tk.ID) == nil && h.parkedByPause(tk.ID) })
+	h.never("a start while paused", 300*time.Millisecond, func() bool { return len(h.invocations()) > 1 })
+	got, _ := h.ticket(tk.ID)
+	if i := got.LatestAssignment().OpenInterruption(); i == nil || !i.ReportOwed {
+		t.Fatalf("interruption = %+v, want the pause owing a Report", i)
+	}
+	if r := got.LatestAssignment().Report; r != nil && r.State == core.ReportFailed {
+		t.Fatalf("report = %+v, want no failure", r)
+	}
+
+	h.n.restartDelay = func(int) time.Duration { return 0 }
+	h.n.SetPaused(false)
+	h.n.Start(got, *got.LatestAssignment())
+	h.eventually("started again after the resume", func() bool { return len(h.invocations()) == 2 })
+	h.eventually("the pause note sent", func() bool { return strings.Contains(h.stdin(), pauseNote) })
+}
+
+// While paused a busy session is sent no new Input: it waits, undelivered. Resumed before the turn ends, the Input
+// reaches the session once the turn is over.
+func TestPausedBusySessionGetsNoInputs(t *testing.T) {
+	hold := filepath.Join(t.TempDir(), "turn-may-end")
+	t.Setenv("ATHENA_FAKE_HOLD_RESULT", hold)
+	h := newHarness(t, func(c *Config) { c.CloseGrace = 300 * time.Millisecond })
+	tk := h.submit("Task", t.TempDir())
+	h.running(tk.ID)
+	h.n.SetPaused(true)
+	if err := h.eng.AddPersonInput(tk.ID, "while-paused-4c2a"); err != nil {
+		t.Fatal(err)
+	}
+	h.never("the input reached the busy session while paused", 300*time.Millisecond, func() bool {
+		return strings.Contains(h.stdin(), "while-paused-4c2a")
+	})
+	if got, _ := h.ticket(tk.ID); len(got.Undelivered) != 1 {
+		t.Fatalf("undelivered = %v, want the input waiting", got.Undelivered)
+	}
+	h.n.SetPaused(false)
+	if err := os.WriteFile(hold, nil, 0o600); err != nil { // the turn ends
+		t.Fatal(err)
+	}
+	h.eventually("the input reached the session after the resume", func() bool {
+		got, _ := h.ticket(tk.ID)
+		return strings.Contains(h.stdin(), "while-paused-4c2a") && len(got.Undelivered) == 0
+	})
+	if n, _ := h.starts(tk.ID); n != 1 {
+		t.Fatalf("claude started %d times, want the same process", n)
+	}
+}

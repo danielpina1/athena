@@ -103,6 +103,29 @@ func (r *runner) parkIfPaused() {
 	r.park = true
 }
 
+// parkCrashedForPause parks, instead of starting it again, a session whose process crashed while the node is paused:
+// its turn did not end, so the pause records it owing its Report (AssignmentPaused, reportOwed), and the resume starts
+// it again with the pause note. A session whose Assignment has not started is put off like a launch (putOffForPause).
+// It reports whether the runner ends; if the pause cannot be recorded the session starts again as after any crash.
+func (r *runner) parkCrashedForPause() bool {
+	if !r.n.Paused() {
+		return false
+	}
+	if !r.started {
+		return r.putOffForPause()
+	}
+	s := r.s
+	// Marked first: a resume's Start that comes once the pause is recorded finds the session parked (startWhenLeft).
+	s.markPauseParked()
+	if err := r.eng.AssignmentPaused(s.t.ID, s.a.ID, true); err != nil {
+		r.log.Error("record pause", "error", err)
+		s.unmarkPauseParked()
+		return false
+	}
+	r.log.Info("athena is paused; the crashed session parked until the resume")
+	return true
+}
+
 // putOffForPause puts off a launch about to start its first process while the node is paused: the runner ends and the loop
 // queues it again, held until the resume.
 func (r *runner) putOffForPause() bool {

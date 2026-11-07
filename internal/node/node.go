@@ -1261,6 +1261,9 @@ func (r *runner) run() {
 		if crashes == 0 && r.putOffForPause() {
 			return // paused while it prepared: its first turn waits for the resume
 		}
+		if crashes > 0 && r.parkCrashedForPause() {
+			return // crashed while paused: it starts again on the resume, not now
+		}
 		spawnStart := time.Now()
 		// One transcript per process: the session appends every line it prints, and it is closed after the process.
 		tr, err := rt.OpenTranscript(trPath, func(off int64, line []byte) { n.streams.add(s.t.ID, off, line) })
@@ -1598,10 +1601,16 @@ func workerPreamble(t core.Ticket, vars []string) string {
 	return b.String()
 }
 
-// deliver sends the Inputs that wait for the Ticket now and reports exactly those as delivered.
+// deliver sends the Inputs that wait for the Ticket now and reports exactly those as delivered. While the node is
+// paused it sends nothing: a busy session would take them into its turn and work on; they wait, undelivered, for the
+// turn's end (delivered then if the node resumed meanwhile) or for the session's start after the resume.
 func (r *runner) deliver(sess rt.Session) {
 	if r.parkIfPaused(); r.park {
 		return // paused while idle: the Inputs wait for the session's start after the resume
+	}
+	if r.n.Paused() {
+		r.redeliver = true
+		return
 	}
 	t, _, err := r.eng.Ticket(r.s.t.ID)
 	if err != nil {
