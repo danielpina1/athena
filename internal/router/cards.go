@@ -445,8 +445,12 @@ func reasonText(rs []core.Reason) string {
 			continue
 		}
 		if r.Code == core.CodeWIPBrake {
-			parts = append(parts, fmt.Sprintf("Held: %s things already wait on you in %s (limit %s).",
-				r.Values["owed"], r.Values["repo"], r.Values["ceiling"]))
+			things := "things already wait"
+			if r.Values["owed"] == "1" {
+				things = "thing already waits"
+			}
+			parts = append(parts, fmt.Sprintf("Held: %s %s on you in %s (limit %s).",
+				r.Values["owed"], things, r.Values["repo"], r.Values["ceiling"]))
 			continue
 		}
 		s := r.Code

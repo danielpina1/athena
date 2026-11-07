@@ -167,7 +167,7 @@ Brake and holding a repository for you. In the dashboard, Settings > Repositorie
   reply is never sent.
 - To see the waiting-on-you brake: in Settings > Repositories set "Hold work in you/sandbox when this many wait on
   you" to 1, leave one Proposal pending, and open a second sandbox issue that does not mention the App. Its decision
-  (`athena decisions`, or the dashboard) reads "Held: 1 things already wait on you in you/sandbox (limit 1)." and no
+  (`athena decisions`, or the dashboard) reads "Held: 1 thing already waits on you in you/sandbox (limit 1)." and no
   Ticket starts for it until you apply or discard the pending Proposal.
 
 Promotion:

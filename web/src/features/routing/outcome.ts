@@ -42,7 +42,8 @@ export function filteredText(code: string): string {
 /** A Decision's reason in a sentence, for the codes that have one; undefined for the rest. */
 export function reasonSentence(code: string, values: Readonly<Record<string, string>>): string | undefined {
   if (code === "wip_brake") {
-    return `Held: ${values.owed} things already wait on you in ${values.repo} (limit ${values.ceiling}).`;
+    const things = values.owed === "1" ? "thing already waits" : "things already wait";
+    return `Held: ${values.owed} ${things} on you in ${values.repo} (limit ${values.ceiling}).`;
   }
   return undefined;
 }
