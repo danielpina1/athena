@@ -3,6 +3,8 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
+	"unicode/utf8"
 
 	"google.golang.org/protobuf/types/known/timestamppb"
 
@@ -11,8 +13,12 @@ import (
 	"github.com/danielpina1/athena/internal/store"
 )
 
-// proposalDetail is what the owner decides on: the held reply's text, "branch @ sha7" for a push, and the title and
-// base of a pull request. A payload that cannot be read gives no detail.
+// maxDetailBody bounds, in characters, the body of a held pull request its detail shows.
+const maxDetailBody = 2000
+
+// proposalDetail is what the owner decides on: the held reply's text, "branch @ sha7" for a push, and for a pull request
+// its title, its base ("default branch" when it names none) and its body, cut to maxDetailBody characters: what a
+// worker wrote is published as it is. A payload that cannot be read gives no detail.
 func proposalDetail(tx *store.Tx, p *core.Proposal) string {
 	switch p.Kind {
 	case core.ProposalReply:
@@ -36,11 +42,22 @@ func proposalDetail(tx *store.Tx, p *core.Proposal) string {
 		}
 		return pl.Branch + " @ " + sha
 	case core.ProposalPull:
-		var pl struct{ Title, Base string }
+		var pl struct{ Title, Base, Body string }
 		if json.Unmarshal(p.Payload, &pl) != nil {
 			return ""
 		}
-		return pl.Title + " → " + pl.Base
+		base := pl.Base
+		if base == "" {
+			base = "default branch"
+		}
+		out := pl.Title + " → " + base
+		if body := strings.TrimSpace(pl.Body); body != "" {
+			if utf8.RuneCountInString(body) > maxDetailBody {
+				body = string([]rune(body)[:maxDetailBody]) + "…"
+			}
+			out += "\n\n" + body
+		}
+		return out
 	}
 	return ""
 }
@@ -50,11 +67,12 @@ func proposalView(tx *store.Tx, p *core.Proposal) *athenav1.ProposalView {
 		Summary: p.Summary, Detail: proposalDetail(tx, p), CreatedAt: timestamppb.New(p.CreatedAt), Error: p.Error}
 }
 
-// Proposals returns the pending Proposals, oldest first.
+// Proposals returns the Proposals that wait on the owner, oldest first: the pending ones and the failed ones, which stay
+// until the owner tries them again or discards them.
 func (s hubSource) Proposals() ([]*athenav1.ProposalView, error) {
 	var out []*athenav1.ProposalView
 	err := s.d.st.Tx(func(tx *store.Tx) error {
-		list, err := tx.PendingProposals()
+		list, err := tx.UndecidedProposals()
 		for _, p := range list {
 			out = append(out, proposalView(tx, p))
 		}

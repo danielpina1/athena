@@ -3,6 +3,7 @@ package core
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"time"
@@ -64,7 +65,7 @@ type Proposal struct {
 }
 
 // Propose records a pending Proposal for an open Ticket and shows the Ticket as waiting for the owner. A pending push
-// of the same Ticket is superseded by a newer one.
+// or failed push of the same Ticket is superseded by a newer one.
 func (e *Engine) Propose(p Proposal) (Proposal, error) {
 	var out Proposal
 	err := e.command(cmdPropose, func(o *op) error {
@@ -103,7 +104,7 @@ func (o *op) propose(t *Ticket, p Proposal) (Proposal, error) {
 			return Proposal{}, err
 		}
 		for _, x := range older {
-			if x.Kind == ProposalPush && x.State == ProposalPending {
+			if x.Kind == ProposalPush && (x.State == ProposalPending || x.State == ProposalFailed) {
 				if err := o.closeProposal(x, ProposalSuperseded, ""); err != nil {
 					return Proposal{}, err
 				}
@@ -119,13 +120,26 @@ func (o *op) propose(t *Ticket, p Proposal) (Proposal, error) {
 
 // ApplyProposal does what the owner approved. A reply releases its held Receipt to the Outbox and is applied; a push
 // or pull request stays pending while the node makes it happen (EffectApplyProposal) until SettleProposal reports the
-// result. A Proposal that is not pending is a UserError.
+// result. A failed Proposal is the owner's "Try again": it is pending again, its start and error forgotten, and applied
+// as if new (the owner's retry is their word that they checked GitHub). A Proposal neither pending nor failed is a
+// UserError.
 func (e *Engine) ApplyProposal(id string) (Proposal, error) {
 	var out Proposal
 	err := e.command(cmdApplyProposal, func(o *op) error {
-		p, err := o.pendingProposal(id)
+		p, err := o.undecidedProposal(id)
 		if err != nil {
 			return err
+		}
+		if p.State == ProposalFailed {
+			p.State, p.StartedAt, p.DecidedAt, p.Error = ProposalPending, nil, nil, ""
+			if err := o.tx.PutProposal(p); err != nil {
+				return err
+			}
+			o.proposalEvent(EventProposalCreated, p, map[string]any{"kind": p.Kind, "summary": p.Summary, "repo": p.Repo,
+				"retry": true})
+			if err := o.syncProposals(p.TicketID); err != nil {
+				return err
+			}
 		}
 		if p.Kind != ProposalReply {
 			if err := o.enqueue(EffectApplyProposal, p.ID, nil); err != nil {
@@ -163,20 +177,25 @@ func (e *Engine) ApplyProposal(id string) (Proposal, error) {
 	return out, nil
 }
 
-// DiscardProposal is the owner's no. A held reply is dropped, never sent.
+// DiscardProposal is the owner's no, to a pending or a failed Proposal. A held reply is dropped, never sent; a reply
+// Proposal whose Receipt is no longer held is discarded all the same. A push or pull request the node has begun to
+// apply (StartedAt) is refused: it may be on GitHub already, and its result settles it.
 func (e *Engine) DiscardProposal(id string) error {
 	return e.command(cmdDiscardProposal, func(o *op) error {
-		p, err := o.pendingProposal(id)
+		p, err := o.undecidedProposal(id)
 		if err != nil {
 			return err
 		}
+		if p.State == ProposalPending && p.StartedAt != nil {
+			return userErrorf("Athena is applying this now; wait for its result")
+		}
 		if p.Kind == ProposalReply {
-			rc, err := o.heldReceipt(p)
-			if err != nil {
-				return err
-			}
-			rc.State, rc.DroppedReason, rc.DroppedAt = ReceiptDropped, dropDiscarded, o.timestamp()
-			if err := o.tx.PutReceipt(rc); err != nil {
+			if rc, err := o.heldReceipt(p); err == nil {
+				rc.State, rc.DroppedReason, rc.DroppedAt = ReceiptDropped, dropDiscarded, o.timestamp()
+				if err := o.tx.PutReceipt(rc); err != nil {
+					return err
+				}
+			} else if !errors.Is(err, errNotHeld) {
 				return err
 			}
 		}
@@ -288,6 +307,21 @@ func (e *Engine) PendingProposals() ([]Proposal, error) {
 	return out, nil
 }
 
+// undecidedProposal loads a Proposal the owner may still apply or discard: pending, or failed.
+func (o *op) undecidedProposal(id string) (*Proposal, error) {
+	p, err := o.tx.GetProposal(id)
+	if err != nil {
+		return nil, err
+	}
+	if p == nil {
+		return nil, userErrorf("proposal %s not found", id)
+	}
+	if p.State != ProposalPending && p.State != ProposalFailed {
+		return nil, userErrorf("proposal %s is already %s", id, p.State)
+	}
+	return p, nil
+}
+
 func (o *op) pendingProposal(id string) (*Proposal, error) {
 	p, err := o.tx.GetProposal(id)
 	if err != nil {
@@ -302,7 +336,11 @@ func (o *op) pendingProposal(id string) (*Proposal, error) {
 	return p, nil
 }
 
-// heldReceipt loads the held Receipt a reply Proposal's payload names.
+// errNotHeld is a reply Proposal whose Receipt is gone or no longer held.
+var errNotHeld = errors.New("the reply is no longer held")
+
+// heldReceipt loads the held Receipt a reply Proposal's payload names; errNotHeld (wrapped) when it is missing or not
+// held.
 func (o *op) heldReceipt(p *Proposal) (*Receipt, error) {
 	var pl struct {
 		ReceiptID string `json:"receiptId"`
@@ -315,7 +353,7 @@ func (o *op) heldReceipt(p *Proposal) (*Receipt, error) {
 		return nil, err
 	}
 	if rc == nil || rc.State != ReceiptHeld {
-		return nil, errors.New("proposal " + p.ID + " names a receipt that is not held")
+		return nil, fmt.Errorf("proposal %s names a receipt that is not held: %w", p.ID, errNotHeld)
 	}
 	return rc, nil
 }

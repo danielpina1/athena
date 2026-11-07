@@ -216,3 +216,114 @@ func TestStartProposalOnce(t *testing.T) {
 	var ue *UserError
 	eq(t, "settled: a UserError", errors.As(err, &ue), true)
 }
+
+// failedPull proposes a pull request, starts and fails it, as the node does when GitHub refuses it.
+func (h *evals) failedPull(ticketID string) Proposal {
+	h.t.Helper()
+	p, err := h.eng.Propose(Proposal{TicketID: ticketID, Kind: ProposalPull, Summary: "pr", Payload: json.RawMessage(`{"title":"t"}`)})
+	h.must(err)
+	_, err = h.eng.StartProposal(p.ID)
+	h.must(err)
+	h.must(h.eng.SettleProposal(p.ID, errors.New("GitHub said no")))
+	return p
+}
+
+func (h *evals) proposal(ticketID, id string) *Proposal {
+	h.t.Helper()
+	for _, p := range h.proposals(ticketID) {
+		if p.ID == id {
+			return p
+		}
+	}
+	h.t.Fatalf("proposal %s not found", id)
+	return nil
+}
+
+// The owner's "Try again" on a failed Proposal: it is pending again, its start and error forgotten, and the node is
+// told to apply it once more.
+func TestApplyFailedProposalTriesAgain(t *testing.T) {
+	h := newEvals(t)
+	a := h.shadowed("c:1", true)
+	p := h.failedPull(a)
+	eq(t, "no longer waiting on the owner", TicketStage(h.ticket(a)).Action != "proposal", true)
+	before := len(h.applyEffects())
+
+	out, err := h.eng.ApplyProposal(p.ID)
+	h.must(err)
+	got := h.proposal(a, p.ID)
+	eq(t, "returned state", out.State, ProposalPending)
+	eq(t, "state", got.State, ProposalPending)
+	eq(t, "start forgotten", got.StartedAt == nil, true)
+	eq(t, "error cleared", got.Error, "")
+	eq(t, "undecided", got.DecidedAt == nil, true)
+	eq(t, "enqueued again", len(h.applyEffects()), before+1)
+	eq(t, "waits on the owner again", TicketStage(h.ticket(a)), Stage{"person", "proposal"})
+	first, err := h.eng.StartProposal(p.ID)
+	h.must(err)
+	eq(t, "the retry starts afresh", first, true)
+}
+
+// A failed Proposal can be discarded.
+func TestDiscardFailedProposal(t *testing.T) {
+	h := newEvals(t)
+	a := h.shadowed("c:1", true)
+	p := h.failedPull(a)
+	h.must(h.eng.DiscardProposal(p.ID))
+	eq(t, "discarded", h.proposal(a, p.ID).State, ProposalDiscarded)
+}
+
+// A reply Proposal whose Receipt is no longer held (gone, or sent some other way) can still be discarded.
+func TestDiscardReplyWithoutHeldReceipt(t *testing.T) {
+	h := newEvals(t)
+	a := h.shadowed("c:1", true)
+	id := h.reply(ReplyRequest{TicketID: a, TriggerID: "c:1", Purpose: PurposeAnswer, Text: "Done."})
+	p := h.proposals(a)[0]
+	h.must(h.repos.Tx(func(tx Tx) error {
+		rc, err := tx.GetReceipt(id)
+		if err != nil {
+			return err
+		}
+		rc.State = ReceiptSent
+		return tx.PutReceipt(rc)
+	}))
+	h.must(h.eng.DiscardProposal(p.ID))
+	eq(t, "discarded", h.proposal(a, p.ID).State, ProposalDiscarded)
+	eq(t, "the receipt is left as it was", h.receipt(id).State, ReceiptSent)
+}
+
+// Once the node began to apply a Proposal, discarding it is refused: the push or pull request may already be on GitHub.
+// Before the start a discard still works.
+func TestDiscardWhileApplyingRefused(t *testing.T) {
+	h := newEvals(t)
+	a := h.shadowed("c:1", true)
+	p, err := h.eng.Propose(Proposal{TicketID: a, Kind: ProposalPush, Summary: "push", Payload: json.RawMessage(`{"branch":"b","sha":"1"}`)})
+	h.must(err)
+	_, err = h.eng.ApplyProposal(p.ID)
+	h.must(err)
+	_, err = h.eng.StartProposal(p.ID)
+	h.must(err)
+	err = h.eng.DiscardProposal(p.ID)
+	var ue *UserError
+	eq(t, "refused as a UserError", errors.As(err, &ue), true)
+	eq(t, "says why", err != nil && strings.Contains(err.Error(), "Athena is applying this now"), true)
+	eq(t, "still pending", h.proposal(a, p.ID).State, ProposalPending)
+
+	q, err := h.eng.Propose(Proposal{TicketID: a, Kind: ProposalPull, Summary: "pr", Payload: json.RawMessage(`{"title":"t"}`)})
+	h.must(err)
+	_, err = h.eng.ApplyProposal(q.ID)
+	h.must(err)
+	h.must(h.eng.DiscardProposal(q.ID))
+	eq(t, "discarded before its start", h.proposal(a, q.ID).State, ProposalDiscarded)
+}
+
+// A newer push supersedes a failed one too: the owner is not left with an old failed push beside the new one.
+func TestPushSupersedesFailedPush(t *testing.T) {
+	h := newEvals(t)
+	a := h.shadowed("c:1", true)
+	old, err := h.eng.Propose(Proposal{TicketID: a, Kind: ProposalPush, Summary: "push 1", Payload: json.RawMessage(`{"branch":"b","sha":"1"}`)})
+	h.must(err)
+	h.must(h.eng.SettleProposal(old.ID, errors.New("x")))
+	_, err = h.eng.Propose(Proposal{TicketID: a, Kind: ProposalPush, Summary: "push 2", Payload: json.RawMessage(`{"branch":"b","sha":"2"}`)})
+	h.must(err)
+	eq(t, "the failed push", h.proposal(a, old.ID).State, ProposalSuperseded)
+}

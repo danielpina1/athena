@@ -44,6 +44,11 @@ func (tx *Tx) PendingProposals() ([]*core.Proposal, error) {
 	return tx.proposals(`SELECT doc FROM proposals WHERE state = ?`, core.ProposalPending)
 }
 
+// UndecidedProposals returns every Proposal the owner may still apply or discard (pending or failed), oldest first.
+func (tx *Tx) UndecidedProposals() ([]*core.Proposal, error) {
+	return tx.proposals(`SELECT doc FROM proposals WHERE state IN (?, ?)`, core.ProposalPending, core.ProposalFailed)
+}
+
 // TicketProposals returns a Ticket's Proposals in every state, oldest first.
 func (tx *Tx) TicketProposals(ticketID string) ([]*core.Proposal, error) {
 	return tx.proposals(`SELECT doc FROM proposals WHERE ticket_id = ?`, ticketID)
