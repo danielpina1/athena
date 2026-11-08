@@ -134,20 +134,26 @@ is treated as restricted. What it gets (`internal/node/toolpolicy.go`, `rules.go
    directory, outside git, so a poisoned cache never reaches your own builds. The first build of such a Ticket is
    slower. (`GOFLAGS=-modcacherw` lets the Ticket directory be removed when it ends.)
 8. **Commands read only what the session needs.** The sandbox denies your home directory, the state directory, the
-   work root, the transcripts and Claude Code's own session transcripts, each as a whole directory, so a Ticket
-   directory or transcript made after the session started is denied too. It then gives back (Claude Code's
-   `allowRead`) only what the session needs: its working directory and git directories, the node socket, the `gh`
-   shim, the `athena` binary, the CA bundle, Claude Code's shell snapshots and install, and the toolchains on your
-   `PATH` that live under your home (a `bin` directory, and the install above it when that is two levels or more
-   below home, such as `~/.nvm/versions/node/v22`). `Config.Secrets` (the GitHub App key) and the credential files the
+   work root, the transcripts, Claude Code's own session transcripts and its temporary files (`/tmp/claude-<uid>`,
+   which hold every session's background task output), each as a whole directory, so a Ticket directory, transcript
+   or output made after the session started is denied too. Each restricted session gets a temporary root of its own
+   (`CLAUDE_CODE_TMPDIR`, `/tmp/athena-<uid>/<id>`, removed when the Ticket ends): a sandboxed command's `$TMPDIR` is
+   the whole root, so it could not be denied otherwise. The sandbox then gives back (Claude Code's `allowRead`) only
+   what the session needs: its working directory and git directories, its own temporary root, the node socket, the
+   `gh` shim, the `athena` binary, the CA bundle, Claude Code's install, and the toolchains on your `PATH` that live
+   under your home in a known toolchain directory (`.nvm`, `.cargo`, `go/bin`, `.local/bin` and the like: anything
+   else on `PATH` could be a project, such as `~/src/proj/bin`; a `bin` directory, and the install above it when that
+   is two levels or more below home, such as `~/.nvm/versions/node/v22`). No shell snapshot is given back: they are
+   every session's, and Claude Code carries on without one. `Config.Secrets` (the GitHub App key) and the credential files the
    rules know (`credRel`, including `~/.git-credentials` and `~/.config/git/credentials`) are denied in their
    configured and their resolved spelling, and nothing given back holds one. Git reads no global configuration
    (`GIT_CONFIG_GLOBAL=/dev/null`, `XDG_CONFIG_HOME` in the Ticket's cache): git stops when it cannot read
    `~/.gitconfig`.
 9. **Claude's file tools read only the Ticket.** `Read`, `Grep` and `Glob` run outside the sandbox, so the hook rules
    keep them to the working directory and the system's and toolchains' roots (`/usr`, `/opt`, `/etc`, `/nix`, the
-   developer tools, the toolchains on `PATH` under your home), in every spelling, a symbolic link out of the directory
-   included. Anything else is denied with: "Work started by someone outside your allow list reads only its own working
+   developer tools, the known toolchains under your home), in every spelling, a symbolic link out of the directory
+   included. A `Glob` pattern is checked against the directory it searches, and a `..` past its first wildcard is denied.
+   Anything else is denied with: "Work started by someone outside your allow list reads only its own working
    directory and the system's tools."
 10. **Held for you, whatever the repository's mode.** A GitHub App token cannot be kept to one branch or thread, so a
     restricted session is treated as if its repository were held for you (section 6): its tokens are read-only, a `git
