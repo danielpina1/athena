@@ -549,3 +549,15 @@ func TestRestrictedReadsNoShellSnapshots(t *testing.T) {
 		t.Fatalf("allowRead gives back %s: %v", snap, allow)
 	}
 }
+
+// Only directories of known toolchains under the home directory are read again: a project's bin directory on PATH
+// would give back the project.
+func TestHomeToolchainsKeepsToKnownRoots(t *testing.T) {
+	home := "/home/o"
+	path := strings.Join([]string{"/usr/bin", home + "/.nvm/versions/node/v22/bin", home + "/go/bin", home + "/.local/bin", home + "/.cargo/bin",
+		home + "/src/proj/bin", home + "/go/src/acme/proj/bin", home + "/bin", home, "relative/bin", "/elsewhere/bin"}, string(filepath.ListSeparator))
+	want := []string{home + "/.nvm/versions/node/v22/bin", home + "/.nvm/versions/node/v22", home + "/go/bin", home + "/.local/bin", home + "/.cargo/bin"}
+	if got := homeToolchains(home, path); !slices.Equal(got, want) {
+		t.Fatalf("homeToolchains = %v, want %v", got, want)
+	}
+}

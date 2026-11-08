@@ -255,9 +255,16 @@ func spellings(p string) []string {
 	return []string{c, r}
 }
 
+// homeToolchainRoots are where toolchains install themselves under the home directory, relative to it. A directory is
+// read again only below one of these: anything else on PATH may be a project's (~/src/proj/bin), and reading it would
+// give back the project.
+var homeToolchainRoots = []string{".nvm", ".fnm", ".volta", ".bun", ".deno", ".cargo", ".rustup", ".pyenv", ".rbenv", ".asdf", ".sdkman",
+	".ghcup", ".dotnet", ".npm-global", ".poetry", ".local/bin", ".local/share/fnm", ".local/share/mise", ".local/share/pnpm", "Library/pnpm",
+	"go/bin"}
+
 // homeToolchains are the toolchains a restricted session's commands may run from the owner's home directory: each
-// directory on path that lies below home, and, for one named bin, its parent too when that is a toolchain's own
-// install two levels or more below home (~/.nvm/versions/node/v22, not ~/.local), whose libraries the binaries need.
+// directory on path below one of homeToolchainRoots, and, for one named bin, its parent too when that is a toolchain's
+// own install two levels or more below home (~/.nvm/versions/node/v22, not ~/.local), whose libraries the binaries need.
 func homeToolchains(home, path string) []string {
 	if home == "" {
 		return nil
@@ -269,7 +276,7 @@ func homeToolchains(home, path string) []string {
 			continue
 		}
 		e = filepath.Clean(e)
-		if e == home || !within(home, e) {
+		if !slices.ContainsFunc(homeToolchainRoots, func(r string) bool { return within(filepath.Join(home, filepath.FromSlash(r)), e) }) {
 			continue
 		}
 		out = append(out, e)
