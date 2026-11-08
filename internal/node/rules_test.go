@@ -1421,6 +1421,16 @@ func TestRestrictedReadsOnlyTicketAndSystem(t *testing.T) {
 		{"grep outside", "Grep", in(map[string]any{"pattern": "x", "path": e.outDir}), VerdictDeny},
 		{"glob outside", "Glob", in(map[string]any{"pattern": "*", "path": e.outDir}), VerdictDeny},
 		{"glob an absolute pattern", "Glob", in(map[string]any{"pattern": e.outDir + "/**"}), VerdictDeny},
+		{"glob its own files", "Glob", in(map[string]any{"pattern": "**/*.go"}), VerdictAllow},
+		{"glob a subdirectory", "Glob", in(map[string]any{"pattern": "src/*.go"}), VerdictAllow},
+		{"glob up and back in", "Glob", in(map[string]any{"pattern": "src/../*.go"}), VerdictAllow},
+		{"glob a name with dots", "Glob", in(map[string]any{"pattern": "*..go"}), VerdictAllow},
+		{"glob up and out", "Glob", in(map[string]any{"pattern": "../T2/*"}), VerdictDeny},
+		{"glob up and out, no wildcard", "Glob", in(map[string]any{"pattern": "../T2/secret.go"}), VerdictDeny},
+		{"glob in then out", "Glob", in(map[string]any{"pattern": "src/../../T2/*"}), VerdictDeny},
+		{"glob out past a wildcard", "Glob", in(map[string]any{"pattern": "*/../../T2/*"}), VerdictDeny},
+		{"glob out in braces", "Glob", in(map[string]any{"pattern": "{..,src}/T2/*"}), VerdictDeny},
+		{"glob out of a named directory", "Glob", in(map[string]any{"pattern": "../../T2/*", "path": filepath.Join(c.TicketDir, "src")}), VerdictDeny},
 	} {
 		d := Evaluate(c, x.tool, x.input)
 		if d.Verdict != x.want {

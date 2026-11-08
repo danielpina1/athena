@@ -411,8 +411,9 @@ func credentialRule(ctx RuleContext, tool string, in map[string]any) (Decision, 
 var readTools = map[string]bool{"Read": true, "Grep": true, "Glob": true, "NotebookRead": true}
 
 // restrictedReadRule keeps a Restricted session's file tools to its own directory and ReadRoots: a path they name (or,
-// for an absolute Glob pattern, its stem) that lies elsewhere in any of its spellings, a symbolic link out of the
-// directory included, is denied. A search with no path runs in TicketDir.
+// for a Glob pattern, its stem, against the directory the search runs in) that lies elsewhere in any of its spellings,
+// a symbolic link out of the directory included, is denied, and so is a Glob pattern with a ".." past its first
+// wildcard, whose destination depends on what the wildcard matches. A search with no path runs in TicketDir.
 func restrictedReadRule(ctx RuleContext, tool string, in map[string]any) (Decision, bool) {
 	if !ctx.Restricted || !readTools[tool] {
 		return Decision{}, false
@@ -423,8 +424,21 @@ func restrictedReadRule(ctx RuleContext, tool string, in map[string]any) (Decisi
 			paths = append(paths, ctx.absPath(p))
 		}
 	}
-	if pat := str(in, "pattern"); tool == "Glob" && (filepath.IsAbs(pat) || strings.HasPrefix(pat, "~")) {
-		paths = append(paths, ctx.absPath(globStem(pat)))
+	if pat := str(in, "pattern"); tool == "Glob" && pat != "" {
+		if globClimbsAfterWildcard(pat) {
+			return deny(ruleRestricted, restrictedReadReason), true
+		}
+		switch stem := globStem(pat); {
+		case filepath.IsAbs(pat) || strings.HasPrefix(pat, "~"):
+			paths = append(paths, ctx.absPath(stem))
+		case stem != "":
+			// Against the directory the search runs in, unclean: variants applies ".." to the real directories.
+			base := ctx.TicketDir
+			if p := str(in, "path"); p != "" {
+				base = ctx.absPath(p)
+			}
+			paths = append(paths, base+string(filepath.Separator)+stem)
+		}
 	}
 	for _, p := range paths {
 		if !ctx.restrictedReadable(p) {
@@ -452,6 +466,15 @@ func (c RuleContext) restrictedReadable(p string) bool {
 // names one is denied. None of them is set in a session; naming one is an attempt to supply or reveal a token.
 var tokenEnvRe = regexp.MustCompile(`\b(?:GH_TOKEN|GH_ENTERPRISE_TOKEN|GITHUB_ENTERPRISE_TOKEN|GIT_ASKPASS|SSH_ASKPASS|` +
 	`GIT_TRACE_REDACT|ATHENA_STATE)\b`)
+
+// climbAfterWildcardRe matches a ".." path segment or alternative of a glob pattern.
+var climbAfterWildcardRe = regexp.MustCompile(`(^|[/{,(|])\.\.($|[/},)|])`)
+
+// globClimbsAfterWildcard reports a glob pattern with a ".." at or past its first wildcard.
+func globClimbsAfterWildcard(pat string) bool {
+	i := strings.IndexAny(pat, "*?[{")
+	return i >= 0 && climbAfterWildcardRe.MatchString(pat[i:])
+}
 
 // globStem is the longest leading part of a glob pattern without wildcards.
 func globStem(pat string) string {
