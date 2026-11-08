@@ -52,6 +52,7 @@ type KV interface {
 	KVSet(key, value string) error
 	// KVList returns the entries whose key starts with prefix.
 	KVList(prefix string) (map[string]string, error)
+	KVDelete(key string) error
 }
 
 // Config configures the Source.
@@ -86,6 +87,7 @@ type Source struct {
 	work sync.Mutex
 
 	mu       sync.Mutex
+	stateErr error                   // why the state documents could not be read; nothing fires while it is set
 	unknown  map[string]string       // slug → repository the GitHub Source does not know
 	eventBad map[string]eventFailure // lower-cased repository → its failing polls in a row
 }
@@ -126,10 +128,14 @@ func (s *Source) Listens(thread string) bool {
 	return false
 }
 
-// Health is an error while an enabled entry names a repository the GitHub Source does not know.
+// Health is an error while the state documents cannot be read, which stops every entry, or else while an enabled entry
+// names a repository the GitHub Source does not know.
 func (s *Source) Health() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.stateErr != nil {
+		return fmt.Errorf("schedule: nothing fires, the entries' state is unavailable: %w", s.stateErr)
+	}
 	slugs := make([]string, 0, len(s.unknown))
 	for slug := range s.unknown {
 		slugs = append(slugs, slug)
@@ -188,8 +194,7 @@ func (s *Source) Tick() {
 	}
 	now := s.cfg.Now()
 	unknown := map[string]string{}
-	if err := s.forgetDisabled(entries); err != nil {
-		s.log.Warn("schedule state not read", "error", err)
+	if !s.forget(entries, now) {
 		return
 	}
 	for _, e := range entries {
@@ -208,10 +213,23 @@ func (s *Source) Tick() {
 	s.mu.Unlock()
 }
 
-// forgetDisabled clears the Spec of the state document of every entry that is not enabled (disabled or deleted), so
-// that enabling it again starts over instead of firing for the time it was off. LastFired, Date and Fires stay: the
-// daily cap survives.
-func (s *Source) forgetDisabled(entries []Entry) error {
+// forget runs forgetDisabled and keeps its failure for Health; it reports whether the pass may go on.
+func (s *Source) forget(entries []Entry, now time.Time) bool {
+	err := s.forgetDisabled(entries, now)
+	s.mu.Lock()
+	s.stateErr = err
+	s.mu.Unlock()
+	if err != nil {
+		s.log.Warn("schedule state not read", "error", err)
+	}
+	return err == nil
+}
+
+// forgetDisabled clears the Spec of the state document of every entry that is not enabled (disabled, deleted or
+// renamed), so that enabling it again starts over instead of firing for the time it was off. LastFired, Date and Fires
+// stay while they still count: a document with its Spec clear is deleted once its day is over and its last firing is
+// outside MinGap, and the daily cap and the gap hold until then. An unreadable document holds nothing to keep.
+func (s *Source) forgetDisabled(entries []Entry, now time.Time) error {
 	docs, err := s.kv.KVList(stateKey(""))
 	if err != nil {
 		return err
@@ -220,21 +238,24 @@ func (s *Source) forgetDisabled(entries []Entry) error {
 	for _, e := range entries {
 		enabled[e.Slug] = true
 	}
-	for key := range docs {
+	today := now.Format("2006-01-02")
+	for key, raw := range docs {
 		slug := strings.TrimPrefix(key, stateKey(""))
 		if enabled[slug] {
 			continue
 		}
-		st, err := s.load(slug)
-		if err != nil {
-			return err
-		}
-		if st == nil || st.Spec == "" {
+		st := s.decode(slug, raw)
+		if st != nil && st.Spec != "" {
+			st.Spec = ""
+			if err := s.save(slug, st); err != nil {
+				return err
+			}
 			continue
 		}
-		st.Spec = ""
-		if err := s.save(slug, st); err != nil {
-			return err
+		if st == nil || (st.Date != today && now.Sub(st.LastFired) >= MinGap) {
+			if err := s.kv.KVDelete(key); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

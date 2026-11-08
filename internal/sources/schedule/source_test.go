@@ -1,6 +1,7 @@
 package schedule
 
 import (
+	"encoding/json"
 	"errors"
 	"reflect"
 	"strings"
@@ -41,9 +42,22 @@ func (f *fakeIntake) ThreadBusy(string) (bool, error) { return f.busy, nil }
 type mapKV struct {
 	m       map[string]string
 	failSet bool
+	// listErr makes KVList fail.
+	listErr error
+	// gets counts the KVGet calls.
+	gets int
 }
 
-func (k *mapKV) KVGet(key string) (string, bool, error) { v, ok := k.m[key]; return v, ok, nil }
+func (k *mapKV) KVGet(key string) (string, bool, error) {
+	k.gets++
+	v, ok := k.m[key]
+	return v, ok, nil
+}
+
+func (k *mapKV) KVDelete(key string) error {
+	delete(k.m, key)
+	return nil
+}
 func (k *mapKV) KVSet(key, value string) error {
 	if k.failSet {
 		return errors.New("disk full")
@@ -53,6 +67,9 @@ func (k *mapKV) KVSet(key, value string) error {
 }
 
 func (k *mapKV) KVList(prefix string) (map[string]string, error) {
+	if k.listErr != nil {
+		return nil, k.listErr
+	}
 	out := map[string]string{}
 	for key, v := range k.m {
 		if strings.HasPrefix(key, prefix) {
@@ -366,5 +383,118 @@ func TestHealthNamesTheFirstUnknownEntryInSortedOrder(t *testing.T) {
 		if err := r.src.Health(); err == nil || err.Error() != want {
 			t.Fatalf("Health = %v, want %q", err, want)
 		}
+	}
+}
+
+// putState stores the state document of an entry that is no longer enabled.
+func (r *rig) putState(slug string, st state) {
+	r.t.Helper()
+	raw, err := json.Marshal(st)
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	r.kv.m[stateKey(slug)] = string(raw)
+}
+
+func (r *rig) hasState(slug string) bool {
+	_, ok := r.kv.m[stateKey(slug)]
+	return ok
+}
+
+func TestForgettingUsesTheListedDocuments(t *testing.T) {
+	r := newRig(t, "0 3 * * *", "2026-11-01 12:00:00")
+	r.entry.Cron = "" // the enabled entry reads no state of its own
+	r.putState("gone", state{Spec: "0 3 * * *", Date: "2026-11-01", Fires: 2})
+	r.putState("settled", state{Date: "2026-11-01", Fires: 2})
+	r.src.Tick()
+	if r.kv.gets != 0 {
+		t.Errorf("forgetting re-read %d documents the list had returned", r.kv.gets)
+	}
+}
+
+func TestDocumentOfAGoneEntryIsDeletedOnceItsDayIsOver(t *testing.T) {
+	r := newRig(t, "0 3 * * *", "2026-11-01 12:00:00")
+	r.putState("gone", state{Spec: "0 3 * * *", Date: "2026-10-31", Fires: 24})
+	r.tickAt("2026-11-01 12:00:30")
+	if !r.hasState("gone") {
+		t.Fatal("deleted before its spec was cleared")
+	}
+	r.tickAt("2026-11-01 12:01:00")
+	if r.hasState("gone") {
+		t.Error("the document of a deleted entry outlived its day")
+	}
+}
+
+func TestDocumentOfAGoneEntryKeepsTodaysCap(t *testing.T) {
+	r := newRig(t, "0 3 * * *", "2026-11-01 12:00:00")
+	r.putState("gone", state{Spec: "0 3 * * *", Date: "2026-11-01", Fires: 24})
+	r.tickAt("2026-11-01 12:00:30")
+	raw, ok := r.kv.m[stateKey("gone")]
+	if !ok {
+		t.Fatal("the document was deleted while its day's count still counts")
+	}
+	var st state
+	if err := json.Unmarshal([]byte(raw), &st); err != nil {
+		t.Fatal(err)
+	}
+	if st.Spec != "" || st.Fires != 24 {
+		t.Errorf("state = %+v, want the spec cleared and the count kept", st)
+	}
+	r.tickAt("2026-11-02 00:00:30")
+	if r.hasState("gone") {
+		t.Error("the document stayed after its day ended")
+	}
+}
+
+// The gap between firings holds across midnight: an entry made again at once must not fire inside it.
+func TestDocumentOfAGoneEntryKeepsItsLastFiringInsideTheGap(t *testing.T) {
+	r := newRig(t, "0 3 * * *", "2026-11-02 00:05:00")
+	r.putState("gone", state{Date: "2026-11-01", Fires: 1, LastFired: at("2026-11-01 23:59:00")})
+	r.tickAt("2026-11-02 00:05:30")
+	if !r.hasState("gone") {
+		t.Fatal("the document went while its last firing is inside the gap")
+	}
+	r.tickAt("2026-11-02 00:14:30")
+	if r.hasState("gone") {
+		t.Error("the document stayed once the gap had passed")
+	}
+}
+
+func TestUnreadableDocumentOfAGoneEntryIsDeleted(t *testing.T) {
+	r := newRig(t, "0 3 * * *", "2026-11-01 12:00:00")
+	r.kv.m[stateKey("gone")] = "{not json"
+	r.tickAt("2026-11-01 12:00:30")
+	if r.hasState("gone") {
+		t.Error("an unreadable document of a deleted entry stayed")
+	}
+}
+
+func TestHealthSaysWhyNothingFiresWhenTheStateCannotBeListed(t *testing.T) {
+	r := newRig(t, "0 3 * * *", "2026-11-01 12:00:00")
+	r.kv.listErr = errors.New("database is locked")
+	r.tickAt("2026-11-01 12:00:30")
+	err := r.src.Health()
+	if err == nil || !strings.Contains(err.Error(), "database is locked") {
+		t.Fatalf("Health = %v, want it to carry the list failure", err)
+	}
+	r.kv.listErr = nil
+	r.tickAt("2026-11-01 12:01:00")
+	if err := r.src.Health(); err != nil {
+		t.Fatalf("Health after the list recovered = %v", err)
+	}
+}
+
+// What stops every entry is said before what stops one.
+func TestHealthPutsTheListFailureFirst(t *testing.T) {
+	r := newRig(t, "0 3 * * *", "2026-11-01 12:00:00")
+	r.known = false
+	r.tickAt("2026-11-01 12:00:30")
+	if r.src.Health() == nil {
+		t.Fatal("no unknown-repository health to outrank")
+	}
+	r.kv.listErr = errors.New("database is locked")
+	r.tickAt("2026-11-01 12:01:00")
+	if err := r.src.Health(); err == nil || !strings.Contains(err.Error(), "database is locked") {
+		t.Fatalf("Health = %v, want the list failure first", err)
 	}
 }

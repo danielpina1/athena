@@ -77,11 +77,10 @@ func (s *Source) PollEvents(ctx context.Context) {
 		s.mu.Unlock()
 		return
 	}
-	if err := s.forgetDisabled(entries); err != nil {
-		s.log.Warn("schedule state not read", "error", err)
+	now := s.cfg.Now()
+	if !s.forget(entries, now) {
 		return
 	}
-	now := s.cfg.Now()
 	bad := map[string]eventFailure{}
 	for _, k := range order {
 		group := byRepo[k]

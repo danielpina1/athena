@@ -261,6 +261,11 @@ func (s *Store) KVSet(key, value string) error {
 	return s.Tx(func(tx *Tx) error { return tx.KVSet(key, value) })
 }
 
+// KVDelete removes a plain string outside any transaction (in a transaction of its own); none is not an error.
+func (s *Store) KVDelete(key string) error {
+	return s.Tx(func(tx *Tx) error { return tx.KVDelete(key) })
+}
+
 // Threads returns every stored Thread, ordered by key: the owner's view (athena threads). It reads in a transaction of
 // its own.
 func (s *Store) Threads() (out []core.Thread, err error) {
