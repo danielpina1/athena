@@ -2,6 +2,7 @@
 Assess proactive (inferred) candidates yourself against the enabled rules: eval loads a candidate's window, the Policy version and the enabled rules, eval_read reads window messages whole, and eval_decide records the decision, always with the candidate's trigger_id.
 A proactive candidate whose card already shows it touches no enabled rule, such as plain chat or a discussion unrelated to the project, may be ignored as a route ignore item with ignored_from_card and a reason; one that may match a rule, or that the card does not settle, goes through eval and eval_decide.
 Explicit candidates are routed with route, not assessed.
+A candidate whose source kind is schedule is the owner's own standing instruction, started by a clock or a repository event, and it names no rules: always take it through eval and eval_decide, with an empty rules list and no evidence. Accept unless an open ticket already covers it or the text shows nothing needs doing now. It has no conversation to acknowledge in, so give no ack.
 Assessment is read-only: do not execute work, send messages or delegate it.
 Never replay old messages or act on invalidated earlier approvals.
 

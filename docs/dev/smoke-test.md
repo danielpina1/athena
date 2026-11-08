@@ -179,3 +179,28 @@ Promotion:
 - A rule such as `credential-read` or `write-outside-ticket` is never offered, however often you approve it.
 
 Clean up: set the repository back to Live, remove the standing rule, and `rm -rf` the state dir as above.
+
+## Autopilot (needs your GitHub App)
+
+This part uses the sandbox repository and server of the GitHub part, with the sandbox repository already polled by
+the GitHub Source. How Autopilot works is in [autonomy.md](autonomy.md) section 9. Use a throwaway repository for the
+`auto` step: Autopilot will start a Ticket there on its own.
+
+1. In Settings > Autopilot, add an entry: name `Branch check`, repository `you/sandbox`, "When the default branch
+   moves", instructions "Create autopilot-check.txt containing hi, then report ready." Save (confirm with your
+   passkey). Leave the accept mode at `observe`.
+2. Push a commit to the default branch of `you/sandbox`. Within about 5 minutes the Routing page shows a Decision
+   `accept (would accept)` for rule `autopilot/branch-check`. `athena triggers` lists a `schedule` Trigger whose text
+   ends with "Why now: ..." and the two commit ids. Nothing is written to GitHub and no Ticket starts. The Source's
+   row in health reads `schedule`; it is there only while an entry is enabled.
+3. "See its runs" beside the entry opens Routing with `schedule:branch-check`.
+4. Switch the mode to `auto` (`athena policy show > p.json`, edit `"mode"`, `athena policy set p.json --state-dir $S`).
+   Push another commit. Within about 5 minutes a Ticket appears (`athena status`) on branch `athena/<ticket>`. Push
+   again while it is open: nothing new starts, because an entry runs one at a time.
+5. Pause and resume: `athena pause --state-dir $S`, push a commit, and wait 5 minutes. `athena decisions` shows no new
+   Decision. After `athena resume --state-dir $S`, one Trigger is raised for the newest commit, once the previous
+   Ticket has ended.
+
+Clean up: turn the entry off or remove it in Settings > Autopilot, set the mode back to `observe`, and delete the
+throwaway repository's branch.
+

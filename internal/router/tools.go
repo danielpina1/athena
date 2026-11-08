@@ -375,7 +375,7 @@ func (h *Host) eval(ctx context.Context, raw json.RawMessage) (any, error) {
 	}
 	rules := []ruleLine{}
 	for _, r := range s.Rules {
-		if r.Enabled {
+		if r.Enabled && v.Eval.Basis.Via != core.ViaAutopilot {
 			rules = append(rules, ruleLine{r.Name, r.Instructions})
 		}
 	}
@@ -559,8 +559,10 @@ func (h *Host) evalDecide(raw json.RawMessage) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, _, _, err := policy.AssessmentOutcome(a, s, v.Eval.Strength); err != nil {
-		return nil, errors.New(strings.TrimPrefix(err.Error(), "policy: "))
+	if v.Eval.Basis.Via != core.ViaAutopilot { // an Autopilot entry is its own rule, with nothing to judge
+		if _, _, _, err := policy.AssessmentOutcome(a, s, v.Eval.Strength); err != nil {
+			return nil, errors.New(strings.TrimPrefix(err.Error(), "policy: "))
+		}
 	}
 	in := core.DecisionInput{TriggerID: tr.ID, Kind: core.DecisionAccept, Reason: args.Reason, Assessment: &a,
 		Origin: core.OriginRouter}

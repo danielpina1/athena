@@ -248,6 +248,22 @@ test("filters in the URL are the starting point and can be cleared", async () =>
   expect(tabLabels()[0]).toBe("Triggers 7");
 });
 
+test("?q=schedule:<slug> opens the Triggers with the search filled and filtered", () => {
+  load({
+    triggers: [
+      { id: "schedule:night:cron:1", at: at(9000), source: "schedule", actor: "", kind: "schedule", thread: "schedule:night", text: "Tidy", outcome: "" },
+      { id: "schedule:weekly:cron:1", at: at(8000), source: "schedule", actor: "", kind: "schedule", thread: "schedule:weekly", text: "Sweep", outcome: "" },
+      ...triggers,
+    ],
+    decisions,
+    threads,
+  });
+  renderRouting("/routing?q=schedule:night");
+  expect((screen.getByRole("searchbox", { name: "Search Triggers" }) as HTMLInputElement).value).toBe("schedule:night");
+  expect(tabLabels()[0]).toBe("Triggers 1");
+  expect(triggerRow("schedule:night:cron:1")).toBeTruthy();
+});
+
 test("a record the URL names is the selected row", () => {
   renderRouting("/routing?tab=triggers&trigger=tr-attached");
   expect(triggerRow("tr-attached").getAttribute("aria-current")).toBe("true");

@@ -17,6 +17,7 @@ import (
 	"github.com/danielpina1/athena/internal/render"
 	"github.com/danielpina1/athena/internal/router"
 	"github.com/danielpina1/athena/internal/sources/github"
+	"github.com/danielpina1/athena/internal/sources/schedule"
 )
 
 // The control socket's views of the routing state (athena status, triggers, threads, decisions) and of the Policy.
@@ -72,6 +73,16 @@ func (c *control) health() HealthView {
 			if n := c.gh.app.Client().RateRemaining(); n >= 0 {
 				h.GitHubRateRemaining = &n
 			}
+		}
+	}
+	if c.autopilot != nil {
+		// Shown only while there is an entry to fire: without one the Source has nothing to say.
+		if cur, _ := c.policy.current(); len(autopilotEntries(cur)) > 0 {
+			sh := SourceHealth{Name: schedule.SourceName}
+			if err := c.autopilot.Health(); err != nil {
+				sh.Error = err.Error()
+			}
+			h.Sources = append(h.Sources, sh)
 		}
 	}
 	if c.pause != nil {

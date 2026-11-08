@@ -608,7 +608,7 @@ func (o *op) accept(th *Thread, ev *Evaluation, d DecisionInput, p Policy, res *
 	kind, reasons, would := DecisionAccept, saidReason(d.Reason), false
 	var rules []string
 	if a := d.Assessment; a != nil {
-		k, rs, w, err := p.Assess(*a, ev.Strength)
+		k, rs, w, err := p.Assess(*a, ev.Strength, ev.Basis.Via)
 		if err != nil {
 			got, err := o.finish(th, ev, &Decision{Kind: DecisionUnavailable,
 				Reasons: []Reason{{Code: CodeAssessmentFailed, Values: map[string]string{"error": err.Error()}}}})
@@ -625,6 +625,10 @@ func (o *op) accept(th *Thread, ev *Evaluation, d DecisionInput, p Policy, res *
 			if j.Matches {
 				rules = append(rules, j.Name)
 			}
+		}
+		if ev.Basis.Via == ViaAutopilot {
+			// The entry is its own rule; there are no judgements to take rules from.
+			rules = ev.Basis.Rules
 		}
 	} else if ev.Strength != StrengthExplicit {
 		res.Refused = CodeNotExplicit + ": an inferred candidate is accepted only on an assessment"

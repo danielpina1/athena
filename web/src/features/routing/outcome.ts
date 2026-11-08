@@ -45,6 +45,7 @@ export function reasonSentence(code: string, values: Readonly<Record<string, str
     const things = values.owed === "1" ? "thing already waits" : "things already wait";
     return `Held: ${values.owed} ${things} on you in ${values.repo} (limit ${values.ceiling}).`;
   }
+  if (code === "autopilot_gone") return "Not started: this Autopilot entry is off or was removed.";
   return undefined;
 }
 

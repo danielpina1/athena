@@ -71,6 +71,7 @@ test("desktop shows the section list beside General by default", () => {
     "Sources › GitHub",
     "Repositories",
     "Trust",
+    "Autopilot",
     "Notifications",
     "Devices",
     "Prompts",

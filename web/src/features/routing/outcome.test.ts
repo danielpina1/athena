@@ -10,3 +10,7 @@ test("the brake reads as a sentence naming the repository and the count; other c
   );
   expect(reasonSentence("routed", { ticket: "T-2" })).toBeUndefined();
 });
+
+test("a gone Autopilot entry reads as a sentence", () => {
+  expect(reasonSentence("autopilot_gone", {})).toBe("Not started: this Autopilot entry is off or was removed.");
+});

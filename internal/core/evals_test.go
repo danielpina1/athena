@@ -19,6 +19,8 @@ type evalPolicy struct {
 	gates     map[string]Gate
 	holds     bool
 	assessErr error
+	// asked records the rule lists AdmitsInferred was asked about.
+	asked [][]string
 	// trust is the class the policy gives every Trigger not in trustOf.
 	trust string
 	// trustOf is the class of the Triggers it names, by ID.
@@ -57,7 +59,10 @@ func (p *evalPolicy) Gate(t Trigger, _ Thread, tickets []Ticket) Gate {
 
 func (p *evalPolicy) Revalidate(Mandate) bool { return p.holds }
 
-func (p *evalPolicy) AdmitsInferred(rules []string) bool { return p.mode == "auto" && len(rules) > 0 }
+func (p *evalPolicy) AdmitsInferred(rules []string) bool {
+	p.asked = append(p.asked, rules)
+	return p.mode == "auto" && len(rules) > 0
+}
 func (p *evalPolicy) WIPCeiling(string) int {
 	if p.ceiling > 0 {
 		return p.ceiling
@@ -78,7 +83,7 @@ func (p *evalPolicy) ToolPolicy(class string) string {
 	return ToolStandard
 }
 
-func (p *evalPolicy) Assess(a Assessment, strength string) (string, []Reason, bool, error) {
+func (p *evalPolicy) Assess(a Assessment, strength, via string) (string, []Reason, bool, error) {
 	if p.assessErr != nil {
 		return "", nil, false, p.assessErr
 	}
@@ -88,7 +93,7 @@ func (p *evalPolicy) Assess(a Assessment, strength string) (string, []Reason, bo
 		}
 		return "ignore", nil, false, nil
 	}
-	if !slices.ContainsFunc(a.Rules, func(j RuleJudgement) bool { return j.Matches }) {
+	if via != ViaAutopilot && !slices.ContainsFunc(a.Rules, func(j RuleJudgement) bool { return j.Matches }) {
 		return "ignore", []Reason{{Code: "no_matching_rule"}}, false, nil
 	}
 	switch p.mode {
@@ -894,4 +899,21 @@ func TestLegacyMandateTrust(t *testing.T) {
 	} {
 		eq(t, "class", tc.m.TrustClass(), tc.want)
 	}
+}
+
+func TestAcceptAutopilotKeepsBasisRules(t *testing.T) {
+	h := newEvals(t)
+	h.pol.mode = "auto"
+	h.pol.gates["s:1"] = Gate{Strength: "inferred", Basis: MandateBasis{Via: ViaAutopilot, Source: "schedule", Scope: "schedule",
+		Sender: "x", Rules: []string{"autopilot/x"}}}
+	tr := h.message("s:1", issue)
+	tr.Source, tr.Kind, tr.Scope, tr.Human = "schedule", KindSchedule, "schedule", false
+	h.receive(tr)
+	h.due()
+	r := h.decide(DecisionInput{TriggerID: "s:1", Kind: "accept", Title: "Nightly", Assessment: &Assessment{Accept: true, Rules: []RuleJudgement{}}})
+	if r.Ticket == nil {
+		t.Fatalf("no ticket: %+v", r)
+	}
+	eq(t, "rules", r.Ticket.Mandate.Basis.Rules, []string{"autopilot/x"})
+	eq(t, "asked", h.pol.asked, [][]string{{"autopilot/x"}})
 }

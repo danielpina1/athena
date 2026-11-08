@@ -182,8 +182,8 @@ type Policy interface {
 	AdmitsInferred(rules []string) bool
 	// Assess converts an Assessment of a candidate of the given strength into an Engine outcome: the Decision kind
 	// (accept or ignore), its reasons and whether an ignore records "would accept". An error means the assessment
-	// failed.
-	Assess(a Assessment, strength string) (kind string, reasons []Reason, wouldAccept bool, err error)
+	// failed. via is the Eval's Basis.Via: an Autopilot candidate is judged without rule judgements.
+	Assess(a Assessment, strength, via string) (kind string, reasons []Reason, wouldAccept bool, err error)
 	// WIPCeiling is how many Tickets of the repository may be in flight at once; always at least 1.
 	WIPCeiling(repo string) int
 	// Shadow reports whether the repository is in shadow mode: its work is held for the owner.

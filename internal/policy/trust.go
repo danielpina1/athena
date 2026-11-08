@@ -12,6 +12,8 @@ func (p *policy) Trust(t core.Trigger) string {
 	switch {
 	case t.Source == core.OwnerActor.Source:
 		return core.TrustOwner
+	case t.Source == ScheduleSource:
+		return core.TrustOwner
 	case t.Kind == core.KindCI || t.Scope == ScopeCI:
 		return core.TrustCI
 	case t.Bot:

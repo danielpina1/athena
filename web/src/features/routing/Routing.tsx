@@ -3,6 +3,7 @@
 // count is the length of the list it shows after its filters; before the first Snapshot there is no count, only
 // "Waiting for the server.". /routing?tab=threads&thread=<key> opens one record.
 import { useMemo } from "react";
+import { Navigate } from "react-router";
 import { selectSynced } from "@/lib/store/selectors";
 import { useAthena } from "@/lib/store/state";
 import { Mono } from "@/ui/athena/Mono";
@@ -39,6 +40,14 @@ export function Routing() {
   // Looked up per row by canReevaluate: indexed once per change of the Decisions.
   const judged = useMemo(() => indexDecisions(decisions.values()), [decisions]);
   const decisionRows = useMemo(() => selectDecisions(decisions, { decision: sp.get("decision") ?? "" }), [decisions, sp]);
+
+  // /routing?q=schedule:<slug> (Settings › Autopilot's "See its runs") is the Triggers search for that text.
+  if (sp.has("q") && !sp.has("tq")) {
+    const next = new URLSearchParams(sp);
+    next.set("tq", next.get("q") ?? "");
+    next.delete("q");
+    return <Navigate to={{ search: `?${next.toString().replace(/%3A/gi, ":")}` }} replace />;
+  }
 
   return (
     <section aria-label="Routing" className="min-w-0">

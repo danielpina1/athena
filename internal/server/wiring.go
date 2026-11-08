@@ -26,6 +26,7 @@ import (
 	"github.com/danielpina1/athena/internal/runtime/codex"
 	"github.com/danielpina1/athena/internal/sources"
 	"github.com/danielpina1/athena/internal/sources/github"
+	"github.com/danielpina1/athena/internal/sources/schedule"
 	"github.com/danielpina1/athena/internal/store"
 	"github.com/danielpina1/athena/internal/web"
 	"github.com/danielpina1/athena/internal/web/ui"
@@ -306,7 +307,7 @@ func (c *appCredentials) Identity() (login, email string) {
 	return c.login, c.email
 }
 
-// intake is the GitHub Source's view of the Engine; it times each Receive (trigger_intake_seconds).
+// intake is the Sources' view of the Engine; it times each Receive (trigger_intake_seconds).
 type intake struct {
 	*core.Engine
 	hist *metrics.Histogram
@@ -319,7 +320,10 @@ func (i intake) Receive(t core.Trigger) (string, error) {
 	return res, err
 }
 
-var _ github.Intake = intake{}
+var (
+	_ github.Intake   = intake{}
+	_ schedule.Intake = intake{}
+)
 
 // timedSource is the GitHub Source as registered: every part of it, its Channel's sends timed (reply_send_seconds).
 type timedSource struct {

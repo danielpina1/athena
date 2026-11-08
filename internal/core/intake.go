@@ -493,3 +493,43 @@ func (e *Engine) FollowedThreads(source string) ([]string, error) {
 	}
 	return slices.Sorted(maps.Keys(seen)), nil
 }
+
+// ThreadBusy tells whether the Thread has work in flight: Triggers queued, an Eval in progress, a Brake holding one of
+// its candidates, or a Subscription of a Ticket that has not ended. An unknown Thread is not busy.
+func (e *Engine) ThreadBusy(thread string) (bool, error) {
+	var busy bool
+	err := e.repos.Tx(func(tx Tx) error {
+		th, err := tx.GetThread(thread)
+		if err != nil {
+			return err
+		}
+		if th != nil {
+			if th.Active() {
+				busy = true
+				return nil
+			}
+			for _, s := range th.Subscriptions {
+				tk, err := tx.GetTicket(s.TicketID)
+				if err != nil {
+					return err
+				}
+				if tk != nil && tk.Ended == nil {
+					busy = true
+					return nil
+				}
+			}
+		}
+		brakes, err := tx.Brakes()
+		if err != nil {
+			return err
+		}
+		for _, b := range brakes {
+			if b.Thread == thread {
+				busy = true
+				return nil
+			}
+		}
+		return nil
+	})
+	return busy, err
+}

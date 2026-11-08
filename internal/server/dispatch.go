@@ -23,6 +23,7 @@ import (
 	"github.com/danielpina1/athena/internal/pb/athenav1"
 	"github.com/danielpina1/athena/internal/policy"
 	"github.com/danielpina1/athena/internal/router"
+	"github.com/danielpina1/athena/internal/sources/schedule"
 	"github.com/danielpina1/athena/internal/store"
 	"github.com/danielpina1/athena/internal/web"
 )
@@ -51,6 +52,8 @@ type Dispatcher struct {
 	gh     *gitHub
 	host   *router.Host
 	policy *policyCache
+	// autopilot is the schedule Source, nil without a router.
+	autopilot *schedule.Source
 	// pause is the kill switch; nil (tests) pauses nothing and answers unavailable.
 	pause *pause.Switch
 	// node interrupts sessions; nil (tests) answers unavailable.

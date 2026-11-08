@@ -399,7 +399,7 @@ func TestObserveRecordsWouldAccept(t *testing.T) {
 	}
 	// The Policy delegates with its own settings.
 	p := New(s, allListen, time.Minute)
-	k2, r2, w2, err := p.Assess(judged(true, false), "inferred")
+	k2, r2, w2, err := p.Assess(judged(true, false), "inferred", core.ViaAdmission)
 	if err != nil || k2 != "ignore" || !w2 || len(r2) != len(reasons) {
 		t.Fatalf("Policy.Assess = %q %+v %v %v", k2, r2, w2, err)
 	}

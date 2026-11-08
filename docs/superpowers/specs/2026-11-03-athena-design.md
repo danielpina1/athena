@@ -492,3 +492,5 @@ A repository can be in `shadow` mode (a Policy setting per repository; default `
 
 A `schedule` Source emits Triggers on cron-like schedules and on repository events (default branch moved, dependency manifest changed, CI red on the default branch for > N hours). Each autopilot entry has a name, instructions, a target repository and a schedule, edited in Settings. Its Triggers go through the same router, Policy and admission as any other Source (strength `inferred`, so `observe` mode only records "would accept"), and are subject to the WIP brake (§18.1) and the kill switch (§18.2).
 
+The values settled at build time: firings of an entry are at least 15 minutes apart and at most 24 per local day (counted across restarts); an entry runs one at a time (a clock firing that comes due while it is busy is dropped, a repository event waits for the newest head); after downtime only the latest missed clock firing runs, if it is under 24 hours old, and says it is a catch-up; "CI red" defaults to 4 hours (1 to 168). Autopilot work has trust class `owner`, and an entry is its own rule, `autopilot/<slug>`. [autonomy.md](../../dev/autonomy.md) section 9 is the reference.
+

@@ -108,6 +108,8 @@ type Settings struct {
 	Allow []AllowRule `json:"allow,omitempty"`
 	// PromoteAfter is how many approvals promote a rule; 0 is DefaultPromoteAfter.
 	PromoteAfter int `json:"promoteAfter,omitempty"`
+	// Autopilot holds the owner's standing instructions.
+	Autopilot []AutopilotEntry `json:"autopilot,omitempty"`
 }
 
 // Repository modes.
@@ -246,6 +248,14 @@ func normalize(s Settings) Settings {
 			return a.Rule < b.Rule
 		})
 	}
+	if len(s.Autopilot) > 0 {
+		out.Autopilot = make([]AutopilotEntry, len(s.Autopilot))
+		for i, e := range s.Autopilot {
+			e.Name = strings.TrimSpace(e.Name)
+			e.Repo = strings.TrimSpace(e.Repo)
+			out.Autopilot[i] = e
+		}
+	}
 	if out.Pairing.Review == "" {
 		out.Pairing.Review = defaultPairing.Review
 	}
@@ -311,11 +321,17 @@ func Validate(s Settings) error {
 	if err := validateAutonomy(s); err != nil {
 		return err
 	}
+	if err := validateAutopilot(s); err != nil {
+		return err
+	}
 	seen := map[string]bool{}
 	for _, r := range s.Rules {
 		name := strings.TrimSpace(r.Name)
 		if name == "" {
 			return errors.New("policy: a rule has no name")
+		}
+		if strings.HasPrefix(name, autopilotPrefix) {
+			return fmt.Errorf("policy: rule %q cannot start with %q, which Autopilot entries use", name, autopilotPrefix)
 		}
 		if seen[name] {
 			return fmt.Errorf("policy: rule %q appears twice", name)
@@ -436,6 +452,9 @@ type canonical struct {
 	Mode    string                     `json:"mode"`
 	Rules   []Rule                     `json:"rules"`
 	Sources map[string]canonicalSource `json:"sources"`
+	// Autopilot holds the enabled entries; with none it is left out, so the version of an installation without
+	// them is what it was before Autopilot existed.
+	Autopilot []AutopilotEntry `json:"autopilot,omitempty"`
 }
 
 type canonicalSource struct {
@@ -456,6 +475,12 @@ func Version(s Settings) string {
 		}
 	}
 	sort.Slice(c.Rules, func(i, j int) bool { return c.Rules[i].Name < c.Rules[j].Name })
+	for _, e := range s.Autopilot {
+		if e.Enabled {
+			c.Autopilot = append(c.Autopilot, e)
+		}
+	}
+	sort.Slice(c.Autopilot, func(i, j int) bool { return c.Autopilot[i].Name < c.Autopilot[j].Name })
 	for name, p := range s.Sources {
 		c.Sources[name] = canonicalSource{Allowed: foldedSet(p.Allowed), Bots: foldedSet(p.Bots), Admission: p.Admission}
 	}

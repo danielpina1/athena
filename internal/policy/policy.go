@@ -37,6 +37,8 @@ const (
 	CodeAdmissionIgnore = "admission_ignore"
 	// CodeNotReceived: the message addresses nobody and its scope does not receive every message.
 	CodeNotReceived = "unaddressed_not_received"
+	// CodeAutopilotGone: the Autopilot entry a schedule Trigger names is off or no longer exists.
+	CodeAutopilotGone = "autopilot_gone"
 	// CodeModeOff: the case is inferred and the accept mode is off.
 	CodeModeOff = "mode_off"
 
@@ -124,7 +126,10 @@ func (p *policy) PromoteAfter() int {
 
 func (p *policy) AdmitsInferred(r []string) bool { return admitsInferred(p.s, r) }
 
-func (p *policy) Assess(a core.Assessment, strength string) (string, []core.Reason, bool, error) {
+func (p *policy) Assess(a core.Assessment, strength, via string) (string, []core.Reason, bool, error) {
+	if via == core.ViaAutopilot {
+		return autopilotOutcome(a, p.s)
+	}
 	return AssessmentOutcome(a, p.s, strength)
 }
 
@@ -184,6 +189,9 @@ func followsATicket(th core.Thread, tickets []core.Ticket) bool {
 }
 
 func (p *policy) Gate(t core.Trigger, th core.Thread, tickets []core.Ticket) core.Gate {
+	if t.Source == ScheduleSource {
+		return p.gateAutopilot(t)
+	}
 	part, ok := p.s.Sources[t.Source]
 	if !ok {
 		return p.refuse(t, CodeSourceUnconfigured, nil)
@@ -217,6 +225,17 @@ func (p *policy) Gate(t core.Trigger, th core.Thread, tickets []core.Ticket) cor
 		return p.gatePerson(t, th, tickets, part, basis, addressed, receiveAll)
 	}
 	return p.refuse(t, CodeNotAPerson, nil)
+}
+
+// gateAutopilot admits a Trigger an Autopilot entry raised: an inferred candidate whose rule is the entry itself.
+func (p *policy) gateAutopilot(t core.Trigger) core.Gate {
+	slug := t.Meta[metaAutopilot]
+	if e, ok := p.s.AutopilotEntry(slug); !ok || !e.Enabled {
+		return p.refuse(t, CodeAutopilotGone, map[string]string{"autopilot": slug})
+	}
+	basis := core.MandateBasis{Via: core.ViaAutopilot, Source: t.Source, Scope: t.Scope, Sender: slug,
+		Rules: []string{AutopilotRule(slug)}}
+	return p.admit(t, inferred, basis)
 }
 
 func (p *policy) gatePerson(t core.Trigger, th core.Thread, tickets []core.Ticket, part SourcePart,
@@ -305,6 +324,12 @@ func admitsInferred(s Settings, rules []string) bool {
 		return false
 	}
 	for _, name := range rules {
+		if slug, ok := strings.CutPrefix(name, autopilotPrefix); ok {
+			if e, found := s.AutopilotEntry(slug); !found || !e.Enabled {
+				return false
+			}
+			continue
+		}
 		if r := findRule(s.Rules, name); r == nil || !r.Enabled {
 			return false
 		}
@@ -341,6 +366,10 @@ func (p *policy) Revalidate(m core.Mandate) bool {
 func requesterHolds(s Settings, m core.Mandate) bool {
 	if m.Basis.Via == core.ViaOwner {
 		return true
+	}
+	if m.Basis.Via == core.ViaAutopilot {
+		e, ok := s.AutopilotEntry(m.Basis.Sender)
+		return ok && e.Enabled
 	}
 	src := m.Basis.Source
 	if src == "" {
@@ -401,12 +430,7 @@ func cellToday(part SourcePart, b core.MandateBasis, sender string) string {
 // (and no other), a proactive accept needs a matching rule with evidence of intent, and only auto mode accepts:
 // observe mode turns a positive assessment into an ignore marked would-accept, and off mode ignores it.
 func AssessmentOutcome(a core.Assessment, s Settings, strength string) (string, []core.Reason, bool, error) {
-	said := func() []core.Reason {
-		if strings.TrimSpace(a.Reason) == "" {
-			return nil
-		}
-		return []core.Reason{{Code: CodeSaid, Values: map[string]string{"text": a.Reason}}}
-	}
+	said := func() []core.Reason { return saidReasons(a) }
 	switch strength {
 	case explicit:
 		if a.Accept {
@@ -437,11 +461,25 @@ func AssessmentOutcome(a core.Assessment, s Settings, strength string) (string, 
 	if !matched {
 		return kindIgnore, append([]core.Reason{{Code: CodeNoMatchingRule}}, said()...), false, nil
 	}
+	return modeOutcome(a, s)
+}
+
+// saidReasons is the assessor's own words as a reason, or none when it said nothing.
+func saidReasons(a core.Assessment) []core.Reason {
+	if strings.TrimSpace(a.Reason) == "" {
+		return nil
+	}
+	return []core.Reason{{Code: CodeSaid, Values: map[string]string{"text": a.Reason}}}
+}
+
+// modeOutcome is what the accept mode makes of a positive assessment of an inferred candidate: auto accepts, observe
+// records an ignore marked would-accept, and off ignores it.
+func modeOutcome(a core.Assessment, s Settings) (string, []core.Reason, bool, error) {
 	switch s.Mode {
 	case ModeAuto:
-		return kindAccept, said(), false, nil
+		return kindAccept, saidReasons(a), false, nil
 	case ModeObserve:
-		return kindIgnore, append([]core.Reason{{Code: CodeWouldAccept}}, said()...), true, nil
+		return kindIgnore, append([]core.Reason{{Code: CodeWouldAccept}}, saidReasons(a)...), true, nil
 	}
 	return kindIgnore, []core.Reason{{Code: CodeModeOff}}, false, nil
 }
@@ -488,6 +526,12 @@ func Effects(tickets []core.Ticket, old, cur Settings) map[string]string {
 		}
 		var notes []string
 		for _, name := range t.Mandate.Basis.Rules {
+			if slug, ok := strings.CutPrefix(name, autopilotPrefix); ok {
+				if note := autopilotNote(old, cur, slug); note != "" {
+					notes = append(notes, note)
+				}
+				continue
+			}
 			or := findRule(old.Rules, name)
 			if or == nil || !or.Enabled {
 				continue
@@ -500,7 +544,7 @@ func Effects(tickets []core.Ticket, old, cur Settings) map[string]string {
 				notes = append(notes, fmt.Sprintf("The rule %q that matched your request changed. Its new text: %s", name, nr.Instructions))
 			}
 		}
-		if requesterHolds(old, t.Mandate) && !requesterHolds(cur, t.Mandate) {
+		if t.Mandate.Basis.Via != core.ViaAutopilot && requesterHolds(old, t.Mandate) && !requesterHolds(cur, t.Mandate) {
 			notes = append(notes, "The person who requested this work may no longer start work under the current Policy.")
 		}
 		if t.Mandate.Strength != explicit && old.Mode == ModeAuto && cur.Mode != ModeAuto {
