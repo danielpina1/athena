@@ -200,7 +200,7 @@ What a held repository (or a restricted session) turns into Proposals:
   `--repo`) is refused, and the fields are checked again when applied.
 
 A Ticket with a pending Proposal shows as waiting on you, and counts toward the section 2 count. The dashboard lists
-them in Needs you as "Review what Athena holds for you"; `athena proposals` lists them too.
+them in Needs you as "Review what Athena holds for you"; `athena proposals` lists them too, with the failed ones and their errors.
 
 **Applying.** `athena apply <id>` or the dashboard's Apply approves a Proposal. A held reply goes back to the Outbox
 and is sent. A push or pull request is made to happen by the node, once:

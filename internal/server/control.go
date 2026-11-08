@@ -47,7 +47,7 @@ const (
 	// OpPause and OpResume set and clear the kill switch (athena pause, athena resume).
 	OpPause  = "pause"
 	OpResume = "resume"
-	// OpProposals lists the pending Proposals; OpApply and OpDiscard (ID) apply or discard one.
+	// OpProposals lists the Proposals that wait on the owner, pending or failed; OpApply and OpDiscard (ID) apply or discard one.
 	OpProposals = "proposals"
 	OpApply     = "apply"
 	OpDiscard   = "discard"
