@@ -594,3 +594,18 @@ func TestRestrictedNeedsRecentClaude(t *testing.T) {
 		t.Errorf("standard session on an old Claude Code did not launch")
 	}
 }
+
+// On Linux the sandbox skips a read deny of a path that does not exist, so a standard session making Claude Code's
+// per-user directory later would leave it readable: it is made before the restricted session starts.
+func TestRestrictedTempMakesTheDeniedRoot(t *testing.T) {
+	old := tempBase
+	tempBase = t.TempDir()
+	t.Cleanup(func() { tempBase = old })
+	if err := makeRestrictedTemp(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	root := claudeTempRoots(os.Getuid())[0]
+	if st, err := os.Stat(root); err != nil || !st.IsDir() || st.Mode().Perm() != 0o700 {
+		t.Fatalf("%s: %v %v, want a private directory", root, st, err)
+	}
+}

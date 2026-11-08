@@ -158,6 +158,7 @@ is treated as restricted. What it gets (`internal/node/toolpolicy.go`, `rules.go
     path), so for a restricted session the well-known daemon sockets are masked (denied to reads and writes):
     `/var/run/docker.sock`, `/run/docker.sock`, `/run/containerd`, `/run/podman`, and `$XDG_RUNTIME_DIR` except the
     node socket.
+    A masked path that does not exist is skipped by Claude Code's sandbox, so a daemon that is not installed is no error.
 
 Every session, standard or restricted, is kept by the hook rules from reading `Config.Secrets` with Claude's file
 tools or naming them in a command, in any spelling (a symbolic link to the key, a search of a directory that holds it,
@@ -168,6 +169,7 @@ What the restricted policy does not give you, today:
 - **Claude's Read, Grep and Glob tools run outside the OS sandbox.** Their reach is checked by the hook rules alone
   (item 9), by path, not by the kernel.
 - On Linux, a Unix socket outside the masked list stays reachable.
+- On Linux, a masked path that appears only after the session started (a daemon started later) is not masked for it.
 - The read containment needs a Claude Code that knows `sandbox.filesystem.allowRead` (2.1.280 or newer). A restricted
   Ticket on an older one fails with a sentence saying so, and nothing starts. When Athena cannot read the version, the
   session starts; an older Claude Code then ignores `allowRead`, and the session's commands cannot read their own

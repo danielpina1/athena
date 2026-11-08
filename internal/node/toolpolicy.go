@@ -106,9 +106,15 @@ func (n *Node) restrictedSandboxConfig(goos, workDir string) *SandboxConfig {
 	return &c
 }
 
+// tempBase is the directory of the temporary roots below (a variable for tests). It is /tmp whatever $TMPDIR says: it
+// is where Claude Code puts its own, and it stops using a root too long for a Unix socket.
+var tempBase = "/tmp"
+
 // restrictedTempParent holds the temporary roots of restricted sessions: one directory, so that denying it covers the
-// roots of sessions that start later. It lies in /tmp: Claude Code stops using a root too long for a Unix socket.
-func restrictedTempParent(uid int) string { return fmt.Sprintf("/tmp/athena-%d", uid) }
+// roots of sessions that start later.
+func restrictedTempParent(uid int) string {
+	return filepath.Join(tempBase, fmt.Sprintf("athena-%d", uid))
+}
 
 // restrictedTempDir is the temporary root of a restricted session working in workDir (CLAUDE_CODE_TMPDIR). Claude Code
 // gives a sandboxed command the whole per-user directory in its root as $TMPDIR, so the session needs a root of its own
@@ -123,14 +129,15 @@ func restrictedTempDir(workDir string) string {
 // CLAUDE_CODE_TMPDIR.
 func claudeTempRoots(uid int) []string {
 	perUser := fmt.Sprintf("claude-%d", uid)
-	roots := []string{filepath.Join("/tmp", perUser), "/tmp/claude"}
+	roots := []string{filepath.Join(tempBase, perUser), filepath.Join(tempBase, "claude")}
 	if d := os.Getenv("CLAUDE_CODE_TMPDIR"); filepath.IsAbs(d) {
 		roots = append(roots, filepath.Join(d, perUser))
 	}
 	return roots
 }
 
-// makeRestrictedTemp creates the session's temporary root, private to the node's user. It refuses a parent in /tmp it
+// makeRestrictedTemp creates the session's temporary root, private to the node's user, and Claude Code's per-user root.
+// It refuses a parent in /tmp it
 // did not make: anyone can create names there, and a session's temporary files must not be readable to another user.
 func makeRestrictedTemp(workDir string) error {
 	parent := restrictedTempParent(os.Getuid())
@@ -143,6 +150,11 @@ func makeRestrictedTemp(workDir string) error {
 	}
 	if sys, ok := st.Sys().(*syscall.Stat_t); !st.IsDir() || st.Mode().Perm() != 0o700 || !ok || int(sys.Uid) != os.Getuid() {
 		return fmt.Errorf("%s is not a private directory of this user", parent)
+	}
+	// Claude Code's own root too, as it would make it: on Linux the sandbox skips a read deny of a path that does not
+	// exist, so a standard session making it later would leave it open to this one.
+	if err := os.MkdirAll(claudeTempRoots(os.Getuid())[0], 0o700); err != nil {
+		return err
 	}
 	return os.MkdirAll(restrictedTempDir(workDir), 0o700)
 }
