@@ -163,6 +163,16 @@ test("a rule needs a unique name before it can be saved", async () => {
   expect((screen.getByRole("button", { name: "Save" }) as HTMLButtonElement).disabled).toBe(false);
 });
 
+test("a rule cannot take a name in the Autopilot namespace", async () => {
+  const user = userEvent.setup();
+  renderBlock("general");
+  await user.click(screen.getByRole("button", { name: "Add rule" }));
+  const names = screen.getAllByRole("textbox", { name: "Name" });
+  await user.type(names[1], "autopilot/deps");
+  expect(screen.getByText(/autopilot\/ is reserved/)).toBeTruthy();
+  expect((screen.getByRole("button", { name: "Save" }) as HTMLButtonElement).disabled).toBe(true);
+});
+
 test("rules move up and down and are removed", async () => {
   const user = userEvent.setup();
   load({

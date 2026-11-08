@@ -186,7 +186,7 @@ func (s *Source) manifestChanged(ctx context.Context, e Entry, st *state, branch
 	if len(changed) > 0 {
 		ok, err := s.fireEvent(e, st, firing{
 			ID:  fmt.Sprintf("%s:%s:manifest:%s", SourceName, e.Slug, sha),
-			Why: fmt.Sprintf("dependency manifests changed on %s of %s: %s.", branch, e.Repo, strings.Join(changed, ", ")),
+			Why: fmt.Sprintf("dependency manifests changed on %s of %s: %s.", branch, e.Repo, listManifests(changed)),
 		}, now)
 		if err != nil || !ok {
 			return err
@@ -235,6 +235,17 @@ func (s *Source) ciRed(ctx context.Context, e Entry, st *state, branch, sha stri
 	}
 	st.Episode = episode
 	return s.save(e.Slug, st)
+}
+
+// maxListedManifests bounds the paths named in the Trigger text.
+const maxListedManifests = 20
+
+// listManifests names the first maxListedManifests paths and counts the others.
+func listManifests(changed []string) string {
+	if len(changed) <= maxListedManifests {
+		return strings.Join(changed, ", ")
+	}
+	return fmt.Sprintf("%s and %d more", strings.Join(changed[:maxListedManifests], ", "), len(changed)-maxListedManifests)
 }
 
 // manifestFiles are the changed dependency manifests, sorted and without repeats. A path with a character outside

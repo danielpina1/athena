@@ -10,7 +10,7 @@ does not do, and where its setting lives. Every claim here is in the code named 
 | Brake | Stops | Never stops |
 | --- | --- | --- |
 | **Waiting-on-you brake** (`wip_brake`) | Starting work Athena chose itself (an *inferred* candidate, which includes an Autopilot firing) in a repository where the number of things waiting on you has reached the ceiling. The candidate is held, not dropped, and starts again when you catch up. | Work you ask for: your own `athena task`, a mention that addresses Athena (an *explicit* candidate), and a follow-up that goes to a Ticket's own worker. Work already running. |
-| **Kill switch** (`athena pause`) | Autopilot firing (nothing fires, nothing is forgotten), deciding on new Triggers, the router, every new session launch, the sending of replies, and applying a held push or pull request. Running sessions stop at the end of their turn. | Reading GitHub (Sources keep polling, and Triggers queue), the dashboard, your answers to Approvals, your Apply and Discard, and Policy changes. A router turn that was already running when you paused may finish, so one Ticket can still be created right after (not started). Nothing queued is dropped. |
+| **Kill switch** (`athena pause`) | Autopilot entries firing (nothing fires, nothing is forgotten), deciding on new Triggers, the router, every new session launch, the sending of replies, and applying a held push or pull request. Running sessions stop at the end of their turn. | Reading GitHub (Sources keep polling, and Triggers queue), the dashboard, your answers to Approvals, your Apply and Discard, and Policy changes. A router turn that was already running when you paused may finish, so one Ticket can still be created right after (not started). Nothing queued is dropped. |
 | **Tool policy** (`restricted`) | What a session started by a sender you did not allow can do: no web beyond GitHub, no escalation, no `follow_thread`, a required sandbox, reads kept to its own directory, and its push, pull request and replies held for you. | A session of someone you trust (standard policy), and everything inside the restricted sandbox. |
 | **Shadow mode (held for you)** | Everything a repository's work would send outward: pushes, pull requests and replies are held as Proposals until you apply them. | Reading the repository, working in the worktree, and committing locally. |
 
@@ -399,7 +399,7 @@ These are choices the plan made for you. Each is yours to overturn.
 | B | An entry is its own rule, `autopilot/<slug>`. No Policy rule must match, and no evidence quote is asked for. | Otherwise every GitHub assessment would have to judge every entry, and you would write each instruction twice. |
 | C | At most one run of an entry at a time. While its Thread has a queued Trigger, an Eval, a held candidate or an open Ticket, the entry does not fire. | Otherwise a nightly job on a Ticket awaiting your review would queue a new run every night. |
 | D | A clock firing that comes due while the entry is busy is dropped. A repository event is kept and fires when the entry is free, for the newest head only. | A skipped night has a next night. A branch move has no second chance. |
-| E | After downtime or sleep, only the latest missed firing runs, if it is under 24 hours old, and its text says it is a catch-up and how late. A firing less than 5 minutes late is not called one. | Your server is a laptop: a nightly job should run once when it wakes. |
+| E | After downtime or sleep, only the latest missed firing runs, if it is under 24 hours old, and its text says it is a catch-up and how late. A firing at most 5 minutes late is not called a catch-up. | Your server is a laptop: a nightly job should run once when it wakes. |
 | F | Firings are at least 15 minutes apart, and at most 24 per entry per local day, counted across restarts. | A merge by Autopilot that moves the default branch could otherwise start a loop, and a crash loop is when the cap matters most. |
 | G | Cron times are local time. A time that does not exist on a daylight-saving day is skipped; one that happens twice fires once. | You think in local time. |
 | H | CI red defaults to 4 hours (1 to 168). "Red" means at least one finished check suite on the head commit ended `failure` or `timed_out`. Athena's own suites do not count; `cancelled` does not either. | `cancelled` is usually a superseded run. |
@@ -412,7 +412,10 @@ Some details the table does not carry:
 - **Starting over.** Nothing fires for the past when an entry starts over. That happens when you disable an entry
   and enable it again, delete one and make it again, edit its `cron` or `event`, or change an event entry's repository.
   The day's count and the last firing are kept, so the cap of 24 survives. A new entry begins from what the
-  repository is now.
+  repository is now. Renaming an entry is a delete plus a create: a new Thread and new state, an open Ticket of the
+  old name is told it no longer applies, and old runs are found by searching the old name's slug.
+- **Turning an entry off with a pull request open.** The Ticket is told, and follow-ups on that pull request no longer
+  reach the Ticket until the entry is on again.
 - **Waiting for a repository.** An enabled entry whose repository the GitHub Source does not poll waits, and the
   `schedule` row in the dashboard's health shows the reason. Add the repository to the GitHub Source or turn the entry off.
 - **The health row.** The `schedule` row appears in health only while an entry is enabled. A repository whose events

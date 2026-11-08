@@ -152,6 +152,7 @@ export function validateGeneral(g: General): string | undefined {
   for (const r of g.rules) {
     const name = r.name.trim();
     if (name === "") return "Every rule needs a name.";
+    if (name.startsWith("autopilot/")) return "autopilot/ is reserved for Autopilot entries.";
     if (seen.has(name)) return `Two rules are named ${name}.`;
     seen.add(name);
   }

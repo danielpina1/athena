@@ -3,6 +3,7 @@ package schedule
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -405,5 +406,21 @@ func TestEventHealthClearsWhenEntryGoes(t *testing.T) {
 	r.pollAt("2026-11-01 12:15:00")
 	if err := r.src.Health(); err != nil {
 		t.Fatalf("health after the entry went = %v", err)
+	}
+}
+
+func TestManifestListIsCapped(t *testing.T) {
+	r, fr := eventRig(t, "manifest_changed", "2026-11-01 12:00:00")
+	r.pollAt("2026-11-01 12:00:00")
+	var files []string
+	for i := 0; i < 25; i++ {
+		files = append(files, fmt.Sprintf("m%02d/go.mod", i))
+	}
+	fr.head, fr.files = shaB, files
+	r.pollAt("2026-11-01 12:05:00")
+	r.fires(1)
+	text := r.lastText()
+	if !strings.Contains(text, "m19/go.mod and 5 more.") || strings.Contains(text, "m20/go.mod") {
+		t.Fatalf("text = %q, want the first 20 paths and ' and 5 more'", text)
 	}
 }

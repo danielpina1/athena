@@ -330,6 +330,9 @@ func Validate(s Settings) error {
 		if name == "" {
 			return errors.New("policy: a rule has no name")
 		}
+		if strings.HasPrefix(name, autopilotPrefix) {
+			return fmt.Errorf("policy: rule %q cannot start with %q, which Autopilot entries use", name, autopilotPrefix)
+		}
 		if seen[name] {
 			return fmt.Errorf("policy: rule %q appears twice", name)
 		}

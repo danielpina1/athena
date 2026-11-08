@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -129,11 +130,21 @@ func (s *Source) Listens(thread string) bool {
 func (s *Source) Health() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for slug, repo := range s.unknown {
-		return fmt.Errorf("schedule: entry %s targets %s, which the github source does not know", slug, repo)
+	slugs := make([]string, 0, len(s.unknown))
+	for slug := range s.unknown {
+		slugs = append(slugs, slug)
 	}
-	for repo, f := range s.eventBad {
-		if f.polls >= eventFailuresReported {
+	sort.Strings(slugs)
+	for _, slug := range slugs {
+		return fmt.Errorf("schedule: entry %s targets %s, which the github source does not know", slug, s.unknown[slug])
+	}
+	repos := make([]string, 0, len(s.eventBad))
+	for repo := range s.eventBad {
+		repos = append(repos, repo)
+	}
+	sort.Strings(repos)
+	for _, repo := range repos {
+		if f := s.eventBad[repo]; f.polls >= eventFailuresReported {
 			return fmt.Errorf("schedule: repository events of %s failed %d polls in a row: %s", repo, f.polls, f.err)
 		}
 	}

@@ -353,3 +353,18 @@ func TestDeletedThenRecreatedEntryStartsOver(t *testing.T) {
 	r.tickAt("2026-11-04 03:00:10")
 	r.fires(1)
 }
+
+func TestHealthNamesTheFirstUnknownEntryInSortedOrder(t *testing.T) {
+	r := newRig(t, "0 3 * * *", "2026-11-01 12:00:00")
+	r.entry.Slug, r.entry.Repo = "zeta", "o/zeta"
+	r.more = []Entry{{Slug: "alpha", Name: "Alpha", Instructions: "x", Repo: "o/alpha", Cron: "0 3 * * *"}}
+	r.src = r.source()
+	r.known = false
+	r.src.Tick()
+	want := "schedule: entry alpha targets o/alpha, which the github source does not know"
+	for i := 0; i < 30; i++ {
+		if err := r.src.Health(); err == nil || err.Error() != want {
+			t.Fatalf("Health = %v, want %q", err, want)
+		}
+	}
+}

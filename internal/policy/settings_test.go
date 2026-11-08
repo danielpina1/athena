@@ -384,3 +384,15 @@ func TestPlan10SettingsDoNotChangeVersion(t *testing.T) {
 		t.Fatal("plan 10 settings must not change the Policy version")
 	}
 }
+
+func TestValidateReservesAutopilotRuleNamespace(t *testing.T) {
+	s := Defaults(nil)
+	s.Rules = []Rule{{Name: "autopilot/x", Enabled: true}}
+	if err := Validate(s); err == nil || !strings.Contains(err.Error(), "autopilot/") {
+		t.Fatalf("Validate(autopilot/x) = %v, want a refusal naming the prefix", err)
+	}
+	s.Rules = []Rule{{Name: "autopilotx", Enabled: true}}
+	if err := Validate(s); err != nil {
+		t.Fatalf("Validate(autopilotx) = %v", err)
+	}
+}
