@@ -14,6 +14,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/danielpina1/athena/internal/core"
 	"github.com/danielpina1/athena/internal/server"
 )
 
@@ -331,9 +332,13 @@ func (c *command) proposalCommand(args []string) int {
 	return 0
 }
 
-// proposalLine is one pending Proposal: id, repository, kind and summary, two spaces apart.
+// proposalLine is one Proposal: id, repository, kind and summary, two spaces apart, and for a failed one its error.
 func proposalLine(p server.ProposalRow) string {
-	return p.ID + "  " + dash(p.Repo) + "  " + p.Kind + "  " + p.Summary
+	line := p.ID + "  " + dash(p.Repo) + "  " + p.Kind + "  " + p.Summary
+	if p.State == core.ProposalFailed {
+		line += "  failed: " + p.Error
+	}
+	return line
 }
 
 func dash(s string) string {

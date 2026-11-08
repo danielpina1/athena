@@ -19,8 +19,10 @@ type evalPolicy struct {
 	gates     map[string]Gate
 	holds     bool
 	assessErr error
-	// trust is the class the policy gives every Trigger.
+	// trust is the class the policy gives every Trigger not in trustOf.
 	trust string
+	// trustOf is the class of the Triggers it names, by ID.
+	trustOf map[string]string
 	// ceiling is the WIP ceiling of every repository; 3 when 0.
 	ceiling int
 	// shadow names the repositories held for the owner.
@@ -63,7 +65,12 @@ func (p *evalPolicy) WIPCeiling(string) int {
 	return 3
 }
 func (p *evalPolicy) Shadow(repo string) bool { return p.shadow[repo] }
-func (p *evalPolicy) Trust(Trigger) string    { return p.trust }
+func (p *evalPolicy) Trust(t Trigger) string {
+	if c, ok := p.trustOf[t.ID]; ok {
+		return c
+	}
+	return p.trust
+}
 func (p *evalPolicy) ToolPolicy(class string) string {
 	if p.restricted[class] {
 		return ToolRestricted
@@ -839,6 +846,40 @@ func TestAcceptRecordsTrust(t *testing.T) {
 	}
 	eq(t, "trust", r.Ticket.Mandate.Trust, TrustCollaborator)
 	eq(t, "trust class", r.Ticket.Mandate.TrustClass(), TrustCollaborator)
+}
+
+// A batch that holds a Trigger of a class under the restricted tool policy runs restricted: the Mandate records the
+// least trusted such class, whatever its primary Trigger's. A batch with none keeps its primary's class.
+func TestAcceptRecordsLeastTrustedRestrictedClass(t *testing.T) {
+	for _, c := range []struct {
+		name       string
+		trustOf    map[string]string
+		restricted map[string]bool
+		want       string
+	}{
+		{"none restricted", map[string]string{"c:1": TrustAllowed, "c:2": TrustStranger}, nil, TrustAllowed},
+		{"a stranger in the batch", map[string]string{"c:1": TrustAllowed, "c:2": TrustStranger}, map[string]bool{TrustStranger: true}, TrustStranger},
+		{"the least trusted of two", map[string]string{"c:1": TrustCollaborator, "c:2": TrustBot, "c:3": TrustStranger},
+			map[string]bool{TrustBot: true, TrustStranger: true}, TrustStranger},
+		{"the primary is restricted", map[string]string{"c:1": TrustStranger, "c:2": TrustAllowed}, map[string]bool{TrustStranger: true}, TrustStranger},
+		{"a restricted class above a standard one", map[string]string{"c:1": TrustAllowed, "c:2": TrustBot, "c:3": TrustStranger},
+			map[string]bool{TrustBot: true}, TrustBot},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h := newEvals(t)
+			h.pol.trust, h.pol.trustOf, h.pol.restricted = TrustAllowed, c.trustOf, c.restricted
+			issue := "github:o/r#1"
+			h.receive(h.request("c:1", issue))
+			h.receive(h.request("c:2", issue))
+			h.receive(h.request("c:3", issue))
+			h.due()
+			r := h.decide(DecisionInput{TriggerID: "c:1", Kind: "accept", Title: "Fix it"})
+			if r.Ticket == nil {
+				t.Fatalf("no ticket: %+v", r)
+			}
+			eq(t, "trust", r.Ticket.Mandate.Trust, c.want)
+		})
+	}
 }
 
 func TestLegacyMandateTrust(t *testing.T) {

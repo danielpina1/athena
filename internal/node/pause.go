@@ -79,6 +79,18 @@ func (r *runner) owesReportAtPause() bool {
 	return r.reportOwed
 }
 
+// parkOwing parks a session whose turn just ended owing its Report (owesReportAtPause), before the handoff park can take
+// it: that one records no pause, and the owed Report would be lost. A resume that came since the turn ended leaves
+// nothing to park for, so the turn is checked as usual.
+func (r *runner) parkOwing() {
+	r.parkIfPaused()
+	if r.park || r.n.Paused() {
+		return
+	}
+	r.reportOwed = false
+	r.turnEnded()
+}
+
 // parkIfPaused parks the session while the node is paused and its turn is over with nothing sent since: it records the
 // turn's end, then the pause (AssignmentPaused, with whether the turn owed a Report), so a restart sees the Interruption
 // after the idle turn; the runner ends the process. A turn that waits on an Approval is not over: it parks when it ends.

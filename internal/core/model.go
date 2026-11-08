@@ -197,11 +197,11 @@ type Mandate struct {
 	Thread string `json:"thread,omitempty"`
 	// Basis records how the gate admitted the Trigger; revalidation reads it.
 	Basis MandateBasis `json:"basis,omitzero"`
-	// Trust is the trust class of the sender the Mandate was given on, fixed at accept (see TrustClass).
+	// Trust is the trust class of the batch of Triggers the Mandate was given on, fixed at accept (batchTrust; see TrustClass).
 	Trust string `json:"trust,omitempty"`
 }
 
-// Trust classes of a sender. The Policy classifies each Trigger; a Mandate records the class of its primary Trigger.
+// Trust classes of a sender. The Policy classifies each Trigger; a Mandate records the class of its batch (batchTrust).
 const (
 	TrustOwner        = "owner"
 	TrustAllowed      = "allowed"

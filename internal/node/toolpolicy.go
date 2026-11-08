@@ -1,16 +1,23 @@
 package node
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
+	"syscall"
 
 	"github.com/danielpina1/athena/internal/core"
 	"github.com/danielpina1/athena/internal/policy"
+	"github.com/danielpina1/athena/internal/runtime/claude"
 	"github.com/danielpina1/athena/internal/runtime/rt"
 )
 
@@ -90,13 +97,66 @@ func (n *Node) restrictedSandboxConfig(goos, workDir string) *SandboxConfig {
 	}
 	c.Required = true
 	c.AllowedDomains = nil
-	c.AllowWrite = []string{restrictedCacheDir(workDir)}
+	c.AllowWrite = []string{restrictedCacheDir(workDir), restrictedTempDir(workDir)}
 	deny, allow := n.restrictedReads(goos, workDir)
 	c.DenyRead = append(slices.Clone(c.DenyRead), deny...)
 	slices.Sort(c.DenyRead)
 	c.DenyRead = slices.Compact(c.DenyRead)
 	c.AllowRead = allow
 	return &c
+}
+
+// tempBase is the directory of the temporary roots below (a variable for tests). It is /tmp whatever $TMPDIR says: it
+// is where Claude Code puts its own, and it stops using a root too long for a Unix socket.
+var tempBase = "/tmp"
+
+// restrictedTempParent holds the temporary roots of restricted sessions: one directory, so that denying it covers the
+// roots of sessions that start later.
+func restrictedTempParent(uid int) string {
+	return filepath.Join(tempBase, fmt.Sprintf("athena-%d", uid))
+}
+
+// restrictedTempDir is the temporary root of a restricted session working in workDir (CLAUDE_CODE_TMPDIR). Claude Code
+// gives a sandboxed command the whole per-user directory in its root as $TMPDIR, so the session needs a root of its own
+// for that directory to be denied (claudeTempRoots) without taking its commands' temporary files with it.
+func restrictedTempDir(workDir string) string {
+	sum := sha256.Sum256([]byte(filepath.Clean(workDir)))
+	return filepath.Join(restrictedTempParent(os.Getuid()), hex.EncodeToString(sum[:4]))
+}
+
+// claudeTempRoots are where Claude Code keeps every session's temporary files of this user, a Ticket's background task
+// output among them: the default per-user directory, the older shared one, and the per-user directory in the owner's
+// CLAUDE_CODE_TMPDIR.
+func claudeTempRoots(uid int) []string {
+	perUser := fmt.Sprintf("claude-%d", uid)
+	roots := []string{filepath.Join(tempBase, perUser), filepath.Join(tempBase, "claude")}
+	if d := os.Getenv("CLAUDE_CODE_TMPDIR"); filepath.IsAbs(d) {
+		roots = append(roots, filepath.Join(d, perUser))
+	}
+	return roots
+}
+
+// makeRestrictedTemp creates the session's temporary root, private to the node's user, and Claude Code's per-user root.
+// It refuses a parent in /tmp it
+// did not make: anyone can create names there, and a session's temporary files must not be readable to another user.
+func makeRestrictedTemp(workDir string) error {
+	parent := restrictedTempParent(os.Getuid())
+	if err := os.Mkdir(parent, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
+		return err
+	}
+	st, err := os.Lstat(parent)
+	if err != nil {
+		return err
+	}
+	if sys, ok := st.Sys().(*syscall.Stat_t); !st.IsDir() || st.Mode().Perm() != 0o700 || !ok || int(sys.Uid) != os.Getuid() {
+		return fmt.Errorf("%s is not a private directory of this user", parent)
+	}
+	// Claude Code's own root too, as it would make it: on Linux the sandbox skips a read deny of a path that does not
+	// exist, so a standard session making it later would leave it open to this one.
+	if err := os.MkdirAll(claudeTempRoots(os.Getuid())[0], 0o700); err != nil {
+		return err
+	}
+	return os.MkdirAll(restrictedTempDir(workDir), 0o700)
 }
 
 // restrictedCacheDir holds a restricted session's package and build caches: in the Ticket's own .athena directory,
@@ -138,11 +198,13 @@ func makeRestrictedCaches(workDir string) error {
 // they may read again inside that (Claude Code's allowRead, which takes precedence over denyRead):
 //   - denied: the node's secrets (Config.Secrets: the GitHub App key) and the owner's credentials the rules know
 //     (credRel), each in its configured and its resolved spelling; the owner's home directory, Athena's state directory,
-//     the work root, the transcripts and Claude Code's session transcripts, each as a whole, so that what appears there
-//     later (another Ticket's directory or transcript) is denied too; and on Linux the daemons' sockets (daemonSockets).
-//   - read again: what the session needs: its working directory and git directories, the node socket, the gh shim, the
-//     athena binary, the CA bundle, Claude Code's shell snapshots and install, and the toolchains on PATH under the
-//     home directory (homeToolchains). Nothing that holds or lies in a secret or credential is read again.
+//     the work root, the transcripts, Claude Code's session transcripts and temporary roots (claudeTempRoots) and those
+//     of the restricted sessions, each as a whole, so that what appears there later (another Ticket's directory, output
+//     or transcript) is denied too; and on Linux the daemons' sockets (daemonSockets).
+//   - read again: what the session needs: its working directory and git directories, its own temporary root, the node
+//     socket, the gh shim, the athena binary, the CA bundle, Claude Code's install, and the toolchains on PATH under the
+//     home directory (homeToolchains). Claude Code's shell snapshots are not: they are every session's, and it carries on
+//     without one. Nothing that holds or lies in a secret or credential is read again.
 func (n *Node) restrictedReads(goos, workDir string) (deny, allow []string) {
 	home, _ := os.UserHomeDir()
 	var guarded []string
@@ -155,7 +217,7 @@ func (n *Node) restrictedReads(goos, workDir string) (deny, allow []string) {
 		}
 	}
 	deny = slices.Clone(guarded)
-	wholes := []string{home, n.cfg.StateDir, n.cfg.WorkRoot}
+	wholes := append([]string{home, n.cfg.StateDir, n.cfg.WorkRoot, restrictedTempParent(os.Getuid())}, claudeTempRoots(os.Getuid())...)
 	if home != "" {
 		wholes = append(wholes, filepath.Join(home, ".claude", "projects"))
 	}
@@ -170,15 +232,12 @@ func (n *Node) restrictedReads(goos, workDir string) (deny, allow []string) {
 	deny = append(deny, daemonSockets(goos, os.Getenv("XDG_RUNTIME_DIR"), n.cfg.SocketPath)...)
 
 	gitDir, common := gitDirs(workDir)
-	need := []string{workDir, gitDir, common, n.cfg.SocketPath, n.cfg.AthenaBin}
+	need := []string{workDir, gitDir, common, n.cfg.SocketPath, n.cfg.AthenaBin, restrictedTempDir(workDir)}
 	if n.cfg.StateDir != "" {
 		need = append(need, filepath.Join(n.cfg.StateDir, ShimsDir))
 	}
 	if n.cfg.Sandbox != nil {
 		need = append(need, n.cfg.Sandbox.CAFile)
-	}
-	if home != "" {
-		need = append(need, filepath.Join(home, ".claude", "shell-snapshots"))
 	}
 	if bin := n.cfg.ClaudeBinary; bin != "" {
 		if p, err := exec.LookPath(bin); err == nil {
@@ -210,9 +269,16 @@ func spellings(p string) []string {
 	return []string{c, r}
 }
 
+// homeToolchainRoots are where toolchains install themselves under the home directory, relative to it. A directory is
+// read again only below one of these: anything else on PATH may be a project's (~/src/proj/bin), and reading it would
+// give back the project.
+var homeToolchainRoots = []string{".nvm", ".fnm", ".volta", ".bun", ".deno", ".cargo", ".rustup", ".pyenv", ".rbenv", ".asdf", ".sdkman",
+	".ghcup", ".dotnet", ".npm-global", ".poetry", ".local/bin", ".local/share/fnm", ".local/share/mise", ".local/share/pnpm", "Library/pnpm",
+	"go/bin"}
+
 // homeToolchains are the toolchains a restricted session's commands may run from the owner's home directory: each
-// directory on path that lies below home, and, for one named bin, its parent too when that is a toolchain's own
-// install two levels or more below home (~/.nvm/versions/node/v22, not ~/.local), whose libraries the binaries need.
+// directory on path below one of homeToolchainRoots, and, for one named bin, its parent too when that is a toolchain's
+// own install two levels or more below home (~/.nvm/versions/node/v22, not ~/.local), whose libraries the binaries need.
 func homeToolchains(home, path string) []string {
 	if home == "" {
 		return nil
@@ -224,7 +290,7 @@ func homeToolchains(home, path string) []string {
 			continue
 		}
 		e = filepath.Clean(e)
-		if e == home || !within(home, e) {
+		if !slices.ContainsFunc(homeToolchainRoots, func(r string) bool { return within(filepath.Join(home, filepath.FromSlash(r)), e) }) {
 			continue
 		}
 		out = append(out, e)
@@ -295,15 +361,43 @@ func denyAllBut(root string, keep []string) []string {
 	return walk(root)
 }
 
-// sandboxUnavailableError is a restricted session's launch on a machine that cannot sandbox it.
-type sandboxUnavailableError struct{ cause string }
+// minRestrictedClaude is the oldest Claude Code a restricted session runs on: the first that knows
+// sandbox.filesystem.allowRead, without which the read containment of restrictedReads does not hold.
+const minRestrictedClaude = "2.1.280"
 
-func (e *sandboxUnavailableError) Error() string { return restrictedSandboxSummary + e.cause }
+// sandboxUnavailableError is a restricted session's launch on a machine that cannot start it; msg is the whole sentence
+// the Failed report says.
+type sandboxUnavailableError struct{ msg string }
+
+func (e *sandboxUnavailableError) Error() string { return e.msg }
 
 // checkRestrictedSandbox is nil when the session may start: it is standard, or this machine can sandbox it.
 func (n *Node) checkRestrictedSandbox(s *session) error {
 	if !s.restricted() || n.canSandbox() {
 		return nil
 	}
-	return &sandboxUnavailableError{cause: fmt.Sprintf("the sandbox runs on macOS and Linux, and this machine runs %s", runtime.GOOS)}
+	return &sandboxUnavailableError{msg: restrictedSandboxSummary + fmt.Sprintf("the sandbox runs on macOS and Linux, and this machine runs %s", runtime.GOOS)}
+}
+
+// checkRestrictedClaude is nil when the session may start: it is standard, or its Claude Code is new enough, or its
+// version cannot be read (a session on one that ignores allowRead fails closed anyway: docs/dev/autonomy.md §5).
+func (n *Node) checkRestrictedClaude(s *session) error {
+	if !s.restricted() {
+		return nil
+	}
+	v := n.claudeVersion(n.ctx)
+	if enough, known := claude.AtLeast(v, minRestrictedClaude); enough || !known {
+		return nil
+	}
+	return &sandboxUnavailableError{msg: fmt.Sprintf("This Ticket came from someone outside your allow list, and such work needs Claude Code %s or newer; this machine has %s.",
+		minRestrictedClaude, v)}
+}
+
+// installedClaudeVersion is the version the node's Claude Code runtime reports, "" when there is none.
+func (n *Node) installedClaudeVersion(ctx context.Context) string {
+	r, ok := n.cfg.Runtimes[core.RuntimeClaude]
+	if !ok {
+		return ""
+	}
+	return r.Check(ctx).Version
 }

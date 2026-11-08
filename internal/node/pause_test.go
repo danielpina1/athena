@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/danielpina1/athena/internal/core"
+	"github.com/danielpina1/athena/internal/runtime/rt"
 )
 
 // parkedByPause reports whether the Ticket's latest Assignment still runs, with its session, and has an open
@@ -277,5 +278,55 @@ func TestPausedBusySessionGetsNoInputs(t *testing.T) {
 	})
 	if n, _ := h.starts(tk.ID); n != 1 {
 		t.Fatalf("claude started %d times, want the same process", n)
+	}
+}
+
+// A handed-off session whose turn ends under the pause owing a Report records the pause: the handoff park alone would
+// lose the Report, and the resume would not start the session to ask for it.
+func TestPausedHandedOffSessionRecordsOwedReport(t *testing.T) {
+	h := newHarness(t, nil)
+	t.Setenv("ATHENA_FAKE_FIXTURE", openTurnFixture(t))
+	tk := h.submit("Task", "")
+	_, a := h.running(tk.ID)
+	if err := h.eng.BindThread(tk.ID, "github:o/r#1", true); err != nil {
+		t.Fatal(err)
+	}
+	if got := h.report(tk.ID, a.ID, core.ReportReady, "PR is up"); !got.OK {
+		t.Fatalf("report = %+v", got)
+	}
+	s := h.n.lookup(tk.ID, a.ID)
+	h.eventually("the handoff seen", s.handedOff)
+	var sent []string
+	r := &runner{n: h.n, s: s, eng: h.eng, log: s.log, sent: map[string]bool{}, started: true, initSeen: true,
+		send: func(text string) error { sent = append(sent, text); return nil }}
+	r.inputSent()
+	h.n.paused.Store(true)
+	defer h.n.paused.Store(false)
+	r.onEvent(rt.TurnEnd{OK: true, Subtype: "success"})
+	got, _ := h.ticket(tk.ID)
+	if i := got.LatestAssignment().OpenInterruption(); i == nil || i.Reason != core.InterruptPaused || !i.ReportOwed {
+		t.Fatalf("interruption = %+v, want the pause owing a Report", i)
+	}
+	if !r.park || len(sent) != 0 {
+		t.Fatalf("park %v, sent %q", r.park, sent)
+	}
+}
+
+// A resume that lands between the turn's end and its parking leaves no owed Report behind: the turn is checked as if
+// the pause had never been, and the worker is nudged.
+func TestResumeBeforeParkChecksTheOwedTurn(t *testing.T) {
+	h := newHarness(t, nil)
+	t.Setenv("ATHENA_FAKE_FIXTURE", openTurnFixture(t))
+	tk := h.submit("Task", "")
+	_, a := h.running(tk.ID)
+	s := h.n.lookup(tk.ID, a.ID)
+	var sent []string
+	r := &runner{n: h.n, s: s, eng: h.eng, log: s.log, sent: map[string]bool{}, started: true, initSeen: true,
+		send: func(text string) error { sent = append(sent, text); return nil }}
+	r.inputSent()
+	r.idle, r.reportOwed = true, true // the turn ended owing, then the resume came
+	r.parkOwing()
+	if len(sent) != 1 || sent[0] != nudgeText || r.reportOwed || r.park {
+		t.Fatalf("sent %q, reportOwed %v, park %v; want one nudge and nothing owed", sent, r.reportOwed, r.park)
 	}
 }

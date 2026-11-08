@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/danielpina1/athena/internal/core"
 	"github.com/danielpina1/athena/internal/server"
 )
 
@@ -251,5 +252,9 @@ func TestProposalLineFormat(t *testing.T) {
 	}
 	if got := proposalLine(server.ProposalRow{ID: "p-2", Kind: "reply", Summary: "Reply"}); got != "p-2  -  reply  Reply" {
 		t.Errorf("a proposal without a repository: %q", got)
+	}
+	failed := server.ProposalRow{ID: "p-3", Repo: "acme/web", Kind: "push", Summary: "Push b", State: core.ProposalFailed, Error: "remote rejected"}
+	if got, want := proposalLine(failed), "p-3  acme/web  push  Push b  failed: remote rejected"; got != want {
+		t.Errorf("a failed proposal: %q, want %q", got, want)
 	}
 }

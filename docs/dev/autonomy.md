@@ -78,9 +78,7 @@ nothing; it says "the assignment starts on resume" for each. `athena resume` the
 Who may resume: `athena pause` and `athena resume` run on the local socket and need nothing more. The dashboard's
 **Pause** needs no re-authentication (a pause is always safe); its **Resume** needs a fresh passkey confirmation.
 
-Known limits, kept as they are: a busy session still receives deliveries while paused; a handed-off session's owed
-Report is dropped under pause; and a resume that lands between a turn ending and its parking can leave that Ticket
-"working" until its next Input.
+Known limit, kept as it is: a busy session still receives deliveries while paused.
 
 ## 4. Trust classes
 
@@ -98,8 +96,9 @@ wins:
 
 The GitHub Source copies `author_association` from the issue, pull request or comment into the Trigger's
 `association` metadata. Only the Policy reads it; the router never sees or sets a class. A Mandate records its class
-when the Ticket is created, and the Ticket's sessions use that class's tool policy. A Mandate made before classes were
-recorded counts as `owner` (owner), `bot` (a bot) or `allowed` (anything else the gate admitted).
+when the Ticket is created, and the Ticket's sessions use that class's tool policy: the class of the Trigger that
+started it, or, when a Trigger batched with it has a class under the restricted policy, the least trusted such class,
+since the session reads that text too. A Mandate made before classes were recorded counts as `owner` (owner), `bot` (a bot) or `allowed` (anything else the gate admitted).
 
 The defaults give every class the standard policy except `stranger`, which is restricted. The owner is always standard
 in the dashboard (the control is disabled).
@@ -135,20 +134,26 @@ is treated as restricted. What it gets (`internal/node/toolpolicy.go`, `rules.go
    directory, outside git, so a poisoned cache never reaches your own builds. The first build of such a Ticket is
    slower. (`GOFLAGS=-modcacherw` lets the Ticket directory be removed when it ends.)
 8. **Commands read only what the session needs.** The sandbox denies your home directory, the state directory, the
-   work root, the transcripts and Claude Code's own session transcripts, each as a whole directory, so a Ticket
-   directory or transcript made after the session started is denied too. It then gives back (Claude Code's
-   `allowRead`) only what the session needs: its working directory and git directories, the node socket, the `gh`
-   shim, the `athena` binary, the CA bundle, Claude Code's shell snapshots and install, and the toolchains on your
-   `PATH` that live under your home (a `bin` directory, and the install above it when that is two levels or more
-   below home, such as `~/.nvm/versions/node/v22`). `Config.Secrets` (the GitHub App key) and the credential files the
+   work root, the transcripts, Claude Code's own session transcripts and its temporary files (`/tmp/claude-<uid>`,
+   which hold every session's background task output), each as a whole directory, so a Ticket directory, transcript
+   or output made after the session started is denied too. Each restricted session gets a temporary root of its own
+   (`CLAUDE_CODE_TMPDIR`, `/tmp/athena-<uid>/<id>`, removed when the Ticket ends): a sandboxed command's `$TMPDIR` is
+   the whole root, so it could not be denied otherwise. The sandbox then gives back (Claude Code's `allowRead`) only
+   what the session needs: its working directory and git directories, its own temporary root, the node socket, the
+   `gh` shim, the `athena` binary, the CA bundle, Claude Code's install, and the toolchains on your `PATH` that live
+   under your home in a known toolchain directory (`.nvm`, `.cargo`, `go/bin`, `.local/bin` and the like: anything
+   else on `PATH` could be a project, such as `~/src/proj/bin`; a `bin` directory, and the install above it when that
+   is two levels or more below home, such as `~/.nvm/versions/node/v22`). No shell snapshot is given back: they are
+   every session's, and Claude Code carries on without one. `Config.Secrets` (the GitHub App key) and the credential files the
    rules know (`credRel`, including `~/.git-credentials` and `~/.config/git/credentials`) are denied in their
    configured and their resolved spelling, and nothing given back holds one. Git reads no global configuration
    (`GIT_CONFIG_GLOBAL=/dev/null`, `XDG_CONFIG_HOME` in the Ticket's cache): git stops when it cannot read
    `~/.gitconfig`.
 9. **Claude's file tools read only the Ticket.** `Read`, `Grep` and `Glob` run outside the sandbox, so the hook rules
    keep them to the working directory and the system's and toolchains' roots (`/usr`, `/opt`, `/etc`, `/nix`, the
-   developer tools, the toolchains on `PATH` under your home), in every spelling, a symbolic link out of the directory
-   included. Anything else is denied with: "Work started by someone outside your allow list reads only its own working
+   developer tools, the known toolchains under your home), in every spelling, a symbolic link out of the directory
+   included. A `Glob` pattern is checked against the directory it searches, and a `..` past its first wildcard is denied.
+   Anything else is denied with: "Work started by someone outside your allow list reads only its own working
    directory and the system's tools."
 10. **Held for you, whatever the repository's mode.** A GitHub App token cannot be kept to one branch or thread, so a
     restricted session is treated as if its repository were held for you (section 6): its tokens are read-only, a `git
@@ -159,6 +164,7 @@ is treated as restricted. What it gets (`internal/node/toolpolicy.go`, `rules.go
     path), so for a restricted session the well-known daemon sockets are masked (denied to reads and writes):
     `/var/run/docker.sock`, `/run/docker.sock`, `/run/containerd`, `/run/podman`, and `$XDG_RUNTIME_DIR` except the
     node socket.
+    A masked path that does not exist is skipped by Claude Code's sandbox, so a daemon that is not installed is no error.
 
 Every session, standard or restricted, is kept by the hook rules from reading `Config.Secrets` with Claude's file
 tools or naming them in a command, in any spelling (a symbolic link to the key, a search of a directory that holds it,
@@ -169,9 +175,11 @@ What the restricted policy does not give you, today:
 - **Claude's Read, Grep and Glob tools run outside the OS sandbox.** Their reach is checked by the hook rules alone
   (item 9), by path, not by the kernel.
 - On Linux, a Unix socket outside the masked list stays reachable.
-- The read containment needs a Claude Code that knows `sandbox.filesystem.allowRead`. An older one ignores it: the
-  session's commands then cannot read their own directory when it lies in your home or the state directory, and its
-  commands fail (closed, not open).
+- On Linux, a masked path that appears only after the session started (a daemon started later) is not masked for it.
+- The read containment needs a Claude Code that knows `sandbox.filesystem.allowRead` (2.1.280 or newer). A restricted
+  Ticket on an older one fails with a sentence saying so, and nothing starts. When Athena cannot read the version, the
+  session starts; an older Claude Code then ignores `allowRead`, and the session's commands cannot read their own
+  directory when it lies in your home or the state directory, so they fail (closed, not open).
 - Text a restricted session reads is still the stranger's text: the policy limits what the worker can do with it, not
   what it reads.
 
@@ -200,7 +208,7 @@ What a held repository (or a restricted session) turns into Proposals:
   `--repo`) is refused, and the fields are checked again when applied.
 
 A Ticket with a pending Proposal shows as waiting on you, and counts toward the section 2 count. The dashboard lists
-them in Needs you as "Review what Athena holds for you"; `athena proposals` lists them too.
+them in Needs you as "Review what Athena holds for you"; `athena proposals` lists them too, with the failed ones and their errors.
 
 **Applying.** `athena apply <id>` or the dashboard's Apply approves a Proposal. A held reply goes back to the Outbox
 and is sent. A push or pull request is made to happen by the node, once:
@@ -228,8 +236,10 @@ and is sent. A push or pull request is made to happen by the node, once:
 - While paused, an applied Proposal waits and runs after resume.
 - A push is refused if the node has no mirror of the repository, or the Proposal names a commit that is not on the
   Ticket's branch.
-- **Known limit**: the clone's `objects/info/alternates` is writable by a worker, so a crafted push could carry an
-  object the node's user can read, if its id is known. This predates shadow mode (the clone sync has it too).
+- A push is refused if the clone's object store has an `objects/info/alternates` file or a symbolic link, checked
+  before any token exists: either could make the push carry an object the node's user can read.
+- **Known limit**: a worker that is still running can write the clone's object store after that check and before the
+  push reads it. The clone sync reads the same store without this check.
 - `athena discard <id>` closes a pending or failed Proposal without applying it; a held reply is dropped and never
   sent. While Athena is applying a push or pull request, discarding it is refused ("Athena is applying this now"):
   it may already be on GitHub, and its result settles it.

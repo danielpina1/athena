@@ -98,22 +98,27 @@ func (s hubSource) Proposal(id string) (*athenav1.ProposalView, error) {
 	return out, err
 }
 
-// ProposalRow is a pending Proposal in the CLI's list.
+// ProposalRow is a Proposal in the CLI's list: one that waits on the owner, pending or failed.
 type ProposalRow struct {
 	ID      string `json:"id"`
 	Repo    string `json:"repo,omitempty"`
 	Kind    string `json:"kind"`
 	Summary string `json:"summary"`
+	State   string `json:"state"`
+	Error   string `json:"error,omitempty"`
 }
 
 func (d *Dispatcher) proposals() ([]ProposalRow, error) {
-	list, err := d.eng.PendingProposals()
+	out := []ProposalRow{}
+	err := d.st.Tx(func(tx *store.Tx) error {
+		list, err := tx.UndecidedProposals()
+		for _, p := range list {
+			out = append(out, ProposalRow{ID: p.ID, Repo: p.Repo, Kind: p.Kind, Summary: p.Summary, State: p.State, Error: p.Error})
+		}
+		return err
+	})
 	if err != nil {
 		return nil, err
-	}
-	out := make([]ProposalRow, 0, len(list))
-	for _, p := range list {
-		out = append(out, ProposalRow{ID: p.ID, Repo: p.Repo, Kind: p.Kind, Summary: p.Summary})
 	}
 	return out, nil
 }

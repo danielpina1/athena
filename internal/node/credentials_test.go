@@ -42,7 +42,9 @@ type fakeCreds struct {
 	repos      []string
 	writes     []bool // each request's write flag
 	revoked    []string
-	revokeErr  error
+	// revokeFails is how many Revoke calls fail before one goes through.
+	revokeFails int
+	revokeErr   error
 	// pulls are the pull requests OpenPull opened; onPull, when set, runs in each call.
 	pulls  []openedPull
 	onPull func(repo, head string)
@@ -54,14 +56,14 @@ type openedPull struct {
 }
 
 // OpenPull records the pull request (PullOpener).
-func (f *fakeCreds) OpenPull(_ context.Context, repo, head string, p HeldPull) (string, error) {
+func (f *fakeCreds) OpenPull(_ context.Context, repo, head string, p HeldPull) (int, string, error) {
 	if f.onPull != nil {
 		f.onPull(repo, head)
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.pulls = append(f.pulls, openedPull{repo, head, p})
-	return "https://github.com/" + repo + "/pull/9", nil
+	return 9, "https://github.com/" + repo + "/pull/9", nil
 }
 
 func (f *fakeCreds) opened() []openedPull {
@@ -91,6 +93,10 @@ func (f *fakeCreds) Revoke(_ context.Context, token string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.revoked = append(f.revoked, token)
+	if f.revokeFails > 0 {
+		f.revokeFails--
+		return errors.New("502 bad gateway")
+	}
 	return f.revokeErr
 }
 
@@ -469,24 +475,41 @@ func TestTokenDroppedOnStop(t *testing.T) {
 	}
 }
 
-// Revoking is best effort: a failure is logged, and the token is dropped all the same. A token minted for an
-// Assignment dropped meanwhile is revoked too.
-func TestDropRevokesBestEffort(t *testing.T) {
-	creds := &fakeCreds{revokeErr: errors.New("502 bad gateway")}
+// A dropped token's revocation is tried again after a failure, and stops at the first that goes through.
+func TestDropRetriesRevocation(t *testing.T) {
+	creds := &fakeCreds{revokeFails: 2}
 	ts := newTokenStore(creds)
+	ts.revokeBackoff = time.Millisecond
 	tok, err := ts.token(context.Background(), "a1", "o/r", false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ts.drop("a1")
 	ts.wait()
-	if ts.holds("a1") || !slices.Equal(creds.revokedTokens(), []string{tok}) {
-		t.Fatalf("held %v, revoked %q; want %q dropped and revoked", ts.holds("a1"), creds.revokedTokens(), tok)
+	if got := creds.revokedTokens(); !slices.Equal(got, []string{tok, tok, tok}) {
+		t.Fatalf("revocations = %q, want three of %q", got, tok)
+	}
+}
+
+// Revoking is best effort: after its last try the failure is logged, and the token is dropped all the same. A token
+// minted for an Assignment dropped meanwhile is revoked too.
+func TestDropRevokesBestEffort(t *testing.T) {
+	creds := &fakeCreds{revokeErr: errors.New("502 bad gateway")}
+	ts := newTokenStore(creds)
+	ts.revokeBackoff = time.Millisecond
+	tok, err := ts.token(context.Background(), "a1", "o/r", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts.drop("a1")
+	ts.wait()
+	if ts.holds("a1") || !slices.Equal(creds.revokedTokens(), []string{tok, tok, tok}) {
+		t.Fatalf("held %v, revoked %q; want %q dropped and tried three times", ts.holds("a1"), creds.revokedTokens(), tok)
 	}
 	ts.drop("a2") // nothing held: nothing to revoke
 	ts.wait()
-	if n := len(creds.revokedTokens()); n != 1 {
-		t.Fatalf("revoked %d tokens, want 1", n)
+	if n := len(creds.revokedTokens()); n != 3 {
+		t.Fatalf("revocations = %d, want 3", n)
 	}
 }
 

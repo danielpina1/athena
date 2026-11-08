@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -147,6 +148,17 @@ func TestDispatchApplyDiscard(t *testing.T) {
 	}
 	if rows := list.([]ProposalRow); len(rows) != 1 || rows[0].ID != s.ID || rows[0].Kind != "push" || rows[0].Repo != "acme/web" {
 		t.Errorf("proposals op = %+v", rows)
+	}
+	// A failed Proposal is still the owner's to apply or discard, so it is listed, with its error.
+	if err := c.eng.SettleProposal(s.ID, errors.New("remote rejected")); err != nil {
+		t.Fatal(err)
+	}
+	list, err = c.handleRequest(Request{Op: OpProposals})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rows := list.([]ProposalRow); len(rows) != 1 || rows[0].ID != s.ID || rows[0].State != core.ProposalFailed || rows[0].Error != "remote rejected" {
+		t.Errorf("proposals op after a failure = %+v", rows)
 	}
 	if _, err := c.handleRequest(Request{Op: OpApply, ID: "nope"}); err == nil {
 		t.Error("applying an unknown proposal succeeded")

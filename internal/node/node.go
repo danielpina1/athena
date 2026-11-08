@@ -207,6 +207,8 @@ type Node struct {
 	restartDelay func(n int) time.Duration
 	// canSandbox reports whether this machine can sandbox a session (default SandboxSupported).
 	canSandbox func() bool
+	// claudeVersion is the version of the Claude Code a session would run on (default installedClaudeVersion).
+	claudeVersion func(ctx context.Context) string
 
 	// queued is the number of launches waiting (written by the loop goroutine); statusSig is the last status
 	// OnStatus was told of (loop goroutine only).
@@ -288,6 +290,7 @@ func New(cfg Config, eng EngineCallbacks) *Node {
 		reg:          cfg.Metrics,
 		slotsGauge:   cfg.Metrics.Gauge("slots_in_use"),
 	}
+	n.claudeVersion = n.installedClaudeVersion
 	n.tokens.log = log
 	// A repository in shadow mode gets read-only tokens: what holds its work for the owner, whatever a session runs.
 	n.tokens.writable = func(repo string) bool { return !n.shadow(repo) }
@@ -400,6 +403,7 @@ func (n *Node) Close() error {
 		n.post(message{kind: msgShutdown})
 		<-n.done
 		n.runners.Wait()
+		n.tokens.stopRevokeRetries()
 		n.tokens.wait()
 		n.cancel()
 	})
@@ -1235,6 +1239,10 @@ func (r *runner) run() {
 	adir := filepath.Join(s.place.workDir, ".athena")
 	env := append([]string{"ATHENA_ASSIGNMENT=" + s.a.ID}, n.variables(s)...)
 	env = append(env, n.githubEnv(s)...)
+	if s.restricted() {
+		// In the process's environment: Claude Code uses its temporary root before it reads the settings file.
+		env = append(env, "CLAUDE_CODE_TMPDIR="+restrictedTempDir(s.place.workDir))
+	}
 	role, markerRole := roleWorker, roleImplement
 	var systemPrompt string
 	if s.reviewing() {
@@ -1826,7 +1834,9 @@ func (r *runner) onEvent(ev rt.Event) {
 		// The turn that took in everything sent before its end is over.
 		r.markRead(-1)
 		r.idle = true
-		if !r.owesReportAtPause() { // paused, the session parks owing its Report instead of a nudged turn
+		if r.owesReportAtPause() { // paused, the session parks owing its Report instead of a nudged turn
+			r.parkOwing()
+		} else {
 			r.turnEnded()
 		}
 		r.parkIfHandedOff()
@@ -2394,6 +2404,9 @@ func (n *Node) prepare(s *session) error {
 	if err := n.checkRestrictedSandbox(s); err != nil {
 		return err
 	}
+	if err := n.checkRestrictedClaude(s); err != nil {
+		return err
+	}
 	// An earlier session may have repointed the worktree's git links and its process not ended cleanly (a node that
 	// died, a child that outlived it): put them back before anything, the sandbox included, reads them.
 	if err := n.restoreGitLinks(s.t, s.log); err != nil {
@@ -2442,6 +2455,9 @@ func (n *Node) prepare(s *session) error {
 	}
 	if s.restricted() {
 		if err := makeRestrictedCaches(p.workDir); err != nil {
+			return err
+		}
+		if err := makeRestrictedTemp(p.workDir); err != nil {
 			return err
 		}
 	}
@@ -2622,6 +2638,9 @@ const keptNote = "its git links were checked against the placement record; its f
 // branch, no remote). Otherwise it keeps it and logs why. The branch itself is kept; the Ticket's checkpoint ref goes
 // with the worktree.
 func cleanupWorktree(p placement, t core.Ticket, workRoot string, log *slog.Logger) {
+	if err := os.RemoveAll(restrictedTempDir(p.workDir)); err != nil {
+		log.Warn("remove the session's temporary root", "ticket", t.ID, "error", err)
+	}
 	if p.repo == "" {
 		return
 	}

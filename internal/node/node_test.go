@@ -62,7 +62,15 @@ func fakeClaude(t *testing.T) string {
 }
 
 func TestMain(m *testing.M) {
+	// Restricted sessions' temporary roots go here instead of /tmp, and with the tests when they end.
+	base, err := os.MkdirTemp("/tmp", "ath")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	tempBase = base
 	code := m.Run()
+	os.RemoveAll(base)
 	if fakeDir != "" {
 		os.RemoveAll(fakeDir)
 	}

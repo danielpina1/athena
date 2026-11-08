@@ -61,6 +61,12 @@ func (r Runtime) Check(ctx context.Context) rt.Info {
 	return info
 }
 
+// AtLeast reports whether dotted version v is min or newer; known is false when either is not a version.
+func AtLeast(v, min string) (enough, known bool) {
+	older, ok := newerVersion(min, v)
+	return ok && !older, ok
+}
+
 // newerVersion reports whether dotted version a is newer than b; ok is false when either is not one.
 func newerVersion(a, b string) (newer, ok bool) {
 	pa, pb := strings.Split(a, "."), strings.Split(b, ".")

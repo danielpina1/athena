@@ -342,3 +342,56 @@ func TestRestrictedReplyIsHeldInLiveRepository(t *testing.T) {
 	eq(t, "one reply proposal", len(ps) == 1 && ps[0].Kind == ProposalReply, true)
 	eq(t, "stage", TicketStage(h.ticket(a)), Stage{"person", "proposal"})
 }
+
+// A push the node has begun to apply is not superseded: it may be on GitHub already, and its result settles it. The
+// newer push waits beside it.
+func TestPushDoesNotSupersedeOneBeingApplied(t *testing.T) {
+	h := newEvals(t)
+	a := h.shadowed("c:1", true)
+	old, err := h.eng.Propose(Proposal{TicketID: a, Kind: ProposalPush, Summary: "push 1", Payload: json.RawMessage(`{"branch":"b","sha":"1"}`)})
+	h.must(err)
+	_, err = h.eng.ApplyProposal(old.ID)
+	h.must(err)
+	_, err = h.eng.StartProposal(old.ID)
+	h.must(err)
+	newer, err := h.eng.Propose(Proposal{TicketID: a, Kind: ProposalPush, Summary: "push 2", Payload: json.RawMessage(`{"branch":"b","sha":"2"}`)})
+	h.must(err)
+	eq(t, "the push being applied", h.proposal(a, old.ID).State, ProposalPending)
+	eq(t, "the newer push", h.proposal(a, newer.ID).State, ProposalPending)
+	h.must(h.eng.SettleProposal(old.ID, nil))
+	eq(t, "its result settles it", h.proposal(a, old.ID).State, ProposalApplied)
+	eq(t, "the newer push still waits", h.proposal(a, newer.ID).State, ProposalPending)
+}
+
+// At send time a waiting reply of a Ticket now held for the owner is held, as if it had just been written; one the owner
+// released is sent, whatever the mode says now.
+func TestHoldIfHeld(t *testing.T) {
+	h := newEvals(t)
+	a := h.shadowed("c:1", false)
+	id := h.reply(ReplyRequest{TicketID: a, TriggerID: "c:1", Purpose: PurposeAnswer, Text: "Done."})
+	held, err := h.eng.HoldIfHeld(id)
+	h.must(err)
+	eq(t, "live: not held", held, false)
+	eq(t, "live: still waiting", h.receipt(id).State, ReceiptWaiting)
+
+	h.pol.shadow = map[string]bool{"o/r": true}
+	held, err = h.eng.HoldIfHeld(id)
+	h.must(err)
+	eq(t, "shadow: held", held, true)
+	eq(t, "shadow: receipt", h.receipt(id).State, ReceiptHeld)
+	ps := h.proposals(a)
+	eq(t, "one proposal", len(ps), 1)
+
+	_, err = h.eng.ApplyProposal(ps[0].ID)
+	h.must(err)
+	eq(t, "released", h.receipt(id).State, ReceiptWaiting)
+	held, err = h.eng.HoldIfHeld(id)
+	h.must(err)
+	eq(t, "the owner's yes stands", held, false)
+	eq(t, "still released", h.receipt(id).State, ReceiptWaiting)
+	eq(t, "no new proposal", len(h.proposals(a)), 1)
+
+	held, err = h.eng.HoldIfHeld("nope")
+	h.must(err)
+	eq(t, "unknown receipt", held, false)
+}
