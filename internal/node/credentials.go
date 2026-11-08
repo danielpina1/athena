@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/danielpina1/athena/internal/redact"
@@ -41,8 +42,12 @@ const (
 	tokenAssumedLife = time.Hour
 	// tokenFetchTimeout bounds one request for a token.
 	tokenFetchTimeout = 30 * time.Second
-	// tokenRevokeTimeout bounds the revocation of a dropped token.
+	// tokenRevokeTimeout bounds one try at revoking a dropped token.
 	tokenRevokeTimeout = 10 * time.Second
+	// tokenRevokeTries is how many times a dropped token's revocation is tried.
+	tokenRevokeTries = 3
+	// tokenRevokeBackoff is the wait before the second try; it doubles for each later one.
+	tokenRevokeBackoff = 2 * time.Second
 )
 
 // credentialError is a failure to get a GitHub Ticket's credentials from the port. permanent is set for a refusal the
@@ -83,9 +88,13 @@ func (secret) MarshalText() ([]byte, error) { return []byte("***"), nil }
 
 // tokenStore holds each running Assignment's token.
 type tokenStore struct {
-	creds Credentials
-	now   func() time.Time
-	log   *slog.Logger
+	// revokeBackoff is the wait before a revocation's second try (tokenRevokeBackoff).
+	revokeBackoff time.Duration
+	// revokeStopped ends the retries once the node is stopping.
+	revokeStopped atomic.Bool
+	creds         Credentials
+	now           func() time.Time
+	log           *slog.Logger
 	// writable reports whether a repository's sessions get a token that writes (nil: every one does); asked whenever a
 	// token is fetched, so a repository switched to shadow gets read-only tokens from then on.
 	writable func(repo string) bool
@@ -110,7 +119,7 @@ type heldToken struct {
 
 func newTokenStore(c Credentials) *tokenStore {
 	return &tokenStore{creds: c, now: time.Now, log: slog.New(slog.DiscardHandler), held: map[string]*heldToken{},
-		dead: map[string]bool{}}
+		dead: map[string]bool{}, revokeBackoff: tokenRevokeBackoff}
 }
 
 // token returns the Assignment's token for repo, fetching one when it holds none, holds one for another repository or
@@ -213,8 +222,10 @@ func (ts *tokenStore) drop(assignmentID string) {
 	ts.revoke(assignmentID, v)
 }
 
-// revoke revokes a dropped token when the port can, in the background so no slot waits for GitHub, and best effort: a
-// failure is logged, and the token expires on its own. wait waits for the revocations in flight.
+// revoke revokes a dropped token when the port can, in the background so no slot waits for GitHub. A failure is tried
+// again (tokenRevokeTries), since a token left valid is a write a worker may still make; after the last try the failure
+// is logged as an error, and the token expires on its own. wait waits for the revocations in flight; once the node is
+// stopping (stopRevokeRetries), no further try is started.
 func (ts *tokenStore) revoke(assignmentID, token string) {
 	r, ok := ts.creds.(TokenRevoker)
 	if !ok || token == "" {
@@ -223,16 +234,29 @@ func (ts *tokenStore) revoke(assignmentID, token string) {
 	ts.revoking.Add(1)
 	go func() {
 		defer ts.revoking.Done()
-		ctx, cancel := context.WithTimeout(context.Background(), tokenRevokeTimeout)
-		defer cancel()
-		if err := r.Revoke(ctx, token); err != nil {
-			ts.log.Warn("revoke a dropped github token; it expires on its own", "assignment", assignmentID,
-				"error", redact.String(err.Error()))
-			return
+		var err error
+		backoff := ts.revokeBackoff
+		for try := 1; try <= tokenRevokeTries; try++ {
+			ctx, cancel := context.WithTimeout(context.Background(), tokenRevokeTimeout)
+			err = r.Revoke(ctx, token)
+			cancel()
+			if err == nil {
+				ts.log.Info("revoked a dropped github token", "assignment", assignmentID, "tries", try)
+				return
+			}
+			if try == tokenRevokeTries || ts.revokeStopped.Load() {
+				break
+			}
+			time.Sleep(backoff)
+			backoff *= 2
 		}
-		ts.log.Info("revoked a dropped github token", "assignment", assignmentID)
+		ts.log.Error("could not revoke a dropped github token; it stays valid until it expires", "assignment", assignmentID,
+			"error", redact.String(err.Error()))
 	}()
 }
+
+// stopRevokeRetries ends the retrying of revocations, for a node shutting down.
+func (ts *tokenStore) stopRevokeRetries() { ts.revokeStopped.Store(true) }
 
 func (ts *tokenStore) wait() { ts.revoking.Wait() }
 

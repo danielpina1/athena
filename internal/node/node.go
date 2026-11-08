@@ -400,6 +400,7 @@ func (n *Node) Close() error {
 		n.post(message{kind: msgShutdown})
 		<-n.done
 		n.runners.Wait()
+		n.tokens.stopRevokeRetries()
 		n.tokens.wait()
 		n.cancel()
 	})
