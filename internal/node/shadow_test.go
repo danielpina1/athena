@@ -511,3 +511,52 @@ func TestRestrictedLiveTicketIsHeld(t *testing.T) {
 		t.Fatalf("pending proposals by kind = %v, want one pull request and one push", kinds)
 	}
 }
+
+// A clone whose object store reaches outside itself (an alternates file, or a symbolic link among its objects) is
+// refused before a write token exists: a crafted push could otherwise carry an object the node's user can read.
+func TestApplyPushRefusesForeignObjects(t *testing.T) {
+	for name, plant := range map[string]func(t *testing.T, objects string){
+		"alternates": func(t *testing.T, objects string) {
+			if err := os.WriteFile(filepath.Join(objects, "info", "alternates"), []byte(t.TempDir()+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"symlinked fan-out directory": func(t *testing.T, objects string) {
+			if err := os.Symlink(t.TempDir(), filepath.Join(objects, "ab")); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"symlinked pack": func(t *testing.T, objects string) {
+			if err := os.Symlink("/etc/hosts", filepath.Join(objects, "pack", "pack-x.pack")); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			creds := &fakeCreds{}
+			h := newGHHarness(t, creds, func(c *Config) { c.Policy = newShadowPolicy("o/r") })
+			bare := git(t, h.work, "remote", "get-url", "origin")
+			tk, a := h.accept("github:issuecomment:1", "o/r", 12, "")
+			h.commit(tk, "fix the typo")
+			if resp := h.report(tk.ID, a.ID, core.ReportProgress, "fixed"); !resp.OK {
+				t.Fatalf("report = %+v", resp)
+			}
+			ps := h.proposalsOf(tk.ID)
+			if len(ps) != 1 {
+				t.Fatalf("proposals = %+v", ps)
+			}
+			plant(t, filepath.Join(CloneDir(h.cfg.StateDir, "o/r"), ".git", "objects"))
+			before := len(creds.asked())
+			err := h.n.ApplyProposal(context.Background(), *ps[0])
+			if err == nil || !strings.Contains(err.Error(), "object store") {
+				t.Fatalf("apply = %v, want it refused for the object store", err)
+			}
+			if asked := creds.asked()[before:]; len(asked) != 0 {
+				t.Errorf("a token was minted: %v", asked)
+			}
+			if out, _ := exec.Command("git", "--git-dir="+bare, "rev-parse", "--verify", "-q", "refs/heads/"+branchName(tk)).Output(); len(out) != 0 {
+				t.Errorf("the branch reached GitHub: %s", out)
+			}
+		})
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -427,6 +428,10 @@ func (n *Node) applyPush(ctx context.Context, p core.Proposal) error {
 	if common == "" {
 		common = filepath.Join(clone, ".git")
 	}
+	// Before any token exists. A worker can write the clone's objects, and the push reads them as an alternate.
+	if err := checkObjectStore(filepath.Join(common, "objects")); err != nil {
+		return fmt.Errorf("proposal %s: %w", p.ID, err)
+	}
 	ctx, cancel := context.WithTimeout(ctx, applyTimeout)
 	defer cancel()
 	tok, done, err := n.writeToken(ctx, p)
@@ -455,6 +460,25 @@ func (n *Node) applyPush(ctx context.Context, p core.Proposal) error {
 	}
 	n.log.Info("applied a push held for the owner", "ticket", t.ID, "proposal", p.ID, "branch", pl.Branch, "commit", pl.SHA)
 	return nil
+}
+
+// checkObjectStore refuses a clone's object store that reaches outside itself: an objects/info/alternates file, or a
+// symbolic link anywhere in it, either of which could make a push carry an object the node's user can read.
+func checkObjectStore(objects string) error {
+	if _, err := os.Lstat(filepath.Join(objects, "info", "alternates")); err == nil {
+		return errors.New("the clone's object store has an alternates file, so this push was not made; look at the clone before applying again")
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("the clone's object store cannot be checked: %w", err)
+	}
+	return filepath.WalkDir(objects, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return fmt.Errorf("the clone's object store cannot be checked: %w", err)
+		}
+		if d.Type()&fs.ModeSymlink != 0 {
+			return fmt.Errorf("the clone's object store has a symbolic link (%s), so this push was not made; look at the clone before applying again", d.Name())
+		}
+		return nil
+	})
 }
 
 // writeToken mints a write token for a push Proposal's repository; done revokes it.

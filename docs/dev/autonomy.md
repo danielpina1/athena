@@ -226,8 +226,10 @@ and is sent. A push or pull request is made to happen by the node, once:
 - While paused, an applied Proposal waits and runs after resume.
 - A push is refused if the node has no mirror of the repository, or the Proposal names a commit that is not on the
   Ticket's branch.
-- **Known limit**: the clone's `objects/info/alternates` is writable by a worker, so a crafted push could carry an
-  object the node's user can read, if its id is known. This predates shadow mode (the clone sync has it too).
+- A push is refused if the clone's object store has an `objects/info/alternates` file or a symbolic link, checked
+  before any token exists: either could make the push carry an object the node's user can read.
+- **Known limit**: a worker that is still running can write the clone's object store after that check and before the
+  push reads it. The clone sync reads the same store without this check.
 - `athena discard <id>` closes a pending or failed Proposal without applying it; a held reply is dropped and never
   sent. While Athena is applying a push or pull request, discarding it is refused ("Athena is applying this now"):
   it may already be on GitHub, and its result settles it.
