@@ -9,7 +9,7 @@ import { create } from "@bufbuild/protobuf";
 import { RepoViewSchema } from "../src/gen/athena/v1/state_pb";
 import { editLink, runtimeStatus } from "./link";
 
-const SECTIONS = ["general", "github", "repositories", "trust", "notifications", "devices", "prompts", "execution", "system"];
+const SECTIONS = ["general", "github", "repositories", "trust", "autopilot", "notifications", "devices", "prompts", "execution", "system"];
 
 const volatile = (page: Page) => [
   page.locator("aside .font-mono"),
@@ -264,4 +264,26 @@ test("trust shows its classes and the standing rules, and the owner row is locke
   await expect(rules.getByRole("listitem")).toHaveCount(2);
   await expectAccessible(page);
   await themes(page, "settings-trust");
+});
+
+test("autopilot shows its entries, the mode line and the link to their runs", async ({ page }) => {
+  await editLink(page, {
+    ...githubRepos,
+    policy: (p) => {
+      const doc = JSON.parse(p.settingsJson);
+      doc.autopilot = [
+        { name: "Night tidy", instructions: "Tidy the repository and open a pull request.", repo: "acme/web", enabled: true, cron: "0 3 * * *" },
+        { name: "CI watch", instructions: "Find out why the default branch stays red.", repo: "acme/api", enabled: false, event: "ci_red", ciRedHours: 6 },
+      ];
+      p.settingsJson = JSON.stringify(doc);
+    },
+  });
+  await page.emulateMedia({ colorScheme: "light", reducedMotion: "reduce" });
+  await signedInPage(page);
+  await page.goto("/settings/autopilot");
+  await expect(page.getByRole("textbox", { name: "Name" }).first()).toHaveValue("Night tidy");
+  await expect(page.getByRole("combobox", { name: "Trigger" }).last()).toHaveValue("ci_red");
+  await expect(page.getByRole("link", { name: "See its runs" }).first()).toHaveAttribute("href", "/routing?q=schedule:night-tidy");
+  await expectAccessible(page);
+  await themes(page, "settings-autopilot");
 });

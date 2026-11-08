@@ -12,6 +12,7 @@ import { Waiting } from "@/ui/athena/Waiting";
 import { cn } from "@/ui/cn";
 import { Button } from "@/ui/primitives/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/ui/primitives/dialog";
+import { Autopilot } from "./AutopilotSettings";
 import { Devices } from "./Devices";
 import { Execution } from "./Execution";
 import { Notifications } from "./Notifications";
@@ -28,6 +29,7 @@ export const SECTIONS = [
   { id: "github", label: "Sources › GitHub" },
   { id: "repositories", label: "Repositories" },
   { id: "trust", label: "Trust" },
+  { id: "autopilot", label: "Autopilot" },
   { id: "notifications", label: "Notifications" },
   { id: "devices", label: "Devices" },
   { id: "prompts", label: "Prompts" },
@@ -46,6 +48,8 @@ function SectionView({ id }: { id: SectionId }) {
       return <Repositories />;
     case "trust":
       return <Trust />;
+    case "autopilot":
+      return <Autopilot />;
     case "notifications":
       return <Notifications />;
     case "devices":
