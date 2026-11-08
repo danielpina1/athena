@@ -1831,7 +1831,9 @@ func (r *runner) onEvent(ev rt.Event) {
 		// The turn that took in everything sent before its end is over.
 		r.markRead(-1)
 		r.idle = true
-		if !r.owesReportAtPause() { // paused, the session parks owing its Report instead of a nudged turn
+		if r.owesReportAtPause() { // paused, the session parks owing its Report instead of a nudged turn
+			r.parkOwing()
+		} else {
 			r.turnEnded()
 		}
 		r.parkIfHandedOff()

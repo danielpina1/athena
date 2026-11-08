@@ -78,9 +78,7 @@ nothing; it says "the assignment starts on resume" for each. `athena resume` the
 Who may resume: `athena pause` and `athena resume` run on the local socket and need nothing more. The dashboard's
 **Pause** needs no re-authentication (a pause is always safe); its **Resume** needs a fresh passkey confirmation.
 
-Known limits, kept as they are: a busy session still receives deliveries while paused; a handed-off session's owed
-Report is dropped under pause; and a resume that lands between a turn ending and its parking can leave that Ticket
-"working" until its next Input.
+Known limit, kept as it is: a busy session still receives deliveries while paused.
 
 ## 4. Trust classes
 
