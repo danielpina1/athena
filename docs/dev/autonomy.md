@@ -9,8 +9,8 @@ does not do, and where its setting lives. Every claim here is in the code named 
 
 | Brake | Stops | Never stops |
 | --- | --- | --- |
-| **Waiting-on-you brake** (`wip_brake`) | Starting work Athena chose itself (an *inferred* candidate) in a repository where the number of things waiting on you has reached the ceiling. The candidate is held, not dropped, and starts again when you catch up. | Work you ask for: your own `athena task`, a mention that addresses Athena (an *explicit* candidate), and a follow-up that goes to a Ticket's own worker. Work already running. |
-| **Kill switch** (`athena pause`) | Deciding on new Triggers, the router, every new session launch, the sending of replies, and applying a held push or pull request. Running sessions stop at the end of their turn. | Reading GitHub (Sources keep polling, and Triggers queue), the dashboard, your answers to Approvals, your Apply and Discard, and Policy changes. A router turn that was already running when you paused may finish, so one Ticket can still be created right after (not started). Nothing queued is dropped. |
+| **Waiting-on-you brake** (`wip_brake`) | Starting work Athena chose itself (an *inferred* candidate, which includes an Autopilot firing) in a repository where the number of things waiting on you has reached the ceiling. The candidate is held, not dropped, and starts again when you catch up. | Work you ask for: your own `athena task`, a mention that addresses Athena (an *explicit* candidate), and a follow-up that goes to a Ticket's own worker. Work already running. |
+| **Kill switch** (`athena pause`) | Autopilot firing (nothing fires, nothing is forgotten), deciding on new Triggers, the router, every new session launch, the sending of replies, and applying a held push or pull request. Running sessions stop at the end of their turn. | Reading GitHub (Sources keep polling, and Triggers queue), the dashboard, your answers to Approvals, your Apply and Discard, and Policy changes. A router turn that was already running when you paused may finish, so one Ticket can still be created right after (not started). Nothing queued is dropped. |
 | **Tool policy** (`restricted`) | What a session started by a sender you did not allow can do: no web beyond GitHub, no escalation, no `follow_thread`, a required sandbox, reads kept to its own directory, and its push, pull request and replies held for you. | A session of someone you trust (standard policy), and everything inside the restricted sandbox. |
 | **Shadow mode (held for you)** | Everything a repository's work would send outward: pushes, pull requests and replies are held as Proposals until you apply them. | Reading the repository, working in the worktree, and committing locally. |
 
@@ -295,8 +295,9 @@ Missing fields mean their defaults. These are the fields of the autonomy brakes:
 | `repos` | Per repository, keyed by the lower-case `owner/name` (two keys that name one repository, such as `Acme/Web` and `acme/web`, are refused): `mode` (`live` or `shadow`, which holds the repository for you) and `wipCeiling` (its own ceiling). | `live`, the global ceiling |
 | `trust` | Trust class (`owner`, `allowed`, `collaborator`, `stranger`, `bot`, `ci`) to `standard` or `restricted`. | `stranger` restricted, the rest `standard` |
 | `allow` | The standing rules: `tool`, `rule`, `repo` and `added`. | none |
+| `autopilot` | Your Autopilot entries (section 9): `name`, `instructions`, `repo`, `enabled`, and one of `cron` or `event` (with `ciRedHours` for `ci_red`). At most 50. | none |
 
-Negative numbers, an unknown mode, an unknown class or policy, an allow rule without a tool, rule and repository, and an
+Negative numbers, an Autopilot entry that breaks a rule of section 9, an unknown mode, an unknown class or policy, an allow rule without a tool, rule and repository, and an
 allow rule naming a never-promoted rule are refused when you save. The pause flag is not in the Policy: it is its own
 persisted switch (`athena pause`).
 
@@ -327,3 +328,115 @@ holds `mode`, `rules`, `sources` and `pairing`.)
 In the dashboard, Settings > Repositories sets the mode and ceilings ("Hold work in `acme/widgets` when this many wait
 on you"), and Settings > Trust sets the tool policy of each class, lists the standing rules with a Remove button, and
 sets `promoteAfter` (2 to 50). Saving either needs a fresh passkey confirmation, as every Policy change from the web.
+
+## 9. Autopilot
+
+Autopilot is how you ask Athena to start work on its own, on a clock or when a repository changes, without anyone
+mentioning it. You write the instructions once; Athena raises them as a Trigger at the right time. The code is in
+`internal/sources/schedule` (when to fire), `internal/policy/autopilot.go` (what is valid) and
+`internal/server/autopilot.go` (the wiring).
+
+### What an entry is
+
+An entry is one standing instruction, and it is its own rule: it needs no matching Policy rule and no evidence quote,
+and its rule is named `autopilot/<slug>`. Edit entries in Settings > Autopilot, or in the Policy JSON under
+`autopilot`. Each has:
+
+- a **name**: it starts with a letter or digit and holds at most 64 letters, digits, spaces, `_` or `-`. The slug is
+  the name in lower case with each run of spaces and underscores turned into `-` (`Nightly Deps` is `nightly-deps`).
+  Two names with one slug are refused;
+- **instructions**: what the worker should do, at most 4000 characters, as you would write them in `athena task`;
+- a **repository**, `owner/name`, that the GitHub Source already polls;
+- **enabled**, on or off;
+- **when**, exactly one of:
+  - `cron`: five numeric fields in the server's local time zone, for example `0 3 * * *` for every night at 03:00.
+    An expression that fires less than 15 minutes apart is refused when you save;
+  - `event`: `branch_moved` (the default branch has a new head), `manifest_changed` (a dependency file changed:
+    `go.mod`, `go.sum`, `package.json`, `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `requirements.txt`,
+    `pyproject.toml`, `poetry.lock`, `uv.lock`, `Pipfile`, `Pipfile.lock`, `Cargo.toml`, `Cargo.lock`, `Gemfile`,
+    `Gemfile.lock`, `composer.json`, `composer.lock`, `pom.xml`, `build.gradle`, `build.gradle.kts`) or `ci_red` (the
+    default branch has stayed red for `ciRedHours`, 4 by default, 1 to 168).
+
+There can be at most 50 entries. A disabled entry is checked like an enabled one, so it is ready when you turn it on.
+
+### The path of a firing
+
+1. **Source.** The `schedule` Source checks the clock every 30 seconds and the repositories' events every 5 minutes.
+   When an entry is due, it raises a Trigger on the Thread `schedule:<slug>` with your instructions and a line
+   `Why now: ...` (for example "scheduled for 03:00." or "main of acme/widgets moved from 1a2b3c4 to 5d6e7f8.").
+2. **Gate.** The Policy admits it as an *inferred* candidate, with trust class `owner` (below). If the entry has been
+   turned off or deleted by then, the Decision is `ignore` with reason `autopilot_gone`.
+3. **Eval.** The accept mode decides, as for any inferred case: `off` admits nothing; `observe` records "would accept"
+   and starts nothing; `auto` accepts. The waiting-on-you brake applies (section 1).
+4. **Ticket.** In `auto`, the Eval accepts and a Ticket starts on the Thread, like any other work. Its pull request
+   or push is held for you if the repository is in shadow mode (section 6).
+
+### Worked example
+
+You want `acme/widgets` to get its dependencies checked every night. In Settings > Autopilot you add an entry named
+`Nightly deps`, repository `acme/widgets`, "Every night at 03:00", with instructions "Check for outdated
+dependencies. If any have a patch release, update them, run the tests and open a pull request."
+
+1. The accept mode is `observe`. At 03:00 a Trigger is raised, and the Routing page shows the Decision `accept (would
+   accept)` for rule `autopilot/nightly-deps`. Nothing starts and nothing is written to GitHub. Do this for a few
+   nights to see that it fires when you expect.
+2. You switch the mode to `auto`. At 03:00 the next night the Eval accepts and a Ticket starts. When it finishes,
+   its pull request is waiting for your review, which counts toward the ceiling of `acme/widgets`.
+3. The next night, 03:00 comes while that Ticket is still open. The entry does not fire (ruling C): one run at a
+   time. When you merge or close the pull request and the Ticket ends, the following night fires again.
+
+To see what an entry did, use "See its runs" beside it in Settings: it opens Routing with the search
+`schedule:<slug>`. That search matches by substring, so `schedule:deps` would also show the runs of an entry called
+`deps-weekly`.
+
+### The rulings, in plain words
+
+These are choices the plan made for you. Each is yours to overturn.
+
+| # | What happens | Why |
+| --- | --- | --- |
+| A | Autopilot work has trust class `owner`. | You wrote the instructions, and the Trigger holds only them plus facts Athena worked out (commit ids, and file names from the list above). No outside path can create a `schedule` Trigger. |
+| B | An entry is its own rule, `autopilot/<slug>`. No Policy rule must match, and no evidence quote is asked for. | Otherwise every GitHub assessment would have to judge every entry, and you would write each instruction twice. |
+| C | At most one run of an entry at a time. While its Thread has a queued Trigger, an Eval, a held candidate or an open Ticket, the entry does not fire. | Otherwise a nightly job on a Ticket awaiting your review would queue a new run every night. |
+| D | A clock firing that comes due while the entry is busy is dropped. A repository event is kept and fires when the entry is free, for the newest head only. | A skipped night has a next night. A branch move has no second chance. |
+| E | After downtime or sleep, only the latest missed firing runs, if it is under 24 hours old, and its text says it is a catch-up and how late. A firing less than 5 minutes late is not called one. | Your server is a laptop: a nightly job should run once when it wakes. |
+| F | Firings are at least 15 minutes apart, and at most 24 per entry per local day, counted across restarts. | A merge by Autopilot that moves the default branch could otherwise start a loop, and a crash loop is when the cap matters most. |
+| G | Cron times are local time. A time that does not exist on a daylight-saving day is skipped; one that happens twice fires once. | You think in local time. |
+| H | CI red defaults to 4 hours (1 to 168). "Red" means at least one finished check suite on the head commit ended `failure` or `timed_out`. Athena's own suites do not count; `cancelled` does not either. | `cancelled` is usually a superseded run. |
+| I | While Athena is paused, or while the GitHub Source does not yet know the repository, nothing fires and nothing is forgotten. | Nothing queued is lost (section 3). |
+
+Some details the table does not carry:
+
+- **The 15-minute gap.** For a clock firing it compares due times, so a late tick cannot refuse a legal schedule. For
+  an event it compares against the time of the check.
+- **Starting over.** Nothing fires for the past when an entry starts over. That happens when you disable an entry
+  and enable it again, delete one and make it again, edit its `cron` or `event`, or change an event entry's repository.
+  The day's count and the last firing are kept, so the cap of 24 survives. A new entry begins from what the
+  repository is now.
+- **Waiting for a repository.** An enabled entry whose repository the GitHub Source does not poll waits, and the
+  `schedule` row in the dashboard's health shows the reason. Add the repository to the GitHub Source or turn the entry off.
+- **The health row.** The `schedule` row appears in health only while an entry is enabled. A repository whose events
+  could not be read three polls in a row shows there too.
+
+### How the brakes apply
+
+- **Waiting-on-you brake.** An Autopilot candidate is inferred, so a repository at its ceiling holds it. The
+  candidate is held, not dropped, and starts when you catch up (section 2). While it is held, the entry does not
+  fire again (ruling C).
+- **Kill switch.** While paused, no entry fires. Nothing is lost: when you resume, a clock entry fires the latest
+  missed firing if it is under 24 hours old, and an event entry fires if its repository has moved.
+- **Shadow mode.** A Ticket from an entry in a shadow repository works as usual, and its push and pull request wait
+  as Proposals for you to apply (section 6). An Autopilot Ticket has no Channel to reply on, so there is no reply to hold.
+- **Trust.** Autopilot work runs with the `owner` trust class, so it gets the owner's tool policy (standard unless
+  you changed it). Its text is not marked as untrusted data. If you edit an entry's instructions or turn it off while
+  a Ticket from it is open, that Ticket is told: "The Autopilot entry ... changed. Its new instructions: ..." or "...
+  no longer applies."
+
+### What to do when
+
+| You see | What it means | What to do |
+| --- | --- | --- |
+| An entry never fires. | It is disabled, paused, busy, at the daily cap, or its repository is unknown to the GitHub Source. | Check the `schedule` row in health, `athena status` for a pause, and Routing (`schedule:<slug>`) for an open Ticket. |
+| The Decision says `accept (would accept)`. | The accept mode is `observe`. | Switch to `auto` when you trust what it would do. |
+| The Decision says `autopilot_gone`. | The entry was turned off or deleted after it fired. | Nothing; turn it on again if you want it back. |
+| The Decision says `wip_brake`. | Things already wait on you in that repository. | Apply, merge or discard them (section 2). |
