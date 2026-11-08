@@ -291,6 +291,43 @@ func (e *Engine) HoldWaiting(repo string) error {
 	})
 }
 
+// HoldIfHeld holds back a waiting Receipt whose Ticket is held for the owner now (heldForOwner), for the Outbox at send
+// time: a repository switched to shadow or a Policy changed after the reply was queued. It reports whether it held the
+// Receipt. One the owner released (an applied reply Proposal names it) is left to go, whatever the mode says now.
+func (e *Engine) HoldIfHeld(receiptID string) (held bool, err error) {
+	err = e.command(cmdHoldWaiting, func(o *op) error {
+		rc, err := o.tx.GetReceipt(receiptID)
+		if err != nil || rc == nil || rc.State != ReceiptWaiting {
+			return err
+		}
+		t, err := o.tx.GetTicket(rc.TicketID)
+		if err != nil || t == nil || !o.heldForOwner(t) {
+			return err
+		}
+		all, err := o.tx.TicketProposals(t.ID)
+		if err != nil {
+			return err
+		}
+		for _, p := range all {
+			var pl struct {
+				ReceiptID string `json:"receiptId"`
+			}
+			if p.Kind == ProposalReply && p.State == ProposalApplied && json.Unmarshal(p.Payload, &pl) == nil && pl.ReceiptID == rc.ID {
+				return nil
+			}
+		}
+		rc.State, held = ReceiptHeld, true
+		if err := o.tx.PutReceipt(rc); err != nil {
+			return err
+		}
+		return o.holdReply(t, rc)
+	})
+	if err != nil {
+		return false, err
+	}
+	return held, nil
+}
+
 // PendingProposals returns the Proposals waiting for the owner, oldest first.
 func (e *Engine) PendingProposals() ([]Proposal, error) {
 	var list []*Proposal

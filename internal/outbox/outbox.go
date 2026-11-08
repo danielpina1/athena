@@ -43,12 +43,13 @@ var Options = effects.Options{Concurrency: 1, Backoff: effects.Backoff{First: 5 
 //     three times;
 //   - drops it (channelGone) when the Source no longer listens to the conversation, or noChannel when the Source has
 //     no Channel;
+//   - leaves it held, with nothing to retry, when hold says it was held back for the owner just now (hold may be nil);
 //   - otherwise records the send as started (Started), then sends it: sent settles it, gone drops it (channelGone)
 //     for good, a refusal (sources.ErrRefused) drops it (refused) with the failure in LastError, and any other failure
 //     counts an attempt (Attempts) on the receipt and is returned for the runner to back off.
 //
 // A receipt that is missing, sent or dropped needs nothing.
-func Handler(reg *sources.Registry, st *store.Store, paused func() bool) effects.Handler {
+func Handler(reg *sources.Registry, st *store.Store, paused func() bool, hold func(receiptID string) (bool, error)) effects.Handler {
 	return func(ctx context.Context, key string, payload []byte) error {
 		if paused != nil && paused() {
 			return effects.Later(PausedWait) // held, not dropped: the owner paused Athena
@@ -92,6 +93,17 @@ func Handler(reg *sources.Registry, st *store.Store, paused func() bool) effects
 		ch, ok := src.(sources.Channel)
 		if !ok {
 			return settle(st, id, core.ReceiptDropped, core.DropNoChannel)
+		}
+		// Last, so that a repository switched to shadow while this message waited behind another is seen.
+		if hold != nil {
+			held, err := hold(id)
+			if err != nil {
+				return fmt.Errorf("outbox: reply %s: check the hold: %w", id, err)
+			}
+			if held {
+				slog.Info("outbox: reply held for the owner at send time", "receipt", id, "ticket", r.TicketID)
+				return nil
+			}
 		}
 		// Record the send as started before making it: if the process dies after the Channel sent the message but before
 		// it is settled, the re-run is known to be a retry and the Channel checks before posting again.

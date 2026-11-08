@@ -286,7 +286,7 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	if _, ok := gh.checked(); routerOn && ok {
 		registerSource()
 	}
-	fx.Handle(core.EffectReply, outbox.Handler(sourceReg, st, killSwitch.Paused), outbox.Options)
+	fx.Handle(core.EffectReply, outbox.Handler(sourceReg, st, killSwitch.Paused, eng.HoldIfHeld), outbox.Options)
 	// An applied push or pull request runs on the node, once: a failure settles it failed, never retried.
 	fx.Handle(core.EffectApplyProposal, applyProposals(st, eng, n, killSwitch.Paused, logger.With("component", "proposals")),
 		effects.Options{Concurrency: 1})

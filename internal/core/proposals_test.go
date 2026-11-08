@@ -362,3 +362,36 @@ func TestPushDoesNotSupersedeOneBeingApplied(t *testing.T) {
 	eq(t, "its result settles it", h.proposal(a, old.ID).State, ProposalApplied)
 	eq(t, "the newer push still waits", h.proposal(a, newer.ID).State, ProposalPending)
 }
+
+// At send time a waiting reply of a Ticket now held for the owner is held, as if it had just been written; one the owner
+// released is sent, whatever the mode says now.
+func TestHoldIfHeld(t *testing.T) {
+	h := newEvals(t)
+	a := h.shadowed("c:1", false)
+	id := h.reply(ReplyRequest{TicketID: a, TriggerID: "c:1", Purpose: PurposeAnswer, Text: "Done."})
+	held, err := h.eng.HoldIfHeld(id)
+	h.must(err)
+	eq(t, "live: not held", held, false)
+	eq(t, "live: still waiting", h.receipt(id).State, ReceiptWaiting)
+
+	h.pol.shadow = map[string]bool{"o/r": true}
+	held, err = h.eng.HoldIfHeld(id)
+	h.must(err)
+	eq(t, "shadow: held", held, true)
+	eq(t, "shadow: receipt", h.receipt(id).State, ReceiptHeld)
+	ps := h.proposals(a)
+	eq(t, "one proposal", len(ps), 1)
+
+	_, err = h.eng.ApplyProposal(ps[0].ID)
+	h.must(err)
+	eq(t, "released", h.receipt(id).State, ReceiptWaiting)
+	held, err = h.eng.HoldIfHeld(id)
+	h.must(err)
+	eq(t, "the owner's yes stands", held, false)
+	eq(t, "still released", h.receipt(id).State, ReceiptWaiting)
+	eq(t, "no new proposal", len(h.proposals(a)), 1)
+
+	held, err = h.eng.HoldIfHeld("nope")
+	h.must(err)
+	eq(t, "unknown receipt", held, false)
+}

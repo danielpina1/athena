@@ -114,7 +114,7 @@ func newFixture(t *testing.T) *fixture {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	f.reg.Start(ctx)
-	f.h = Handler(f.reg, st, nil)
+	f.h = Handler(f.reg, st, nil, nil)
 	return f
 }
 
@@ -280,11 +280,11 @@ func TestOutboxSourceOffWaitsNotListeningDrops(t *testing.T) {
 	// A registered Source that does not run, and a Source not registered, leave the message waiting.
 	off := sources.NewRegistry()
 	off.Register(newFakeSource())
-	h := Handler(off, f.st, nil)
+	h := Handler(off, f.st, nil, nil)
 	f.queue("w", "T-0001", pull, "Wait.")
 	payload, _ := json.Marshal(map[string]string{"receiptId": "w"})
 	wantLater(t, "source not running", h(context.Background(), "w", payload))
-	wantLater(t, "source not registered", Handler(sources.NewRegistry(), f.st, nil)(context.Background(), "w", payload))
+	wantLater(t, "source not registered", Handler(sources.NewRegistry(), f.st, nil, nil)(context.Background(), "w", payload))
 	eq(t, "still waiting", f.receipt("w").State, core.ReceiptWaiting)
 	wantFailure(t, "malformed payload", f.h(context.Background(), "w", []byte("{")))
 }
@@ -370,7 +370,7 @@ func TestOutboxRecordsTheStartBeforeSending(t *testing.T) {
 func TestOutboxHoldsWhilePaused(t *testing.T) {
 	f := newFixture(t)
 	paused := true
-	h := Handler(f.reg, f.st, func() bool { return paused })
+	h := Handler(f.reg, f.st, func() bool { return paused }, nil)
 	f.queue("p", "T-0001", issue, "Hold me.")
 	payload, _ := json.Marshal(map[string]string{"receiptId": "p"})
 	wantLater(t, "paused", h(context.Background(), "p", payload))
@@ -379,4 +379,30 @@ func TestOutboxHoldsWhilePaused(t *testing.T) {
 	paused = false
 	must(t, "sent after resume", h(context.Background(), "p", payload))
 	eq(t, "sent", f.receipt("p").State, core.ReceiptSent)
+}
+
+// A reply the hold check takes back at send time reaches no Source and needs no retry.
+func TestOutboxHoldsAtSendTime(t *testing.T) {
+	f := newFixture(t)
+	var asked []string
+	held := true
+	h := Handler(f.reg, f.st, nil, func(id string) (bool, error) { asked = append(asked, id); return held, nil })
+	payload := f.queue("h", "T-0001", issue, "Hold me.")
+	must(t, "held", h(context.Background(), "h", payload))
+	eq(t, "asked for the receipt", len(asked) == 1 && asked[0] == "h", true)
+	eq(t, "nothing sent", f.src.tries, 0)
+	held = false
+	must(t, "sent", h(context.Background(), "h", payload))
+	eq(t, "sent", f.receipt("h").State, core.ReceiptSent)
+}
+
+// A failing hold check does not send: the runner backs off and asks again.
+func TestOutboxHoldCheckFailureDoesNotSend(t *testing.T) {
+	f := newFixture(t)
+	h := Handler(f.reg, f.st, nil, func(string) (bool, error) { return false, errors.New("db") })
+	payload := f.queue("h", "T-0001", issue, "Hold me.")
+	if err := h(context.Background(), "h", payload); err == nil {
+		t.Fatal("handler = nil, want the failure")
+	}
+	eq(t, "nothing sent", f.src.tries, 0)
 }
