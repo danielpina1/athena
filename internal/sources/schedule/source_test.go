@@ -72,6 +72,8 @@ type rig struct {
 	paused bool
 	known  bool
 	src    *Source
+	repos  Repos // nil: no event entry fires
+	more   []Entry
 }
 
 func at(s string) time.Time {
@@ -95,11 +97,12 @@ func (r *rig) source() *Source {
 			if r.off {
 				return nil
 			}
-			return []Entry{r.entry}
+			return append([]Entry{r.entry}, r.more...)
 		},
 		Known:  func(string) bool { return r.known },
 		Paused: func() bool { return r.paused },
 		Now:    func() time.Time { return r.now },
+		Repos:  r.repos,
 	}, r.in, r.kv, nil)
 }
 

@@ -65,6 +65,10 @@ type Config struct {
 	Wait   func(ctx context.Context, d time.Duration) error
 	// TickInterval defaults to the constant; tests shorten it.
 	TickInterval time.Duration
+	// Repos reads the facts repository events wait for; nil means no event entry fires.
+	Repos Repos
+	// EventInterval defaults to the constant; tests shorten it.
+	EventInterval time.Duration
 }
 
 // ThreadKey is the Thread of an entry's runs.
@@ -77,8 +81,12 @@ type Source struct {
 	kv  KV
 	log *slog.Logger
 
-	mu      sync.Mutex
-	unknown map[string]string // slug → repository the GitHub Source does not know
+	// work serializes a tick and an event poll, which read and write the same state documents.
+	work sync.Mutex
+
+	mu       sync.Mutex
+	unknown  map[string]string       // slug → repository the GitHub Source does not know
+	eventBad map[string]eventFailure // lower-cased repository → its failing polls in a row
 }
 
 // New returns the Source; log defaults to a logger that discards.
@@ -95,7 +103,10 @@ func New(cfg Config, in Intake, kv KV, log *slog.Logger) *Source {
 	if cfg.TickInterval <= 0 {
 		cfg.TickInterval = TickInterval
 	}
-	return &Source{cfg: cfg, in: in, kv: kv, log: log, unknown: map[string]string{}}
+	if cfg.EventInterval <= 0 {
+		cfg.EventInterval = EventInterval
+	}
+	return &Source{cfg: cfg, in: in, kv: kv, log: log, unknown: map[string]string{}, eventBad: map[string]eventFailure{}}
 }
 
 // Name is "schedule".
@@ -121,11 +132,33 @@ func (s *Source) Health() error {
 	for slug, repo := range s.unknown {
 		return fmt.Errorf("schedule: entry %s targets %s, which the github source does not know", slug, repo)
 	}
+	for repo, f := range s.eventBad {
+		if f.polls >= eventFailuresReported {
+			return fmt.Errorf("schedule: repository events of %s failed %d polls in a row: %s", repo, f.polls, f.err)
+		}
+	}
 	return nil
 }
 
-// Run ticks at once and then every TickInterval until ctx is done, and returns nil then.
+// Run ticks at once and then every TickInterval until ctx is done, and returns nil then. With Repos set, it polls the
+// repository events on their own timer beside it.
 func (s *Source) Run(ctx context.Context) error {
+	if s.cfg.Repos != nil {
+		done := make(chan struct{})
+		defer func() { <-done }()
+		var stop context.CancelFunc
+		ctx, stop = context.WithCancel(ctx)
+		defer stop()
+		go func() {
+			defer close(done)
+			for {
+				s.PollEvents(ctx)
+				if err := s.cfg.Wait(ctx, s.cfg.EventInterval); err != nil || ctx.Err() != nil {
+					return
+				}
+			}
+		}()
+	}
 	for {
 		s.Tick()
 		if err := s.cfg.Wait(ctx, s.cfg.TickInterval); err != nil || ctx.Err() != nil {
@@ -136,6 +169,8 @@ func (s *Source) Run(ctx context.Context) error {
 
 // Tick looks at every enabled entry once.
 func (s *Source) Tick() {
+	s.work.Lock()
+	defer s.work.Unlock()
 	var entries []Entry
 	if s.cfg.Entries != nil {
 		entries = s.cfg.Entries()
