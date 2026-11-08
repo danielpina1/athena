@@ -188,8 +188,9 @@ func makeRestrictedCaches(workDir string) error {
 //     of the restricted sessions, each as a whole, so that what appears there later (another Ticket's directory, output
 //     or transcript) is denied too; and on Linux the daemons' sockets (daemonSockets).
 //   - read again: what the session needs: its working directory and git directories, its own temporary root, the node
-//     socket, the gh shim, the athena binary, the CA bundle, Claude Code's shell snapshots and install, and the toolchains on PATH under the
-//     home directory (homeToolchains). Nothing that holds or lies in a secret or credential is read again.
+//     socket, the gh shim, the athena binary, the CA bundle, Claude Code's install, and the toolchains on PATH under the
+//     home directory (homeToolchains). Claude Code's shell snapshots are not: they are every session's, and it carries on
+//     without one. Nothing that holds or lies in a secret or credential is read again.
 func (n *Node) restrictedReads(goos, workDir string) (deny, allow []string) {
 	home, _ := os.UserHomeDir()
 	var guarded []string
@@ -223,9 +224,6 @@ func (n *Node) restrictedReads(goos, workDir string) (deny, allow []string) {
 	}
 	if n.cfg.Sandbox != nil {
 		need = append(need, n.cfg.Sandbox.CAFile)
-	}
-	if home != "" {
-		need = append(need, filepath.Join(home, ".claude", "shell-snapshots"))
 	}
 	if bin := n.cfg.ClaudeBinary; bin != "" {
 		if p, err := exec.LookPath(bin); err == nil {

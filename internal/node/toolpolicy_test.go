@@ -536,3 +536,16 @@ func TestCleanupRemovesRestrictedTemp(t *testing.T) {
 		t.Fatalf("temporary root still there: %v", err)
 	}
 }
+
+// A restricted session reads no shell snapshot of the owner's: they are other sessions' too, and Claude Code carries on
+// without one.
+func TestRestrictedReadsNoShellSnapshots(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	n := New(Config{SocketPath: filepath.Join(t.TempDir(), "n.sock"), StateDir: t.TempDir()}, nil)
+	_, allow := n.restrictedReads("darwin", t.TempDir())
+	snap := filepath.Join(home, ".claude", "shell-snapshots", "snapshot-zsh-1-a.sh")
+	if slices.ContainsFunc(allow, func(a string) bool { return within(a, snap) || within(a, resolvedPath(snap)) }) {
+		t.Fatalf("allowRead gives back %s: %v", snap, allow)
+	}
+}
