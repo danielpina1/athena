@@ -48,6 +48,10 @@ type fakeGitHub struct {
 	nextID int64
 	// repos is what GET /installation/repositories lists.
 	repos []string
+	// head is the sha of o/r's default branch.
+	head string
+	// changed are the files the compare route reports.
+	changed []string
 }
 
 type openedPull struct {
@@ -73,7 +77,7 @@ const (
 
 func newFakeGitHub(t *testing.T) *fakeGitHub {
 	t.Helper()
-	g := &fakeGitHub{t: t, pulls: map[int]map[string]any{}, nextID: 5000, repos: []string{fakeRepo}}
+	g := &fakeGitHub{t: t, pulls: map[int]map[string]any{}, nextID: 5000, repos: []string{fakeRepo}, head: strings.Repeat("a", 40)}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /app/installations/777/access_tokens", func(w http.ResponseWriter, r *http.Request) {
 		g.record(r)
@@ -199,7 +203,19 @@ func newFakeGitHub(t *testing.T) *fakeGitHub {
 	})
 	mux.HandleFunc("GET /repos/o/r/pulls/{n}/reviews", func(w http.ResponseWriter, r *http.Request) { g.json(w, r, []any{}) })
 	mux.HandleFunc("GET /repos/o/r/branches/{b}", func(w http.ResponseWriter, r *http.Request) {
-		g.json(w, r, map[string]any{"name": r.PathValue("b"), "commit": map[string]any{"sha": strings.Repeat("a", 40)}})
+		g.mu.Lock()
+		sha := g.head
+		g.mu.Unlock()
+		g.json(w, r, map[string]any{"name": r.PathValue("b"), "commit": map[string]any{"sha": sha}})
+	})
+	mux.HandleFunc("GET /repos/o/r/compare/{spec}", func(w http.ResponseWriter, r *http.Request) {
+		g.mu.Lock()
+		files := []map[string]any{}
+		for _, f := range g.changed {
+			files = append(files, map[string]any{"filename": f})
+		}
+		g.mu.Unlock()
+		g.json(w, r, map[string]any{"files": files})
 	})
 	mux.HandleFunc("GET /repos/o/r/commits/{sha}/check-suites", func(w http.ResponseWriter, r *http.Request) {
 		g.json(w, r, map[string]any{"total_count": 0, "check_suites": []any{}})
@@ -214,6 +230,10 @@ func newFakeGitHub(t *testing.T) *fakeGitHub {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			io.WriteString(w, `{"message":"unavailable"}`)
 			return
+		}
+		// GitHub finds a repository whatever the case of its name.
+		if rest, ok := strings.CutPrefix(r.URL.Path, "/repos/O/R"); ok {
+			r.URL.Path = "/repos/o/r" + rest
 		}
 		mux.ServeHTTP(w, r)
 	}))
@@ -287,6 +307,20 @@ func (g *fakeGitHub) mergePull(n int, head string) {
 		"user":       map[string]any{"login": fakeBot, "id": fakeBotID, "type": "Bot"},
 		"created_at": now, "updated_at": now, "closed_at": now,
 		"pull_request": map[string]any{"merged_at": now}})
+}
+
+// setHead moves o/r's default branch to sha.
+func (g *fakeGitHub) setHead(sha string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.head = sha
+}
+
+// setChanged sets the files the compare route reports.
+func (g *fakeGitHub) setChanged(files ...string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.changed = files
 }
 
 func (g *fakeGitHub) postedComments() []postedComment {

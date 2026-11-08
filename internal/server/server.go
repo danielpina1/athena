@@ -31,6 +31,7 @@ import (
 	"github.com/danielpina1/athena/internal/router"
 	"github.com/danielpina1/athena/internal/sources"
 	"github.com/danielpina1/athena/internal/sources/github"
+	"github.com/danielpina1/athena/internal/sources/schedule"
 	"github.com/danielpina1/athena/internal/store"
 )
 
@@ -69,6 +70,8 @@ type Config struct {
 	Version string
 	// HTTPClient reaches GitHub (default: a client with a 30 s timeout); its transport is wrapped for the metrics.
 	HTTPClient *http.Client
+	// ScheduleEventInterval replaces how often the schedule Source polls repository events (tests; 0 keeps its default).
+	ScheduleEventInterval time.Duration
 
 	// dispatcherReady, when set (tests), is called with the Dispatcher before the control socket serves.
 	dispatcherReady func(*Dispatcher)
@@ -83,9 +86,9 @@ type Config struct {
 //
 // Wiring order, so that nothing waits on what is not there yet: store → configuration → GitHub App (checked) → Policy
 // store (the default allows the installation's account) → node (with the App's credentials) → effects runner →
-// Engine (Wake is the runner's, relays whenever the App exists) → GitHub Source (once the check passed) → Outbox
-// (reply) → router (assessment, relay, notice) → node socket → startup recovery (Evals, a pending Policy change,
-// Assignments) → runner, Sources, router, ticker. A check that failed is retried in the background (30 s doubling to
+// Engine (Wake is the runner's, relays whenever the App exists) → GitHub Source (once the check passed) → schedule
+// Source (with the router) → Outbox (reply) → router (assessment, relay, notice) → node socket → startup recovery
+// (Evals, a pending Policy change, Assignments) → runner, Sources, router, ticker. A check that failed is retried in the background (30 s doubling to
 // 10 min); when it passes the Source starts and the default Policy allows the installation's account. With web.enabled
 // the dashboard's listener is bound and its certificate and push key prepared before the runner starts (the Pusher is
 // one of its handlers), and it serves once the Dispatcher exists, before the control socket does.
@@ -286,6 +289,13 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	if _, ok := gh.checked(); routerOn && ok {
 		registerSource()
 	}
+	// Without a router nothing could assess what the schedule Source raises.
+	var autopilot *schedule.Source
+	if routerOn {
+		autopilot = newScheduleSource(pc, sourceReg, gh, killSwitch.Paused, cfg.ScheduleEventInterval,
+			intake{Engine: eng, hist: reg.Histogram("trigger_intake_seconds")}, st, logger.With("source", schedule.SourceName))
+		sourceReg.Register(autopilot)
+	}
 	fx.Handle(core.EffectReply, outbox.Handler(sourceReg, st, killSwitch.Paused, eng.HoldIfHeld), outbox.Options)
 	// An applied push or pull request runs on the node, once: a failure settles it failed, never retried.
 	fx.Handle(core.EffectApplyProposal, applyProposals(st, eng, n, killSwitch.Paused, logger.With("component", "proposals")),
@@ -422,7 +432,7 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	logger.Info("athena server started", "stateDir", stateDir, "pid", os.Getpid())
 
 	c := &control{stateDir: stateDir, eng: eng, workRoot: ncfg.WorkRoot, model: ncfg.Model, log: logger, reg: reg,
-		st: st, fx: fx, gh: gh, host: host, policy: pc, node: n, pause: killSwitch}
+		st: st, fx: fx, gh: gh, host: host, policy: pc, node: n, pause: killSwitch, autopilot: autopilot}
 	if err := c.resumePolicyChange(); err != nil {
 		logger.Error("startup: tell the pending policy change", "error", err)
 	}
