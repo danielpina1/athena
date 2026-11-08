@@ -3,6 +3,7 @@ package schedule
 import (
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -51,7 +52,18 @@ func (k *mapKV) KVSet(key, value string) error {
 	return nil
 }
 
+func (k *mapKV) KVList(prefix string) (map[string]string, error) {
+	out := map[string]string{}
+	for key, v := range k.m {
+		if strings.HasPrefix(key, prefix) {
+			out[key] = v
+		}
+	}
+	return out, nil
+}
+
 type rig struct {
+	off    bool // the entry is disabled or deleted
 	t      *testing.T
 	now    time.Time
 	in     *fakeIntake
@@ -79,10 +91,15 @@ func newRig(t *testing.T, cron, now string) *rig {
 
 func (r *rig) source() *Source {
 	return New(Config{
-		Entries: func() []Entry { return []Entry{r.entry} },
-		Known:   func(string) bool { return r.known },
-		Paused:  func() bool { return r.paused },
-		Now:     func() time.Time { return r.now },
+		Entries: func() []Entry {
+			if r.off {
+				return nil
+			}
+			return []Entry{r.entry}
+		},
+		Known:  func(string) bool { return r.known },
+		Paused: func() bool { return r.paused },
+		Now:    func() time.Time { return r.now },
 	}, r.in, r.kv, nil)
 }
 
@@ -302,4 +319,34 @@ func TestListens(t *testing.T) {
 			t.Errorf("Listens(%q) = %v, want %v", thread, got, want)
 		}
 	}
+}
+
+func TestReenabledEntryStartsOver(t *testing.T) {
+	r := newRig(t, "0 3 * * *", "2026-11-02 10:00:00")
+	r.src.Tick()
+	r.off = true
+	r.tickAt("2026-11-02 12:00:00")
+	r.tickAt("2026-11-03 03:00:10") // the firing it was disabled across
+	r.off = false
+	r.tickAt("2026-11-03 14:00:00")
+	r.fires(0)
+	r.tickAt("2026-11-04 03:00:10")
+	r.fires(1)
+	if id := r.in.got[0].ID; id != "schedule:night:cron:2026-11-04T03:00" {
+		t.Fatalf("id = %s", id)
+	}
+}
+
+func TestDeletedThenRecreatedEntryStartsOver(t *testing.T) {
+	r := newRig(t, "0 3 * * *", "2026-11-02 10:00:00")
+	r.src.Tick()
+	r.off = true // deleted
+	r.tickAt("2026-11-02 12:00:00")
+	r.src = r.source() // and the server restarted meanwhile
+	r.entry.Instructions = "A new job under the old name."
+	r.off = false
+	r.tickAt("2026-11-03 14:00:00")
+	r.fires(0)
+	r.tickAt("2026-11-04 03:00:10")
+	r.fires(1)
 }

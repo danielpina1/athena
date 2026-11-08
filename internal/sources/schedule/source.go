@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -48,6 +49,8 @@ type Intake interface {
 type KV interface {
 	KVGet(key string) (string, bool, error)
 	KVSet(key, value string) error
+	// KVList returns the entries whose key starts with prefix.
+	KVList(prefix string) (map[string]string, error)
 }
 
 // Config configures the Source.
@@ -139,6 +142,10 @@ func (s *Source) Tick() {
 	}
 	now := s.cfg.Now()
 	unknown := map[string]string{}
+	if err := s.forgetDisabled(entries); err != nil {
+		s.log.Warn("schedule state not read", "error", err)
+		return
+	}
 	for _, e := range entries {
 		if e.Repo != "" && s.cfg.Known != nil && !s.cfg.Known(e.Repo) {
 			unknown[e.Slug] = e.Repo
@@ -153,6 +160,38 @@ func (s *Source) Tick() {
 	s.mu.Lock()
 	s.unknown = unknown
 	s.mu.Unlock()
+}
+
+// forgetDisabled clears the Spec of the state document of every entry that is not enabled (disabled or deleted), so
+// that enabling it again starts over instead of firing for the time it was off. LastFired, Date and Fires stay: the
+// daily cap survives.
+func (s *Source) forgetDisabled(entries []Entry) error {
+	docs, err := s.kv.KVList(stateKey(""))
+	if err != nil {
+		return err
+	}
+	enabled := map[string]bool{}
+	for _, e := range entries {
+		enabled[e.Slug] = true
+	}
+	for key := range docs {
+		slug := strings.TrimPrefix(key, stateKey(""))
+		if enabled[slug] {
+			continue
+		}
+		st, err := s.load(slug)
+		if err != nil {
+			return err
+		}
+		if st == nil || st.Spec == "" {
+			continue
+		}
+		st.Spec = ""
+		if err := s.save(slug, st); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // tickClock fires the latest clock firing of e due at or before now, if any.
