@@ -759,3 +759,56 @@ func TestFollowedThreadsOfOpenTickets(t *testing.T) {
 	h.must(err)
 	eq(t, "ended tickets follow nothing", len(got), 0)
 }
+
+func TestThreadBusy(t *testing.T) {
+	const th = "schedule:night"
+	busy := func(h *intake, want bool, why string) {
+		t.Helper()
+		got, err := h.eng.ThreadBusy(th)
+		if err != nil || got != want {
+			t.Fatalf("%s: ThreadBusy = %v, %v; want %v", why, got, err, want)
+		}
+	}
+	put := func(h *intake, f func(*Thread)) {
+		t.Helper()
+		h.must(h.repos.Tx(func(tx Tx) error {
+			x, err := tx.GetThread(th)
+			if err != nil {
+				return err
+			}
+			if x == nil {
+				x = &Thread{Key: th, Source: "schedule"}
+			}
+			f(x)
+			return tx.PutThread(x)
+		}))
+	}
+	h := newIntake(t)
+	busy(h, false, "unknown thread")
+	put(h, func(x *Thread) { x.Queued = []string{"t1"} })
+	busy(h, true, "queued")
+
+	h = newIntake(t)
+	put(h, func(x *Thread) { x.Eval = &Evaluation{ID: "e1", Thread: th} })
+	busy(h, true, "eval")
+
+	h = newIntake(t)
+	put(h, func(x *Thread) {})
+	h.must(h.repos.Tx(func(tx Tx) error { return tx.PutBrake(Brake{TriggerID: "t1", Repo: "o/r", Thread: th, At: h.now()}) }))
+	busy(h, true, "brake")
+
+	h = newIntake(t)
+	id := h.accepted()
+	h.subscribe(id, th, false)
+	busy(h, true, "open ticket")
+
+	h.must(h.repos.Tx(func(tx Tx) error {
+		tk, err := tx.GetTicket(id)
+		if err != nil {
+			return err
+		}
+		tk.Ended = &Ended{At: h.now()}
+		return tx.PutTicket(tk)
+	}))
+	busy(h, false, "ended ticket")
+}
