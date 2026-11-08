@@ -56,14 +56,14 @@ type openedPull struct {
 }
 
 // OpenPull records the pull request (PullOpener).
-func (f *fakeCreds) OpenPull(_ context.Context, repo, head string, p HeldPull) (string, error) {
+func (f *fakeCreds) OpenPull(_ context.Context, repo, head string, p HeldPull) (int, string, error) {
 	if f.onPull != nil {
 		f.onPull(repo, head)
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.pulls = append(f.pulls, openedPull{repo, head, p})
-	return "https://github.com/" + repo + "/pull/9", nil
+	return 9, "https://github.com/" + repo + "/pull/9", nil
 }
 
 func (f *fakeCreds) opened() []openedPull {

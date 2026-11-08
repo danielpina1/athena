@@ -17,6 +17,7 @@ import (
 
 	"github.com/danielpina1/athena/internal/core"
 	"github.com/danielpina1/athena/internal/redact"
+	"github.com/danielpina1/athena/internal/sources/github"
 )
 
 // Shadow mode: a repository whose work is held for the owner. Its Tickets' sessions get read-only GitHub tokens
@@ -162,9 +163,10 @@ type HeldPull struct {
 }
 
 // PullOpener is the optional part of Credentials that opens a pull request through GitHub's API (POST
-// /repos/{owner}/{name}/pulls) with a write token it mints for that call and revokes after; it returns its URL.
+// /repos/{owner}/{name}/pulls) with a write token it mints for that call and revokes after; it returns its number and
+// URL.
 type PullOpener interface {
-	OpenPull(ctx context.Context, repo, head string, p HeldPull) (url string, err error)
+	OpenPull(ctx context.Context, repo, head string, p HeldPull) (number int, url string, err error)
 }
 
 // ProposeRequest carries the session's `gh pr create` as a HeldPull, parsed and its body file read by `athena gh`
@@ -514,10 +516,17 @@ func (n *Node) applyPull(ctx context.Context, p core.Proposal) error {
 	}
 	ctx, cancel := context.WithTimeout(ctx, applyTimeout)
 	defer cancel()
-	url, err := opener.OpenPull(ctx, p.Repo, branchName(t), pl)
+	number, url, err := opener.OpenPull(ctx, p.Repo, branchName(t), pl)
 	if err != nil {
 		return fmt.Errorf("open the pull request: %s", redact.String(err.Error()))
 	}
 	n.log.Info("applied a pull request held for the owner", "ticket", t.ID, "proposal", p.ID, "url", url)
+	// A Ticket that ended meanwhile has nothing to follow it with; the pull request stands either way, so no failure here
+	// may fail the Proposal.
+	if thread := github.ThreadKey(p.Repo, number); number > 0 {
+		if err := n.engine().BindThread(t.ID, thread, true); err != nil {
+			n.log.Warn("the applied pull request was not bound to its ticket", "ticket", t.ID, "thread", thread, "error", err)
+		}
+	}
 	return nil
 }

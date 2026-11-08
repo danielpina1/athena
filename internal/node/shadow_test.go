@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/danielpina1/athena/internal/core"
+	"github.com/danielpina1/athena/internal/sources/github"
 	"github.com/danielpina1/athena/internal/store"
 )
 
@@ -336,6 +337,13 @@ func TestApplyPullAppliesPushFirst(t *testing.T) {
 	}
 	if asked := creds.asked()[before:]; len(asked) != 1 || !asked[0] {
 		t.Errorf("apply asked write = %v, want the push's write token", asked)
+	}
+	th, err := h.eng.Thread(github.ThreadKey("o/r", 9))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(th.Subscriptions, func(s core.Subscription) bool { return s.TicketID == tk.ID && s.Own }) {
+		t.Errorf("thread = %+v, want the Ticket to own the opened pull request's", th)
 	}
 	h.eventually("the push's token revoked", func() bool { return len(creds.revokedTokens()) >= 1 })
 	for _, p := range h.proposalsOf(tk.ID) {
