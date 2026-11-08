@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/danielpina1/athena/internal/core"
@@ -115,10 +116,10 @@ func (tx *Tx) PutApproval(a *core.Approval) error {
 	if a.AnsweredAt != nil {
 		answered = *a.AnsweredAt
 	}
-	_, err = tx.sql.Exec(`INSERT INTO approvals (id, state, ticket_id, doc, answered_at) VALUES (?, ?, ?, ?, ?)
+	_, err = tx.sql.Exec(`INSERT INTO approvals (id, state, ticket_id, doc, answered_at, class) VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET state = excluded.state, ticket_id = excluded.ticket_id, doc = excluded.doc,
-			answered_at = excluded.answered_at`,
-		a.ID, a.State, a.TicketID, string(doc), answered.UTC().Format(timeLayout))
+			answered_at = excluded.answered_at, class = excluded.class`,
+		a.ID, a.State, a.TicketID, string(doc), answered.UTC().Format(timeLayout), ApprovalClass(a.Tool, a.Rule, a.Repo))
 	if err != nil {
 		return fmt.Errorf("store: put approval %q: %w", a.ID, err)
 	}
@@ -313,4 +314,49 @@ func decodeApproval(doc string) (*core.Approval, error) {
 		return nil, fmt.Errorf("store: decode approval: %w", err)
 	}
 	return &a, nil
+}
+
+// ApprovalClass is the key of an action class: the tool, the rule that escalated it and the repository, lower-cased.
+func ApprovalClass(tool, rule, repo string) string {
+	return strings.ToLower(tool + "|" + rule + "|" + repo)
+}
+
+// Streak is how many times in a row the owner approved one action class.
+type Streak struct {
+	Tool, Rule, Repo string
+	Approved         int
+	Last             time.Time
+}
+
+// ApprovalStreaks returns, per action class, the approved answers after the class's latest denial. An expired answer
+// neither counts nor resets. Tool and Rule are as the latest approval gave them; Repo is lower-cased.
+func (s *Store) ApprovalStreaks() (out []Streak, err error) {
+	err = s.Tx(func(tx *Tx) error {
+		rows, err := tx.sql.Query(`SELECT a.class, COUNT(*), MAX(a.answered_at), json_extract(a.doc, '$.tool'), json_extract(a.doc, '$.rule')
+			FROM approvals a
+			WHERE a.state = ? AND a.class != '' AND a.answered_at > COALESCE(
+				(SELECT MAX(d.answered_at) FROM approvals d WHERE d.class = a.class AND d.state = ?), '')
+			GROUP BY a.class`, core.ApprovalApproved, core.ApprovalDenied)
+		if err != nil {
+			return fmt.Errorf("store: approval streaks: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var class, last string
+			var g Streak
+			var tool, rule sql.NullString
+			if err := rows.Scan(&class, &g.Approved, &last, &tool, &rule); err != nil {
+				return fmt.Errorf("store: approval streaks: %w", err)
+			}
+			g.Tool, g.Rule = tool.String, rule.String
+			g.Repo = class[strings.LastIndex(class, "|")+1:]
+			if g.Last, err = time.Parse(timeLayout, last); err != nil {
+				return fmt.Errorf("store: approval streaks: %w", err)
+			}
+			out = append(out, g)
+		}
+		return rows.Err()
+	})
+	sort.Slice(out, func(i, j int) bool { return out[i].Last.After(out[j].Last) })
+	return out, err
 }

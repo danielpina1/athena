@@ -6,13 +6,16 @@ import { create } from "zustand";
 import { Channel } from "@/gen/athena/v1/link_pb";
 import type {
   ApprovalView,
+  Control,
   DecisionView,
   Delta,
   Health,
   NodeStatus,
   NotificationPrefsView,
   PolicyView,
+  PromotionOffer,
   PromptsView,
+  ProposalView,
   RepoView,
   Snapshot,
   ThreadView,
@@ -43,7 +46,13 @@ export type AthenaData = {
   node?: NodeStatus;
   health?: Health;
   policy?: PolicyView;
+  /** The kill switch: absent until the first Snapshot; paused while Athena makes no decisions and sends no replies. */
+  control?: Control;
   repos: RepoView[];
+  /** Replies, pushes and pull requests Athena holds for the owner: the pending ones, and the failed ones to try again. */
+  proposals: Map<string, ProposalView>;
+  /** Actions the owner keeps approving, each offered as a standing allow rule. */
+  offers: PromotionOffer[];
   notifications?: NotificationPrefsView;
   prompts?: PromptsView;
   /**
@@ -104,7 +113,10 @@ function empty(): AthenaData {
     node: undefined,
     health: undefined,
     policy: undefined,
+    control: undefined,
     repos: [],
+    proposals: new Map(),
+    offers: [],
     notifications: undefined,
     prompts: undefined,
     details: new Map(),
@@ -210,8 +222,21 @@ function change(s: AthenaData, d: Delta): Partial<AthenaData> {
       return { health: c.value };
     case "policy":
       return { policy: c.value };
+    case "control":
+      return { control: c.value };
     case "repos":
       return { repos: c.value.repos };
+    case "proposal": {
+      // Applied, discarded and superseded Proposals leave the list; a failed one stays for "Try again".
+      const live = c.value.state === "pending" || c.value.state === "failed";
+      if (!live && !s.proposals.has(c.value.id)) return {};
+      if (live) return { proposals: upsert(s.proposals, c.value.id, c.value) };
+      const proposals = new Map(s.proposals);
+      proposals.delete(c.value.id);
+      return { proposals };
+    }
+    case "offers":
+      return { offers: c.value.offers };
     case "notifications":
       return { notifications: c.value };
     case "prompts":
@@ -249,7 +274,10 @@ export const useAthena = create<AthenaState>()((set, get) => ({
       node: s.node,
       health: s.health,
       policy: s.policy,
+      control: s.control,
       repos: s.repos,
+      proposals: byKey(s.proposals, (x) => x.id),
+      offers: s.offers?.offers ?? [],
       notifications: s.notifications,
       prompts: s.prompts,
     });

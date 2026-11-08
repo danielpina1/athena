@@ -114,7 +114,7 @@ func newFixture(t *testing.T) *fixture {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	f.reg.Start(ctx)
-	f.h = Handler(f.reg, st)
+	f.h = Handler(f.reg, st, nil)
 	return f
 }
 
@@ -280,11 +280,11 @@ func TestOutboxSourceOffWaitsNotListeningDrops(t *testing.T) {
 	// A registered Source that does not run, and a Source not registered, leave the message waiting.
 	off := sources.NewRegistry()
 	off.Register(newFakeSource())
-	h := Handler(off, f.st)
+	h := Handler(off, f.st, nil)
 	f.queue("w", "T-0001", pull, "Wait.")
 	payload, _ := json.Marshal(map[string]string{"receiptId": "w"})
 	wantLater(t, "source not running", h(context.Background(), "w", payload))
-	wantLater(t, "source not registered", Handler(sources.NewRegistry(), f.st)(context.Background(), "w", payload))
+	wantLater(t, "source not registered", Handler(sources.NewRegistry(), f.st, nil)(context.Background(), "w", payload))
 	eq(t, "still waiting", f.receipt("w").State, core.ReceiptWaiting)
 	wantFailure(t, "malformed payload", f.h(context.Background(), "w", []byte("{")))
 }
@@ -364,4 +364,19 @@ func TestOutboxRecordsTheStartBeforeSending(t *testing.T) {
 	f.src.before = func() { started = f.receipt("m").Started }
 	must(t, "sent", f.run("m"))
 	eq(t, "started was already 1 inside Send", started, 1)
+}
+
+// While Athena is paused a reply waits (effects.Later) and nothing reaches the Source; once resumed it is sent.
+func TestOutboxHoldsWhilePaused(t *testing.T) {
+	f := newFixture(t)
+	paused := true
+	h := Handler(f.reg, f.st, func() bool { return paused })
+	f.queue("p", "T-0001", issue, "Hold me.")
+	payload, _ := json.Marshal(map[string]string{"receiptId": "p"})
+	wantLater(t, "paused", h(context.Background(), "p", payload))
+	eq(t, "nothing sent", f.src.tries, 0)
+	eq(t, "still waiting", f.receipt("p").State, core.ReceiptWaiting)
+	paused = false
+	must(t, "sent after resume", h(context.Background(), "p", payload))
+	eq(t, "sent", f.receipt("p").State, core.ReceiptSent)
 }

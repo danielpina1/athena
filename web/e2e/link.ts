@@ -8,12 +8,19 @@ import { create, fromBinary, toBinary, type MessageInitShape } from "@bufbuild/p
 import type { Page } from "@playwright/test";
 import { FrameSchema } from "../src/gen/athena/v1/link_pb";
 import {
+  OfferListSchema,
   RuntimeStatusSchema,
   TimelineEntrySchema,
   type NodeStatus,
+  type PolicyView,
+  type PromotionOffer,
+  type ProposalView,
+  type RepoView,
   type RuntimeStatus,
   type TicketDetail,
+  type TicketSummary,
   type TimelineEntry,
+  type TriggerView,
 } from "../src/gen/athena/v1/state_pb";
 
 export type LinkEdits = {
@@ -21,6 +28,18 @@ export type LinkEdits = {
   node?: (n: NodeStatus) => void;
   /** Shapes a Ticket's detail (its summary, timeline and reports). */
   detail?: (d: TicketDetail) => void;
+  /** Shapes each Ticket summary (a Snapshot's, a Ticket Delta's and a detail's). */
+  ticket?: (t: TicketSummary) => void;
+  /** Shapes each Trigger (a Snapshot's and a Trigger Delta's). */
+  trigger?: (t: TriggerView) => void;
+  /** Shapes the repository list (a Snapshot's and a repos Delta's); it may push to or replace the entries. */
+  repos?: (r: RepoView[]) => void;
+  /** Shapes the held Proposals a Snapshot carries; it may push to or replace the entries. */
+  proposals?: (p: ProposalView[]) => void;
+  /** Shapes the Policy a Snapshot and a policy Delta carry (settings_json is a string: parse, change, stringify). */
+  policy?: (p: PolicyView) => void;
+  /** Shapes the promotion offers a Snapshot carries (and an offers Delta); it may push to or replace the entries. */
+  offers?: (o: PromotionOffer[]) => void;
 };
 
 /** Routes the page's link through `edits`. The object is read on every frame, so a test may swap its edits. */
@@ -34,11 +53,31 @@ export async function editLink(page: Page, edits: LinkEdits): Promise<void> {
       }
       const f = fromBinary(FrameSchema, new Uint8Array(message));
       const body = f.body;
-      if (body.case === "snapshot" && body.value.node) edits.node?.(body.value.node);
+      if (body.case === "snapshot") {
+        if (body.value.node) edits.node?.(body.value.node);
+        body.value.tickets.forEach((t) => edits.ticket?.(t));
+        body.value.triggers.forEach((t) => edits.trigger?.(t));
+        edits.repos?.(body.value.repos);
+        edits.proposals?.(body.value.proposals);
+        if (body.value.policy) edits.policy?.(body.value.policy);
+        if (body.value.offers) edits.offers?.(body.value.offers.offers);
+        else if (edits.offers) {
+          body.value.offers = create(OfferListSchema, {});
+          edits.offers(body.value.offers.offers);
+        }
+      }
       if (body.case === "delta") {
         const change = body.value.change;
         if (change.case === "node") edits.node?.(change.value);
-        if (change.case === "ticketDetail") edits.detail?.(change.value);
+        if (change.case === "ticketDetail") {
+          edits.detail?.(change.value);
+          if (change.value.summary) edits.ticket?.(change.value.summary);
+        }
+        if (change.case === "ticket") edits.ticket?.(change.value);
+        if (change.case === "trigger") edits.trigger?.(change.value);
+        if (change.case === "repos") edits.repos?.(change.value.repos);
+        if (change.case === "policy") edits.policy?.(change.value);
+        if (change.case === "offers") edits.offers?.(change.value.offers);
       }
       ws.send(Buffer.from(toBinary(FrameSchema, f)));
     });

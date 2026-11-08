@@ -26,6 +26,7 @@ import (
 	"github.com/danielpina1/athena/internal/metrics"
 	"github.com/danielpina1/athena/internal/node"
 	"github.com/danielpina1/athena/internal/outbox"
+	"github.com/danielpina1/athena/internal/pause"
 	"github.com/danielpina1/athena/internal/policy"
 	"github.com/danielpina1/athena/internal/router"
 	"github.com/danielpina1/athena/internal/sources"
@@ -181,6 +182,10 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	ncfg.WorkerPrompt = func() string { return currentPrompt(st, logger, true) }
 	ncfg.ReviewerPrompt = func() string { return currentReviewerPrompt(st, logger) }
 	ncfg.SocketPath = filepath.Join(stateDir, NodeSocket)
+	// The node gives each session its tool policy from the current Policy, read when its launch begins; a restricted
+	// one's commands never read the App key, whatever the sandbox setting.
+	ncfg.Policy = nodePolicy{pc}
+	ncfg.Secrets = append(ncfg.Secrets, fileCfg.nodeSecrets()...)
 	if ncfg.Sandbox == nil {
 		ncfg.Sandbox = fileCfg.nodeSandbox()
 	}
@@ -258,6 +263,14 @@ func Run(ctx context.Context, cfg Config) (err error) {
 		logger.Info("event", attrs...)
 	}
 	fx := effects.New(st, logger.With("component", "effects"))
+	killSwitch, err := pause.Open(st, time.Now)
+	if err != nil {
+		return err
+	}
+	if killSwitch.Paused() {
+		logger.Warn("athena is paused; `athena resume` starts the decisions and replies again", "since", killSwitch.State().Since)
+	}
+	n.SetPaused(killSwitch.Paused())
 	eng := core.NewEngineWith(st.Repos(), n, core.Options{Now: time.Now, Emit: emit, Policy: pc.policy, Scope: sourceReg,
 		Wake: fx.Wake, Relays: routerOn, DefaultRuntime: fileCfg.Runtimes.Default, Pairing: pc.pairing})
 	eng.SetMetrics(reg)
@@ -273,12 +286,15 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	if _, ok := gh.checked(); routerOn && ok {
 		registerSource()
 	}
-	fx.Handle(core.EffectReply, outbox.Handler(sourceReg, st), outbox.Options)
+	fx.Handle(core.EffectReply, outbox.Handler(sourceReg, st, killSwitch.Paused), outbox.Options)
+	// An applied push or pull request runs on the node, once: a failure settles it failed, never retried.
+	fx.Handle(core.EffectApplyProposal, applyProposals(st, eng, n, killSwitch.Paused, logger.With("component", "proposals")),
+		effects.Options{Concurrency: 1})
 	var host *router.Host
 	if routerOn {
 		host = router.New(router.Config{Bin: ncfg.AthenaBin, StateDir: stateDir, Model: fileCfg.Router.Model,
 			Socket: ncfg.SocketPath, ClaudeBinary: ncfg.ClaudeBinary, KV: st, Policy: pc.settings,
-			Prompt: func() string { return currentPrompt(st, logger, false) }}, eng, fx, sourceReg, logger)
+			Prompt: func() string { return currentPrompt(st, logger, false) }, Paused: killSwitch.Paused}, eng, fx, sourceReg, logger)
 		n.SetRouter(host)
 	}
 	var webEP *webEndpoint
@@ -288,6 +304,25 @@ func Run(ctx context.Context, cfg Config) (err error) {
 		}
 		defer webEP.stop()
 	}
+	// The one seam a change of the switch goes through: the node parks its sessions or starts them again, the dashboard
+	// hears of it, and the effects that were put off while paused run again at once.
+	killSwitch.OnChange(func(s pause.State) {
+		n.SetPaused(s.Paused)
+		if !s.Paused {
+			resumeParked(eng, n, logger)
+		}
+		if h := hubRef.Load(); h != nil {
+			h.OnCommit(store.Changes{Control: true})
+		}
+		if !s.Paused {
+			// Held effects were put off by their delay; run them now, not when the delay ends.
+			if _, err := st.ReleaseEffects(st.Now(), core.EffectReply, core.EffectAssessment, core.EffectRelay,
+				core.EffectApplyProposal); err != nil {
+				logger.Error("resume: release held effects", "error", err)
+			}
+		}
+		fx.Wake()
+	})
 	expirePendingApprovals(eng, logger)
 
 	nodeCtx, nodeCancel := context.WithCancel(context.Background())
@@ -367,7 +402,7 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	}
 	go func() {
 		defer close(evalDone)
-		evaluate(workCtx, eng, logger)
+		evaluate(workCtx, eng, killSwitch.Paused, logger)
 	}()
 	workStopped := false
 	defer func() {
@@ -387,7 +422,7 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	logger.Info("athena server started", "stateDir", stateDir, "pid", os.Getpid())
 
 	c := &control{stateDir: stateDir, eng: eng, workRoot: ncfg.WorkRoot, model: ncfg.Model, log: logger, reg: reg,
-		st: st, fx: fx, gh: gh, host: host, policy: pc, node: n}
+		st: st, fx: fx, gh: gh, host: host, policy: pc, node: n, pause: killSwitch}
 	if err := c.resumePolicyChange(); err != nil {
 		logger.Error("startup: tell the pending policy change", "error", err)
 	}
@@ -483,7 +518,8 @@ func expirePendingApprovals(eng *core.Engine, log *slog.Logger) {
 // first. The node resumes a running one's session with a restart or recovery note and sends it the Inputs that still
 // wait (Ticket.Undelivered). A running Assignment idle
 // since its last turn (one whose worker handed off included) keeps its Session without a process: the node resumes
-// it, with the resume note, when its next Input arrives.
+// it, with the resume note, when its next Input arrives. While paused it records the interruptions but starts nothing:
+// resumeParked does, on resume.
 func recoverAssignments(eng *core.Engine, n *node.Node, log *slog.Logger) {
 	tickets, err := eng.Tickets(false)
 	if err != nil {
@@ -496,6 +532,9 @@ func recoverAssignments(eng *core.Engine, n *node.Node, log *slog.Logger) {
 			continue
 		}
 		if a.State == core.AssignmentRunning && !interrupted(&t, a) {
+			if !n.Paused() {
+				liftPause(eng, &t, a, log) // a resume the server stopped before it got to
+			}
 			log.Info("idle assignment resumes on its next input", "ticket", t.ID, "assignment", a.ID)
 			continue
 		}
@@ -508,19 +547,69 @@ func recoverAssignments(eng *core.Engine, n *node.Node, log *slog.Logger) {
 				t, a = fresh, fresh.LatestAssignment()
 			}
 		}
+		if n.Paused() {
+			log.Info("athena is paused; the assignment starts on resume", "ticket", t.ID, "assignment", a.ID, "state", a.State)
+			continue
+		}
 		log.Info("recovering assignment", "ticket", t.ID, "assignment", a.ID, "state", a.State, "undelivered", len(t.Undelivered))
 		n.Start(t, *a)
 	}
 }
 
+// resumeParked starts again, on resume, what the pause held, as recovery does: of every open Ticket, a pending latest
+// Assignment and a running one that was interrupted (cut short by a restart, parked by the pause owing its Report, or
+// Inputs wait for it). The node resumes a session with the pause or restart note. A Start of one that is queued or
+// still live changes nothing. An idle session the pause parked with nothing waiting is not started: its pause closes
+// (liftPause) and its next Input resumes it, as after a restart.
+func resumeParked(eng *core.Engine, n *node.Node, log *slog.Logger) {
+	tickets, err := eng.Tickets(false)
+	if err != nil {
+		log.Error("resume: list tickets", "error", err)
+		return
+	}
+	for _, t := range tickets {
+		a := t.LatestAssignment()
+		if a == nil {
+			continue
+		}
+		if a.State == core.AssignmentRunning && !interrupted(&t, a) {
+			liftPause(eng, &t, a, log)
+			continue
+		}
+		if a.State != core.AssignmentPending && a.State != core.AssignmentRunning {
+			continue
+		}
+		log.Info("resuming assignment", "ticket", t.ID, "assignment", a.ID, "state", a.State, "undelivered", len(t.Undelivered))
+		n.Start(t, *a)
+	}
+}
+
+// liftPause closes the open pause of an idle running Assignment that is not started again (PauseLifted: resumed
+// without a start); anything else is left alone.
+func liftPause(eng *core.Engine, t *core.Ticket, a *core.Assignment, log *slog.Logger) {
+	if i := a.OpenInterruption(); i == nil || i.Reason != core.InterruptPaused {
+		return
+	}
+	if err := eng.PauseLifted(t.ID, a.ID); err != nil {
+		log.Error("resume: close the pause", "ticket", t.ID, "assignment", a.ID, "error", err)
+		return
+	}
+	log.Info("pause closed; the idle assignment resumes on its next input", "ticket", t.ID, "assignment", a.ID)
+}
+
 // interrupted reports whether a running Assignment was busy when the server stopped: no turn of its worker ended
-// since it started, an Input (or the nudge to report) reached it after its turn last ended, Inputs wait for it, or a
-// shutdown recorded an interruption that no start has closed and no turn ended after.
+// since it started, an Input (or the nudge to report) reached it after its turn last ended, Inputs wait for it, a
+// shutdown recorded an interruption that no start has closed and no turn ended after, or the owner's pause parked its
+// session at the end of a turn that owed a Report.
 // A Ticket whose latest Report is failed or blocked, with no person's message since, waits for a person instead: a
 // failed turn may skip the Stop hook, but nothing is to run until someone answers (plan 1 R34).
 func interrupted(t *core.Ticket, a *core.Assignment) bool {
 	if t.WaitsForPerson() {
 		return false
+	}
+	if i := a.OpenInterruption(); i != nil && i.Reason == core.InterruptPaused {
+		// The pause parked it at the end of a turn: it starts again only to give the Report it owed or to take Inputs.
+		return i.ReportOwed || len(t.Undelivered) > 0
 	}
 	if i := a.OpenInterruption(); i != nil && (a.IdleAt == nil || !a.IdleAt.After(i.At)) {
 		return true

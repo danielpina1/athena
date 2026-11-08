@@ -429,7 +429,7 @@ func (n *Node) prepareGitHub(s *session) error {
 		}
 		return nil
 	}
-	tok, err := n.tokens.token(n.ctx, s.a.ID, p.github)
+	tok, err := n.tokens.token(n.ctx, s.a.ID, p.github, n.heldForOwner(s))
 	if err != nil {
 		return err
 	}

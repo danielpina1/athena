@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -12,6 +13,7 @@ import (
 	"github.com/danielpina1/athena/internal/core"
 	"github.com/danielpina1/athena/internal/hub"
 	"github.com/danielpina1/athena/internal/node"
+	"github.com/danielpina1/athena/internal/pause"
 	"github.com/danielpina1/athena/internal/pb/athenav1"
 	"github.com/danielpina1/athena/internal/policy"
 	"github.com/danielpina1/athena/internal/store"
@@ -212,6 +214,14 @@ func (s hubSource) NodeStatus() node.Status {
 // GitFolder reports whether dir has a .git entry, as the placeFacts pass last found it (see Repos).
 func (s hubSource) GitFolder(dir string) bool { return s.d.facts.lookup(dir).git }
 
+// Trust classifies a Trigger's sender under the current Policy; there is none until settings are saved or checked.
+func (s hubSource) Trust(t core.Trigger) string {
+	if p := s.d.policy.policy(); p != nil {
+		return p.Trust(t)
+	}
+	return ""
+}
+
 // Repos lists where a task can be placed: the configured GitHub repositories and the repository or folder of each of
 // the newest Tickets, the last used first. A configured repository no Ticket used goes after them, by name; together
 // they are at most maxRepos. Then come the local git repositories the last scan found under the localRepoRoots and
@@ -288,6 +298,9 @@ func (s hubSource) Repos() ([]*athenav1.RepoView, error) {
 			out[i].LastUsedAt = timestamppb.New(e.at)
 		}
 	}
+	if err := s.brakeNumbers(out); err != nil {
+		return nil, err
+	}
 	local := 0
 	for _, dir := range s.d.local.list() {
 		if local == maxLocalRepos {
@@ -301,6 +314,66 @@ func (s hubSource) Repos() ([]*athenav1.RepoView, error) {
 	return out, nil
 }
 
+// brakeNumbers fills, for each GitHub repository, what waits on the owner there, the ceiling it is held to, how many
+// candidates the brake holds and whether its work is held for the owner. Without a Policy yet the ceiling is the
+// default and the mode live.
+func (s hubSource) brakeNumbers(repos []*athenav1.RepoView) error {
+	hasGitHub := false
+	for _, r := range repos {
+		hasGitHub = hasGitHub || r.Kind == "github"
+	}
+	if !hasGitHub {
+		return nil
+	}
+	var tickets []core.Ticket
+	var approvals []core.Approval
+	var brakes []core.Brake
+	err := s.d.st.Tx(func(tx *store.Tx) error {
+		open, err := tx.OpenTickets()
+		if err != nil {
+			return err
+		}
+		for _, t := range open {
+			tickets = append(tickets, *t)
+		}
+		pending, err := tx.PendingApprovals()
+		if err != nil {
+			return err
+		}
+		for _, a := range pending {
+			approvals = append(approvals, *a)
+		}
+		brakes, err = tx.Brakes()
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	var pol core.Policy
+	if s.d.policy != nil {
+		pol = s.d.policy.policy()
+	}
+	for _, r := range repos {
+		if r.Kind != "github" {
+			continue
+		}
+		r.Owed = int32(core.OwedAttention(tickets, approvals, r.Name))
+		r.Ceiling, r.Mode = policy.DefaultWIPCeiling, "live"
+		if pol != nil {
+			r.Ceiling = int32(pol.WIPCeiling(r.Name))
+			if pol.Shadow(r.Name) {
+				r.Mode = "shadow"
+			}
+		}
+		for _, b := range brakes {
+			if strings.EqualFold(b.Repo, r.Name) {
+				r.Braked++
+			}
+		}
+	}
+	return nil
+}
+
 // Notifications returns the kinds an owner can mute and the ones they muted.
 func (s hubSource) Notifications() ([]string, []string, error) {
 	muted, err := web.MutedKinds(s.d.st)
@@ -312,3 +385,29 @@ func (s hubSource) Notifications() ([]string, []string, error) {
 
 // Prompts says which prompt parts the owner overrode.
 func (s hubSource) Prompts() (*athenav1.PromptsView, error) { return promptsView(s.d.st) }
+
+// Control is the kill switch (not paused when the server has none).
+func (s hubSource) Control() pause.State {
+	if s.d.pause == nil {
+		return pause.State{}
+	}
+	return s.d.pause.State()
+}
+
+// Offers is the standing allow rules on offer: the owner's approval streaks, under the current Policy and what they
+// dismissed.
+func (s hubSource) Offers() ([]hub.Offer, error) {
+	streaks, err := s.d.st.ApprovalStreaks()
+	if err != nil || len(streaks) == 0 {
+		return nil, err
+	}
+	cur, _, err := s.d.policy.saved()
+	if err != nil {
+		return nil, err
+	}
+	dismissed, err := s.d.dismissedOffers()
+	if err != nil {
+		return nil, err
+	}
+	return hub.Offers(streaks, cur, dismissed), nil
+}

@@ -62,6 +62,20 @@ type Tx interface {
 	PutReceipt(r *Receipt) error
 	// TicketReceipts returns a Ticket's reply receipts, in queue order (Seq).
 	TicketReceipts(ticketID string) ([]*Receipt, error)
+	// GetProposal returns the Proposal with the given ID, or nil, nil if there is none.
+	GetProposal(id string) (*Proposal, error)
+	// PutProposal inserts or replaces a Proposal.
+	PutProposal(p *Proposal) error
+	// PendingProposals returns every Proposal still pending, oldest first.
+	PendingProposals() ([]*Proposal, error)
+	// TicketProposals returns a Ticket's Proposals in every state, oldest first.
+	TicketProposals(ticketID string) ([]*Proposal, error)
+	// PutBrake inserts or replaces the Brake of a Trigger.
+	PutBrake(b Brake) error
+	// DeleteBrake removes the Brake of a Trigger; none is not an error.
+	DeleteBrake(triggerID string) error
+	// Brakes returns every Brake, oldest first.
+	Brakes() ([]Brake, error)
 	// NextSeq returns the next value of the named counter: 1 on first use, then one more each call.
 	// It moves only if the transaction commits.
 	NextSeq(name string) (int, error)
@@ -96,14 +110,18 @@ const (
 	EventInputAdded        = "input.added"
 	EventApprovalRequested = "approval.requested"
 	EventApprovalAnswered  = "approval.answered"
-	EventTriggerReceived   = "trigger.received"
-	EventThreadSubscribed  = "thread.subscribed"
+	// EventApprovalAllowed is an action a standing allow rule let through with no Approval.
+	EventApprovalAllowed  = "approval.allowed"
+	EventTriggerReceived  = "trigger.received"
+	EventThreadSubscribed = "thread.subscribed"
 	// EventThreadUnsubscribed is emitted for each Ticket whose Subscription to a Thread was dropped.
 	EventThreadUnsubscribed = "thread.unsubscribed"
 	EventEvalStarted        = "eval.started"
 	EventDecisionRecorded   = "decision.recorded"
 	EventTriggerRequeued    = "trigger.requeued"
 	EventPolicyChanged      = "policy.changed"
+	EventProposalCreated    = "proposal.created"
+	EventProposalSettled    = "proposal.settled"
 )
 
 // Event is what the Engine reports after a committed change.
@@ -166,4 +184,12 @@ type Policy interface {
 	// (accept or ignore), its reasons and whether an ignore records "would accept". An error means the assessment
 	// failed.
 	Assess(a Assessment, strength string) (kind string, reasons []Reason, wouldAccept bool, err error)
+	// WIPCeiling is how many Tickets of the repository may be in flight at once; always at least 1.
+	WIPCeiling(repo string) int
+	// Shadow reports whether the repository is in shadow mode: its work is held for the owner.
+	Shadow(repo string) bool
+	// Trust is the trust class of the Trigger's sender.
+	Trust(t Trigger) string
+	// ToolPolicy is the tool policy (ToolStandard, ToolRestricted) of work a sender of the class started.
+	ToolPolicy(class string) string
 }

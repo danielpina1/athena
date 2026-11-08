@@ -40,14 +40,41 @@ type fakeCreds struct {
 	noIdentity atomic.Bool
 	mu         sync.Mutex
 	repos      []string
+	writes     []bool // each request's write flag
 	revoked    []string
 	revokeErr  error
+	// pulls are the pull requests OpenPull opened; onPull, when set, runs in each call.
+	pulls  []openedPull
+	onPull func(repo, head string)
 }
 
-func (f *fakeCreds) Token(_ context.Context, repo string) (string, time.Time, error) {
+type openedPull struct {
+	Repo, Head string
+	Pull       HeldPull
+}
+
+// OpenPull records the pull request (PullOpener).
+func (f *fakeCreds) OpenPull(_ context.Context, repo, head string, p HeldPull) (string, error) {
+	if f.onPull != nil {
+		f.onPull(repo, head)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pulls = append(f.pulls, openedPull{repo, head, p})
+	return "https://github.com/" + repo + "/pull/9", nil
+}
+
+func (f *fakeCreds) opened() []openedPull {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]openedPull(nil), f.pulls...)
+}
+
+func (f *fakeCreds) Token(_ context.Context, repo string, write bool) (string, time.Time, error) {
 	n := f.calls.Add(1)
 	f.mu.Lock()
 	f.repos = append(f.repos, repo)
+	f.writes = append(f.writes, write)
 	f.mu.Unlock()
 	if f.fail.Add(-1) >= 0 {
 		return "", time.Time{}, f.failErr
@@ -65,6 +92,13 @@ func (f *fakeCreds) Revoke(_ context.Context, token string) error {
 	defer f.mu.Unlock()
 	f.revoked = append(f.revoked, token)
 	return f.revokeErr
+}
+
+// asked returns each request's write flag, in order.
+func (f *fakeCreds) asked() []bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]bool(nil), f.writes...)
 }
 
 func (f *fakeCreds) revokedTokens() []string {
@@ -440,7 +474,7 @@ func TestTokenDroppedOnStop(t *testing.T) {
 func TestDropRevokesBestEffort(t *testing.T) {
 	creds := &fakeCreds{revokeErr: errors.New("502 bad gateway")}
 	ts := newTokenStore(creds)
-	tok, err := ts.token(context.Background(), "a1", "o/r")
+	tok, err := ts.token(context.Background(), "a1", "o/r", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -462,18 +496,18 @@ func TestTokenRefreshedBeforeExpiry(t *testing.T) {
 	clock := time.Now()
 	ts.now = func() time.Time { return clock }
 	ctx := context.Background()
-	first, err := ts.token(ctx, "a1", "o/r")
+	first, err := ts.token(ctx, "a1", "o/r", false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if again, _ := ts.token(ctx, "a1", "o/r"); again != first || creds.calls.Load() != 1 {
+	if again, _ := ts.token(ctx, "a1", "o/r", false); again != first || creds.calls.Load() != 1 {
 		t.Fatalf("a fresh token was fetched again (%d calls)", creds.calls.Load())
 	}
 	clock = clock.Add(6 * time.Minute) // 4 minutes left: inside the refresh margin
-	if next, _ := ts.token(ctx, "a1", "o/r"); next == first || creds.calls.Load() != 2 {
+	if next, _ := ts.token(ctx, "a1", "o/r", false); next == first || creds.calls.Load() != 2 {
 		t.Fatalf("a token 4 minutes from expiry was not refreshed (%d calls)", creds.calls.Load())
 	}
-	if _, err := ts.token(ctx, "a2", "o/s"); err != nil || creds.calls.Load() != 3 {
+	if _, err := ts.token(ctx, "a2", "o/s", false); err != nil || creds.calls.Load() != 3 {
 		t.Fatalf("another assignment shares a token: %v (%d calls)", err, creds.calls.Load())
 	}
 	ts.drop("a1")
@@ -486,7 +520,7 @@ func TestTokenRefreshedBeforeExpiry(t *testing.T) {
 	if b, _ := json.Marshal(struct{ T secret }{"ghs_x"}); strings.Contains(string(b), "ghs_x") {
 		t.Fatal("a secret marshals its value")
 	}
-	if _, err := newTokenStore(nil).token(ctx, "a3", "o/r"); err == nil {
+	if _, err := newTokenStore(nil).token(ctx, "a3", "o/r", false); err == nil {
 		t.Fatal("a token without credentials")
 	}
 }
@@ -734,15 +768,15 @@ func TestTokenStoreTombstone(t *testing.T) {
 	creds := &fakeCreds{}
 	ts := newTokenStore(creds)
 	ctx := context.Background()
-	if _, err := ts.token(ctx, "a1", "o/r"); err != nil {
+	if _, err := ts.token(ctx, "a1", "o/r", false); err != nil {
 		t.Fatal(err)
 	}
 	ts.drop("a1")
-	if _, err := ts.token(ctx, "a1", "o/r"); err == nil || creds.calls.Load() != 1 {
+	if _, err := ts.token(ctx, "a1", "o/r", false); err == nil || creds.calls.Load() != 1 {
 		t.Fatalf("token after drop: %v (%d calls)", err, creds.calls.Load())
 	}
 	ts.revive("a1") // a new session of the same Assignment
-	if _, err := ts.token(ctx, "a1", "o/r"); err != nil {
+	if _, err := ts.token(ctx, "a1", "o/r", false); err != nil {
 		t.Fatalf("token after revive: %v", err)
 	}
 }

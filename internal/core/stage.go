@@ -19,6 +19,9 @@ func TicketStage(t *Ticket) Stage {
 	if t.PendingApproval != "" {
 		return Stage{"person", "approval"}
 	}
+	if t.PendingProposals > 0 {
+		return Stage{"person", "proposal"}
+	}
 	if t.Attention != nil {
 		return Stage{"person", "answer"}
 	}

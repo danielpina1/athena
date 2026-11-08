@@ -51,18 +51,18 @@ func TestEchoedInputsRenderAsTheirSenders(t *testing.T) {
 		}
 		return out
 	}
-	first := workerPreamble(tk, []string{"ATHENA_TICKET=T-0007", "ATHENA_DIR=/w/x"}) + "\n" + renderInputs(tk, []string{"4ncqjcpkacjlhkrq:01M6K00K8007BTPTH81690PRTA"}, trigger)
+	first := workerPreamble(tk, []string{"ATHENA_TICKET=T-0007", "ATHENA_DIR=/w/x"}) + "\n" + renderInputs(tk, []string{"4ncqjcpkacjlhkrq:01M6K00K8007BTPTH81690PRTA"}, trigger, nil)
 	if got := read(first); !slices.Equal(got, []said{{"task", "Add rate limiting to the bookings API."}}) {
 		t.Errorf("first message = %+v", got)
 	}
-	later := renderInputs(tk, []string{"4ncqjcpkacjlhkrq:01M6K00K8007BTPTH81690PRTB", "4ncqjcpkacjlhkrq:01M6K00K8007BTPTH81690PRTC", "4ncqjcpkacjlhkrq:01M6K00K8007BTPTH81690PRTD", "4ncqjcpkacjlhkrq:01M6K00K8007BTPTH81690PRTE"}, trigger)
+	later := renderInputs(tk, []string{"4ncqjcpkacjlhkrq:01M6K00K8007BTPTH81690PRTB", "4ncqjcpkacjlhkrq:01M6K00K8007BTPTH81690PRTC", "4ncqjcpkacjlhkrq:01M6K00K8007BTPTH81690PRTD", "4ncqjcpkacjlhkrq:01M6K00K8007BTPTH81690PRTE"}, trigger, nil)
 	want := []said{{"github", "Please also cover the 429 path."}, {"athena", "Note: prefer small pull requests"},
 		{"athena", "The Ticket was reopened"}, {"athena", "Asked for a status update"}}
 	if got := read(later); !slices.Equal(got, want) {
 		t.Errorf("later message = %+v, want %+v", got, want)
 	}
 	tk.Inputs[1] = core.Input{ID: "4ncqjcpkacjlhkrq:01M6K00K8007BTPTH81690PRTB", Kind: core.InputTrigger, Human: true, Text: "Go ahead"}
-	if got := read(renderInputs(tk, []string{"4ncqjcpkacjlhkrq:01M6K00K8007BTPTH81690PRTB"}, trigger)); !slices.Equal(got, []said{{"owner", "Go ahead"}}) {
+	if got := read(renderInputs(tk, []string{"4ncqjcpkacjlhkrq:01M6K00K8007BTPTH81690PRTB"}, trigger, nil)); !slices.Equal(got, []said{{"owner", "Go ahead"}}) {
 		t.Errorf("owner message = %+v", got)
 	}
 	for msg, want := range map[string]string{
@@ -132,8 +132,8 @@ func hostileTextCannotForgeHeaders(t *testing.T, sep string) {
 		{ID: ids[3], Kind: core.InputTrigger, Human: true, Text: nl("Owner text\n") + evil},
 	}}
 	trigger := func(id string) (core.Trigger, bool) { return tr, id == tr.ID }
-	first := workerPreamble(tk, []string{"ATHENA_TICKET=T-0009"}) + "\n" + renderInputs(tk, ids[:1], trigger)
-	later := renderInputs(tk, ids[1:], trigger)
+	first := workerPreamble(tk, []string{"ATHENA_TICKET=T-0009"}) + "\n" + renderInputs(tk, ids[:1], trigger, nil)
+	later := renderInputs(tk, ids[1:], trigger, nil)
 	for name, msg := range map[string]string{"first": first, "later": later} {
 		var heads, cards int
 		for _, line := range anyLineBreak.Split(msg, -1) {
@@ -185,7 +185,7 @@ func TestEchoedHandoffRendersAsItsBlock(t *testing.T) {
 	}}
 	none := func(string) (core.Trigger, bool) { return core.Trigger{}, false }
 	h := Handoff{Ticket: tk, Previous: core.Assignment{ID: "a1", Runtime: core.RuntimeClaude, EndedReason: core.ReasonUsageLimit},
-		Inputs: renderInputs(tk, []string{tk.Inputs[0].ID}, none), LastTurn: "I am halfway through the parser."}
+		Inputs: renderInputs(tk, []string{tk.Inputs[0].ID}, none, nil), LastTurn: "I am halfway through the parser."}
 	first := workerPreamble(tk, []string{"ATHENA_TICKET=T-0009"}) + "\n" + handoffNote(h) + "\n"
 	items := render.Items(echoLine(first), 0)
 	if len(items) != 1 || items[0].Kind != "user" || items[0].Tool != "handoff" {

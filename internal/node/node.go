@@ -20,6 +20,7 @@ import (
 
 	"github.com/danielpina1/athena/internal/core"
 	"github.com/danielpina1/athena/internal/metrics"
+	"github.com/danielpina1/athena/internal/policy"
 	"github.com/danielpina1/athena/internal/quota"
 	"github.com/danielpina1/athena/internal/redact"
 	"github.com/danielpina1/athena/internal/render"
@@ -108,6 +109,13 @@ type Config struct {
 	ReviewerPrompt func() string
 	// Sandbox, when set, turns on Claude Code's sandbox for worker sessions (sandbox.go); nil leaves it off.
 	Sandbox *SandboxConfig
+	// Secrets are paths no restricted session's commands may read, whether the owner's Sandbox is on or not (the GitHub
+	// App key).
+	Secrets []string
+	// Policy, when set, gives each Ticket's sessions their tool policy by the trust class of its Mandate
+	// (toolpolicy.go): a restricted session always runs sandboxed, reaching GitHub alone, and asks nobody for anything.
+	// nil runs every session standard.
+	Policy Policy
 	// Logger receives the node's log lines (default slog.Default()).
 	Logger *slog.Logger
 	// Name and ClaudeVersion are shown in Status; the node does not interpret them.
@@ -129,6 +137,9 @@ type EngineCallbacks interface {
 	TurnEnded(ticketID, assignmentID string) error
 	// AssignmentInterrupted records that the session of a busy Assignment is cut short from outside (a shutdown).
 	AssignmentInterrupted(ticketID, assignmentID, reason string) error
+	// AssignmentPaused records that the owner's pause parked the session at the end of its turn (reportOwed: the turn
+	// ended without the Report the worker owed).
+	AssignmentPaused(ticketID, assignmentID string, reportOwed bool) error
 	// UsageLimited records that the session of a running Assignment stopped at its usage limit: a new Assignment takes
 	// over, with no person stage.
 	UsageLimited(ticketID, assignmentID string, l core.UsageLimit) error
@@ -139,6 +150,8 @@ type EngineCallbacks interface {
 	RequestApproval(a core.Approval) (core.Approval, error)
 	WaitApproval(ctx context.Context, id string) (core.Approval, error)
 	ExpireApproval(id string) error
+	// AllowedByRule records on the Ticket that the owner's standing allow rule let an action through with no Approval.
+	AllowedByRule(ticketID, tool, rule, repo string) error
 	// Trigger reads a stored Trigger: a Ticket's origin for its execution variables, an Input's for its card.
 	Trigger(id string) (core.Trigger, error)
 	// The worker tools' commands (workertools.go) and the binding of a reported pull request.
@@ -147,6 +160,12 @@ type EngineCallbacks interface {
 	MarkUnrelated(ticketID, thread, reason string) error
 	Handback(ticketID, triggerID, reason string) (bool, error)
 	BindThread(ticketID, thread string, own bool) error
+	// The Proposals of a repository in shadow mode (shadow.go): the node proposes a Ticket's branch and pull request,
+	// and settles the push it applies with a pull request.
+	Propose(p core.Proposal) (core.Proposal, error)
+	PendingProposals() ([]core.Proposal, error)
+	SettleProposal(id string, applyErr error) error
+	StartProposal(id string) (first bool, err error)
 	// RecordUsage adds what the node observed to the Ticket's stats. It takes the Engine's lock: never call it while
 	// holding a node lock that Start, Deliver or Stop also take.
 	RecordUsage(ticketID, assignmentID string, u core.UsageDelta) error
@@ -186,6 +205,8 @@ type Node struct {
 
 	// restartDelay is the pause before restart n (1-based) of a crashed session.
 	restartDelay func(n int) time.Duration
+	// canSandbox reports whether this machine can sandbox a session (default SandboxSupported).
+	canSandbox func() bool
 
 	// queued is the number of launches waiting (written by the loop goroutine); statusSig is the last status
 	// OnStatus was told of (loop goroutine only).
@@ -219,6 +240,8 @@ type Node struct {
 	infos  map[string]rt.Info
 	// statusGen moves whenever a runtime's readiness or quota changes, so publishStatus tells OnStatus.
 	statusGen atomic.Int64
+	// paused is the kill switch (pause.go): no queued launch starts and live sessions park at their turn's end.
+	paused atomic.Bool
 }
 
 type engineRef struct{ e EngineCallbacks }
@@ -261,10 +284,13 @@ func New(cfg Config, eng EngineCallbacks) *Node {
 		done:         make(chan struct{}),
 		live:         map[string]*session{},
 		restartDelay: func(n int) time.Duration { return time.Duration(n) * time.Second },
+		canSandbox:   SandboxSupported,
 		reg:          cfg.Metrics,
 		slotsGauge:   cfg.Metrics.Gauge("slots_in_use"),
 	}
 	n.tokens.log = log
+	// A repository in shadow mode gets read-only tokens: what holds its work for the owner, whatever a session runs.
+	n.tokens.writable = func(repo string) bool { return !n.shadow(repo) }
 	n.infos = map[string]rt.Info{}
 	n.chooser = cfg.Chooser
 	if n.chooser == nil {
@@ -489,6 +515,7 @@ func (n *Node) onStart(st *loopState, t core.Ticket, a core.Assignment) {
 		return
 	}
 	if s := n.liveSession(t.ID); s != nil && s.a.ID == a.ID {
+		s.startWhenLeft() // a session the pause parked, still leaving, starts again once it left
 		return
 	}
 	for i, q := range st.queue {
@@ -595,8 +622,9 @@ func (n *Node) onEnded(st *loopState, s *session) {
 			}
 			st.queue = append(st.queue, ns)
 		}
-	} else if !st.shutting && !s.isStopped() && len(s.deliverCh) > 0 {
-		// Inputs arrived after the runner stopped listening: launch the Assignment again to take them.
+	} else if !st.shutting && !s.isStopped() && (len(s.deliverCh) > 0 || s.startsWhenLeft()) {
+		// Inputs arrived after the runner stopped listening, or the resume started it while the pause that parked it
+		// still closed it: launch the Assignment again.
 		a := s.a
 		a.State = core.AssignmentRunning
 		if id := s.currentSessionID(); id != "" {
@@ -632,6 +660,9 @@ func (n *Node) onShutdown(st *loopState) {
 // schedule launches queued sessions while slots are free, skipping a Ticket whose previous session still ends, a
 // non-git directory another Ticket uses and a launch put off until later (waiting for credentials or a runtime).
 func (n *Node) schedule(st *loopState) {
+	if n.Paused() {
+		return // the queue waits for the resume (SetPaused)
+	}
 	for i := 0; i < len(st.queue); {
 		if n.liveCount() >= n.cfg.Slots {
 			return
@@ -698,6 +729,7 @@ type session struct {
 
 	deliverCh chan struct{} // cap 1: a delivery is wanted
 	reportCh  chan struct{} // cap 1: the session filed a Report
+	pauseCh   chan struct{} // cap 1: the node paused; park if idle
 	stopCh    chan struct{}
 
 	mu          sync.Mutex
@@ -722,6 +754,10 @@ type session struct {
 	// request); parked once its runner ended the process for it, the Assignment running on with its session.
 	handoff bool
 	parked  bool
+	// pauseParked is set once the node's pause parked the session; startAgain once a Start came for it while it was
+	// still leaving (pause.go).
+	pauseParked bool
+	startAgain  bool
 	// wait is set when the launch cannot go yet (GitHub credentials, its runtime limited or at its session cap): it
 	// is queued again, without a slot, to be tried after the pause.
 	wait launchWait
@@ -739,6 +775,34 @@ type session struct {
 	shared map[string]*sharedVerdict
 	// runtime is the runtime the session's runner chose (chooseRuntime), set before it prepares its directory.
 	runtime string
+	// toolPolicy is the session's tool policy (policy.ToolStandard, policy.ToolRestricted), read once from the Policy
+	// when its launch begins (before its runtime is chosen), so that a change of the Policy never flips a session.
+	toolPolicy string
+}
+
+// readToolPolicy sets the session's tool policy from read, unless it has one already.
+func (s *session) readToolPolicy(read func() string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.toolPolicy == "" {
+		s.toolPolicy = read()
+	}
+}
+
+// ticketRepo is the repository (owner/name) the session's Ticket works in, or empty.
+func (s *session) ticketRepo() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.t.Repo
+}
+
+// restricted reports whether the session runs under the restricted tool policy: any but standard, so a session not
+// prepared yet is restricted too.
+
+func (s *session) restricted() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.toolPolicy != policy.ToolStandard
 }
 
 func (s *session) setRuntime(name string) {
@@ -864,6 +928,7 @@ func (n *Node) newSession(t core.Ticket, a core.Assignment, p placement) *sessio
 		log:       n.log.With("ticket", t.ID, "assignment", a.ID),
 		deliverCh: make(chan struct{}, 1),
 		reportCh:  make(chan struct{}, 1),
+		pauseCh:   make(chan struct{}, 1),
 		stopCh:    make(chan struct{}),
 	}
 }
@@ -1065,6 +1130,8 @@ type runner struct {
 	paused bool
 	// restarted is set when the first process resumes a session a server restart cut short.
 	restarted bool
+	// reportOwed is set when a turn ended while paused without the Report the worker owed (pause.go).
+	reportOwed bool
 	// redeliver is set when sending waiting Inputs failed while the process ran: the next turn end tries again.
 	redeliver bool
 	// handoff is the handoff note (handoff.go) the first message of the Assignment's first process carries, if any.
@@ -1112,7 +1179,9 @@ func (r *runner) run() {
 	if s.isStopped() {
 		return
 	}
-	// The runtime first: a launch whose runtime is limited (or at its session cap) waits without a slot, like one
+	// The tool policy first: it decides which runtimes may run the session.
+	s.readToolPolicy(func() string { return n.toolPolicy(s.t) })
+	// The runtime next: a launch whose runtime is limited (or at its session cap) waits without a slot, like one
 	// waiting for credentials; one whose runtime cannot run it fails with why.
 	rtm, ok := r.chooseRuntime()
 	if !ok {
@@ -1122,6 +1191,10 @@ func (r *runner) run() {
 	// retried until they come or the session is stopped, never filed as failed: the Ticket shows working/queued meanwhile.
 	// The launch waits without a slot: the runner ends, and the loop queues it again, due after the pause (onEnded).
 	if err := n.prepare(s); err != nil {
+		if su := (*sandboxUnavailableError)(nil); errors.As(err, &su) {
+			r.fail(su.Error())
+			return
+		}
 		if !credentialsLater(err) {
 			r.fail("prepare ticket directory: " + redact.String(err.Error()))
 			return
@@ -1151,7 +1224,9 @@ func (r *runner) run() {
 	// session names at start (Init). An auto Ticket's model is a Claude Code model (the only kind a task named before
 	// runtimes): on Codex it runs Codex's default rather than a model Codex does not have.
 	model := ""
-	if x := s.t.Execution; x != nil && x.Model != "" && (x.Runtime != core.RuntimeAuto || rtm.Name() == runtimeClaude) {
+	// A restricted Ticket that names Codex runs on Claude Code (chooseRuntime): its model is Codex's, not one to run.
+	if x := s.t.Execution; x != nil && x.Model != "" && (x.Runtime != core.RuntimeAuto || rtm.Name() == runtimeClaude) &&
+		!(s.restricted() && x.Runtime == core.RuntimeCodex) {
 		model = x.Model
 	} else if rtm.Name() == runtimeClaude {
 		model = n.cfg.Model
@@ -1172,7 +1247,7 @@ func (r *runner) run() {
 	if trPath == "" {
 		trPath = filepath.Join(adir, "transcript.jsonl")
 	}
-	sandbox, sandboxEnv := n.sessionSandbox(s.place.workDir, s.reviewing())
+	sandbox, sandboxEnv := n.sessionSandbox(s.place.workDir, s.reviewing(), s.restricted())
 	var roots []string
 	if !s.reviewing() {
 		roots = n.writableRoots(s.place.workDir)
@@ -1183,6 +1258,12 @@ func (r *runner) run() {
 		r.handoff, failover = r.handoffFor(rtm.Name(), resumeID)
 	}
 	for crashes := 0; ; {
+		if crashes == 0 && r.putOffForPause() {
+			return // paused while it prepared: its first turn waits for the resume
+		}
+		if crashes > 0 && r.parkCrashedForPause() {
+			return // crashed while paused: it starts again on the resume, not now
+		}
 		spawnStart := time.Now()
 		// One transcript per process: the session appends every line it prints, and it is closed after the process.
 		tr, err := rt.OpenTranscript(trPath, func(off int64, line []byte) { n.streams.add(s.t.ID, off, line) })
@@ -1276,6 +1357,15 @@ func (r *runner) chooseRuntime() (rt.Runtime, bool) {
 	if p := pinnedRuntime(s.t, s.a); p != "" && !(movable(s.t, s.a) && n.quota.State(p).Limited(time.Now())) {
 		names = []string{p}
 	}
+	// A restricted session runs on Claude Code alone, whose sandbox keeps its commands from the owner's secrets, whatever
+	// runtime its Ticket names (a stranger's Ticket gets the server's default, which no person chose): the Chooser sees
+	// its launch pinned to Claude Code.
+	restricted := s.restricted()
+	t, a := s.t, s.a
+	if restricted {
+		names = []string{runtimeClaude}
+		a.Runtime = runtimeClaude
+	}
 	cctx, cancel := context.WithCancel(n.ctx)
 	go func() {
 		select {
@@ -1287,7 +1377,7 @@ func (r *runner) chooseRuntime() (rt.Runtime, bool) {
 	ready := map[string]rt.Info{}
 	for _, name := range names {
 		if rtm, ok := n.cfg.Runtimes[name]; ok {
-			ready[name] = n.eligible(s.a, rtm, n.checkRuntime(cctx, name, rtm))
+			ready[name] = n.eligible(s.a, rtm, n.checkRuntime(cctx, name, rtm), restricted)
 		}
 	}
 	cancel()
@@ -1298,7 +1388,7 @@ func (r *runner) chooseRuntime() (rt.Runtime, bool) {
 	n.mu.Lock()
 	live, gen := n.liveRuntimesLocked(s), n.endGen
 	n.mu.Unlock()
-	c := n.chooser.Choose(ChoiceInput{Ticket: s.t, Assignment: s.a, Ready: ready, Quota: n.quota.State, Live: live, Now: time.Now()})
+	c := n.chooser.Choose(ChoiceInput{Ticket: t, Assignment: a, Ready: ready, Quota: n.quota.State, Live: live, Now: time.Now()})
 	launch := c.Runtime != "" && c.Until.IsZero() && !c.AwaitSession
 	if info, checked := ready[c.Runtime]; launch && (!checked || !info.Ready) {
 		// Whatever the Chooser says, nothing launches on a runtime the node did not find ready.
@@ -1336,6 +1426,9 @@ func (r *runner) chooseRuntime() (rt.Runtime, bool) {
 		if c.AwaitSession {
 			s.awaitSessionEnd(gen)
 		}
+		return nil, false
+	case restricted:
+		r.fail(restrictedRuntimeSummary + redact.String(c.Why))
 		return nil, false
 	default:
 		r.fail(redact.String(c.Why))
@@ -1382,6 +1475,8 @@ loop:
 		case <-s.reportCh:
 			r.markRead(s.reportCount())
 			r.parkIfHandedOff()
+		case <-s.pauseCh:
+			r.parkIfPaused()
 		case <-s.stopCh:
 			crashed = false
 			r.log.Info("session stopped", "reason", s.reason())
@@ -1393,10 +1488,9 @@ loop:
 			break loop
 		}
 		if r.park {
-			// The worker handed off and its turn is over: the process ends, the slot is free, the Assignment runs on
-			// with its session, which a later Input resumes.
+			// The worker handed off, or the node paused, and its turn is over: the process ends, the slot is free, the
+			// Assignment runs on with its session, which a later Input (or the resume) starts again.
 			crashed = false
-			r.log.Info("worker handed off; session paused until its next input")
 			_ = sess.Close()
 			for ev := range events {
 				r.account(ev)
@@ -1457,7 +1551,9 @@ func (r *runner) sendFirst(sess rt.Session, recovering bool) {
 	}
 	ids := r.pending(t)
 	var b strings.Builder
-	if recovering && r.paused {
+	if recovering && pausedByOwner(t, s.a.ID) {
+		b.WriteString(pauseNote + "\n")
+	} else if recovering && r.paused {
 		b.WriteString(resumeNote + "\n")
 	} else if recovering && r.restarted {
 		b.WriteString(restartNote + recoveryAdvice + "\n")
@@ -1474,10 +1570,10 @@ func (r *runner) sendFirst(sess rt.Session, recovering bool) {
 	r.handoff = "" // once: a restarted process gets the recovery note
 	// Inputs a crashed process received but never took into a step go again, ahead of what waits.
 	if len(r.unread) > 0 {
-		b.WriteString("\n" + renderInputs(t, r.unreadIDs(), r.trigger))
+		b.WriteString("\n" + renderInputs(t, r.unreadIDs(), r.trigger, r.n.trustOf))
 	}
 	if len(ids) > 0 {
-		b.WriteString("\n" + renderInputs(t, ids, r.trigger))
+		b.WriteString("\n" + renderInputs(t, ids, r.trigger, r.n.trustOf))
 	}
 	if r.firstSent.IsZero() {
 		r.firstSent = time.Now()
@@ -1505,8 +1601,17 @@ func workerPreamble(t core.Ticket, vars []string) string {
 	return b.String()
 }
 
-// deliver sends the Inputs that wait for the Ticket now and reports exactly those as delivered.
+// deliver sends the Inputs that wait for the Ticket now and reports exactly those as delivered. While the node is
+// paused it sends nothing: a busy session would take them into its turn and work on; they wait, undelivered, for the
+// turn's end (delivered then if the node resumed meanwhile) or for the session's start after the resume.
 func (r *runner) deliver(sess rt.Session) {
+	if r.parkIfPaused(); r.park {
+		return // paused while idle: the Inputs wait for the session's start after the resume
+	}
+	if r.n.Paused() {
+		r.redeliver = true
+		return
+	}
 	t, _, err := r.eng.Ticket(r.s.t.ID)
 	if err != nil {
 		r.log.Error("read ticket", "error", err)
@@ -1519,7 +1624,7 @@ func (r *runner) deliver(sess rt.Session) {
 	if len(ids) == 0 {
 		return
 	}
-	if err := sess.Send(renderInputs(t, ids, r.trigger), ""); err != nil {
+	if err := sess.Send(renderInputs(t, ids, r.trigger, r.n.trustOf), ""); err != nil {
 		if errors.Is(err, rt.ErrExited) {
 			return // still waiting: the restarted process takes them
 		}
@@ -1721,8 +1826,11 @@ func (r *runner) onEvent(ev rt.Event) {
 		// The turn that took in everything sent before its end is over.
 		r.markRead(-1)
 		r.idle = true
-		r.turnEnded()
+		if !r.owesReportAtPause() { // paused, the session parks owing its Report instead of a nudged turn
+			r.turnEnded()
+		}
 		r.parkIfHandedOff()
+		r.parkIfPaused()
 	}
 }
 
@@ -1747,6 +1855,7 @@ func (r *runner) parkIfHandedOff() {
 		r.log.Error("record turn end", "error", err)
 		return
 	}
+	r.log.Info("worker handed off; session paused until its next input")
 	s.markParked()
 	r.park = true
 }
@@ -1833,6 +1942,7 @@ func (r *runner) turnEnded() {
 		return
 	}
 	r.inputSent() // start over: the turn of the next Input is checked afresh
+	r.idle = true // nothing was sent: the session waits
 	if r.s.isStopped() {
 		return
 	}
@@ -2003,8 +2113,8 @@ func (r *runner) trigger(id string) (core.Trigger, bool) {
 }
 
 // renderInputs renders Inputs for the session, in order; an Input whose Trigger came from a Source's Thread is a
-// Trigger card (inputCard), trigger reading the Trigger.
-func renderInputs(t core.Ticket, ids []string, trigger func(id string) (core.Trigger, bool)) string {
+// Trigger card (inputCard), trigger reading the Trigger and trust the trust class of its sender (nil: none is marked).
+func renderInputs(t core.Ticket, ids []string, trigger func(id string) (core.Trigger, bool), trust func(core.Trigger) string) string {
 	var b strings.Builder
 	for _, id := range ids {
 		var in *core.Input
@@ -2029,7 +2139,7 @@ func renderInputs(t core.Ticket, ids []string, trigger func(id string) (core.Tri
 			found := false
 			if in.TriggerID != "" && trigger != nil {
 				if tr, found = trigger(in.TriggerID); found && len(tr.Threads) > 0 {
-					b.WriteString(inputCard(t.ID, *in, tr))
+					b.WriteString(inputCard(t.ID, *in, tr, trustOf(trust, tr)))
 					continue
 				}
 			}
@@ -2280,6 +2390,10 @@ func WorktreeBranch(t core.Ticket, hasGit func(dir string) bool) string {
 // prepare makes the session's directory and writes its settings and MCP config.
 func (n *Node) prepare(s *session) error {
 	p := s.place
+	s.readToolPolicy(func() string { return n.toolPolicy(s.t) })
+	if err := n.checkRestrictedSandbox(s); err != nil {
+		return err
+	}
 	// An earlier session may have repointed the worktree's git links and its process not ended cleanly (a node that
 	// died, a child that outlived it): put them back before anything, the sandbox included, reads them.
 	if err := n.restoreGitLinks(s.t, s.log); err != nil {
@@ -2326,7 +2440,12 @@ func (n *Node) prepare(s *session) error {
 	if !ok {
 		return fmt.Errorf("runtime %q is not available on this node", name)
 	}
-	sb, sbEnv := n.sessionSandbox(p.workDir, s.reviewing())
+	if s.restricted() {
+		if err := makeRestrictedCaches(p.workDir); err != nil {
+			return err
+		}
+	}
+	sb, sbEnv := n.sessionSandbox(p.workDir, s.reviewing(), s.restricted())
 	role := roleWorker
 	if s.reviewing() {
 		role = core.RoleReview

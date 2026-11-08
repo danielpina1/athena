@@ -256,6 +256,32 @@ func (c *Client) deleteAs(ctx context.Context, path, token string) error {
 	return err
 }
 
+// postAs sends in as JSON to path authenticated with token instead of the client's own, and decodes the response into
+// out (which may be nil). Like deleteAs, it does not retry on a 401.
+func (c *Client) postAs(ctx context.Context, path, token string, in, out any) error {
+	body, err := json.Marshal(in)
+	if err != nil {
+		return fmt.Errorf("github: POST %s: encode: %w", path, err)
+	}
+	target, err := c.resolve(path)
+	if err != nil {
+		return err
+	}
+	if u, err := url.Parse(target); err != nil || !c.sameOrigin(u) {
+		return fmt.Errorf("github: refusing POST %s: not on the API host: %w", path, ErrPermanent)
+	}
+	resp, err := c.send(ctx, http.MethodPost, target, path, body, nil, token)
+	if err != nil {
+		return err
+	}
+	if out != nil && len(resp.body) > 0 {
+		if err := json.Unmarshal(resp.body, out); err != nil {
+			return fmt.Errorf("github: POST %s: decode: %w", path, err)
+		}
+	}
+	return nil
+}
+
 func (c *Client) write(ctx context.Context, method, path string, in, out any) error {
 	var body []byte
 	if in != nil {

@@ -16,6 +16,7 @@ import (
 
 	"github.com/danielpina1/athena/internal/core"
 	"github.com/danielpina1/athena/internal/node"
+	"github.com/danielpina1/athena/internal/pause"
 	"github.com/danielpina1/athena/internal/pb/athenav1"
 	"github.com/danielpina1/athena/internal/quota"
 	"github.com/danielpina1/athena/internal/runtime/rt"
@@ -40,6 +41,9 @@ type fakeSource struct {
 	kinds     []string
 	muted     []string
 	prompts   *athenav1.PromptsView
+	control   pause.State
+	offers    []Offer
+	proposals map[string]*athenav1.ProposalView
 	// triggerReads counts Trigger calls; triggerErr fails them, as a store that cannot be read does.
 	triggerReads int
 	triggerErr   error
@@ -129,6 +133,14 @@ func (f *fakeSource) Repos() ([]*athenav1.RepoView, error) {
 
 func (f *fakeSource) setRepos(r ...*athenav1.RepoView) { f.mu.Lock(); f.repos = r; f.mu.Unlock() }
 
+// Trust classes every Trigger of a source "github" allowed and any other source stranger, like a settled Policy.
+func (f *fakeSource) Trust(t core.Trigger) string {
+	if t.Source == "github" {
+		return core.TrustAllowed
+	}
+	return core.TrustStranger
+}
+
 func (f *fakeSource) GitFolder(dir string) bool { f.mu.Lock(); defer f.mu.Unlock(); return f.git[dir] }
 
 func (f *fakeSource) setGit(dir string, git bool) {
@@ -150,6 +162,18 @@ func (f *fakeSource) Prompts() (*athenav1.PromptsView, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return proto.Clone(f.prompts).(*athenav1.PromptsView), nil
+}
+
+func (f *fakeSource) Control() pause.State {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.control
+}
+
+func (f *fakeSource) Offers() ([]Offer, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.offers, nil
 }
 
 func (f *fakeSource) setMuted(m ...string) { f.mu.Lock(); f.muted = m; f.mu.Unlock() }
@@ -608,7 +632,7 @@ func TestApprovalInputRedacted(t *testing.T) {
 func TestTriggerAndReasonRedacted(t *testing.T) {
 	tok := "ghs_16C7e42F292c6912E7710c838347Ae178B4a"
 	tr := core.Trigger{ID: "R-1", Text: "use " + tok}
-	if v := triggerView(&tr); strings.Contains(v.Text, "ghs_") {
+	if v := triggerView(&tr, nil); strings.Contains(v.Text, "ghs_") {
 		t.Errorf("trigger text = %q", v.Text)
 	}
 	d := core.Decision{Reasons: []core.Reason{{Code: "x", Values: map[string]string{"text": tok}}}}
@@ -1101,5 +1125,158 @@ func TestQuotaDeltaThrottled(t *testing.T) {
 	set(busy)
 	if d := next(t, sub); d.GetNode().GetSlotsInUse() != 1 {
 		t.Fatalf("slot change = %v", d)
+	}
+}
+
+func TestHubCarriesControl(t *testing.T) {
+	f := newFake()
+	h := start(t, f)
+	snap, _ := h.Snapshot()
+	if snap.Control.GetPaused() {
+		t.Fatalf("snapshot control before pause = %v", snap.Control)
+	}
+	sub, _ := h.Subscribe(0, h.Epoch())
+	defer sub.Close()
+	since := epoch0.Add(time.Minute)
+	f.mu.Lock()
+	f.control = pause.State{Paused: true, Since: since, By: "cli"}
+	f.mu.Unlock()
+	h.OnCommit(store.Changes{Control: true})
+	d := next(t, sub)
+	if c := d.GetControl(); !c.GetPaused() || c.GetBy() != "cli" || !c.GetSince().AsTime().Equal(since) {
+		t.Fatalf("control delta = %v", d)
+	}
+	snap, _ = h.Snapshot()
+	if !snap.Control.GetPaused() || snap.Control.GetBy() != "cli" {
+		t.Fatalf("snapshot control after pause = %v", snap.Control)
+	}
+}
+
+func TestHubCarriesOffers(t *testing.T) {
+	f := newFake()
+	h := start(t, f)
+	snap, _ := h.Snapshot()
+	if len(snap.Offers.GetOffers()) != 0 {
+		t.Fatalf("snapshot offers at the start = %v", snap.Offers)
+	}
+	sub, _ := h.Subscribe(0, h.Epoch())
+	defer sub.Close()
+	f.mu.Lock()
+	f.offers = []Offer{{Class: "bash|bash-escalate:npm|acme/web", Tool: "Bash", Rule: "bash-escalate:npm", Repo: "acme/web", Approved: 5}}
+	f.mu.Unlock()
+	h.OnCommit(store.Changes{Offers: true})
+	d := next(t, sub)
+	if o := d.GetOffers().GetOffers(); len(o) != 1 || o[0].GetRepo() != "acme/web" || o[0].GetApproved() != 5 {
+		t.Fatalf("offers delta = %v", d)
+	}
+	snap, _ = h.Snapshot()
+	if len(snap.Offers.GetOffers()) != 1 {
+		t.Fatalf("snapshot offers = %v", snap.Offers)
+	}
+}
+
+func (f *fakeSource) Proposals() ([]*athenav1.ProposalView, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []*athenav1.ProposalView
+	for _, p := range f.proposals {
+		if p.State == "pending" {
+			out = append(out, p)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Id < out[j].Id })
+	return out, nil
+}
+
+func (f *fakeSource) Proposal(id string) (*athenav1.ProposalView, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if p, ok := f.proposals[id]; ok {
+		return p, nil
+	}
+	return nil, fmt.Errorf("proposal %s not found", id)
+}
+
+func (f *fakeSource) setProposal(p *athenav1.ProposalView) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.proposals == nil {
+		f.proposals = map[string]*athenav1.ProposalView{}
+	}
+	f.proposals[p.Id] = p
+}
+
+func TestHubPublishesProposal(t *testing.T) {
+	f := newFake()
+	h := start(t, f)
+	sub, _ := h.Subscribe(0, h.Epoch())
+	defer sub.Close()
+	f.setProposal(&athenav1.ProposalView{Id: "p1", TicketId: "T-1", Repo: "acme/web", Kind: "push", State: "pending",
+		Summary: "push athena/t-1", Detail: "athena/t-1 @ abc1234"})
+	h.OnCommit(store.Changes{Proposals: []string{"p1"}})
+	d := next(t, sub)
+	if p := d.GetProposal(); p.GetId() != "p1" || p.GetState() != "pending" || p.GetDetail() != "athena/t-1 @ abc1234" {
+		t.Fatalf("proposal delta = %v", d)
+	}
+	if snap, _ := h.Snapshot(); len(snap.Proposals) != 1 || snap.Proposals[0].Id != "p1" {
+		t.Fatalf("snapshot proposals = %v", snap.Proposals)
+	}
+	// Applying changes its state: the delta says so and the snapshot no longer lists it as pending.
+	f.setProposal(&athenav1.ProposalView{Id: "p1", TicketId: "T-1", Kind: "push", State: "applied"})
+	h.OnCommit(store.Changes{Proposals: []string{"p1"}})
+	if d := next(t, sub); d.GetProposal().GetState() != "applied" {
+		t.Fatalf("applied delta = %v", d)
+	}
+	if snap, _ := h.Snapshot(); len(snap.Proposals) != 0 {
+		t.Fatalf("snapshot proposals after apply = %v", snap.Proposals)
+	}
+}
+
+// A commit that changed only the brake (a candidate held or let go) republishes the repositories, whose braked count moved.
+func TestHubRepublishesReposOnBrakeChange(t *testing.T) {
+	f := newFake()
+	f.repos = []*athenav1.RepoView{{Name: "acme/web", Kind: "github", Ceiling: 3, Mode: "live"}}
+	h := start(t, f)
+	sub, _ := h.Subscribe(0, h.Epoch())
+	defer sub.Close()
+	f.mu.Lock()
+	f.repos = []*athenav1.RepoView{{Name: "acme/web", Kind: "github", Ceiling: 3, Braked: 1, Mode: "live"}}
+	f.mu.Unlock()
+	h.OnCommit(store.Changes{Brakes: true})
+	d := next(t, sub)
+	if r := d.GetRepos().GetRepos(); len(r) != 1 || r[0].GetBraked() != 1 {
+		t.Fatalf("repos delta = %v", d)
+	}
+}
+
+// A Ticket of a repository that starts or stops waiting on the owner moves the repository's owed count: the repos are
+// read again, once for each change and not for a progress commit.
+func TestRepoOwedFollowsTicketStage(t *testing.T) {
+	f := newFake()
+	f.setRepos(&athenav1.RepoView{Name: "o/r", Kind: "github", LastUsedAt: timestamppb.New(epoch0.Add(time.Hour))})
+	h := start(t, f)
+	sub, _ := h.Subscribe(0, h.Epoch())
+	defer sub.Close()
+	reads := func() int { f.mu.Lock(); defer f.mu.Unlock(); return f.repoReads }
+	tk := ticket("T-1")
+	tk.Repo = "o/r"
+	f.put(tk)
+	before := reads()
+	h.OnCommit(store.Changes{Tickets: []string{"T-1"}})
+	next(t, sub)
+	if reads() != before {
+		t.Fatal("a Ticket that does not wait on the owner read the repos")
+	}
+	tk.Attention = &core.Attention{Question: "which branch?"}
+	f.put(tk)
+	h.OnCommit(store.Changes{Tickets: []string{"T-1"}})
+	next(t, sub)
+	if reads() != before+1 {
+		t.Fatalf("repos read %d times when the Ticket began waiting, want 1", reads()-before)
+	}
+	h.OnCommit(store.Changes{Tickets: []string{"T-1"}})
+	next(t, sub)
+	if reads() != before+1 {
+		t.Errorf("a Ticket that still waits read the repos again")
 	}
 }

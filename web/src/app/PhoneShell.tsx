@@ -6,6 +6,8 @@ import type { ReactNode } from "react";
 import { NavLink } from "react-router";
 import { ConnectionBanner, type LinkSource } from "@/app/ConnectionBanner";
 import { UpdateBanner } from "@/app/UpdateBanner";
+import { PauseControl } from "@/features/control/PauseControl";
+import { PausedBanner } from "@/features/control/PausedBanner";
 import { NAV, type NavItem, useNavCount } from "@/app/routes";
 import { NeedsCount } from "@/app/Sidebar";
 import { AthenaMark } from "@/app/AthenaMark";
@@ -57,17 +59,21 @@ export function PhoneShell({
           <AthenaMark link={link} className="font-mono text-xs tracking-wider text-muted uppercase">
             Athena
           </AthenaMark>
-          <button
-            type="button"
-            onClick={onOpenPalette}
-            aria-label="Search and commands"
-            className="inline-flex size-11 items-center justify-center rounded-md text-text hover:bg-surface-2"
-          >
-            <SearchIcon className="size-5" aria-hidden />
-          </button>
+          <div className="flex items-center">
+            <PauseControl variant="phone" />
+            <button
+              type="button"
+              onClick={onOpenPalette}
+              aria-label="Search and commands"
+              className="inline-flex size-11 items-center justify-center rounded-md text-text hover:bg-surface-2"
+            >
+              <SearchIcon className="size-5" aria-hidden />
+            </button>
+          </div>
         </div>
         <ConnectionBanner link={link} />
         <UpdateBanner />
+        <PausedBanner />
       </header>
       <main className="min-w-0 flex-1 pb-[calc(57px+env(safe-area-inset-bottom))]">{children}</main>
       <nav

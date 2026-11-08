@@ -18,6 +18,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/danielpina1/athena/internal/core"
+	"github.com/danielpina1/athena/internal/policy"
 	"github.com/danielpina1/athena/internal/redact"
 	"github.com/danielpina1/athena/internal/runtime/rt"
 	"github.com/danielpina1/athena/internal/sources/github"
@@ -34,7 +35,8 @@ const (
 
 // Serve serves the node's Unix socket (mode 0600) until ctx is done: one JSON request line and one response line per
 // connection. Ops: hook (the hook rules, Approvals for escalations, Stop as the end of a turn, SessionStart context),
-// report (a worker's Report), review (a review session's verdict), worker (a worker's other tools), credential (a
+// report (a worker's Report), review (a review session's verdict), worker (a worker's other tools), worker_tools (the
+// tools a worker's MCP server offers), credential (a
 // session's GitHub token, for its credential helper and gh wrapper), router (the router's tools) and ping. Every op names its Ticket and Assignment, and one that does not match a live
 // session is refused: a hook is denied (a Stop is still allowed), a report fails.
 func (n *Node) Serve(ctx context.Context) error {
@@ -151,12 +153,25 @@ func (n *Node) handleConn(ctx context.Context, conn net.Conn) {
 			} else {
 				resp = n.handleWorker(req)
 			}
+		case OpWorkerTools:
+			var req WorkerRequest
+			if err := json.Unmarshal(line, &req); err != nil {
+				resp = WorkerToolsResponse{Error: "malformed worker tools request"}
+			} else {
+				resp = n.handleWorkerTools(req)
+			}
 		case OpCredential:
 			var req CredentialRequest
 			if err := json.Unmarshal(line, &req); err != nil {
 				resp = CredentialResponse{Error: "malformed credential request"}
 			} else {
 				resp = n.handleCredential(ctx, req)
+			}
+		case OpPropose:
+			if req, err := decodePropose(line); err != nil {
+				resp = ProposeResponse{Error: "malformed propose request: " + err.Error()}
+			} else {
+				resp = n.handlePropose(req)
 			}
 		case OpPing:
 			resp = Response{OK: true}
@@ -252,11 +267,15 @@ func (n *Node) recordUsage(s *session, u core.UsageDelta) {
 func hookRuntime(s *session) string { return s.currentRuntime() }
 
 // ruleContext is what the rules know of a session; a Codex session's protected paths are denied by the rules, since
-// its sandbox cannot keep them read-only, and a review session writes nothing.
+// its sandbox cannot keep them read-only, a review session writes nothing, and a restricted one asks nobody.
 func (n *Node) ruleContext(s *session, runtime string) RuleContext {
 	home, _ := os.UserHomeDir()
 	c := RuleContext{TicketDir: s.place.workDir, Blocked: n.cfg.Blocked, Home: home, StateDir: n.cfg.StateDir,
-		AthenaBin: n.cfg.AthenaBin, VenvActive: false, ReadOnly: s.reviewing()}
+		AthenaBin: n.cfg.AthenaBin, VenvActive: false, ReadOnly: s.reviewing(), Restricted: s.restricted(),
+		Shadow: n.heldForOwner(s), Secrets: n.cfg.Secrets}
+	if c.Restricted {
+		c.ReadRoots = restrictedReadRoots()
+	}
 	if runtime == core.RuntimeCodex {
 		c.Protected = ProtectedPaths(s.place.workDir)
 	}
@@ -309,8 +328,9 @@ const ruleCodexUnsandboxed = "codex_unsandboxed"
 // (escalateShared). An ask through a door (Codex asking to run a command or write files outside its sandbox) on a node
 // that sandboxes its workers escalates what the rules allow: a sandboxed Claude Code worker cannot run anything
 // unsandboxed (allowUnsandboxedCommands: false), and a Codex one may only with a person's yes. Without a sandbox, Claude
-// Code's commands run unsandboxed under the rules alone, and so do these. A review session's ask through a door is
-// denied, sandbox or not: it stays in its read-only sandbox.
+// Code's commands run unsandboxed under the rules alone, and so do these; a restricted session always runs sandboxed,
+// so its asks through a door are escalations too, which it may not make (escalateShared). A review session's ask
+// through a door is denied, sandbox or not: it stays in its read-only sandbox.
 func (n *Node) judge(ctx context.Context, s *session, j judgment, start time.Time) HookResponse {
 	if j.door != "" && s.reviewing() {
 		// A review runs in its read-only sandbox, whatever the rules would allow: an ask to run or write outside it is
@@ -321,9 +341,14 @@ func (n *Node) judge(ctx context.Context, s *session, j judgment, start time.Tim
 	}
 	rc := n.ruleContext(s, j.runtime)
 	d, at := EvaluateCalls(rc, j.runtime, j.calls)
-	unsandboxed := d.Verdict == VerdictAllow && j.door != "" && n.cfg.Sandbox != nil && runsOrWrites(j.calls)
+	outside := j.door != "" && (n.cfg.Sandbox != nil || rc.Restricted) && runsOrWrites(j.calls)
+	unsandboxed := d.Verdict == VerdictAllow && outside
 	if unsandboxed {
 		d = escalate(ruleCodexUnsandboxed, "running outside the sandbox needs approval")
+	} else if d.Verdict == VerdictEscalate && outside {
+		// The rules' escalation is not the only reason to ask: the action also runs outside Codex's sandbox, which no
+		// standing allow rule may allow, so a person is always asked.
+		d = d.merged(escalate(ruleCodexUnsandboxed, "running outside the sandbox needs approval"))
 	}
 	// Never log the tool input: it may name credential paths or carry secrets.
 	s.log.Info("hook decision", "event", j.event, "runtime", j.runtime, "tool", j.tool, "verdict", d.Verdict, "rule", d.Rule)
@@ -424,8 +449,14 @@ func callSubject(c ToolCall) string {
 // its sandbox through its PermissionRequest hook and through an approval request, in either order. The first ask
 // creates the Approval; the other door's ask with the same key, while it waits or within shareWindow of its answer,
 // gets the same answer, and the answer is then dropped. The same door asking again (the action run again) asks anew.
-// An empty key shares nothing. A review session's ask is denied: it asks no person.
+// An empty key shares nothing. A review session's ask is denied: it asks no person; so is a restricted session's.
 func (n *Node) escalateShared(ctx context.Context, s *session, event, key, door string, ask approvalAsk, start time.Time) HookResponse {
+	if s.restricted() {
+		// Work a stranger started asks the owner nothing: an Approval would let it put its asks before them.
+		s.log.Info("restricted session's escalation denied", "rule", ask.d.Rule)
+		n.observeHook(event, VerdictDeny, start)
+		return denied(restrictedEscalateReason)
+	}
 	if s.reviewing() {
 		// A review asks no person: an Approval would put the Ticket in a person stage, which a review never does.
 		s.log.Info("review session's escalation denied", "rule", ask.d.Rule)
@@ -473,19 +504,51 @@ func (n *Node) escalateShared(ctx context.Context, s *session, event, key, door 
 	return resp
 }
 
+// allowedByRule reports whether the owner's allow rules let the session do what it asks with no Approval: only a
+// standard session, in a repository, and only when every rule the ask triggers is allowed and none is one the owner
+// always decides. When not, it names the first rule that is not allowed.
+func (n *Node) allowedByRule(s *session, ask approvalAsk) (bool, string) {
+	repo := s.ticketRepo()
+	if n.cfg.Policy == nil || s.restricted() || repo == "" {
+		return false, ask.d.Rule
+	}
+	for _, rule := range append([]string{ask.d.Rule}, ask.d.Also...) {
+		if slices.Contains(policy.NeverPromote, rule) || !n.cfg.Policy.Allows(ask.tool, rule, repo) {
+			return false, rule
+		}
+	}
+	return true, ""
+}
+
 // escalate asks a person through an Approval and waits up to ApprovalTimeout, or until the session stops, for the
 // answer; no answer is a deny and the Approval expires.
 func (n *Node) escalate(ctx context.Context, s *session, event string, ask approvalAsk, start time.Time) HookResponse {
 	eng := n.engine()
+	ok, notAllowed := n.allowedByRule(s, ask)
+	if !ok && notAllowed != ask.d.Rule {
+		// The Approval is about the rule no standing rule allows, not the one that was shown first.
+		ask.summary = "Needs approval (" + notAllowed + "): " + ask.summary
+	}
+	if ok {
+		// The owner's standing rule answers it: nobody is asked, no Approval is made and no escalation is counted.
+		n.observeHook(event, VerdictAllow, start)
+		repo := s.ticketRepo()
+		s.log.Info("allowed by a standing rule", "tool", ask.tool, "rule", ask.d.Rule, "repo", repo)
+		if err := eng.AllowedByRule(s.t.ID, ask.tool, ask.d.Rule, repo); err != nil {
+			s.log.Error("record allowed action", "error", err)
+		}
+		return allowed("allowed by your standing rule")
+	}
+	// The Approval names the first rule no standing rule allows.
 	ap, err := eng.RequestApproval(core.Approval{
-		TicketID: s.t.ID, AssignmentID: s.a.ID, Tool: ask.tool, Rule: ask.d.Rule, Input: ask.input, Summary: ask.summary,
+		TicketID: s.t.ID, AssignmentID: s.a.ID, Tool: ask.tool, Rule: notAllowed, Input: ask.input, Summary: ask.summary,
 	})
 	n.observeHook(event, VerdictEscalate, start)
 	if err != nil {
 		s.log.Error("request approval", "error", err)
 		return denied("approval could not be requested: " + err.Error())
 	}
-	s.log.Info("approval requested", "approval", ap.ID, "rule", ask.d.Rule)
+	s.log.Info("approval requested", "approval", ap.ID, "rule", notAllowed)
 	// The wait ends with the session too: nobody can act on an answer once it stopped (a retry, a stop, a shutdown).
 	wctx, cancel := context.WithTimeout(ctx, n.cfg.ApprovalTimeout)
 	go func() {
@@ -539,6 +602,8 @@ func (n *Node) escalate(ctx context.Context, s *session, event string, ask appro
 //   - file: the strictest verdict over a Write of each path, the same way;
 //   - network: always a person's (rule network_access), "Network: <host>";
 //   - permissions: always a person's (rule codex_permissions), with everything accepting grants.
+//
+// A restricted session asks nobody (escalateShared): what would ask a person is declined.
 //
 // An escalation becomes an Approval exactly as a hook's does (the timeout, the expiry, the end with the session), and
 // a command or file ask about an action the PermissionRequest hook of the same turn already escalated shares that
@@ -686,6 +751,10 @@ func (n *Node) handleReport(req ReportRequest) Response {
 			return Response{Error: "binding pull request #" + strconv.Itoa(req.Pull) + ": " + err.Error()}
 		}
 		s.log.Info("pull request bound", "thread", thread)
+	}
+	// In shadow mode the branch is proposed as a push before the Report is filed, which may end the Ticket.
+	if err := n.proposeBranch(s); err != nil {
+		s.log.Warn("branch not proposed", "error", err)
 	}
 	err := n.engine().FileReport(req.Ticket, core.ReportInput{
 		AssignmentID: req.Assignment, State: core.ReportState(req.Status), Summary: req.Summary, Question: req.Question,

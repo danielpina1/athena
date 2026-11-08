@@ -62,7 +62,7 @@ func TestCanRetryOnDeliveryFailure(t *testing.T) {
 func TestTriggerViewClipsText(t *testing.T) {
 	tr := core.Trigger{ID: "R-1", Text: strings.Repeat("é", 200), Meta: map[string]string{"secret": "x"},
 		Channels: []core.ChannelRef{{Address: map[string]string{"k": "v"}}}}
-	v := triggerView(&tr)
+	v := triggerView(&tr, nil)
 	if n := len([]rune(v.Text)); n != previewRunes+1 {
 		t.Errorf("text has %d runes", n)
 	}
@@ -175,6 +175,27 @@ func TestTimelineShowsInterruptionsAndResumes(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := "assignment/started sonnet · |assignment/restart  · |assignment/resumed  · |assignment/restart  · "
+	if got := entries(d.Timeline); got != want {
+		t.Errorf("timeline:\n got %q\nwant %q", got, want)
+	}
+}
+
+// The owner's pause reads as its own interruption, and the start after the resume as resumed.
+func TestTimelineShowsPauseAndResume(t *testing.T) {
+	f := newFake()
+	tk := ticket("T-1")
+	started, resumed := epoch0.Add(time.Minute), epoch0.Add(3*time.Minute)
+	tk.Assignments = []core.Assignment{{ID: "a1", State: core.AssignmentRunning, CreatedAt: epoch0, StartedAt: &started, Model: "sonnet",
+		Interruptions: []core.Interruption{
+			{At: epoch0.Add(2 * time.Minute), Reason: core.InterruptPaused, ResumedAt: &resumed},
+			{At: epoch0.Add(4 * time.Minute), Reason: core.InterruptPaused},
+		}}}
+	f.put(tk)
+	d, err := New(f, quiet()).Detail("T-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "assignment/started sonnet · |assignment/paused  · |assignment/unpaused  · |assignment/paused  · "
 	if got := entries(d.Timeline); got != want {
 		t.Errorf("timeline:\n got %q\nwant %q", got, want)
 	}
@@ -760,5 +781,30 @@ func TestHeldReportShowsOnceWhenApplied(t *testing.T) {
 	}
 	if e := d.Timeline[len(d.Timeline)-1]; !e.At.AsTime().Equal(epoch0.Add(30 * time.Minute)) {
 		t.Errorf("resumed start at %v, want the delivery", e.At.AsTime())
+	}
+}
+
+func TestViewsCarryTrust(t *testing.T) {
+	tk := ticket("T-1")
+	tk.Mandate = core.Mandate{Trust: core.TrustCollaborator}
+	if v := ticketSummary(&tk, core.TicketStage(&tk), nil); v.Trust != "collaborator" {
+		t.Errorf("summary trust = %q", v.Trust)
+	}
+	// A Ticket whose Mandate predates trust classes reads its class from the basis.
+	tk.Mandate = core.Mandate{Basis: core.MandateBasis{Via: core.ViaOwner}}
+	if v := ticketSummary(&tk, core.TicketStage(&tk), nil); v.Trust != "owner" {
+		t.Errorf("legacy summary trust = %q", v.Trust)
+	}
+	tr := core.Trigger{ID: "R-1", Source: "github"}
+	if v := triggerView(&tr, func(core.Trigger) string { return core.TrustStranger }); v.Trust != "stranger" {
+		t.Errorf("trigger trust = %q", v.Trust)
+	}
+}
+
+func TestTicketSummaryNeedsYouForProposal(t *testing.T) {
+	tk := core.Ticket{ID: "T-1", Title: "x", PendingProposals: 1}
+	v := ticketSummary(&tk, core.TicketStage(&tk), nil)
+	if !v.NeedsYou || v.Stage != "person" || v.Action != "proposal" {
+		t.Errorf("summary = %v, want needs_you with stage person and action proposal", v)
 	}
 }

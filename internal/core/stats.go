@@ -14,6 +14,8 @@ const (
 	cmdDeliveryFailed        = "delivery_failed"
 	cmdInputsRead            = "inputs_read"
 	cmdAssignmentInterrupted = "assignment_interrupted"
+	cmdAssignmentPaused      = "assignment_paused"
+	cmdPauseLifted           = "pause_lifted"
 	cmdUsageLimited          = "usage_limited"
 	cmdTurnEnded             = "turn_ended"
 	cmdFileReport            = "file_report"
@@ -42,14 +44,24 @@ const (
 	cmdNote                  = "note"
 	cmdRequestStatus         = "request_status"
 	cmdReply                 = "reply"
+	cmdPropose               = "propose"
+	cmdApplyProposal         = "apply_proposal"
+	cmdDiscardProposal       = "discard_proposal"
+	cmdSettleProposal        = "settle_proposal"
+	cmdHoldWaiting           = "hold_waiting"
+	cmdStartProposal         = "start_proposal"
+	cmdAllowedByRule         = "allowed_by_rule"
 )
 
 var commandNames = []string{
 	cmdSubmit, cmdAssignmentStarted, cmdInputsDelivered, cmdDeliveryFailed, cmdInputsRead, cmdTurnEnded, cmdAssignmentInterrupted,
+	cmdAssignmentPaused, cmdPauseLifted,
 	cmdUsageLimited, cmdFileReport, cmdFileReview, cmdPersonInput, cmdStop, cmdRetry, cmdRequestApproval, cmdAnswerApproval, cmdExpireApproval,
 	cmdRecordUsage, cmdReceive, cmdBindThread, cmdThreadClosed, cmdEvaluateDue, cmdCandidateDelivered, cmdDecide,
 	cmdAttach, cmdHandback, cmdReevaluate, cmdDismiss, cmdPolicyChanged, cmdFollowForContext, cmdMarkUnrelated,
 	cmdUnsubscribe, cmdNote, cmdRequestStatus, cmdReply,
+	cmdPropose, cmdApplyProposal, cmdDiscardProposal, cmdSettleProposal, cmdHoldWaiting, cmdStartProposal,
+	cmdAllowedByRule,
 }
 
 // TicketStats are a Ticket's performance numbers (spec §10.3). The Engine updates them in the same transaction as the

@@ -32,6 +32,12 @@ message Command {
     GetPrompt get_prompt = 28;
     SetPrompt set_prompt = 29;
     ResetPrompt reset_prompt = 30;
+    Pause pause = 31;
+    Resume resume = 32;
+    AllowAction allow_action = 33;
+    DismissOffer dismiss_offer = 34;
+    ApplyProposal apply_proposal = 35;
+    DiscardProposal discard_proposal = 36;
   }
 }
 
@@ -74,6 +80,10 @@ message AnswerApproval {
 message Reevaluate {
   string trigger_id = 1;
 }
+
+message Pause {}
+
+message Resume {}
 
 message Dismiss {
   string decision_id = 1;
@@ -183,4 +193,24 @@ message PromptRevision {
   string origin = 3;
   // reset is true when the revision returned the part to its default.
   bool reset = 4;
+}
+
+// AllowAction turns an offer into a standing allow rule in the Policy. It is Sensitive (needs a recent passkey).
+message AllowAction {
+  string class = 1;
+}
+
+// DismissOffer hides an offer until the owner has approved the class as many times again.
+message DismissOffer {
+  string class = 1;
+}
+
+// ApplyProposal lets a held reply, push or pull request go.
+message ApplyProposal {
+  string id = 1;
+}
+
+// DiscardProposal drops a held reply, push or pull request.
+message DiscardProposal {
+  string id = 1;
 }

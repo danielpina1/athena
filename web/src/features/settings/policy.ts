@@ -4,7 +4,7 @@
 // Sources, unknown fields of a rule, a row or a Source part) is kept as it came, in its place: the edit spreads the
 // document and replaces the known keys.
 
-type Json = Record<string, unknown>;
+export type Json = Record<string, unknown>;
 
 export const MODES = ["off", "observe", "auto"] as const;
 
@@ -49,8 +49,8 @@ export type General = { mode: string; rules: Rule[] };
 /** allowed and bots are as typed: one login per line. */
 export type GitHub = { allowed: string; bots: string; admission: Admission };
 
-const isObject = (v: unknown): v is Json => typeof v === "object" && v !== null && !Array.isArray(v);
-const str = (v: unknown) => (typeof v === "string" ? v : "");
+export const isObject = (v: unknown): v is Json => typeof v === "object" && v !== null && !Array.isArray(v);
+export const str = (v: unknown) => (typeof v === "string" ? v : "");
 const strings = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
 
 /** The settings document; {} when it is not an object (the server always sends one). */

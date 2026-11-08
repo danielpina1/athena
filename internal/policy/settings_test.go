@@ -273,3 +273,114 @@ func TestPairingDefaultRoundTrips(t *testing.T) {
 		}
 	}
 }
+
+func TestRepoSettingsDefaults(t *testing.T) {
+	p := New(Defaults(nil), nil, time.Minute)
+	if p.WIPCeiling("any/repo") != 3 || p.Shadow("any/repo") {
+		t.Fatalf("defaults: ceiling %d shadow %v", p.WIPCeiling("any/repo"), p.Shadow("any/repo"))
+	}
+	s := Defaults(nil)
+	s.Repos = map[string]RepoSettings{"Acme/Web": {Mode: RepoShadow, WIPCeiling: 1}}
+	p = New(s, nil, time.Minute)
+	if !p.Shadow("acme/web") || !p.Shadow("ACME/web") || p.WIPCeiling("acme/web") != 1 {
+		t.Fatalf("per-repo: ceiling %d shadow %v", p.WIPCeiling("acme/web"), p.Shadow("acme/web"))
+	}
+	if p.Shadow("acme/other") || p.WIPCeiling("acme/other") != 3 {
+		t.Fatal("other repo must use defaults")
+	}
+	s.WIPCeiling = 2
+	if got := New(s, nil, time.Minute).WIPCeiling("acme/other"); got != 2 {
+		t.Fatalf("settings ceiling = %d", got)
+	}
+}
+
+func TestValidateRejectsBadPlan10Settings(t *testing.T) {
+	bad := map[string]func(*Settings){
+		"mode":         func(s *Settings) { s.Repos = map[string]RepoSettings{"a/b": {Mode: "dry"}} },
+		"repo ceiling": func(s *Settings) { s.Repos = map[string]RepoSettings{"a/b": {WIPCeiling: -1}} },
+		"ceiling":      func(s *Settings) { s.WIPCeiling = -1 },
+		"class":        func(s *Settings) { s.Trust = map[string]string{"friend": "standard"} },
+		"trust value":  func(s *Settings) { s.Trust = map[string]string{"bot": "loose"} },
+		"empty tool":   func(s *Settings) { s.Allow = []AllowRule{{Rule: "r", Repo: "a/b"}} },
+		"empty rule":   func(s *Settings) { s.Allow = []AllowRule{{Tool: "Bash", Repo: "a/b"}} },
+		"empty repo":   func(s *Settings) { s.Allow = []AllowRule{{Tool: "Bash", Rule: "r"}} },
+		"never":        func(s *Settings) { s.Allow = []AllowRule{{Tool: "Bash", Rule: "protected_path", Repo: "a/b"}} },
+		"promote":      func(s *Settings) { s.PromoteAfter = -1 },
+		"network":      func(s *Settings) { s.Allow = []AllowRule{{Tool: "Bash", Rule: "network_access", Repo: "a/b"}} },
+		"permissions":  func(s *Settings) { s.Allow = []AllowRule{{Tool: "Bash", Rule: "codex_permissions", Repo: "a/b"}} },
+		"unsandboxed":  func(s *Settings) { s.Allow = []AllowRule{{Tool: "Bash", Rule: "codex_unsandboxed", Repo: "a/b"}} },
+		// Two keys of one repository would collapse in normalize in no set order, and could drop shadow mode.
+		"repo case": func(s *Settings) {
+			s.Repos = map[string]RepoSettings{"Acme/Web": {Mode: RepoShadow}, "acme/web": {Mode: RepoLive}}
+		},
+		"repo space": func(s *Settings) { s.Repos = map[string]RepoSettings{" a/b": {Mode: RepoShadow}, "a/b": {}} },
+	}
+	for name, mut := range bad {
+		s := Defaults(nil)
+		mut(&s)
+		if Validate(s) == nil {
+			t.Errorf("%s: Validate accepted %+v", name, s)
+		}
+	}
+	ok := Defaults(nil)
+	ok.Repos = map[string]RepoSettings{"a/b": {Mode: RepoShadow, WIPCeiling: 2}}
+	ok.Trust = map[string]string{"bot": ToolRestricted}
+	ok.Allow = []AllowRule{{Tool: "Bash", Rule: "net", Repo: "a/b"}}
+	if err := Validate(ok); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestToolPolicyDefaults(t *testing.T) {
+	p := New(Defaults(nil), nil, time.Minute).(*policy)
+	for class, want := range map[string]string{"stranger": "restricted", "allowed": "standard", "": "standard", "owner": "standard", "ci": "standard"} {
+		if got := p.ToolPolicy(class); got != want {
+			t.Errorf("ToolPolicy(%q) = %q, want %q", class, got, want)
+		}
+	}
+	s := Defaults(nil)
+	s.Trust = map[string]string{"bot": "restricted"}
+	p = New(s, nil, time.Minute).(*policy)
+	if p.ToolPolicy("bot") != "restricted" || p.ToolPolicy("stranger") != "restricted" || p.ToolPolicy("ci") != "standard" {
+		t.Fatal("override must keep other defaults")
+	}
+}
+
+func TestAllowsAndPromoteAfter(t *testing.T) {
+	s := Defaults(nil)
+	s.Allow = []AllowRule{{Tool: "Bash", Rule: "net", Repo: "Acme/Web"}}
+	p := New(s, nil, time.Minute).(*policy)
+	if !p.Allows("Bash", "net", "acme/web") || p.Allows("Bash", "net", "acme/api") || p.Allows("Edit", "net", "acme/web") {
+		t.Fatal("allow must match tool, rule and repo exactly")
+	}
+	if p.PromoteAfter() != 5 {
+		t.Fatalf("PromoteAfter = %d", p.PromoteAfter())
+	}
+	s.PromoteAfter = 2
+	if New(s, nil, time.Minute).(*policy).PromoteAfter() != 2 {
+		t.Fatal("PromoteAfter override")
+	}
+	if len(NeverPromote) != 11 {
+		t.Fatalf("NeverPromote = %v, want eleven rules", NeverPromote)
+	}
+	for _, rule := range NeverPromote {
+		s.Allow = []AllowRule{{Tool: "Bash", Rule: rule, Repo: "a/b"}}
+		if New(s, nil, time.Minute).(*policy).Allows("Bash", rule, "a/b") {
+			t.Fatalf("never-promote rule %s must not be allowed", rule)
+		}
+	}
+}
+
+func TestPlan10SettingsDoNotChangeVersion(t *testing.T) {
+	base := Defaults([]string{"a"})
+	v := Version(base)
+	s := Defaults([]string{"a"})
+	s.Repos = map[string]RepoSettings{"a/b": {Mode: RepoShadow, WIPCeiling: 1}}
+	s.Trust = map[string]string{"bot": ToolRestricted}
+	s.Allow = []AllowRule{{Tool: "Bash", Rule: "net", Repo: "a/b"}}
+	s.WIPCeiling = 4
+	s.PromoteAfter = 9
+	if Version(s) != v {
+		t.Fatal("plan 10 settings must not change the Policy version")
+	}
+}

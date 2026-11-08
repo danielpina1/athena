@@ -69,6 +69,8 @@ test("desktop shows the section list beside General by default", () => {
   expect(within(sections()).getAllByRole("link").map((l) => l.textContent)).toEqual([
     "General",
     "Sources › GitHub",
+    "Repositories",
+    "Trust",
     "Notifications",
     "Devices",
     "Prompts",

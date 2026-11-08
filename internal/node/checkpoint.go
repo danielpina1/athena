@@ -75,14 +75,7 @@ func checkpoint(workDir, ticketID string, env []string) (sha string, err error) 
 // node's minimal environment (a GitHub clone's for a GitHub Ticket) with the git directories Athena made for it pinned
 // (worktreeGitEnv).
 func (n *Node) worktreeEnv(p placement, t core.Ticket) ([]string, error) {
-	common := p.common
-	if common == "" {
-		var err error
-		if common, err = repoGitDir(p.repo); err != nil {
-			return nil, err
-		}
-	}
-	admin, err := findWorktreeAdmin(common, p.workDir, n.cfg.WorkRoot, n.log.With("ticket", t.ID))
+	admin, common, err := n.worktreeGitDirs(p, t)
 	if err != nil {
 		return nil, err
 	}
@@ -91,6 +84,19 @@ func (n *Node) worktreeEnv(p placement, t core.Ticket) ([]string, error) {
 		base = cloneGitEnv(p.repo, p.github)
 	}
 	return worktreeGitEnv(base, admin, common, p.workDir), nil
+}
+
+// worktreeGitDirs are the git directory Athena made for the Ticket's worktree (findWorktreeAdmin) and its repository's
+// common directory, for worktreeGitEnv.
+func (n *Node) worktreeGitDirs(p placement, t core.Ticket) (admin, common string, err error) {
+	common = p.common
+	if common == "" {
+		if common, err = repoGitDir(p.repo); err != nil {
+			return "", "", err
+		}
+	}
+	admin, err = findWorktreeAdmin(common, p.workDir, n.cfg.WorkRoot, n.log.With("ticket", t.ID))
+	return admin, common, err
 }
 
 // checkpointSession checkpoints the work of a worker session that stopped at its usage limit, when it runs in a git

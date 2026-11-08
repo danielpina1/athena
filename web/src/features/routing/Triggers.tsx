@@ -4,6 +4,7 @@ import { timestampMs } from "@bufbuild/protobuf/wkt";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router";
 import type { TriggerView } from "@/gen/athena/v1/state_pb";
+import { TrustBadge } from "@/features/control/trust";
 import { threadMatcher, threadRoute, ticketRoute } from "@/app/search";
 import { reevaluate } from "@/lib/commands/actions";
 import { toast } from "@/ui/primitives/toast";
@@ -121,6 +122,7 @@ function Row({ trigger, selected, again }: { trigger: TriggerView; selected: boo
         <Mono tone="default">{trigger.source}</Mono>
         <Mono className="min-w-0 break-all">{trigger.actor}</Mono>
         <Mono>{trigger.kind}</Mono>
+        <TrustBadge trust={trigger.trust} />
         {trigger.addressed && (
           <span className="border border-line px-1 font-mono text-xs" title={`Addressed to the agent (${trigger.addressed})`}>
             to agent

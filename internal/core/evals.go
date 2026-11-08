@@ -123,11 +123,15 @@ func (e *Engine) EvaluateDue() error {
 	if p == nil {
 		return nil
 	}
+	_, relErr := e.ReleaseBrakes()
 	threads, err := e.activeThreads()
 	if err != nil {
-		return err
+		return errors.Join(relErr, err)
 	}
 	var errs []error
+	if relErr != nil {
+		errs = append(errs, relErr)
+	}
 	for _, th := range threads {
 		if th.Eval == nil {
 			continue
@@ -245,8 +249,14 @@ func (o *op) startEval(key string, p Policy) error {
 	var reasons []Reason
 	var primary *Trigger
 	var gate Gate
+	var admitted, notAdmitted []string
 	for _, tr := range triggers {
 		g := p.Gate(*tr, *th, tickets)
+		if g.Strength != "" {
+			admitted = append(admitted, tr.ID)
+		} else {
+			notAdmitted = append(notAdmitted, tr.ID)
+		}
 		if g.Strength == "" {
 			r := g.Reason
 			if r.Code == "" {
@@ -279,11 +289,40 @@ func (o *op) startEval(key string, p Policy) error {
 		}
 		return o.tx.PutThread(th)
 	}
+	// The brake: the strongest candidate is inferred, so every admitted one is. A repository with the ceiling's worth
+	// waiting on the owner takes no self-chosen work, and neither does one that already holds braked candidates (a
+	// new one does not jump them), unless the owner or a release sent this batch back to Eval.
+	if repo := th.Meta["repo"]; repo != "" && gate.Strength == StrengthInferred {
+		owed, err := o.owed(repo)
+		if err != nil {
+			return err
+		}
+		ceiling := p.WIPCeiling(repo)
+		held := false
+		if owed < ceiling {
+			if held, err = o.holdsOthers(repo, admitted); err != nil {
+				return err
+			}
+			for _, tr := range triggers {
+				if tr.Disposition.Requeued != nil && slices.Contains(admitted, tr.ID) {
+					held = false
+				}
+			}
+		}
+		if owed >= ceiling || held {
+			return o.brake(th, repo, owed, ceiling, admitted, notAdmitted, reasons)
+		}
+	}
 	ev := &Evaluation{ID: newID(), Thread: th.Key, Primary: primary.ID, TriggerIDs: ids, Strength: gate.Strength,
 		Basis: gate.Basis, PolicyVersion: p.Version(), StartedAt: o.at}
 	th.Eval = ev
 	if err := o.tx.PutThread(th); err != nil {
 		return err
+	}
+	for _, id := range ids { // a Trigger an Eval holds is no longer held back
+		if err := o.tx.DeleteBrake(id); err != nil {
+			return err
+		}
 	}
 	if err := o.enqueueAssessment(ev); err != nil {
 		return err
@@ -614,7 +653,7 @@ func (o *op) accept(th *Thread, ev *Evaluation, d DecisionInput, p Policy, res *
 	if len(rules) > 0 {
 		basis.Rules = rules
 	}
-	mandate := Mandate{Strength: ev.Strength, PolicyVersion: ev.PolicyVersion, Actor: primary.Actor, Thread: ev.Thread, Basis: basis}
+	mandate := Mandate{Strength: ev.Strength, PolicyVersion: ev.PolicyVersion, Actor: primary.Actor, Thread: ev.Thread, Basis: basis, Trust: p.Trust(*primary)}
 	n, err := o.tx.NextSeq(ticketSeq)
 	if err != nil {
 		return err
@@ -899,18 +938,26 @@ func (e *Engine) Reevaluate(triggerID string, origin ...CommandOrigin) error {
 					CodeWorkerDecides, strings.Join(owners, ", "), triggerID)
 			}
 		}
-		queueForEval(th, triggerID)
-		if err := o.tx.PutThread(th); err != nil {
-			return err
-		}
-		tr.Disposition.Requeued = o.timestamp()
-		if err := o.tx.PutTrigger(tr); err != nil {
-			return err
-		}
-		o.emitEvent(Event{Type: EventTriggerRequeued, At: o.at, Data: map[string]any{"triggerId": triggerID, "thread": th.Key}})
-		return o.notice("trigger_requeued:"+triggerID+":"+stamp(o.at),
-			Message{Kind: NoticeTriggerRequeued, TriggerID: triggerID, Thread: th.Key, At: o.at})
+		return o.requeue(tr, th)
 	})
+}
+
+// requeue queues a stored Trigger for a fresh Eval on its primary Thread th and records the requeue.
+func (o *op) requeue(tr *Trigger, th *Thread) error {
+	queueForEval(th, tr.ID)
+	if err := o.tx.DeleteBrake(tr.ID); err != nil { // sent back to Eval: no longer held
+		return err
+	}
+	if err := o.tx.PutThread(th); err != nil {
+		return err
+	}
+	tr.Disposition.Requeued = o.timestamp()
+	if err := o.tx.PutTrigger(tr); err != nil {
+		return err
+	}
+	o.emitEvent(Event{Type: EventTriggerRequeued, At: o.at, Data: map[string]any{"triggerId": tr.ID, "thread": th.Key}})
+	return o.notice("trigger_requeued:"+tr.ID+":"+stamp(o.at),
+		Message{Kind: NoticeTriggerRequeued, TriggerID: tr.ID, Thread: th.Key, At: o.at})
 }
 
 // Dismiss records that a person dismissed the problem an unavailable Decision shows.

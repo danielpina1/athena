@@ -1248,14 +1248,16 @@ func (b blockingEngine) AssignmentStarted(string, string, string, string, string
 	b.wait()
 	return nil
 }
-func (b blockingEngine) InputsDelivered(string, string, []string) error { b.wait(); return nil }
-func (b blockingEngine) DeliveryFailed(string, string, string) error    { b.wait(); return nil }
-func (b blockingEngine) InputsRead(string, []string) error              { b.wait(); return nil }
-func (b blockingEngine) TurnEnded(string, string) error                 { b.wait(); return nil }
+func (b blockingEngine) AllowedByRule(string, string, string, string) error { b.wait(); return nil }
+func (b blockingEngine) InputsDelivered(string, string, []string) error     { b.wait(); return nil }
+func (b blockingEngine) DeliveryFailed(string, string, string) error        { b.wait(); return nil }
+func (b blockingEngine) InputsRead(string, []string) error                  { b.wait(); return nil }
+func (b blockingEngine) TurnEnded(string, string) error                     { b.wait(); return nil }
 func (b blockingEngine) FileReview(string, string, string, string) error {
 	b.wait()
 	return nil
 }
+func (b blockingEngine) AssignmentPaused(string, string, bool) error { b.wait(); return nil }
 func (b blockingEngine) AssignmentInterrupted(string, string, string) error {
 	b.wait()
 	return nil
@@ -1291,8 +1293,12 @@ func (b blockingEngine) MarkUnrelated(string, string, string) error {
 	b.wait()
 	return nil
 }
-func (b blockingEngine) Handback(string, string, string) (bool, error) { b.wait(); return false, nil }
-func (b blockingEngine) BindThread(string, string, bool) error         { b.wait(); return nil }
+func (b blockingEngine) Handback(string, string, string) (bool, error)  { b.wait(); return false, nil }
+func (b blockingEngine) BindThread(string, string, bool) error          { b.wait(); return nil }
+func (b blockingEngine) Propose(p core.Proposal) (core.Proposal, error) { b.wait(); return p, nil }
+func (b blockingEngine) PendingProposals() ([]core.Proposal, error)     { b.wait(); return nil, nil }
+func (b blockingEngine) SettleProposal(string, error) error             { b.wait(); return nil }
+func (b blockingEngine) StartProposal(string) (bool, error)             { b.wait(); return true, nil }
 func (b blockingEngine) RecordUsage(string, string, core.UsageDelta) error {
 	b.wait()
 	return nil
@@ -1417,7 +1423,7 @@ func TestTriggerInputCard(t *testing.T) {
 		{ID: "i5", Kind: core.InputNote, Text: "T-2 found the root cause"},
 		{ID: "i6", Kind: core.InputTrigger, TriggerID: "github:issue:7", Text: "please review it", Human: true},
 	}}
-	got := renderInputs(tk, []string{"i1", "i2", "i3", "i4", "i5", "i6"}, lookup)
+	got := renderInputs(tk, []string{"i1", "i2", "i3", "i4", "i5", "i6"}, lookup, nil)
 	for _, want := range []string{
 		"[input i1: message from a person]\ntrigger_id: github:issuecomment:1\n" +
 			"acknowledged: no; ack it before substantial work if it is a request you take up\nfrom: alice\nat: 2026-11-04T10:30:00Z\n" +
@@ -1448,7 +1454,7 @@ func TestTriggerInputCard(t *testing.T) {
 		t.Error("inputs out of order")
 	}
 	// Without a way to read Triggers, a Trigger Input is plain text, and not the owner's.
-	if plain := renderInputs(tk, []string{"i1"}, nil); !strings.HasPrefix(plain, "[input i1: message]\nplease fix the typo") {
+	if plain := renderInputs(tk, []string{"i1"}, nil, nil); !strings.HasPrefix(plain, "[input i1: message]\nplease fix the typo") {
 		t.Errorf("plain rendering = %q", plain)
 	}
 }
@@ -1469,7 +1475,7 @@ func TestInputLabelFallback(t *testing.T) {
 	}}
 	for id, want := range map[string]string{"a": "message from the owner (not on GitHub)", "b": "message", "c": "message",
 		"d": "message from the owner (not on GitHub)"} {
-		got := renderInputs(tk, []string{id}, lookup)
+		got := renderInputs(tk, []string{id}, lookup, nil)
 		if !strings.HasPrefix(got, "[input "+id+": "+want+"]\n") {
 			t.Errorf("input %s: %q, want label %q", id, got, want)
 		}

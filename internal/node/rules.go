@@ -22,6 +22,19 @@ type Decision struct {
 	Verdict string
 	Reason  string
 	Rule    string
+	// Also names the other rules an escalation triggers beyond Rule (a command can need approval for several reasons):
+	// a standing allow rule lets the call through only when every one of them is allowed.
+	Also []string
+}
+
+// merged is escalation d with the rules of escalation o added; d stays the one shown.
+func (d Decision) merged(o Decision) Decision {
+	for _, r := range append([]string{o.Rule}, o.Also...) {
+		if r != d.Rule && r != "" && !slices.Contains(d.Also, r) {
+			d.Also = append(slices.Clone(d.Also), r)
+		}
+	}
+	return d
 }
 
 // RuleContext carries what the rules need to know about the worker.
@@ -52,6 +65,22 @@ type RuleContext struct {
 	// ReadOnly is set for a session that may change nothing (a review): every write it names is denied (readOnlyRule).
 	ReadOnly bool
 
+	// Restricted is set for a session under the restricted tool policy (toolpolicy.go): what the rules escalate is
+	// denied, since nobody is asked, and so are the web tools (restrictRule).
+	Restricted bool
+
+	// Shadow is set for a session whose work is held for the owner (shadow.go: its repository is in shadow mode, or it
+	// is restricted): a git push is denied (shadowPushRule).
+	Shadow bool
+
+	// Secrets are the node's secret files (Config.Secrets: the GitHub App key): no session may read them, in any
+	// spelling, nor search a directory that holds one.
+	Secrets []string
+
+	// ReadRoots are, for a Restricted session, the paths besides TicketDir its file tools may read: the system's and the
+	// toolchains' (restrictedReadRule).
+	ReadRoots []string
+
 	// tainted names the expandable variables a Bash command assigns or may change; set by bashWriteRule.
 	tainted map[string]bool
 }
@@ -69,6 +98,7 @@ const (
 	ruleProtectedPath = "protected_path"
 	ruleAttribution   = "attribution"
 	ruleReadOnly      = "read_only"
+	ruleRestricted    = "restricted"
 )
 
 // routerToolPrefix names the tools of Athena's MCP server, the only server the router session has.
@@ -96,12 +126,36 @@ func escalate(rule, reason string) Decision {
 }
 
 // Evaluate applies the hook rules in order: credential reads (deny), any write of a
-// read-only session (deny), blocked commands (deny), an AI attribution in a commit or pull request (deny), writes
-// to a protected path (deny) or outside the ticket dir (escalate; for Bash the
+// read-only session (deny), a git push in shadow mode (deny), blocked commands (deny), an AI attribution in a commit or
+// pull request (deny), writes to a protected path (deny) or outside the ticket dir (escalate; for Bash the
 // redirections and file commands that name a target), risky Bash commands
 // (escalate); anything else is allowed. Malformed input is denied. A Bash
-// input's "workdir", when set, is the directory the command runs in.
+// input's "workdir", when set, is the directory the command runs in. A restricted session's verdict then goes
+// through restrictRule.
 func Evaluate(ctx RuleContext, tool string, input json.RawMessage) Decision {
+	return restrictRule(ctx, tool, evaluate(ctx, tool, input))
+}
+
+// webTools are the tools that reach the web outside the sandbox: Claude Code's and Codex's.
+var webTools = map[string]bool{"WebFetch": true, "WebSearch": true, "web_search": true}
+
+// restrictRule is the restricted tool policy over the rules' verdict d on a call of tool: a session that is not
+// Restricted keeps d; a restricted one's web tool is denied, and an escalation becomes a deny of the same rule, since
+// nobody is asked. A deny stays as it is.
+func restrictRule(ctx RuleContext, tool string, d Decision) Decision {
+	if !ctx.Restricted || d.Verdict == VerdictDeny {
+		return d
+	}
+	if webTools[tool] {
+		return deny(ruleRestricted, restrictedWebReason)
+	}
+	if d.Verdict == VerdictEscalate {
+		return deny(d.Rule, restrictedEscalateReason)
+	}
+	return d
+}
+
+func evaluate(ctx RuleContext, tool string, input json.RawMessage) Decision {
 	var in map[string]any
 	if len(input) == 0 || json.Unmarshal(input, &in) != nil || in == nil {
 		return deny(ruleInput, "tool input is not a JSON object")
@@ -109,10 +163,16 @@ func Evaluate(ctx RuleContext, tool string, input json.RawMessage) Decision {
 	if d, ok := credentialRule(ctx, tool, in); ok {
 		return d
 	}
+	if d, ok := restrictedReadRule(ctx, tool, in); ok {
+		return d
+	}
 	if d, ok := readOnlyRule(ctx, tool, in); ok {
 		return d
 	}
 	if tool == "Bash" {
+		if d, ok := shadowPushRule(ctx, str(in, "command")); ok {
+			return d
+		}
 		if d, ok := blockedRule(ctx, str(in, "command")); ok {
 			return d
 		}
@@ -126,11 +186,18 @@ func Evaluate(ctx RuleContext, tool string, input json.RawMessage) Decision {
 		}
 	}
 	if tool == "Bash" {
-		if d, ok := bashWriteRule(ctx, str(in, "command"), str(in, "workdir")); ok {
-			return d
-		}
-		if d, ok := bashEscalateRule(ctx, str(in, "command")); ok {
-			return d
+		// Every escalation the command triggers, not only the first: an allow rule for one must not pass the others.
+		w, wok := bashWriteRule(ctx, str(in, "command"), str(in, "workdir"))
+		e, eok := bashEscalateRule(ctx, str(in, "command"))
+		switch {
+		case wok && w.Verdict == VerdictDeny:
+			return w
+		case wok && eok:
+			return w.merged(e)
+		case wok:
+			return w
+		case eok:
+			return e
 		}
 	}
 	return allow()
@@ -295,12 +362,13 @@ var searchTools = map[string]bool{"Grep": true, "Glob": true}
 var pathKeys = []string{"file_path", "path", "notebook_path"}
 
 // credRel are credential locations relative to the home directory.
-var credRel = []string{".ssh", ".aws", ".config/gh", ".netrc", ".codex/auth.json", ".claude.json", ".claude/.credentials.json"}
+var credRel = []string{".ssh", ".aws", ".config/gh", ".netrc", ".codex/auth.json", ".claude.json", ".claude/.credentials.json",
+	".git-credentials", ".config/git/credentials"}
 
 // bareCredRe matches credential names mentioned in free text (a Bash command
 // or a Glob pattern), however the home directory is spelled (~, $HOME, an
 // absolute path) or even when it is implied by a prior cd.
-var bareCredRe = regexp.MustCompile(`(?i)(?:^|[\s/"'=:~}])(?:\.ssh(?:/|\s|$|["';|&)])|\.aws/|\.config/gh(?:/|\s|$|["';|&)])|\.netrc(?:[\s"';|&)]|$)|\.codex/auth\.json|\.credentials\.json|\.claude\.json)`)
+var bareCredRe = regexp.MustCompile(`(?i)(?:^|[\s/"'=:~}])(?:\.ssh(?:/|\s|$|["';|&)])|\.aws/|\.config/gh(?:/|\s|$|["';|&)])|\.netrc(?:[\s"';|&)]|$)|\.codex/auth\.json|\.credentials\.json|\.claude\.json|\.git-credentials|\.config/git/credentials)`)
 
 func credentialRule(ctx RuleContext, tool string, in map[string]any) (Decision, bool) {
 	if fileTools[tool] {
@@ -339,6 +407,47 @@ func credentialRule(ctx RuleContext, tool string, in map[string]any) (Decision, 
 	return Decision{}, false
 }
 
+// readTools are the file tools that only read.
+var readTools = map[string]bool{"Read": true, "Grep": true, "Glob": true, "NotebookRead": true}
+
+// restrictedReadRule keeps a Restricted session's file tools to its own directory and ReadRoots: a path they name (or,
+// for an absolute Glob pattern, its stem) that lies elsewhere in any of its spellings, a symbolic link out of the
+// directory included, is denied. A search with no path runs in TicketDir.
+func restrictedReadRule(ctx RuleContext, tool string, in map[string]any) (Decision, bool) {
+	if !ctx.Restricted || !readTools[tool] {
+		return Decision{}, false
+	}
+	var paths []string
+	for _, k := range pathKeys {
+		if p := str(in, k); p != "" {
+			paths = append(paths, ctx.absPath(p))
+		}
+	}
+	if pat := str(in, "pattern"); tool == "Glob" && (filepath.IsAbs(pat) || strings.HasPrefix(pat, "~")) {
+		paths = append(paths, ctx.absPath(globStem(pat)))
+	}
+	for _, p := range paths {
+		if !ctx.restrictedReadable(p) {
+			return deny(ruleRestricted, restrictedReadReason), true
+		}
+	}
+	return Decision{}, false
+}
+
+// restrictedReadable reports whether every spelling of the absolute path p lies in TicketDir or one of ReadRoots.
+func (c RuleContext) restrictedReadable(p string) bool {
+	var roots []string
+	for _, r := range append([]string{c.TicketDir}, c.ReadRoots...) {
+		roots = append(roots, variants(r)...)
+	}
+	for _, cand := range variants(p) {
+		if !slices.ContainsFunc(roots, func(r string) bool { return within(r, cand) }) {
+			return false
+		}
+	}
+	return true
+}
+
 // tokenEnvRe names the variables that carry or fetch a GitHub or git token, or show one in a trace; a Bash command that
 // names one is denied. None of them is set in a session; naming one is an attempt to supply or reveal a token.
 var tokenEnvRe = regexp.MustCompile(`\b(?:GH_TOKEN|GH_ENTERPRISE_TOKEN|GITHUB_ENTERPRISE_TOKEN|GIT_ASKPASS|SSH_ASKPASS|` +
@@ -353,8 +462,9 @@ func globStem(pat string) string {
 }
 
 // protectedPath returns a denial reason if the absolute path p (or what it
-// resolves to) is a credential or Athena state location. With ancestors set,
-// a path that contains a credential location (a recursive search from ~) is
+// resolves to) is a credential, one of the node's secrets (in any of their
+// spellings) or an Athena state location. With ancestors set, a path that
+// contains a credential location or a secret (a recursive search from ~) is
 // protected too.
 func (c RuleContext) protectedPath(p string, ancestors bool) string {
 	var creds []string // roots that are always protected
@@ -365,8 +475,20 @@ func (c RuleContext) protectedPath(p string, ancestors bool) string {
 	}
 	state := variants(c.StateDir)
 	ticket := variants(c.TicketDir)
+	var secrets []string
+	for _, k := range c.Secrets {
+		secrets = append(secrets, variants(k)...)
+	}
 
 	for _, cand := range variants(p) {
+		for _, k := range secrets {
+			if within(k, cand) {
+				return "reading Athena's secret files is not allowed"
+			}
+			if ancestors && within(cand, k) {
+				return "searching a directory that holds Athena's secret files is not allowed"
+			}
+		}
 		for _, r := range creds {
 			if within(r, cand) {
 				return "reading credential files is not allowed"
@@ -418,10 +540,19 @@ func (c RuleContext) isClaudeCredential(p string) bool {
 }
 
 // protectedText checks free text (Bash command, Glob pattern) for mentions of
-// credential files or the Athena state directory.
+// credential files, the node's secrets (by name, so any path to them) or the
+// Athena state directory.
 func (c RuleContext) protectedText(s string) string {
 	if bareCredRe.MatchString(s) {
 		return "reading credential files is not allowed"
+	}
+	for _, k := range c.Secrets {
+		if name := filepath.Base(filepath.Clean(k)); name != "." && name != string(filepath.Separator) {
+			re := regexp.MustCompile(ciFlag() + `(?:^|[^\w.\-])` + regexp.QuoteMeta(name) + `(?:$|[^\w.\-])`)
+			if re.MatchString(s) {
+				return "reading Athena's secret files is not allowed"
+			}
+		}
 	}
 	if c.StateDir == "" {
 		return ""
@@ -1157,6 +1288,8 @@ func bashWriteRule(ctx RuleContext, command, workdir string) (Decision, bool) {
 	note := func(d Decision) {
 		if esc == nil {
 			esc = &d
+		} else {
+			*esc = esc.merged(d)
 		}
 	}
 	for _, t := range ctx.bashWriteTargets(command, start, 0) {
@@ -1189,16 +1322,28 @@ func bashWriteRule(ctx RuleContext, command, workdir string) (Decision, bool) {
 	return Decision{}, false
 }
 
+// bashEscalateRule is the escalation of the first risky pattern the command matches, naming the rest in Also.
 func bashEscalateRule(ctx RuleContext, command string) (Decision, bool) {
+	var out *Decision
+	note := func(d Decision) {
+		if out == nil {
+			out = &d
+		} else {
+			*out = out.merged(d)
+		}
+	}
 	for _, p := range bashEscalations {
 		if p.re.MatchString(command) {
-			return escalate(ruleBashPrefix+p.name, "command needs approval ("+p.name+")"), true
+			note(escalate(ruleBashPrefix+p.name, "command needs approval ("+p.name+")"))
 		}
 	}
 	if pipInstallRe.MatchString(command) && !ctx.VenvActive && !venvInCmdRe.MatchString(command) {
-		return escalate(ruleBashPrefix+"pip-install", "pip install outside a virtualenv needs approval"), true
+		note(escalate(ruleBashPrefix+"pip-install", "pip install outside a virtualenv needs approval"))
 	}
-	return Decision{}, false
+	if out == nil {
+		return Decision{}, false
+	}
+	return *out, true
 }
 
 // ---------------------------------------------------------------------------

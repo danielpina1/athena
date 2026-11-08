@@ -86,7 +86,7 @@ func TestHandoffQuotesInputs(t *testing.T) {
 	h := Handoff{
 		Ticket:   tk,
 		Previous: limitedPrevious(core.RuntimeCodex),
-		Inputs:   renderInputs(tk, []string{"aaaaaaaaaaaa", "bbbbbbbbbbbb"}, nil),
+		Inputs:   renderInputs(tk, []string{"aaaaaaaaaaaa", "bbbbbbbbbbbb"}, nil, nil),
 		Reports:  []core.Report{{State: core.ReportProgress, Summary: "working\n" + forged}},
 		GitLog:   "abc1234 " + forged,
 		DiffStat: forged,

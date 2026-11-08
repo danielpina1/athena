@@ -93,6 +93,8 @@ type sandboxFilesystem struct {
 	AllowWrite []string `json:"allowWrite"`
 	DenyWrite  []string `json:"denyWrite"`
 	DenyRead   []string `json:"denyRead"`
+	// AllowRead is Claude Code's allowRead: paths readable again within denyRead, which it takes precedence over.
+	AllowRead []string `json:"allowRead,omitempty"`
 }
 
 type sandboxNetwork struct {
@@ -117,7 +119,8 @@ func sandboxBlock(sb *rt.Sandbox) *sandboxSettings {
 		Enabled:                      true,
 		FailIfUnavailable:            sb.Required,
 		EnableWeakerNetworkIsolation: sb.WeakerNetworkIsolation,
-		Filesystem:                   sandboxFilesystem{AllowWrite: list(sb.AllowWrite), DenyWrite: list(sb.DenyWrite), DenyRead: list(sb.DenyRead)},
+		Filesystem: sandboxFilesystem{AllowWrite: list(sb.AllowWrite), DenyWrite: list(sb.DenyWrite), DenyRead: list(sb.DenyRead),
+			AllowRead: slices.Clone(sb.AllowRead)},
 		Network: sandboxNetwork{AllowedDomains: list(sb.AllowedDomains), StrictAllowlist: true,
 			AllowUnixSockets: list(sb.UnixSockets), AllowAllUnixSockets: sb.AllowAllUnixSockets},
 	}

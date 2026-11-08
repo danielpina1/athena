@@ -66,6 +66,12 @@ var errNotRunning = errors.New("router: the router session is not running")
 // it; the attempt is no failure (Minor 7: the Host stops before the effects drain).
 const stoppingPause = 5 * time.Second
 
+// pausedHold is how long a message is put off while the owner has paused Athena.
+var pausedHold = 5 * time.Second
+
+// held reports whether the owner paused Athena; the caller returns hold() to put its message off.
+func (h *Host) held() bool { return h.cfg.Paused != nil && h.cfg.Paused() }
+
 // notRunning is the error of a message that finds no session: put off while the Host stops, else errNotRunning.
 func (h *Host) notRunning() error {
 	if h.isStopped() {
@@ -100,6 +106,8 @@ type Config struct {
 	Prompt func() string
 	// Policy returns the current Policy settings, whose enabled rules an assessment judges; nil gives none.
 	Policy func() (policy.Settings, error)
+	// Paused says the owner paused Athena: the router's messages are held (put off, never dropped) until it is false.
+	Paused func() bool
 }
 
 // Host runs the router session and serves its tools. Its methods are safe for concurrent use.
@@ -445,6 +453,9 @@ func (h *Host) keepSession(id string) {
 // The message is kept as unconfirmed before it is written, then the notices it carried are settled; until the session
 // takes it into a turn that ends, every start sends it again.
 func (h *Host) deliver(ctx context.Context, text string) error {
+	if h.held() {
+		return effects.Later(pausedHold)
+	}
 	// Wait for the session outside sendMu, which a starting session takes for its resend.
 	if _, err := h.session(ctx); err != nil {
 		return err
@@ -497,6 +508,9 @@ func (h *Host) deliver(ctx context.Context, text string) error {
 // handleAssessment steers an Eval's candidate card into the router's turn, then tells the Engine it was delivered,
 // which starts the Eval's deadline. An Eval that ended meanwhile is dropped.
 func (h *Host) handleAssessment(ctx context.Context, key string, payload []byte) error {
+	if h.held() {
+		return effects.Later(pausedHold) // the candidate stays queued; its deadline has not started
+	}
 	var p struct {
 		EvalID    string `json:"evalId"`
 		TriggerID string `json:"triggerId"`

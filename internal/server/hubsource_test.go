@@ -282,3 +282,31 @@ func TestPlaceFactsRunProbesANewFolder(t *testing.T) {
 		t.Errorf("fact = %+v", f)
 	}
 }
+
+func TestRepoViewCarriesBrake(t *testing.T) {
+	st := openStore(t)
+	t0 := time.Date(2026, 11, 4, 9, 0, 0, 0, time.UTC)
+	var tks []*core.Ticket
+	for i := range 3 {
+		tk := placedTicket(fmt.Sprintf("T-%d", i), "acme/web", "", t0.Add(time.Duration(i)*time.Minute))
+		tk.Attention = &core.Attention{Question: "which branch?"}
+		tks = append(tks, tk)
+	}
+	putTickets(t, st, tks...)
+	if err := st.Tx(func(tx *store.Tx) error {
+		return tx.PutBrake(core.Brake{TriggerID: "trg-1", Repo: "acme/web", Thread: "github:acme/web#1", At: t0})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	pc, err := newPolicyCache(st, nil, allScope{}, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := probedRepos(t, &Dispatcher{st: st, policy: pc})
+	if len(got) != 1 {
+		t.Fatalf("repos = %v", got)
+	}
+	if r := got[0]; r.Owed != 3 || r.Ceiling != 3 || r.Braked != 1 || r.Mode != "live" {
+		t.Errorf("repo view = %v, want owed 3, ceiling 3, braked 1, live", r)
+	}
+}

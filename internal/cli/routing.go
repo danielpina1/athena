@@ -278,6 +278,64 @@ func (c *command) routingCommand(args []string) int {
 	return 0
 }
 
+// pauseCommand is athena pause and athena resume: the kill switch.
+func (c *command) pauseCommand(args []string) int {
+	if _, code, ok := c.parse(args, 0, 0); !ok {
+		return code
+	}
+	if c.name == "resume" {
+		if err := call(c.stateDir, server.Request{Op: server.OpResume}, nil); err != nil {
+			return c.fail(err)
+		}
+		fmt.Fprintln(c.stdout, "Athena resumed.")
+		return 0
+	}
+	if err := call(c.stateDir, server.Request{Op: server.OpPause}, nil); err != nil {
+		return c.fail(err)
+	}
+	fmt.Fprintln(c.stdout, "Athena is paused. Running sessions stop at the end of their turn; nothing queued is lost. Resume with: athena resume")
+	return 0
+}
+
+// proposalCommand is athena proposals, athena apply <id> and athena discard <id>: what Athena holds for the owner.
+func (c *command) proposalCommand(args []string) int {
+	if c.name == "proposals" {
+		if _, code, ok := c.parse(args, 0, 0); !ok {
+			return code
+		}
+		var list []server.ProposalRow
+		if err := call(c.stateDir, server.Request{Op: server.OpProposals}, &list); err != nil {
+			return c.fail(err)
+		}
+		if len(list) == 0 {
+			fmt.Fprintln(c.stdout, "nothing is held for you")
+			return 0
+		}
+		for _, p := range list {
+			fmt.Fprintln(c.stdout, proposalLine(p))
+		}
+		return 0
+	}
+	pos, code, ok := c.parse(args, 1, 1)
+	if !ok {
+		return code
+	}
+	op, done := server.OpApply, "applied"
+	if c.name == "discard" {
+		op, done = server.OpDiscard, "discarded"
+	}
+	if err := call(c.stateDir, server.Request{Op: op, ID: pos[0]}, nil); err != nil {
+		return c.fail(err)
+	}
+	fmt.Fprintf(c.stdout, "%s: %s\n", pos[0], done)
+	return 0
+}
+
+// proposalLine is one pending Proposal: id, repository, kind and summary, two spaces apart.
+func proposalLine(p server.ProposalRow) string {
+	return p.ID + "  " + dash(p.Repo) + "  " + p.Kind + "  " + p.Summary
+}
+
 func dash(s string) string {
 	if s == "" {
 		return "-"

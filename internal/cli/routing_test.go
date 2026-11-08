@@ -112,6 +112,21 @@ func TestRoutingCommandsAgainstServer(t *testing.T) {
 		}
 	}
 
+	// The kill switch: pause says what stops, status shows it, resume clears it.
+	if code, out, errOut := athena(ctx, "pause", "--state-dir", dir); code != 0 || errOut != "" ||
+		out != "Athena is paused. Running sessions stop at the end of their turn; nothing queued is lost. Resume with: athena resume\n" {
+		t.Fatalf("pause: %d %q %q", code, out, errOut)
+	}
+	if code, out, _ := athena(ctx, "status", "--state-dir", dir); code != 0 || !strings.Contains(out, "paused since ") || !strings.Contains(out, "(by cli)") {
+		t.Fatalf("status while paused: %d %q", code, out)
+	}
+	if code, out, errOut := athena(ctx, "resume", "--state-dir", dir); code != 0 || errOut != "" || out != "Athena resumed.\n" {
+		t.Fatalf("resume: %d %q %q", code, out, errOut)
+	}
+	if code, out, _ := athena(ctx, "status", "--state-dir", dir); code != 0 || strings.Contains(out, "paused") {
+		t.Fatalf("status after resume: %d %q", code, out)
+	}
+
 	code, out, errOut := athena(ctx, "policy", "show", "--state-dir", dir)
 	var shown server.PolicyView
 	if code != 0 || json.Unmarshal([]byte(out), &shown) != nil || shown.Revision != 0 || shown.Settings.Mode != "observe" {
@@ -210,5 +225,31 @@ func TestRoutingViewsGolden(t *testing.T) {
 		if b.String() != c.want {
 			t.Errorf("%s:\n got:\n%s\nwant:\n%s", c.name, b.String(), c.want)
 		}
+	}
+}
+
+func TestCLIProposals(t *testing.T) {
+	dir := startServer(t)
+	ctx := context.Background()
+	if code, out, errOut := athena(ctx, "proposals", "--state-dir", dir); code != 0 || errOut != "" || out != "nothing is held for you\n" {
+		t.Fatalf("proposals: %d %q %q", code, out, errOut)
+	}
+	for _, c := range []struct{ args []string }{{[]string{"apply", "p-1"}}, {[]string{"discard", "p-1"}}} {
+		if code, out, errOut := athena(ctx, append(c.args, "--state-dir", dir)...); code != 1 || out != "" || errOut == "" {
+			t.Errorf("%v: %d %q %q, want exit 1 for an unknown proposal", c.args, code, out, errOut)
+		}
+	}
+	if code, _, errOut := athena(ctx, "apply", "--state-dir", dir); code != 2 || errOut == "" {
+		t.Errorf("apply without an id: %d %q, want a usage error", code, errOut)
+	}
+}
+
+func TestProposalLineFormat(t *testing.T) {
+	got := proposalLine(server.ProposalRow{ID: "p-1", Repo: "acme/web", Kind: "pull_request", Summary: "Open a pull request"})
+	if want := "p-1  acme/web  pull_request  Open a pull request"; got != want {
+		t.Errorf("line = %q, want %q", got, want)
+	}
+	if got := proposalLine(server.ProposalRow{ID: "p-2", Kind: "reply", Summary: "Reply"}); got != "p-2  -  reply  Reply" {
+		t.Errorf("a proposal without a repository: %q", got)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -297,7 +298,7 @@ func TestCredentialsFromApp(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := &appCredentials{app: app}
-	tok, exp, err := c.Token(context.Background(), fakeRepo)
+	tok, exp, err := c.Token(context.Background(), fakeRepo, true)
 	if err != nil || !strings.HasPrefix(tok, "ghs_") || time.Until(exp) < 30*time.Minute {
 		t.Fatalf("token = %q %v %v", tok, exp, err)
 	}
@@ -749,4 +750,79 @@ func TestNoGatingBeforeTheCheckPasses(t *testing.T) {
 			t.Fatalf("decisions = %+v: the trigger was ignored", list)
 		}
 	}
+}
+
+// The WIP brake: with the repository's ceiling at one and one Ticket waiting on the owner there, an unaddressed
+// comment (a self-chosen candidate) is held with a wip_brake Decision and starts no Ticket; once the waiting Ticket
+// ends, the held comment is evaluated.
+func TestServerBrakesInferredMention(t *testing.T) {
+	newFakeEnv(t, openTurnFixture(t))
+	fastEvaluate(t)
+	g := newFakeGitHub(t)
+	dir := newStateDir(t)
+	g.configure(t, dir, 600)
+	cfg, err := LoadConfig(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.GitHub.ReceiveAll = []string{"O/R"}
+	if err := SaveConfig(dir, cfg); err != nil {
+		t.Fatal(err)
+	}
+	offlineWith(t, dir, time.Now, func(_ *core.Engine, st *store.Store) {
+		ps := policy.NewStore(st, policy.Defaults(nil))
+		_, rev, err := ps.Current()
+		if err != nil {
+			t.Fatal(err)
+		}
+		cur := policy.Defaults([]string{"o"})
+		cur.WIPCeiling = 1
+		if _, err := ps.Save(cur, rev, policy.OriginCLI); err != nil {
+			t.Fatal(err)
+		}
+		waiting := &core.Ticket{ID: "T-9001", Title: "Waits on the owner", Repo: fakeRepo,
+			Mandate:   core.Mandate{Strength: "explicit", PolicyVersion: core.OwnerPolicyVersion, Basis: core.MandateBasis{Via: core.ViaOwner}},
+			Attention: &core.Attention{ID: "q1", Question: "Which page?", At: time.Now()}, CreatedAt: time.Now(), UpdatedAt: time.Now()}
+		if err := st.Tx(func(tx *store.Tx) error { return tx.PutTicket(waiting) }); err != nil {
+			t.Fatal(err)
+		}
+	})
+	s := startServer(t, dir)
+	eventually(t, "router running and github healthy", func() bool {
+		h := s.health()
+		return h.Router.State == "running" && len(h.Sources) == 1 && h.Sources[0].Error == ""
+	})
+	g.addComment(3, "o", "the login test is flaky again")
+	thread := github.ThreadKey(fakeRepo, 3)
+	braked := func() bool {
+		var list []DecisionView
+		s.ok(Request{Op: OpDecisions, Thread: thread}, &list)
+		for _, d := range list {
+			if d.Kind == core.DecisionIgnore && slices.Contains(d.Reasons, core.CodeWIPBrake) {
+				return true
+			}
+		}
+		return false
+	}
+	eventually(t, "the comment was held by the brake", braked)
+	for _, th := range s.threads() {
+		if th.Key == thread && th.Eval != nil {
+			t.Fatalf("the held comment was evaluated: %+v", th.Eval)
+		}
+	}
+	var tickets []TicketSummary
+	s.ok(Request{Op: OpTickets, All: true}, &tickets)
+	if len(tickets) != 1 {
+		t.Fatalf("tickets = %+v, want only the waiting one", tickets)
+	}
+
+	s.ok(Request{Op: OpStop, ID: "T-9001"}, nil)
+	eventually(t, "the held comment reached the router once the owner caught up", func() bool {
+		for _, th := range s.threads() {
+			if th.Key == thread && th.Eval != nil && th.Eval.DeliveredAt != nil {
+				return true
+			}
+		}
+		return false
+	})
 }

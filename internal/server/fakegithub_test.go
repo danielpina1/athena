@@ -30,6 +30,8 @@ type fakeGitHub struct {
 
 	// down makes every request answer 503, as GitHub unreachable at boot.
 	down atomic.Bool
+	// failComments makes every comment post answer 503, so a reply waits to go out.
+	failComments atomic.Bool
 
 	mu       sync.Mutex
 	issues   []map[string]any // the issues list: issues and pull requests
@@ -37,9 +39,25 @@ type fakeGitHub struct {
 	pulls    map[int]map[string]any
 	posted   []postedComment
 	requests []string // "METHOD path"
-	nextID   int64
+	// mints are the permissions each token was minted with (nil: the installation's own), with its value; revoked
+	// the tokens revoked.
+	mints   []fakeMint
+	revoked []string
+	// opened are the bodies of the pull requests created, with the token each was created with.
+	opened []openedPull
+	nextID int64
 	// repos is what GET /installation/repositories lists.
 	repos []string
+}
+
+type openedPull struct {
+	Token string
+	Body  map[string]any
+}
+
+type fakeMint struct {
+	Token string
+	Perms map[string]string
 }
 
 type postedComment struct {
@@ -59,8 +77,24 @@ func newFakeGitHub(t *testing.T) *fakeGitHub {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /app/installations/777/access_tokens", func(w http.ResponseWriter, r *http.Request) {
 		g.record(r)
+		var in struct {
+			Permissions map[string]string `json:"permissions"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&in)
+		tok := fmt.Sprintf("ghs_faketoken%d", time.Now().UnixNano())
+		g.mu.Lock()
+		g.mints = append(g.mints, fakeMint{Token: tok, Perms: in.Permissions})
+		g.mu.Unlock()
 		w.WriteHeader(http.StatusCreated)
-		fmt.Fprintf(w, `{"token":"ghs_faketoken%d","expires_at":%q}`, time.Now().UnixNano(), time.Now().Add(time.Hour).UTC().Format(time.RFC3339))
+		fmt.Fprintf(w, `{"token":%q,"expires_at":%q}`, tok, time.Now().Add(time.Hour).UTC().Format(time.RFC3339))
+	})
+	mux.HandleFunc("DELETE /installation/token", func(w http.ResponseWriter, r *http.Request) {
+		g.record(r)
+		_, tok, _ := strings.Cut(r.Header.Get("Authorization"), " ")
+		g.mu.Lock()
+		g.revoked = append(g.revoked, tok)
+		g.mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("GET /app/installations/777", func(w http.ResponseWriter, r *http.Request) {
 		g.json(w, r, map[string]any{"id": 777, "account": map[string]any{"login": "o"}})
@@ -118,6 +152,11 @@ func newFakeGitHub(t *testing.T) *fakeGitHub {
 	})
 	mux.HandleFunc("POST /repos/o/r/issues/{n}/comments", func(w http.ResponseWriter, r *http.Request) {
 		g.record(r)
+		if g.failComments.Load() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			io.WriteString(w, `{"message":"unavailable"}`)
+			return
+		}
 		n, _ := strconv.Atoi(r.PathValue("n"))
 		var in struct {
 			Body string `json:"body"`
@@ -146,6 +185,17 @@ func newFakeGitHub(t *testing.T) *fakeGitHub {
 			return
 		}
 		g.json(w, r, p)
+	})
+	mux.HandleFunc("POST /repos/o/r/pulls", func(w http.ResponseWriter, r *http.Request) {
+		g.record(r)
+		var in map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&in)
+		_, tok, _ := strings.Cut(r.Header.Get("Authorization"), " ")
+		g.mu.Lock()
+		g.opened = append(g.opened, openedPull{Token: tok, Body: in})
+		g.mu.Unlock()
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{"number": 21, "html_url": "https://github.com/o/r/pull/21"})
 	})
 	mux.HandleFunc("GET /repos/o/r/pulls/{n}/reviews", func(w http.ResponseWriter, r *http.Request) { g.json(w, r, []any{}) })
 	mux.HandleFunc("GET /repos/o/r/branches/{b}", func(w http.ResponseWriter, r *http.Request) {
@@ -243,6 +293,24 @@ func (g *fakeGitHub) postedComments() []postedComment {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return append([]postedComment(nil), g.posted...)
+}
+
+func (g *fakeGitHub) minted() []fakeMint {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return append([]fakeMint(nil), g.mints...)
+}
+
+func (g *fakeGitHub) openedPulls() []openedPull {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return append([]openedPull(nil), g.opened...)
+}
+
+func (g *fakeGitHub) revokedTokens() []string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return append([]string(nil), g.revoked...)
 }
 
 func (g *fakeGitHub) requestLog() []string {

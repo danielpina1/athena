@@ -86,6 +86,15 @@ func WorkerPermissions() map[string]string {
 	}
 }
 
+// ReaderPermissions are the permissions of a read-only worker token, for a repository in shadow mode: everything a
+// worker reads, nothing it could change. It returns a new map each time.
+func ReaderPermissions() map[string]string {
+	return map[string]string{
+		"contents": "read", "pull_requests": "read", "issues": "read",
+		"checks": "read", "actions": "read", "metadata": "read",
+	}
+}
+
 // App authenticates as a GitHub App. It is safe for concurrent use.
 type App struct {
 	cfg  AppConfig
@@ -339,6 +348,41 @@ func (a *App) RevokeToken(ctx context.Context, token string) error {
 		return errors.New("github app: no token to revoke")
 	}
 	return a.inst.deleteAs(ctx, "/installation/token", token)
+}
+
+// NewPull is a pull request to open on a repository: its title, body, base branch (the repository's default branch
+// when empty), head branch (of the same repository) and whether it is a draft.
+type NewPull struct {
+	Title, Body, Base, Head string
+	Draft                   bool
+}
+
+// CreatePull opens a pull request on repo (owner/name) with token (a worker's write token, minted for this), and
+// returns its number and URL: POST /repos/{owner}/{name}/pulls with exactly the fields of p. An empty base is the
+// repository's default branch, read with the installation token.
+func (a *App) CreatePull(ctx context.Context, token, repo string, p NewPull) (number int, htmlURL string, err error) {
+	if _, _, ok := strings.Cut(repo, "/"); !ok || token == "" || p.Head == "" || p.Title == "" {
+		return 0, "", fmt.Errorf("github app: a pull request needs a repository, a token, a head and a title: %w", ErrPermanent)
+	}
+	base := p.Base
+	if base == "" {
+		var r Repo
+		if _, err := a.inst.Get(ctx, "/repos/"+repo, &r); err != nil {
+			return 0, "", err
+		}
+		if base = r.DefaultBranch; base == "" {
+			return 0, "", fmt.Errorf("github app: %s names no default branch", repo)
+		}
+	}
+	in := map[string]any{"title": p.Title, "body": p.Body, "base": base, "head": p.Head, "draft": p.Draft}
+	var out struct {
+		Number  int    `json:"number"`
+		HTMLURL string `json:"html_url"`
+	}
+	if err := a.inst.postAs(ctx, "/repos/"+repo+"/pulls", token, in, &out); err != nil {
+		return 0, "", err
+	}
+	return out.Number, out.HTMLURL, nil
 }
 
 // Client returns the client that authenticates with the installation token.

@@ -2,12 +2,12 @@
 // lists the other selectors return. A result is kept while its inputs are the same Maps, so a component can subscribe
 // to a selector without getting a new array on every store update.
 import { timestampMs, type Timestamp } from "@bufbuild/protobuf/wkt";
-import type { ApprovalView, TicketSummary } from "@/gen/athena/v1/state_pb";
+import type { ApprovalView, ProposalView, TicketSummary } from "@/gen/athena/v1/state_pb";
 import type { AthenaData } from "./state";
 
-export type NeedsYouKind = "approval" | "answer" | "review" | "delivery" | "blocked" | "failed";
+export type NeedsYouKind = "approval" | "proposal" | "answer" | "review" | "delivery" | "blocked" | "failed";
 
-export type NeedsYouItem = { kind: NeedsYouKind; ticket: TicketSummary; approval?: ApprovalView };
+export type NeedsYouItem = { kind: NeedsYouKind; ticket: TicketSummary; approval?: ApprovalView; proposal?: ProposalView };
 
 export type TicketFilter = {
   stage?: "open" | "needsYou" | "working" | "idle" | "ended";
@@ -21,10 +21,10 @@ export type TicketFilter = {
 export type Counts = { needsYou: number; open: number; working: number; endedToday: number; mergedToday: number };
 
 /** The state the selectors read. Without `answering` nothing is being answered. */
-type Slice = Pick<AthenaData, "tickets" | "approvals"> & Partial<Pick<AthenaData, "answering">>;
+type Slice = Pick<AthenaData, "tickets" | "approvals"> & Partial<Pick<AthenaData, "answering" | "proposals">>;
 type TicketsSlice = Pick<AthenaData, "tickets"> & Partial<Pick<AthenaData, "answering">>;
 
-const KINDS = new Set<string>(["approval", "answer", "review", "delivery", "blocked", "failed"]);
+const KINDS = new Set<string>(["approval", "proposal", "answer", "review", "delivery", "blocked", "failed"]);
 
 const NOTHING_ANSWERED: Answering = new Map();
 
@@ -45,20 +45,24 @@ export const needsYouKindOf = (t: TicketSummary): NeedsYouKind | undefined => ne
 const ms = (ts: Timestamp | undefined) => (ts ? timestampMs(ts) : 0);
 
 /** Approvals first, then answers, then the rest, each oldest first. */
-const RANK: Record<NeedsYouKind, number> = { approval: 0, answer: 1, review: 2, delivery: 2, blocked: 2, failed: 2 };
+const RANK: Record<NeedsYouKind, number> = { approval: 0, proposal: 1, answer: 2, review: 3, delivery: 3, blocked: 3, failed: 3 };
 
-/** When the item started waiting: an approval when it was asked, anything else when its Ticket last changed. */
-const since = (i: NeedsYouItem) => (i.approval ? ms(i.approval.createdAt) : ms(i.ticket.updatedAt));
+/** When the item started waiting: an approval or Proposal when it was made, anything else when its Ticket last changed. */
+const since = (i: NeedsYouItem) =>
+  i.approval ? ms(i.approval.createdAt) : i.proposal ? ms(i.proposal.createdAt) : ms(i.ticket.updatedAt);
 
 type Tickets = AthenaData["tickets"];
 type Approvals = AthenaData["approvals"];
 type Answering = AthenaData["answering"];
+type Proposals = AthenaData["proposals"];
 
 // Results are cached per tickets Map (and approvals and answering Maps), so a new Map, which every change makes,
 // starts afresh and the old results go with the old Map.
 const ticketLists = new WeakMap<Tickets, WeakMap<Answering, Map<string, TicketSummary[]>>>();
-const needsYouLists = new WeakMap<Tickets, WeakMap<Approvals, WeakMap<Answering, NeedsYouItem[]>>>();
-const countsByDay = new WeakMap<Tickets, WeakMap<Approvals, WeakMap<Answering, Map<number, Counts>>>>();
+const needsYouLists = new WeakMap<Tickets, WeakMap<Approvals, WeakMap<Answering, WeakMap<Proposals, NeedsYouItem[]>>>>();
+const countsByDay = new WeakMap<Tickets, WeakMap<Approvals, WeakMap<Answering, WeakMap<Proposals, Map<number, Counts>>>>>();
+
+const NO_PROPOSALS: Proposals = new Map();
 
 const answeringOf = (s: { answering?: Answering }) => s.answering ?? NOTHING_ANSWERED;
 
@@ -80,11 +84,17 @@ function cached<K, V>(m: { get(k: K): V | undefined; set(k: K, v: V): unknown },
 export function selectNeedsYou(s: Slice): NeedsYouItem[] {
   const answering = answeringOf(s);
   const byApprovals = cached(cached(needsYouLists, s.tickets, () => new WeakMap()), s.approvals, () => new WeakMap());
-  return cached(byApprovals, answering, () => {
+  const proposals = s.proposals ?? NO_PROPOSALS;
+  return cached(cached(byApprovals, answering, () => new WeakMap()), proposals, () => {
     const items: NeedsYouItem[] = [];
+    // One card per held Proposal; the Ticket waiting on them (action "proposal") adds none of its own.
+    for (const proposal of proposals.values()) {
+      const ticket = s.tickets.get(proposal.ticketId);
+      if (ticket) items.push({ kind: "proposal", ticket, proposal });
+    }
     for (const ticket of s.tickets.values()) {
       const kind = needsYouKind(ticket, answering);
-      if (!kind) continue;
+      if (!kind || kind === "proposal") continue;
       const approval = kind === "approval" ? s.approvals.get(ticket.pendingApprovalId) : undefined;
       items.push(approval ? { kind, ticket, approval } : { kind, ticket });
     }
@@ -154,7 +164,8 @@ export function selectMergedToday(s: TicketsSlice, now: number = Date.now()): Ti
 /** The counts the sidebar and tabs show; each is the length of the list it links to. */
 export function selectCounts(s: Slice, now: number = Date.now()): Counts {
   const byApprovals = cached(cached(countsByDay, s.tickets, () => new WeakMap()), s.approvals, () => new WeakMap());
-  const byDay = cached(byApprovals, answeringOf(s), () => new Map<number, Counts>());
+  const byAnswering = cached(byApprovals, answeringOf(s), () => new WeakMap());
+  const byDay = cached(byAnswering, s.proposals ?? NO_PROPOSALS, () => new Map<number, Counts>());
   return cached(byDay, startOfDay(now), () => ({
     needsYou: selectNeedsYou(s).length,
     open: selectTickets(s, { stage: "open" }).length,

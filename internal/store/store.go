@@ -151,6 +151,17 @@ var migrations = []string{
 		at INTEGER NOT NULL
 	);
 	CREATE INDEX prompt_revisions_part ON prompt_revisions (part, revision);`,
+	// 8: the WIP brake's held candidates, one per Trigger, with the repository as a column for the release pass.
+	`CREATE TABLE brakes (trigger_id TEXT PRIMARY KEY, repo TEXT NOT NULL, doc TEXT NOT NULL);`,
+	// 9: Proposals, work held for the owner's yes.
+	`CREATE TABLE proposals (id TEXT PRIMARY KEY, ticket_id TEXT NOT NULL, state TEXT NOT NULL, doc TEXT NOT NULL);
+	CREATE INDEX proposals_state ON proposals (state);`,
+	// 10: the action class of an Approval (tool|rule|repository, lower-cased), for the streaks that offer a standing
+	// allow rule. Older Approvals take the repository from their Ticket.
+	`ALTER TABLE approvals ADD COLUMN class TEXT NOT NULL DEFAULT '';
+	UPDATE approvals SET class = lower(COALESCE(json_extract(doc, '$.tool'), '') || '|' || COALESCE(json_extract(doc, '$.rule'), '') || '|' ||
+		COALESCE(json_extract(doc, '$.repo'), (SELECT json_extract(t.doc, '$.repo') FROM tickets t WHERE t.id = approvals.ticket_id), ''));
+	CREATE INDEX approvals_class ON approvals (class, state, answered_at);`,
 }
 
 const schemaKey = "schema"

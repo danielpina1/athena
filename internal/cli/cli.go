@@ -45,6 +45,11 @@ var usage = map[string]string{
 	"reevaluate":  "athena reevaluate <trigger>",
 	"dismiss":     "athena dismiss <decision>",
 	"unsubscribe": "athena unsubscribe <thread>",
+	"pause":       "athena pause",
+	"resume":      "athena resume",
+	"proposals":   "athena proposals",
+	"apply":       "athena apply <id>",
+	"discard":     "athena discard <id>",
 	"status":      "athena status [<id>] [--all]",
 	"logs":        "athena logs <id> [-f]",
 	"reply":       `athena reply <id> "<text>"`,
@@ -101,6 +106,10 @@ func Run(ctx context.Context, cmd string, args []string, stdout, stderr io.Write
 		return c.threads(args)
 	case "decisions":
 		return c.decisions(args)
+	case "pause", "resume":
+		return c.pauseCommand(args)
+	case "proposals", "apply", "discard":
+		return c.proposalCommand(args)
 	case "reevaluate", "dismiss", "unsubscribe":
 		return c.routingCommand(args)
 	default: // approve, deny
@@ -301,6 +310,9 @@ func printHealth(w io.Writer, h server.HealthView) {
 		for _, k := range kinds {
 			fmt.Fprintf(w, "effects:   %s: %s\n", k, h.Effects[k])
 		}
+	}
+	if h.Paused {
+		fmt.Fprintf(w, "paused since %s (by %s)\n", h.PausedSince.Local().Format(time.DateTime), h.PausedBy)
 	}
 	line := "router:    " + h.Router.State
 	if h.Router.Session != "" {

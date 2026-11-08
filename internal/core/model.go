@@ -79,6 +79,9 @@ const RoleReview = "review"
 // InterruptRestart is the reason of an Interruption a server restart caused.
 const InterruptRestart = "server restart"
 
+// InterruptPaused is the reason of an Interruption the owner's pause caused: the session parked at the end of its turn.
+const InterruptPaused = "paused"
+
 // Interruption is a time an Assignment's session was cut short while it worked. ResumedAt is when the session started
 // again, and EndedAt when the Assignment ended before it did (a stop, a failover, a review); both are nil while the
 // Interruption is open.
@@ -87,6 +90,9 @@ type Interruption struct {
 	Reason    string     `json:"reason"`
 	ResumedAt *time.Time `json:"resumedAt,omitempty"`
 	EndedAt   *time.Time `json:"endedAt,omitempty"`
+	// ReportOwed is set on a pause (InterruptPaused) whose turn ended without the Report the worker owed: it was not
+	// nudged into a new turn while paused, so the resume starts its session again to ask for it.
+	ReportOwed bool `json:"reportOwed,omitempty"`
 }
 
 // OpenInterruption returns the Assignment's last Interruption when its session has not started again since and the
@@ -191,6 +197,40 @@ type Mandate struct {
 	Thread string `json:"thread,omitempty"`
 	// Basis records how the gate admitted the Trigger; revalidation reads it.
 	Basis MandateBasis `json:"basis,omitzero"`
+	// Trust is the trust class of the sender the Mandate was given on, fixed at accept (see TrustClass).
+	Trust string `json:"trust,omitempty"`
+}
+
+// Trust classes of a sender. The Policy classifies each Trigger; a Mandate records the class of its primary Trigger.
+const (
+	TrustOwner        = "owner"
+	TrustAllowed      = "allowed"
+	TrustCollaborator = "collaborator"
+	TrustStranger     = "stranger"
+	TrustBot          = "bot"
+	TrustCI           = "ci"
+)
+
+// Tool policies of a trust class's work (Policy.ToolPolicy): standard, or restricted (sandboxed, asking nobody, and
+// held for the owner). A value other than standard counts as restricted.
+const (
+	ToolStandard   = "standard"
+	ToolRestricted = "restricted"
+)
+
+// TrustClass is the Mandate's trust class: the recorded one, else, for a Mandate made before classes were recorded,
+// owner when the owner gave it, bot for a bot's, and allowed otherwise (the gate admitted a listed sender).
+func (m Mandate) TrustClass() string {
+	if m.Trust != "" {
+		return m.Trust
+	}
+	switch m.Basis.Via {
+	case ViaOwner:
+		return TrustOwner
+	case ViaBot:
+		return TrustBot
+	}
+	return TrustAllowed
 }
 
 // Admission paths a MandateBasis names in Via.
@@ -281,6 +321,8 @@ type Ticket struct {
 	Delivery    *DeliveryFailure `json:"delivery,omitempty"`
 	// PendingApproval is the ID of an Approval of this Ticket waiting for a person; empty if none.
 	PendingApproval string `json:"pendingApproval,omitempty"`
+	// PendingProposals counts the Proposals of this Ticket waiting for the owner; only the Engine writes it.
+	PendingProposals int `json:"pendingProposals,omitempty"`
 	// Stats are the Ticket's performance numbers, updated in the same transaction as the command that causes them.
 	Stats TicketStats `json:"stats"`
 	// SessionCosts is, per runtime session, the cumulative cost it last reported: a runtime reports a session's total

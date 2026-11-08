@@ -230,7 +230,7 @@ func (e *Engine) SubmitOwnerTask(text string, opts TaskOptions) (Ticket, error) 
 		// The owner's message goes straight to its Ticket, with no routing: record where it reached.
 		trigger := &Trigger{ID: newID(), Source: ownerSource, Actor: OwnerActor, Human: true, At: o.at, Text: text,
 			Disposition: Disposition{Reached: []string{id}}}
-		mandate := Mandate{Strength: "explicit", PolicyVersion: OwnerPolicyVersion, Actor: OwnerActor, Scope: ownerScope}
+		mandate := Mandate{Strength: "explicit", PolicyVersion: OwnerPolicyVersion, Actor: OwnerActor, Scope: ownerScope, Trust: TrustOwner}
 		if opts.Repo != "" {
 			// The owner's word is the whole basis: no Source admitted it, so no Source revalidates it.
 			mandate.Basis = MandateBasis{Via: ViaOwner}

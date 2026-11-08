@@ -50,7 +50,7 @@ func reportFiled(status string) string {
 }
 
 // RunMCP implements `athena mcp --ticket <id>`: a stdio MCP server for one session, exposing the report tool and the
-// worker tools (workertools.go), which forward to the node socket. The session's Assignment comes from
+// worker tools the node names for the session (workertools.go), which forward to the node socket. The session's Assignment comes from
 // ATHENA_ASSIGNMENT, set by the node.
 func RunMCP(ticketID, socket string) error {
 	if ticketID == "" {
@@ -91,7 +91,7 @@ func newMCPServer(ticketID, assignmentID, socket string) *mcp.Server {
 			}
 			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: reportFiled(in.Status)}}}, nil, nil
 		})
-	addWorkerTools(s, ticketID, assignmentID, socket)
+	addWorkerTools(s, ticketID, assignmentID, socket, sessionWorkerTools(ticketID, assignmentID, socket))
 	return s
 }
 

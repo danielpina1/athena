@@ -26,6 +26,9 @@ type SandboxConfig struct {
 	AllowWrite []string
 	// DenyRead are absolute paths sandboxed commands cannot read (the server puts the GitHub App key here).
 	DenyRead []string
+	// AllowRead are absolute paths readable again inside DenyRead (Claude Code's allowRead, which takes precedence):
+	// the node sets them for a restricted session (restrictedReads), never from the owner's configuration.
+	AllowRead []string
 	// WeakerNetworkIsolation (macOS) lets commands reach the trustd service, which Go programs such as gh verify every
 	// TLS certificate through: without it gh cannot reach GitHub. It opens a path out of the sandbox through that
 	// service.
@@ -48,7 +51,11 @@ var caEnvNames = []string{"SSL_CERT_FILE", "GIT_SSL_CAINFO", "CURL_CA_BUNDLE"}
 // sandboxFor is the sandbox block of a session working in workDir, and the settings env it needs; nil without
 // Config.Sandbox.
 func (n *Node) sandboxFor(workDir string) (*rt.Sandbox, []string) {
-	c := n.cfg.Sandbox
+	return n.sandboxWith(n.cfg.Sandbox, workDir)
+}
+
+// sandboxWith is sandboxFor with the sandbox configuration c; nil without c.
+func (n *Node) sandboxWith(c *SandboxConfig, workDir string) (*rt.Sandbox, []string) {
 	if c == nil {
 		return nil, nil
 	}
@@ -58,6 +65,7 @@ func (n *Node) sandboxFor(workDir string) (*rt.Sandbox, []string) {
 		// Athena's own files, and a repository's git config and hooks (ProtectedPaths).
 		DenyWrite:              ProtectedPaths(workDir),
 		DenyRead:               slices.Clone(c.DenyRead),
+		AllowRead:              slices.Clone(c.AllowRead),
 		AllowedDomains:         append(slices.Clone(GitHubDomains), c.AllowedDomains...),
 		UnixSockets:            []string{n.cfg.SocketPath},
 		AllowAllUnixSockets:    runtime.GOOS == "linux", // Linux cannot allow a socket by path; without this the node socket is unreachable
@@ -80,9 +88,27 @@ func (n *Node) sandboxFor(workDir string) (*rt.Sandbox, []string) {
 // sessionSandbox is sandboxFor for a session working in workDir. A read-only session's (a review's) writes nothing of
 // the Ticket's: of allowWrite it keeps only the owner's paths that neither hold nor lie in workDir or the repository's
 // git directories (a build cache, so that its tests can run), and workDir and the git directories are denied too, since
-// Claude Code's sandbox lets a session write in its working directory whatever allowWrite says.
-func (n *Node) sessionSandbox(workDir string, readOnly bool) (*rt.Sandbox, []string) {
-	sb, env := n.sandboxFor(workDir)
+// Claude Code's sandbox lets a session write in its working directory whatever allowWrite says. A restricted session's
+// (toolpolicy.go) is always there, even with Config.Sandbox nil: required, reaching GitHub alone (restrictedSandbox),
+// writing its own caches instead of the owner's, and kept from the node's secrets (restrictedSandboxConfig); its env
+// points the caches there (restrictedCacheEnv).
+func (n *Node) sessionSandbox(workDir string, readOnly, restricted bool) (*rt.Sandbox, []string) {
+	return n.sessionSandboxOn(runtime.GOOS, workDir, readOnly, restricted)
+}
+
+// sessionSandboxOn is sessionSandbox on the operating system goos.
+func (n *Node) sessionSandboxOn(goos, workDir string, readOnly, restricted bool) (*rt.Sandbox, []string) {
+	c := n.cfg.Sandbox
+	if restricted {
+		c = n.restrictedSandboxConfig(goos, workDir)
+	}
+	sb, env := n.sandboxWith(c, workDir)
+	if restricted {
+		sb = restrictedSandbox(sb)
+		// The daemons' sockets are masked for writes too: on Linux connecting to one takes no read.
+		sb.DenyWrite = append(sb.DenyWrite, daemonSockets(goos, os.Getenv("XDG_RUNTIME_DIR"), n.cfg.SocketPath)...)
+		env = append(env, restrictedCacheEnv(workDir)...)
+	}
 	if sb != nil && readOnly {
 		sb.AllowWrite = []string{}
 		gitDir, common := gitDirs(workDir)
@@ -100,10 +126,14 @@ func (n *Node) sessionSandbox(workDir string, readOnly bool) (*rt.Sandbox, []str
 			}
 			return false
 		}
-		for _, p := range n.cfg.Sandbox.AllowWrite {
+		for _, p := range c.AllowWrite {
 			if !overlaps(p) {
 				sb.AllowWrite = append(sb.AllowWrite, p)
 			}
+		}
+		if restricted {
+			// Its own caches only: a restricted review writes nothing else, the owner's caches included.
+			sb.AllowWrite = append(sb.AllowWrite, restrictedCacheDir(workDir))
 		}
 		sb.DenyWrite = append(sb.DenyWrite, workDir)
 		if common != "" {

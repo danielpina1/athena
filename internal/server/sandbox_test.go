@@ -184,3 +184,24 @@ func TestServerWorkersGetSandbox(t *testing.T) {
 		t.Fatalf("enableWeakerNetworkIsolation = %v on %s:\n%s", settings.Sandbox.Weaker, runtime.GOOS, raw)
 	}
 }
+
+// With the sandbox off, the node still learns the App key, which restricted sessions' commands may never read.
+func TestSecretsReachTheNodeWithSandboxOff(t *testing.T) {
+	dir := t.TempDir()
+	writeConfigFile(t, dir, `{"github": {"appId": 1, "slug": "a", "keyFile": "/keys/app.pem", "installationId": 2, "repos": ["o/r"]},
+		"sandbox": {"enabled": false}}`)
+	c, err := LoadConfig(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.nodeSandbox() != nil {
+		t.Fatal("sandbox off still made a node sandbox")
+	}
+	if got := c.nodeSecrets(); !slices.Equal(got, []string{"/keys/app.pem"}) {
+		t.Fatalf("secrets = %v, want the App key", got)
+	}
+	writeConfigFile(t, dir, `{}`)
+	if c, err = LoadConfig(dir); err != nil || len(c.nodeSecrets()) != 0 {
+		t.Fatalf("no GitHub: secrets = %v, %v", c.nodeSecrets(), err)
+	}
+}

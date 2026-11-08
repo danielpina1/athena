@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,6 +21,7 @@ import (
 	"github.com/danielpina1/athena/internal/hub"
 	"github.com/danielpina1/athena/internal/metrics"
 	"github.com/danielpina1/athena/internal/node"
+	"github.com/danielpina1/athena/internal/outbox"
 	"github.com/danielpina1/athena/internal/policy"
 	"github.com/danielpina1/athena/internal/runtime/codex"
 	"github.com/danielpina1/athena/internal/sources"
@@ -224,16 +226,42 @@ type appCredentials struct {
 	login, email string
 }
 
-// Token mints a token for repo alone, with github.WorkerPermissions().
-func (c *appCredentials) Token(ctx context.Context, repo string) (string, time.Time, error) {
-	t, err := c.app.ScopedToken(ctx, repo, github.WorkerPermissions())
+// Token mints a token for repo alone, with github.WorkerPermissions(), or github.ReaderPermissions() unless write.
+func (c *appCredentials) Token(ctx context.Context, repo string, write bool) (string, time.Time, error) {
+	perms := github.ReaderPermissions()
+	if write {
+		perms = github.WorkerPermissions()
+	}
+	t, err := c.app.ScopedToken(ctx, repo, perms)
 	if err != nil {
 		return "", time.Time{}, err
 	}
 	return t.Value, t.ExpiresAt, nil
 }
 
-var _ node.TokenRevoker = (*appCredentials)(nil)
+var (
+	_ node.TokenRevoker = (*appCredentials)(nil)
+	_ node.PullOpener   = (*appCredentials)(nil)
+)
+
+// OpenPull opens a pull request the owner applied (node.PullOpener): through the API, with a write token minted for
+// this call alone and revoked after.
+func (c *appCredentials) OpenPull(ctx context.Context, repo, head string, p node.HeldPull) (string, error) {
+	t, err := c.app.ScopedToken(ctx, repo, github.WorkerPermissions())
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		rctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := c.app.RevokeToken(rctx, t.Value); err != nil {
+			slog.Warn("revoke the token of an opened pull request; it expires on its own", "repo", repo, "error", err)
+		}
+	}()
+	_, url, err := c.app.CreatePull(ctx, t.Value, repo, github.NewPull{Title: p.Title, Body: p.Body, Base: p.Base, Head: head,
+		Draft: p.Draft})
+	return url, err
+}
 
 // Revoke revokes a worker's token the node dropped (node.TokenRevoker).
 func (c *appCredentials) Revoke(ctx context.Context, token string) error {
@@ -255,7 +283,7 @@ func (c *appCredentials) seed(login string, id int64) {
 // configuration.
 type unavailableCredentials struct{ err error }
 
-func (u unavailableCredentials) Token(context.Context, string) (string, time.Time, error) {
+func (u unavailableCredentials) Token(context.Context, string, bool) (string, time.Time, error) {
 	return "", time.Time{}, fmt.Errorf("github app unavailable: %v", u.err)
 }
 
@@ -360,6 +388,47 @@ func (c *policyCache) policy() core.Policy {
 		return nil
 	}
 	return c.pol
+}
+
+// nodePolicy is the node's Policy (node.Policy) over the cache: each call reads the current Policy, so a saved change
+// reaches the next session the node prepares. It reads the Policy built from the current settings even while the
+// Engine has none (policy): their tool policies hold then too. A Policy that is not a node.Policy fails closed:
+// restricted, no allow rule, every repository held.
+type nodePolicy struct{ c *policyCache }
+
+func (p nodePolicy) current() node.Policy {
+	p.c.mu.RLock()
+	defer p.c.mu.RUnlock()
+	np, _ := p.c.pol.(node.Policy)
+	return np
+}
+
+func (p nodePolicy) ToolPolicy(class string) string {
+	if np := p.current(); np != nil {
+		return np.ToolPolicy(class)
+	}
+	return policy.ToolRestricted
+}
+
+func (p nodePolicy) Allows(tool, rule, repo string) bool {
+	if np := p.current(); np != nil {
+		return np.Allows(tool, rule, repo)
+	}
+	return false
+}
+
+func (p nodePolicy) Shadow(repo string) bool {
+	if np := p.current(); np != nil {
+		return np.Shadow(repo)
+	}
+	return true
+}
+
+func (p nodePolicy) Trust(t core.Trigger) string {
+	if np := p.current(); np != nil {
+		return np.Trust(t)
+	}
+	return core.TrustStranger
 }
 
 // pairing is the Engine's pairing defaults: the current settings' (policy.Settings.PairingDefaults).
@@ -510,17 +579,26 @@ func (c *policyCache) writePending(p *pendingChange) error {
 	return c.st.KVSet(policyChangeKey, string(raw))
 }
 
-// evaluate runs the Evals' due work now and then every evaluateEvery, only while a Thread has Triggers queued or an
-// Eval in progress, until ctx is done.
-func evaluate(ctx context.Context, eng *core.Engine, log *slog.Logger) {
+// evaluate runs the Evals' due work now and then every evaluateEvery, only while a Thread has Triggers queued, an
+// Eval in progress or a candidate held by the brake, until ctx is done. While paused() it decides nothing.
+func evaluate(ctx context.Context, eng *core.Engine, paused func() bool, log *slog.Logger) {
 	run := func() {
+		if paused != nil && paused() {
+			return // the owner paused Athena: Triggers stay queued, nothing is decided
+		}
 		active, err := eng.ActiveThreads()
 		if err != nil {
 			log.Error("evaluate: active threads", "error", err)
 			return
 		}
 		if len(active) == 0 {
-			return
+			// Nothing queued, but a candidate the brake holds waits for the owner to catch up.
+			if held, err := eng.HasBrakes(); err != nil || !held {
+				if err != nil {
+					log.Error("evaluate: brakes", "error", err)
+				}
+				return
+			}
 		}
 		if err := eng.EvaluateDue(); err != nil {
 			log.Error("evaluate: due work", "error", err)
@@ -783,3 +861,61 @@ func checkCodexApprovalTimeout(approvalTimeout time.Duration) error {
 
 // Executable is this program's path with symlinks resolved: the athena binary hooks and MCP servers run.
 func Executable() (string, error) { return executable() }
+
+// applyProposals is the apply_proposal effect handler: the node pushes the branch or opens the pull request the owner
+// applied (node.ApplyProposal), and the Proposal is settled with the result. It is never retried: applying an outward
+// effect twice is worse than asking again, so a failure settles the Proposal failed and the owner applies it again if
+// they still want it. While Athena is paused it waits, like a reply.
+func applyProposals(st *store.Store, eng *core.Engine, n *node.Node, paused func() bool, log *slog.Logger) effects.Handler {
+	return func(ctx context.Context, key string, _ []byte) error {
+		if paused != nil && paused() {
+			return effects.Later(outbox.PausedWait)
+		}
+		var p *core.Proposal
+		if err := st.Tx(func(tx *store.Tx) error {
+			var err error
+			p, err = tx.GetProposal(key)
+			return err
+		}); err != nil {
+			return err
+		}
+		if p == nil || p.State != core.ProposalPending {
+			return nil
+		}
+		applyErr := n.ApplyProposal(ctx, *p)
+		if applyErr != nil {
+			log.Warn("applying a proposal failed", "proposal", p.ID, "ticket", p.TicketID, "kind", p.Kind, "error", applyErr)
+		}
+		if err := eng.SettleProposal(p.ID, applyErr); err != nil {
+			log.Error("settle an applied proposal; it stays pending", "proposal", p.ID, "error", err)
+		}
+		return nil
+	}
+}
+
+// heldRepos are the repositories a settings change switched to shadow mode.
+func heldRepos(from, to policy.Settings) []string {
+	var out []string
+	for repo, r := range to.Repos {
+		if r.Mode == policy.RepoShadow && from.Repos[repo].Mode != policy.RepoShadow {
+			out = append(out, repo)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// holdSwitched holds back the work of the repositories a settings change switched to shadow mode: the node drops their
+// write tokens (revoked, so a copy a worker kept stops working), and their replies waiting to go out are held for the
+// owner. Both are safe to repeat (a change told again).
+func holdSwitched(eng *core.Engine, n *node.Node, from, to policy.Settings) error {
+	for _, repo := range heldRepos(from, to) {
+		if n != nil {
+			n.DropTokens(repo)
+		}
+		if err := eng.HoldWaiting(repo); err != nil {
+			return err
+		}
+	}
+	return nil
+}

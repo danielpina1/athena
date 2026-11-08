@@ -22,6 +22,11 @@ message Snapshot {
   repeated RepoView repos = 10;
   NotificationPrefsView notifications = 11;
   PromptsView prompts = 12;
+  Control control = 13;
+  // offers are the actions the owner keeps approving, each offered as a standing allow rule.
+  OfferList offers = 14;
+  // proposals are the replies, pushes and pull requests Athena holds until the owner applies or discards them.
+  repeated ProposalView proposals = 15;
 }
 
 message Delta {
@@ -40,7 +45,36 @@ message Delta {
     RepoList repos = 19;
     NotificationPrefsView notifications = 20;
     PromptsView prompts = 21;
+    Control control = 22;
+    // offers carries the whole list, sent only when it changed.
+    OfferList offers = 23;
+    // proposal carries one Proposal in whatever state it now has; a client drops it from its pending list once it is
+    // no longer pending.
+    ProposalView proposal = 24;
   }
+}
+
+// Control is the kill switch: while paused, Athena makes no decisions and sends no replies.
+message Control {
+  bool paused = 1;
+  google.protobuf.Timestamp since = 2;
+  // by is who paused it: cli or web.
+  string by = 3;
+}
+
+// PromotionOffer is an action class (tool + rule + repository) the owner approved `approved` times in a row without a
+// denial; allowing it writes a standing Policy allow rule.
+message PromotionOffer {
+  // class is the stable key: tool|rule|repo, lower-cased.
+  string class = 1;
+  string tool = 2;
+  string rule = 3;
+  string repo = 4;
+  uint32 approved = 5;
+}
+
+message OfferList {
+  repeated PromotionOffer offers = 1;
 }
 
 message TicketSummary {
@@ -71,6 +105,9 @@ message TicketSummary {
   string pairing = 20;
   // review_rounds is how many reviews of its ready reports ended (approved, changes or failed).
   uint32 review_rounds = 21;
+  // trust is the trust class of the sender the Ticket's Mandate was given on: owner, allowed, collaborator, stranger,
+  // bot or ci.
+  string trust = 22;
 }
 
 message TicketDetail {
@@ -94,7 +131,8 @@ message TimelineEntry {
   //   trigger: where it came from: issue, pull, issue-comment, pull-comment, review-comment, review, ci or owner;
   //   decision: accepted;
   //   assignment: queued, started (the start entry), restart (its session was cut short by a server restart),
-  //     resumed (it started again by itself), limited (it ended at a usage limit: subject is the runtime, text the
+  //     resumed (it started again by itself), paused (the owner's pause parked its session at the end of a turn),
+  //     unpaused (it started again after the pause), limited (it ended at a usage limit: subject is the runtime, text the
   //     RFC 3339 reset, empty when unknown), review (a review Assignment's start), or ended, interrupted, stopped
   //     or retried (the end entry, at the Assignment's end);
   //   review: approved, changes or failed, at the end of a review; text is the first finding line (or why it
@@ -153,6 +191,9 @@ message TriggerView {
   string text = 8;
   // outcome says what became of it: filtered:<code>, reached/attached Tickets, requeued.
   string outcome = 9;
+  // trust is the trust class the current Policy gives the sender: owner, allowed, collaborator, stranger, bot or ci;
+  // empty while there is no Policy.
+  string trust = 10;
 }
 
 message ThreadView {
@@ -276,6 +317,31 @@ message RepoView {
   string kind = 2;
   // last_used_at is unset for a configured repository no Ticket has used.
   google.protobuf.Timestamp last_used_at = 3;
+  // owed is how many things wait on the owner in this repository (Tickets in a person stage, plus Tickets with a
+  // pending approval). Set for github repositories only.
+  int32 owed = 4;
+  // ceiling is how many things may wait on the owner here before Athena stops starting work it chose itself.
+  int32 ceiling = 5;
+  // braked is how many candidates the brake holds back in this repository.
+  int32 braked = 6;
+  // mode is live, or shadow when replies, pushes and pull requests are held for the owner. Empty for non-github kinds.
+  string mode = 7;
+}
+
+// ProposalView is a reply, push or pull request held for the owner.
+message ProposalView {
+  string id = 1;
+  string ticket_id = 2;
+  string repo = 3;
+  // kind is reply, push or pull_request.
+  string kind = 4;
+  // state is pending, applied, discarded, failed or superseded.
+  string state = 5;
+  string summary = 6;
+  // detail is the held reply text, "branch @ sha7", or the pull request title and base.
+  string detail = 7;
+  google.protobuf.Timestamp created_at = 8;
+  string error = 9;
 }
 
 message RepoList {

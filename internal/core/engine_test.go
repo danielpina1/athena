@@ -63,7 +63,7 @@ func TestSubmitOwnerTaskStartsAssignment(t *testing.T) {
 	eq(t, "returned ticket equals stored", got, *stored)
 	eq(t, "id", got.ID, "T-0001")
 	eq(t, "title", got.Title, "Fix the login bug")
-	eq(t, "mandate", got.Mandate, Mandate{Strength: "explicit", PolicyVersion: OwnerPolicyVersion, Actor: OwnerActor, Scope: "owner"})
+	eq(t, "mandate", got.Mandate, Mandate{Strength: "explicit", PolicyVersion: OwnerPolicyVersion, Actor: OwnerActor, Scope: "owner", Trust: TrustOwner})
 	eq(t, "execution", got.Execution, &Execution{Directory: "/work/login", Runtime: "claude", Model: "opus"})
 	eq(t, "created at", got.CreatedAt, base)
 	eq(t, "assignments", assignmentStates(stored), []AssignmentState{AssignmentPending})

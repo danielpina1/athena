@@ -444,6 +444,15 @@ func reasonText(rs []core.Reason) string {
 			parts = append(parts, r.Values["text"])
 			continue
 		}
+		if r.Code == core.CodeWIPBrake {
+			things := "things already wait"
+			if r.Values["owed"] == "1" {
+				things = "thing already waits"
+			}
+			parts = append(parts, fmt.Sprintf("Held: %s %s on you in %s (limit %s).",
+				r.Values["owed"], things, r.Values["repo"], r.Values["ceiling"]))
+			continue
+		}
 		s := r.Code
 		var vals []string
 		for _, k := range slices.Sorted(maps.Keys(r.Values)) {

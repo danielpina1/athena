@@ -25,6 +25,9 @@ type Approval struct {
 	Tool    string `json:"tool,omitempty"`
 	Summary string `json:"summary,omitempty"`
 	Rule    string `json:"rule,omitempty"`
+	// Repo is the repository (owner/name) of the Ticket the action is for, or empty; with Tool and Rule it is the
+	// action class a standing allow rule names.
+	Repo string `json:"repo,omitempty"`
 	// Input is the tool's input as the session gave it.
 	Input json.RawMessage `json:"input,omitempty"`
 	// State is pending until a person answers it (approved or denied) or it expires.
@@ -52,6 +55,7 @@ func (e *Engine) RequestApproval(a Approval) (Approval, error) {
 			return userErrorf("ticket %s has ended", a.TicketID)
 		}
 		a.ID = newID()
+		a.Repo = t.Repo
 		a.State = ApprovalPending
 		a.CreatedAt = o.at
 		a.AnsweredAt = nil
@@ -270,4 +274,18 @@ func (o *op) approvalEvent(typ string, a *Approval, data map[string]any) {
 	o.effects = append(o.effects, effect{kind: effectEvent, event: Event{
 		Type: typ, TicketID: a.TicketID, AssignmentID: a.AssignmentID, ApprovalID: a.ID, At: o.at, Data: data,
 	}})
+}
+
+// AllowedByRule records on an open Ticket's timeline that the owner's standing allow rule let an action through with no
+// Approval. It changes no state of the Ticket: nothing waited for the owner, so no escalation is counted.
+func (e *Engine) AllowedByRule(ticketID, tool, rule, repo string) error {
+	return e.command(cmdAllowedByRule, func(o *op) error {
+		t, err := o.require(ticketID)
+		if err != nil {
+			return err
+		}
+		o.event(EventApprovalAllowed, t, "", map[string]any{"tool": tool, "rule": rule, "repo": repo,
+			"text": "Allowed by your standing rule: " + tool + " · " + rule + " in " + repo})
+		return nil
+	})
 }

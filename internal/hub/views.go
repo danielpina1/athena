@@ -107,6 +107,7 @@ func ticketSummary(t *core.Ticket, st core.Stage, gitFolder func(dir string) boo
 	if t.Execution != nil {
 		v.Dir, v.Model = t.Execution.Directory, t.Execution.Model
 	}
+	v.Trust = t.Mandate.TrustClass()
 	v.Branch = node.WorktreeBranch(*t, gitFolder)
 	if a := t.LatestAssignment(); a != nil && a.Model != "" {
 		v.Model = a.Model
@@ -129,9 +130,13 @@ func approvalView(a *core.Approval) *athenav1.ApprovalView {
 	}
 }
 
-func triggerView(t *core.Trigger) *athenav1.TriggerView {
+// triggerView maps a Trigger; trust tells the sender's trust class under the current Policy (nil: none).
+func triggerView(t *core.Trigger, trust func(core.Trigger) string) *athenav1.TriggerView {
 	v := &athenav1.TriggerView{Id: t.ID, At: ts(t.At), Source: t.Source, Actor: t.Actor.ID, Kind: t.Kind,
 		Addressed: t.Addressed, Text: clip(oneLine(redact.String(t.Text)), previewRunes)}
+	if trust != nil {
+		v.Trust = trust(*t)
+	}
 	if len(t.Threads) > 0 {
 		v.Thread = t.Threads[0]
 	}
@@ -457,9 +462,13 @@ func ticketTimeline(t *core.Ticket, origin *core.Trigger, pending *core.Approval
 			out = append(out, timelineEntry(r.At, "report", string(r.State), subject, firstLine(clean(headOf(r.Summary))), a.ID))
 		}
 		for _, in := range a.Interruptions {
-			out = append(out, withRuntime(timelineEntry(in.At, "assignment", "restart", "", "", a.ID), a.Runtime))
+			cut, resumed := "restart", "resumed"
+			if in.Reason == core.InterruptPaused {
+				cut, resumed = "paused", "unpaused"
+			}
+			out = append(out, withRuntime(timelineEntry(in.At, "assignment", cut, "", "", a.ID), a.Runtime))
 			if in.ResumedAt != nil {
-				out = append(out, withRuntime(timelineEntry(*in.ResumedAt, "assignment", "resumed", "", "", a.ID), a.Runtime))
+				out = append(out, withRuntime(timelineEntry(*in.ResumedAt, "assignment", resumed, "", "", a.ID), a.Runtime))
 			}
 		}
 		if a.State == core.AssignmentEnded && a.EndedAt != nil {
