@@ -17,7 +17,7 @@ import (
 )
 
 // SourceName is the Source's name and the prefix of its Thread keys and Trigger IDs.
-const SourceName = "schedule"
+const SourceName = core.SourceSchedule
 
 const (
 	TickInterval  = 30 * time.Second

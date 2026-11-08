@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"unicode/utf8"
 
 	"github.com/danielpina1/athena/internal/core"
@@ -42,6 +43,12 @@ func (tx *Tx) PutDecision(d *core.Decision) error {
 	if err != nil {
 		return fmt.Errorf("store: put decision %q: %w", d.ID, err)
 	}
+	// A Decision's Triggers never change: a Decision put again has nothing new to index.
+	for _, id := range d.TriggerIDs {
+		if _, err := tx.sql.Exec(`INSERT OR IGNORE INTO decision_triggers (trigger_id, decision_id) VALUES (?, ?)`, id, d.ID); err != nil {
+			return fmt.Errorf("store: index decision %q: %w", d.ID, err)
+		}
+	}
 	tx.changes.Decisions = addID(tx.changes.Decisions, d.ID)
 	return nil
 }
@@ -59,6 +66,21 @@ func (tx *Tx) GetDecision(id string) (*core.Decision, error) {
 // Decisions returns the Decisions made on a Thread, most recent first; limit <= 0 returns all.
 func (tx *Tx) Decisions(thread string, limit int) ([]*core.Decision, error) {
 	return tx.decisions(`SELECT doc FROM decisions WHERE thread = ? ORDER BY at DESC, id DESC`, thread, limit, thread)
+}
+
+// DecisionsOfTriggers returns the Decisions made on a Thread about any of the given Triggers, most recent first; the
+// index by Trigger keeps it from reading the Thread's other Decisions.
+func (tx *Tx) DecisionsOfTriggers(thread string, triggerIDs []string) ([]*core.Decision, error) {
+	if len(triggerIDs) == 0 {
+		return nil, nil
+	}
+	args := []any{thread}
+	for _, id := range triggerIDs {
+		args = append(args, id)
+	}
+	marks := strings.TrimSuffix(strings.Repeat("?,", len(triggerIDs)), ",")
+	return tx.decisions(`SELECT doc FROM decisions WHERE thread = ? AND id IN
+		(SELECT decision_id FROM decision_triggers WHERE trigger_id IN (`+marks+`)) ORDER BY at DESC, id DESC`, thread, 0, args...)
 }
 
 // RecentDecisions returns the Decisions of every Thread, most recent first; limit <= 0 returns all.

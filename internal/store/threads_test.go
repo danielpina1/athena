@@ -390,3 +390,93 @@ func TestThreadAndTriggerLists(t *testing.T) {
 		}
 	}
 }
+
+func TestDecisionsOfTriggers(t *testing.T) {
+	s, _ := openTemp(t)
+	mk := func(id, thread string, at time.Time, triggers ...string) *core.Decision {
+		return &core.Decision{ID: id, Kind: "accept", Thread: thread, At: at, TriggerIDs: triggers}
+	}
+	inTx(t, s, func(tx core.Tx) error {
+		for _, d := range []*core.Decision{
+			mk("d1", "schedule:a", t0, "t1", "t2"),
+			mk("d2", "schedule:a", t0.Add(time.Minute), "t3"),
+			mk("d3", "schedule:a", t0.Add(2*time.Minute), "t1"),
+			mk("d4", "schedule:b", t0.Add(3*time.Minute), "t1"),
+		} {
+			if err := tx.PutDecision(d); err != nil {
+				return err
+			}
+			// A Decision put again, as a dismissal does, is still found once.
+			if err := tx.PutDecision(d); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	ids := func(thread string, triggers ...string) []string {
+		t.Helper()
+		var out []string
+		inTx(t, s, func(tx core.Tx) error {
+			ds, err := tx.DecisionsOfTriggers(thread, triggers)
+			for _, d := range ds {
+				out = append(out, d.ID)
+			}
+			return err
+		})
+		return out
+	}
+	if got, want := ids("schedule:a", "t1"), []string{"d3", "d1"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("t1 on a = %v, want %v, most recent first", got, want)
+	}
+	if got, want := ids("schedule:a", "t2", "t3"), []string{"d2", "d1"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("t2 and t3 on a = %v, want %v", got, want)
+	}
+	if got := ids("schedule:b", "t2"); got != nil {
+		t.Errorf("t2 on b = %v, want none", got)
+	}
+	if got := ids("schedule:a"); got != nil {
+		t.Errorf("no triggers = %v, want none", got)
+	}
+}
+
+// Decisions made before the index existed are found too: a Trigger accepted then still started its Ticket.
+func TestDecisionTriggerIndexBackfilled(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "athena.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range migrations[:10] {
+		if _, err := db.Exec(m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.Exec(`INSERT INTO kv (key, value) VALUES ('schema', '10')`); err != nil {
+		t.Fatal(err)
+	}
+	doc, err := json.Marshal(&core.Decision{ID: "old", Kind: "accept", TicketID: "T-1", Thread: "schedule:a", At: t0, TriggerIDs: []string{"t1", "t2"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO decisions (id, thread, at, doc) VALUES ('old', 'schedule:a', ?, ?)`, t0.UTC().Format(timeLayout), string(doc)); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open on schema 10: %v", err)
+	}
+	defer s.Close()
+	inTx(t, s, func(tx core.Tx) error {
+		ds, err := tx.DecisionsOfTriggers("schedule:a", []string{"t2"})
+		if err != nil {
+			return err
+		}
+		if len(ds) != 1 || ds[0].ID != "old" {
+			t.Errorf("found %+v, want the old decision", ds)
+		}
+		return nil
+	})
+}

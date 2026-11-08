@@ -356,6 +356,9 @@ type Close struct {
 	Outcome TicketOutcome `json:"outcome"`
 }
 
+// SourceSchedule names the Source of Autopilot entries, whose Threads are permanent: one per entry, for good.
+const SourceSchedule = "schedule"
+
 // Kinds of Trigger.
 const (
 	KindMessage = "message"

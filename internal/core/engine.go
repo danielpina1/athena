@@ -605,7 +605,9 @@ func (e *Engine) AddPersonInputWithID(ticketID, inputID, text string) error {
 		input := Input{ID: inputID, Kind: InputTrigger, At: o.at, TriggerID: trigger.ID, Text: text, Human: true}
 		o.addInput(t, input)
 		o.event(EventInputAdded, t, "", map[string]any{"inputId": input.ID})
-		o.wake(t)
+		if err := o.wake(t); err != nil {
+			return err
+		}
 		return o.tx.PutTicket(t)
 	})
 }
@@ -919,9 +921,9 @@ func (o *op) addInput(t *Ticket, in Input) {
 
 // wake resumes an ended Ticket a person's message waits for, under its unchanged Mandate: no Decision, since nothing
 // new is authorized. A Ticket a person stopped stays ended. The resume note goes ahead of the waiting messages.
-func (o *op) wake(t *Ticket) {
+func (o *op) wake(t *Ticket) error {
 	if t.Ended == nil || t.Ended.By == EndByHuman || len(t.Undelivered) == 0 {
-		return
+		return nil
 	}
 	var first *Input
 	for _, id := range t.Undelivered {
@@ -931,7 +933,7 @@ func (o *op) wake(t *Ticket) {
 		}
 	}
 	if first == nil {
-		return
+		return nil
 	}
 	triggerID := first.TriggerID
 	t.Ended = nil
@@ -942,6 +944,10 @@ func (o *op) wake(t *Ticket) {
 	t.Undelivered = append([]string{resumed.ID}, t.Undelivered...)
 	o.start(t, assignment)
 	o.event(EventTicketResumed, t, assignment, map[string]any{"triggerId": triggerID})
+	if permanentThread(t.Mandate.Thread) {
+		return o.subscribe(t.ID, t.Mandate.Thread, true) // a later accept may have let go of it (dropEndedRuns)
+	}
+	return nil
 }
 
 // requeueUntaken puts back, ahead of what waits, the trigger Inputs delivered to the replaced Assignment that no step
