@@ -352,7 +352,7 @@ func TestEditedEventStartsOver(t *testing.T) {
 	fr.head = shaB
 	r.pollAt("2026-11-01 13:00:00")
 	r.fires(0)
-	if st := r.state(); st.Base != shaB || !st.RedSince.IsZero() || st.Episode != "" || st.Spec != "branch_moved" {
+	if st := r.state(); st.Base != shaB || !st.RedSince.IsZero() || st.Episode != "" || st.Spec != "branch_moved@o/r" {
 		t.Fatalf("state = %+v", st)
 	}
 }
@@ -370,5 +370,40 @@ func TestEventErrorsReportAfterThree(t *testing.T) {
 	r.pollAt("2026-11-01 12:15:00")
 	if err := r.src.Health(); err != nil {
 		t.Fatalf("health after a good poll = %v", err)
+	}
+}
+
+func TestEditedRepoStartsOver(t *testing.T) {
+	for _, ev := range []string{"branch_moved", "ci_red"} {
+		r, fr := eventRig(t, ev, "2026-11-01 12:00:00")
+		fr.ci = CIRed
+		r.pollAt("2026-11-01 12:00:00")
+		r.entry.Repo = "new/repo"
+		fr.heads = map[string]string{"new/repo": shaB}
+		r.pollAt("2026-11-01 16:30:00")
+		r.fires(0)
+		st := r.state()
+		if ev == "branch_moved" && st.Base != shaB {
+			t.Fatalf("%s: base = %q, want %q", ev, st.Base, shaB)
+		}
+		if ev == "ci_red" && !st.RedSince.Equal(at("2026-11-01 16:30:00")) {
+			t.Fatalf("%s: RedSince = %v, want the new first sight", ev, st.RedSince)
+		}
+	}
+}
+
+func TestEventHealthClearsWhenEntryGoes(t *testing.T) {
+	r, fr := eventRig(t, "branch_moved", "2026-11-01 12:00:00")
+	fr.headErr = map[string]error{"o/r": errors.New("boom")}
+	for _, at := range []string{"12:00:00", "12:05:00", "12:10:00"} {
+		r.pollAt("2026-11-01 " + at)
+	}
+	if r.src.Health() == nil {
+		t.Fatal("health is nil after three failed polls")
+	}
+	r.off = true
+	r.pollAt("2026-11-01 12:15:00")
+	if err := r.src.Health(); err != nil {
+		t.Fatalf("health after the entry went = %v", err)
 	}
 }

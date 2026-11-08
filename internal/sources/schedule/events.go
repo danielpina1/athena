@@ -72,6 +72,9 @@ func (s *Source) PollEvents(ctx context.Context) {
 		byRepo[k] = append(byRepo[k], e)
 	}
 	if len(order) == 0 {
+		s.mu.Lock()
+		s.eventBad = map[string]eventFailure{}
+		s.mu.Unlock()
 		return
 	}
 	if err := s.forgetDisabled(entries); err != nil {
@@ -115,14 +118,15 @@ func (s *Source) pollEvent(ctx context.Context, e Entry, branch, sha string, now
 	if err != nil {
 		return err
 	}
-	if st == nil || st.Spec != e.Event {
-		// A new, edited or re-enabled entry starts from what the repository is now: nothing for the past. The day's
+	spec := e.Event + "@" + strings.ToLower(e.Repo)
+	if st == nil || st.Spec != spec {
+		// A new, edited (event or repository) or re-enabled entry starts from what the repository is now: nothing for the past. The day's
 		// count and last firing stay.
 		next := &state{}
 		if st != nil {
 			next = st
 		}
-		next.Spec, next.Base, next.RedSince, next.Episode = e.Event, sha, time.Time{}, ""
+		next.Spec, next.Base, next.RedSince, next.Episode = spec, sha, time.Time{}, ""
 		if e.Event != policy.EventCIRed {
 			return s.save(e.Slug, next)
 		}
