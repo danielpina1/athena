@@ -1,8 +1,9 @@
-// Command planwatch shows, live in a terminal, how Athena's own development is going: the roadmap's plans and, for
-// each plan being built task by task, every task's state, fix rounds and the latest events from its ledger.
+// Command planwatch shows, live in a terminal, how Athena's own development is going: what is happening now, what
+// comes next, what waits on the owner, the plan being built task by task, and the roadmap.
 //
-// It reads only files: docs/superpowers/plans (the roadmap, the plans, the "deferred" files written when a plan
-// finishes) and the git-ignored ledgers under .superpowers/sdd/*/progress.md. Run it from the repository root:
+// It reads files: the git-ignored .superpowers/now.md (see now.go), docs/superpowers/plans (the roadmap, the plans,
+// the "deferred" files written when a plan finishes) and the git-ignored ledgers under .superpowers/sdd/*/progress.md.
+// It also asks gh for the open pull requests, every 30 s. Run it from the repository root:
 //
 //	go run ./tools/planwatch            # refresh every 2 s until Ctrl-C
 //	go run ./tools/planwatch -once      # print once and exit
@@ -29,7 +30,8 @@ import (
 type RoadmapPlan struct {
 	Num    int
 	Name   string
-	Status string // done, active or planned
+	Status string // done, review (built, pull request open), active or planned
+	PR     int    // the open pull request of a plan in review
 }
 
 // Task is one task of a plan being built, with what its ledger says about it.
@@ -52,12 +54,24 @@ type Build struct {
 	Updated  time.Time
 }
 
+// Finished says the plan's tasks are all done and its final review has closed.
+func (b Build) Finished() bool {
+	for _, t := range b.Tasks {
+		if t.State != "done" {
+			return false
+		}
+	}
+	return len(b.Tasks) > 0 && strings.Contains(b.Final, "re-review") && !strings.Contains(b.Final, "dispatched")
+}
+
 var (
 	roadmapRow = regexp.MustCompile(`^\|\s*(\d+)\s*\|\s*(.+?)\s*\|`)
 	taskHead   = regexp.MustCompile(`^### Task (\d+):\s*(.+)$`)
 	ledgerTask = regexp.MustCompile(`^Task (\d+):\s*(.+)$`)
 	fixRound   = regexp.MustCompile(`fix round \d+/\d+`)
 	planNum    = regexp.MustCompile(`-p(\d+)-`)
+	branchPlan = regexp.MustCompile(`^p(\d+)-`)
+	builtNote  = regexp.MustCompile(`\*\*Plan (\d+) is built\*\*`)
 	boldName   = regexp.MustCompile(`\*\*(.+?)\*\*`)
 )
 
@@ -68,59 +82,94 @@ func main() {
 	flag.Parse()
 
 	if *once {
-		render(os.Stdout, *root, width(), false)
+		prs, _ := fetchPRs(*root)
+		cols, _ := size()
+		render(os.Stdout, *root, prs, cols, 0, false)
 		return
 	}
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
-	fmt.Print("\x1b[?25l") // hide the cursor
-	defer fmt.Print("\x1b[?25h")
+	fmt.Print("\x1b[?1049h\x1b[?25l") // a screen of its own, so redraws never pile up in the scrollback; no cursor
+	defer fmt.Print("\x1b[?25h\x1b[?1049l")
 	tick := time.NewTicker(*interval)
 	defer tick.Stop()
+	var prs []PR
+	var asked time.Time
 	for {
-		render(os.Stdout, *root, width(), true)
+		if time.Since(asked) >= prInterval {
+			asked = time.Now()
+			if fresh, ok := fetchPRs(*root); ok {
+				prs = fresh
+			}
+		}
+		cols, rows := size()
+		render(os.Stdout, *root, prs, cols, rows, true)
 		select {
 		case <-stop:
-			fmt.Println()
 			return
 		case <-tick.C:
 		}
 	}
 }
 
-// width is the terminal's column count, 100 when it cannot be read.
-func width() int {
-	if c, err := strconv.Atoi(os.Getenv("COLUMNS")); err == nil && c > 20 {
-		return c
-	}
+// prInterval is how often GitHub is asked for open pull requests.
+const prInterval = 30 * time.Second
+
+// size is the terminal's columns and rows, 100 by 40 when it cannot be read.
+func size() (cols, rows int) {
+	cols, rows = 100, 40
 	cmd := exec.Command("stty", "size")
 	cmd.Stdin = os.Stdin
 	if out, err := cmd.Output(); err == nil {
 		if f := strings.Fields(string(out)); len(f) == 2 {
+			if r, err := strconv.Atoi(f[0]); err == nil && r > 5 {
+				rows = r
+			}
 			if c, err := strconv.Atoi(f[1]); err == nil && c > 20 {
-				return c
+				cols = c
 			}
 		}
 	}
-	return 100
+	if c, err := strconv.Atoi(os.Getenv("COLUMNS")); err == nil && c > 20 {
+		cols = c
+	}
+	return cols, rows
 }
 
-// ReadRoadmap reads the roadmap table and gives each plan its status: done when the plan's "deferred" file exists
-// (written when a plan finishes), active when a ledger names one of its plan files, planned otherwise.
-func ReadRoadmap(root string, builds []Build) []RoadmapPlan {
+// ReadRoadmap reads the roadmap table and gives each plan its status. A plan is done when its "deferred" file exists
+// (written when a plan finishes), the roadmap says "**Plan N is built**", or its ledger is finished; done plans with
+// an open pull request on a pN-… branch are in review. A plan with an unfinished ledger is active; the rest are planned.
+func ReadRoadmap(root string, builds []Build, prs []PR) []RoadmapPlan {
 	files, _ := filepath.Glob(filepath.Join(root, "docs/superpowers/plans/*-roadmap.md"))
 	if len(files) == 0 {
 		return nil
 	}
-	active := map[int]bool{}
+	active, finished, built, inReview := map[int]bool{}, map[int]bool{}, map[int]bool{}, map[int]int{}
 	for _, b := range builds {
 		if m := planNum.FindStringSubmatch(b.PlanFile); m != nil {
 			n, _ := strconv.Atoi(m[1])
-			active[n] = true
+			if b.Finished() {
+				finished[n] = true
+			} else {
+				active[n] = true
+			}
+		}
+	}
+	for _, p := range prs {
+		if m := branchPlan.FindStringSubmatch(p.Branch); m != nil {
+			n, _ := strconv.Atoi(m[1])
+			inReview[n] = p.Number
+		}
+	}
+	rows := lines(files[0])
+	for _, line := range rows {
+		for _, m := range builtNote.FindAllStringSubmatch(line, -1) {
+			n, _ := strconv.Atoi(m[1])
+			built[n] = true
 		}
 	}
 	var plans []RoadmapPlan
-	for _, line := range lines(files[0]) {
+	for _, line := range rows {
 		m := roadmapRow.FindStringSubmatch(line)
 		if m == nil {
 			continue
@@ -130,13 +179,18 @@ func ReadRoadmap(root string, builds []Build) []RoadmapPlan {
 		if b := boldName.FindStringSubmatch(name); b != nil {
 			name = b[1]
 		}
-		status := "planned"
-		if done, _ := filepath.Glob(filepath.Join(root, fmt.Sprintf("docs/superpowers/plans/*-p%d-deferred.md", n))); len(done) > 0 {
-			status = "done"
-		} else if active[n] {
-			status = "active"
+		plan := RoadmapPlan{Num: n, Name: name, Status: "planned"}
+		deferred, _ := filepath.Glob(filepath.Join(root, fmt.Sprintf("docs/superpowers/plans/*-p%d-deferred.md", n)))
+		switch {
+		case len(deferred) > 0 || built[n] || finished[n]:
+			plan.Status = "done"
+			if pr, ok := inReview[n]; ok {
+				plan.Status, plan.PR = "review", pr
+			}
+		case active[n]:
+			plan.Status = "active"
 		}
-		plans = append(plans, RoadmapPlan{Num: n, Name: name, Status: status})
+		plans = append(plans, plan)
 	}
 	return plans
 }
@@ -214,7 +268,7 @@ func readBuild(root, ledger string) (Build, bool) {
 			if fixRound.MatchString(line) {
 				t.FixRounds++
 			}
-			if strings.HasPrefix(m[2], "complete") {
+			if strings.HasPrefix(m[2], "complete") || strings.Contains(m[2], fmt.Sprintf("Task %d: complete", n)) {
 				t.State = "done"
 			} else if t.State != "done" {
 				t.State = "active"
@@ -256,87 +310,174 @@ const (
 	green  = "\x1b[32m"
 )
 
-func render(w io.Writer, root string, cols int, clear bool) {
+// render draws the whole view. rows limits its height (0 means no limit), so it always fits the terminal.
+func render(w io.Writer, root string, prs []PR, cols, rows int, clear bool) {
 	builds := ReadBuilds(root)
-	roadmap := ReadRoadmap(root, builds)
-	var out strings.Builder
-	if clear {
-		out.WriteString("\x1b[H\x1b[2J")
-	}
-	line := func(style, s string) {
-		out.WriteString(style + clip(s, cols) + reset + "\n")
-	}
+	roadmap := ReadRoadmap(root, builds, prs)
+	sections, edited := ReadNow(root)
+
+	var view []string
+	add := func(style, s string) { view = append(view, style+clip(s, cols)+reset) }
+	gap := func() { view = append(view, "") }
+	heading := func(s string) { add(bold, s) }
 
 	branch, commit := gitHead(root)
-	line(bold, "Athena · development")
-	line(dim, fmt.Sprintf("%s · %s · %s", branch, commit, time.Now().Format("15:04:05")))
-	out.WriteString("\n")
+	add(bold, "Athena · development")
+	add(dim, fmt.Sprintf("%s · %s · %s", branch, commit, time.Now().Format("15:04:05")))
+	gap()
 
-	if len(roadmap) > 0 {
-		done := 0
-		for _, p := range roadmap {
-			if p.Status == "done" {
-				done++
-			}
+	if len(sections) == 0 {
+		add(dim, "Nothing written yet: put Now and Next lists in "+nowFile)
+		gap()
+	}
+	shownPRs := false
+	drawPRs := func() {
+		for _, p := range prs {
+			add(orange, fmt.Sprintf("  ◆ PR #%d  %s · %s", p.Number, p.Title, p.Checks()))
 		}
-		line(bold, fmt.Sprintf("Roadmap  %s  %d of %d plans done", bar(done, len(roadmap), 20), done, len(roadmap)))
-		for _, p := range roadmap {
-			switch p.Status {
-			case "done":
-				line(green, fmt.Sprintf("  ✓ %2d  %s", p.Num, p.Name))
-			case "active":
-				line(orange+bold, fmt.Sprintf("  ▶ %2d  %s", p.Num, p.Name))
+		shownPRs = true
+	}
+	for _, sec := range sections {
+		now := strings.EqualFold(sec.Title, "now")
+		numbered := strings.EqualFold(sec.Title, "next")
+		title := sec.Title
+		if now && !edited.IsZero() {
+			title += "  " + dim + "· updated " + ago(edited) + reset
+		}
+		view = append(view, bold+title+reset)
+		step := 0
+		for _, it := range sec.Items {
+			switch {
+			case it.Done:
+				add(green, "  ✓ "+it.Text)
+			case now:
+				add(orange+bold, "  ▶ "+it.Text)
+			case numbered:
+				step++
+				add("", fmt.Sprintf("  %d. %s", step, it.Text))
 			default:
-				line(dim, fmt.Sprintf("  · %2d  %s", p.Num, p.Name))
+				add("", "  · "+it.Text)
 			}
 		}
-		out.WriteString("\n")
+		if now {
+			drawPRs()
+		}
+		gap()
+	}
+	if !shownPRs && len(prs) > 0 {
+		heading("Pull requests")
+		drawPRs()
+		gap()
 	}
 
-	if len(builds) == 0 {
-		line(dim, "No plan is being built right now.")
-	}
 	for _, b := range builds {
+		if b.Finished() {
+			continue
+		}
 		done := 0
 		for _, t := range b.Tasks {
 			if t.State == "done" {
 				done++
 			}
 		}
-		line(bold, b.PlanName)
-		line("", fmt.Sprintf("%s  %d of %d tasks · %d rulings · ledger %s", bar(done, len(b.Tasks), 30), done, len(b.Tasks),
-			b.Rulings, ago(b.Updated)))
+		heading("Building: " + b.PlanName)
+		add("", fmt.Sprintf("  %s  %d of %d tasks · ledger %s", bar(done, len(b.Tasks), 24), done, len(b.Tasks), ago(b.Updated)))
+		upcoming := 0
 		for _, t := range b.Tasks {
-			fix := ""
-			if t.FixRounds > 0 {
-				fix = fmt.Sprintf("  (%d fix round%s)", t.FixRounds, plural(t.FixRounds))
-			}
-			switch t.State {
-			case "done":
-				line(green, fmt.Sprintf("  ✓ %2d  %s%s", t.Num, t.Title, fix))
-			case "active":
-				line(orange+bold, fmt.Sprintf("  ▶ %2d  %s%s", t.Num, t.Title, fix))
-				line(orange, "        "+t.Last)
-			default:
-				line(dim, fmt.Sprintf("  · %2d  %s", t.Num, t.Title))
+			switch {
+			case t.State == "active":
+				add(orange+bold, fmt.Sprintf("  ▶ %2d  %s", t.Num, t.Title))
+				add(orange, "        "+t.Last)
+			case t.State == "pending" && upcoming < 3:
+				upcoming++
+				add(dim, fmt.Sprintf("  · %2d  %s", t.Num, t.Title))
 			}
 		}
 		if b.Final != "" {
-			line(orange, "  "+b.Final)
+			add(orange, "  "+b.Final)
 		}
-		if len(b.Recent) > 0 {
-			out.WriteString("\n")
-			line(dim, "  Latest")
-			for _, r := range b.Recent {
-				line(dim, "    "+r)
+		gap()
+	}
+
+	if len(roadmap) > 0 {
+		done, review := 0, 0
+		for _, p := range roadmap {
+			switch p.Status {
+			case "done":
+				done++
+			case "review":
+				review++
 			}
 		}
-		out.WriteString("\n")
+		summary := fmt.Sprintf("Roadmap  %s  %d of %d built", bar(done+review, len(roadmap), 20), done+review, len(roadmap))
+		if review > 0 {
+			summary += fmt.Sprintf(" · %d in review", review)
+		}
+		heading(summary)
+		view = append(view, roadmapRows(roadmap, cols)...)
+	}
+
+	omitted := 0
+	if rows > 0 && len(view) >= rows {
+		omitted = len(view) - rows + 2
+		view = view[:rows-2]
+	}
+	if omitted > 0 {
+		add(dim, fmt.Sprintf("… %d more lines; make this panel taller", omitted))
+	}
+
+	var out strings.Builder
+	eol := "\n"
+	if clear {
+		out.WriteString("\x1b[H")
+		eol = "\x1b[K\n"
+	}
+	for _, l := range view {
+		out.WriteString(l + eol)
 	}
 	if clear {
-		line(dim, "Ctrl-C to quit")
+		out.WriteString("\x1b[J")
 	}
 	io.WriteString(w, out.String())
+}
+
+// roadmapRows lays the plans out in two columns when the terminal is wide enough, one otherwise.
+func roadmapRows(plans []RoadmapPlan, cols int) []string {
+	cell := func(p RoadmapPlan, width int) (style, text string) {
+		text = fmt.Sprintf("  %s %2d  %s", map[string]string{"done": "✓", "review": "◆", "active": "▶"}[p.Status], p.Num, p.Name)
+		switch p.Status {
+		case "done":
+			style = green
+		case "review":
+			style, text = orange, fmt.Sprintf("  ◆ %2d  %s · PR #%d", p.Num, p.Name, p.PR)
+		case "active":
+			style = orange + bold
+		default:
+			style, text = dim, fmt.Sprintf("  · %2d  %s", p.Num, p.Name)
+		}
+		return style, clip(text, width)
+	}
+	var rows []string
+	if cols < 90 {
+		for _, p := range plans {
+			style, text := cell(p, cols)
+			rows = append(rows, style+text+reset)
+		}
+		return rows
+	}
+	width := cols / 2
+	half := (len(plans) + 1) / 2
+	for i := 0; i < half; i++ {
+		style, left := cell(plans[i], width-1)
+		row := style + left + reset
+		if i+half < len(plans) {
+			row += strings.Repeat(" ", width-len([]rune(left)))
+			style, right := cell(plans[i+half], cols-width)
+			row += style + right + reset
+		}
+		rows = append(rows, row)
+	}
+	return rows
 }
 
 func gitHead(root string) (string, string) {
@@ -374,12 +515,7 @@ func ago(t time.Time) string {
 	}
 }
 
-func plural(n int) string {
-	if n == 1 {
-		return ""
-	}
-	return "s"
-}
+func itoa(n int) string { return strconv.Itoa(n) }
 
 // clip cuts s to cols runes so a long ledger line never wraps and breaks the redraw.
 func clip(s string, cols int) string {

@@ -88,7 +88,7 @@ Session view: implementer dispatched
 
 func TestReadRoadmapStatuses(t *testing.T) {
 	root := fixture(t)
-	plans := ReadRoadmap(root, ReadBuilds(root))
+	plans := ReadRoadmap(root, ReadBuilds(root), nil)
 	got := map[int]string{}
 	for _, p := range plans {
 		got[p.Num] = p.Status
@@ -100,7 +100,7 @@ func TestReadRoadmapStatuses(t *testing.T) {
 
 func TestRenderClipsLongLines(t *testing.T) {
 	var sb strings.Builder
-	render(&sb, fixture(t), 40, false)
+	render(&sb, fixture(t), nil, 40, 0, false)
 	for _, l := range strings.Split(sb.String(), "\n") {
 		plain := l
 		for _, esc := range []string{reset, bold, dim, orange, green} {
@@ -109,5 +109,101 @@ func TestRenderClipsLongLines(t *testing.T) {
 		if n := len([]rune(plain)); n > 40 {
 			t.Fatalf("line of %d runes: %q", n, plain)
 		}
+	}
+}
+
+func TestRoadmapBuiltNoteAndOpenPR(t *testing.T) {
+	root := fixture(t)
+	write(t, root, "docs/superpowers/plans/2026-11-03-athena-roadmap.md", `| # | Plan | Ends with | Spec |
+| --- | --- | --- | --- |
+| 3 | Dashboard UI | a | b |
+| 4 | Brakes | a | b |
+
+**Plan 3 is built** (branch x). **Plan 4 is built** too.
+`)
+	plans := ReadRoadmap(root, nil, []PR{{Number: 12, Branch: "p4-brakes"}, {Number: 13, Branch: "unrelated"}})
+	if plans[0].Status != "done" || plans[1].Status != "review" || plans[1].PR != 12 {
+		t.Fatalf("roadmap = %+v", plans)
+	}
+}
+
+func TestCompleteInsideALaterSentenceFinishesTheTask(t *testing.T) {
+	root := fixture(t)
+	write(t, root, ".superpowers/sdd/2026-11-04-athena-p2-router/progress.md", `# SDD ledger — plan: docs/superpowers/plans/2026-11-04-athena-p2-router.md
+
+Task 1: re-review CLEAN. Task 1: complete (commits a..b)
+Task 2: complete
+Task 3: complete
+Final review: dispatched
+`)
+	b := ReadBuilds(root)[0]
+	if b.Tasks[0].State != "done" {
+		t.Fatalf("task 1 state = %q", b.Tasks[0].State)
+	}
+	if b.Finished() {
+		t.Fatal("finished while the final review is still running")
+	}
+	write(t, root, ".superpowers/sdd/2026-11-04-athena-p2-router/progress.md", `# SDD ledger — plan: docs/superpowers/plans/2026-11-04-athena-p2-router.md
+
+Task 1: complete
+Task 2: complete
+Task 3: complete
+Final re-review: all addressed
+`)
+	if !ReadBuilds(root)[0].Finished() {
+		t.Fatal("not finished after the final re-review")
+	}
+}
+
+func TestReadNow(t *testing.T) {
+	root := fixture(t)
+	write(t, root, nowFile, `# Now
+- Hardening session running
+
+# Next
+- [x] Open the PR
+- [ ] Merge it
+stray text
+`)
+	sections, modified := ReadNow(root)
+	if modified.IsZero() || len(sections) != 2 || sections[0].Title != "Now" {
+		t.Fatalf("sections = %+v", sections)
+	}
+	next := sections[1].Items
+	if len(next) != 2 || !next[0].Done || next[0].Text != "Open the PR" || next[1].Done || next[1].Text != "Merge it" {
+		t.Fatalf("next = %+v", next)
+	}
+}
+
+func TestParsePRsCountsChecks(t *testing.T) {
+	prs, err := parsePRs([]byte(`[{"number":12,"title":"T","headRefName":"p10-x","statusCheckRollup":[
+		{"conclusion":"SUCCESS"},{"conclusion":"FAILURE"},{"state":"PENDING"},{"conclusion":"","state":""}]}]`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := prs[0]
+	if p.Passed != 1 || p.Failed != 1 || p.Other != 2 || p.Checks() != "1 check failing" {
+		t.Fatalf("pr = %+v checks %q", p, p.Checks())
+	}
+	if (PR{}).Checks() != "no checks" || (PR{Passed: 2}).Checks() != "2 checks passed" {
+		t.Fatalf("checks wording")
+	}
+}
+
+func TestRenderFitsTheHeightAndPutsPRsUnderNow(t *testing.T) {
+	root := fixture(t)
+	write(t, root, nowFile, "# Now\n- Working\n\n# Next\n- One\n- Two\n")
+	var sb strings.Builder
+	render(&sb, root, []PR{{Number: 12, Title: "Brakes"}}, 100, 12, false)
+	got := strings.TrimRight(sb.String(), "\n")
+	if n := len(strings.Split(got, "\n")); n > 11 {
+		t.Fatalf("%d lines for 12 rows:\n%s", n, got)
+	}
+	if !strings.Contains(got, "more lines") {
+		t.Fatalf("no overflow note:\n%s", got)
+	}
+	now, pr, next := strings.Index(got, "Now"), strings.Index(got, "PR #12"), strings.Index(got, "Next")
+	if !(now < pr && pr < next) {
+		t.Fatalf("order now=%d pr=%d next=%d:\n%s", now, pr, next, got)
 	}
 }
