@@ -22,6 +22,7 @@ type fakeRepos struct {
 	heads        map[string]string
 	files        []string
 	filesErr     error
+	onlyAthena   bool
 	ci           CIState
 	ciErr        error
 
@@ -42,10 +43,10 @@ func (f *fakeRepos) Head(_ context.Context, repo string) (string, string, error)
 	return f.branch, f.head, nil
 }
 
-func (f *fakeRepos) ChangedFiles(_ context.Context, _, base, head string) ([]string, error) {
+func (f *fakeRepos) Compare(_ context.Context, _, base, head string) (Comparison, error) {
 	f.compareCalls++
 	f.lastBase, f.lastHead = base, head
-	return f.files, f.filesErr
+	return Comparison{Files: f.files, OnlyAthena: f.onlyAthena}, f.filesErr
 }
 
 func (f *fakeRepos) CI(context.Context, string, string) (CIState, error) {
@@ -123,12 +124,75 @@ func TestBranchMovedBusyKeepsEvent(t *testing.T) {
 	if b := r.state().Base; b != shaA {
 		t.Fatalf("base = %q, want it to stay %q", b, shaA)
 	}
+	if fr.compareCalls != 0 {
+		t.Fatalf("compared %d times while busy", fr.compareCalls)
+	}
 	r.in.busy = false
 	r.pollAt("2026-11-01 12:10:00")
 	r.fires(1)
 	if got := r.lastID(); got != "schedule:night:head:"+shaB {
 		t.Fatalf("id = %q", got)
 	}
+}
+
+func TestAthenaOnlyMoveDoesNotFireAndAdvancesBase(t *testing.T) {
+	for _, ev := range []string{"branch_moved", "manifest_changed"} {
+		r, fr := eventRig(t, ev, "2026-11-01 12:00:00")
+		r.pollAt("2026-11-01 12:00:00")
+		fr.head, fr.files, fr.onlyAthena = shaB, []string{"go.mod"}, true
+		r.pollAt("2026-11-01 12:05:00")
+		r.fires(0)
+		if fr.lastBase != shaA || fr.lastHead != shaB {
+			t.Fatalf("%s: compared %s...%s", ev, fr.lastBase, fr.lastHead)
+		}
+		if b := r.state().Base; b != shaB {
+			t.Fatalf("%s: base = %q, want %q", ev, b, shaB)
+		}
+		fr.head, fr.onlyAthena = shaC, false
+		r.pollAt("2026-11-01 12:10:00")
+		r.fires(1)
+		if fr.lastBase != shaB || fr.lastHead != shaC {
+			t.Fatalf("%s: the next real move compared %s...%s, want it to start from the ignored head", ev, fr.lastBase, fr.lastHead)
+		}
+	}
+}
+
+func TestMixedMoveFires(t *testing.T) {
+	for _, ev := range []string{"branch_moved", "manifest_changed"} {
+		r, fr := eventRig(t, ev, "2026-11-01 12:00:00")
+		r.pollAt("2026-11-01 12:00:00")
+		fr.head, fr.files, fr.onlyAthena = shaB, []string{"go.mod"}, false
+		r.pollAt("2026-11-01 12:05:00")
+		r.fires(1)
+		if b := r.state().Base; b != shaB {
+			t.Fatalf("%s: base = %q, want %q", ev, b, shaB)
+		}
+	}
+}
+
+func TestBranchMovedForcePushStillFires(t *testing.T) {
+	r, fr := eventRig(t, "branch_moved", "2026-11-01 12:00:00")
+	r.pollAt("2026-11-01 12:00:00")
+	fr.head, fr.filesErr = shaB, ErrNoCompare
+	r.pollAt("2026-11-01 12:05:00")
+	r.fires(1)
+	if b := r.state().Base; b != shaB {
+		t.Fatalf("base = %q, want %q", b, shaB)
+	}
+}
+
+func TestBranchMovedKeepsEventWhenCompareFails(t *testing.T) {
+	r, fr := eventRig(t, "branch_moved", "2026-11-01 12:00:00")
+	r.pollAt("2026-11-01 12:00:00")
+	fr.head, fr.filesErr = shaB, errors.New("boom")
+	r.pollAt("2026-11-01 12:05:00")
+	r.fires(0)
+	if b := r.state().Base; b != shaA {
+		t.Fatalf("base = %q, want it to stay %q", b, shaA)
+	}
+	fr.filesErr = nil
+	r.pollAt("2026-11-01 12:10:00")
+	r.fires(1)
 }
 
 func TestBranchMovedRespectsGap(t *testing.T) {
@@ -194,7 +258,7 @@ func TestManifestNotComparedWhileBusy(t *testing.T) {
 	r.pollAt("2026-11-01 12:05:00")
 	r.fires(0)
 	if fr.compareCalls != 0 {
-		t.Fatalf("ChangedFiles called %d times while busy", fr.compareCalls)
+		t.Fatalf("Compare called %d times while busy", fr.compareCalls)
 	}
 	if b := r.state().Base; b != shaA {
 		t.Fatalf("base = %q", b)

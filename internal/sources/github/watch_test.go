@@ -107,7 +107,7 @@ func TestCI(t *testing.T) {
 	}
 }
 
-func TestChangedFilesAcrossPages(t *testing.T) {
+func TestCompareFilesAcrossPages(t *testing.T) {
 	var srvURL string
 	w := watcherOver(t, func(rw http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/repos/o/r/compare/aaa...bbb" {
@@ -122,22 +122,108 @@ func TestChangedFilesAcrossPages(t *testing.T) {
 		fmt.Fprint(rw, `{"files":[{"filename":"README.md"},{"filename":"go.mod"}]}`)
 	}, "")
 	srvURL = strings.TrimSuffix(w.c.base.String(), "/")
-	got, err := w.ChangedFiles(context.Background(), "o/r", "aaa", "bbb")
+	got, err := w.Compare(context.Background(), "o/r", "aaa", "bbb")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"README.md", "go.mod", "web/package.json"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("files = %v, want %v", got, want)
+	if want := []string{"README.md", "go.mod", "web/package.json"}; !reflect.DeepEqual(got.Files, want) {
+		t.Fatalf("files = %v, want %v", got.Files, want)
 	}
 }
 
-func TestChangedFiles404IsErrNoCompare(t *testing.T) {
+func TestCompare404IsErrNoCompare(t *testing.T) {
 	w := watcherOver(t, func(rw http.ResponseWriter, r *http.Request) {
 		rw.WriteHeader(http.StatusNotFound)
 		fmt.Fprint(rw, `{"message":"Not Found"}`)
 	}, "")
-	_, err := w.ChangedFiles(context.Background(), "o/r", "aaa", "bbb")
+	_, err := w.Compare(context.Background(), "o/r", "aaa", "bbb")
 	if !errors.Is(err, schedule.ErrNoCompare) {
 		t.Fatalf("err = %v, want ErrNoCompare", err)
+	}
+}
+
+// compared is one commit of a compare response: its GitHub author and committer ("" reads as null, an address GitHub
+// tied to no account) and how many parents it has.
+func compared(author, committer string, parents int) string {
+	login := func(l string) string {
+		if l == "" {
+			return "null"
+		}
+		return fmt.Sprintf(`{"login":%q}`, l)
+	}
+	ps := strings.TrimSuffix(strings.Repeat(`{"sha":"p"},`, parents), ",")
+	return fmt.Sprintf(`{"sha":"s","author":%s,"committer":%s,"parents":[%s]}`, login(author), login(committer), ps)
+}
+
+func TestCompareOnlyAthena(t *testing.T) {
+	const bot, person, github = "athena-bot[bot]", "alice", "web-flow"
+	var (
+		botCommit    = compared(bot, bot, 1)
+		personCommit = compared(person, person, 1)
+		mergeButton  = compared(person, github, 2) // the Merge button: the author is whoever pressed it
+	)
+	cases := []struct {
+		name    string
+		commits []string
+		total   int // total_commits; 0 means len(commits)
+		want    bool
+	}{
+		{"the bot's commits", []string{botCommit, botCommit}, 0, true},
+		{"the login in another case", []string{compared("Athena-Bot[bot]", "Athena-Bot[bot]", 1)}, 0, true},
+		{"a squash of a Ticket's pull request", []string{compared(bot, github, 1)}, 0, true},
+		{"a rebase of a Ticket's pull request", []string{compared(bot, github, 1), compared(bot, github, 1)}, 0, true},
+		{"the Merge button on a Ticket's pull request", []string{botCommit, mergeButton}, 0, true},
+		{"the bot's commit beside a person's", []string{botCommit, personCommit}, 0, false},
+		{"the Merge button bringing in a person's commit", []string{botCommit, personCommit, mergeButton}, 0, false},
+		{"a merge a person made on their own machine", []string{botCommit, compared(person, person, 2)}, 0, false},
+		{"a person's commit that GitHub committed", []string{botCommit, compared(person, github, 1)}, 0, false},
+		{"the Merge button with nothing of the bot's", []string{mergeButton}, 0, false},
+		{"another App's bot", []string{compared("dependabot[bot]", "dependabot[bot]", 1)}, 0, false},
+		{"an author GitHub could not tie to an account", []string{botCommit, compared("", "", 1)}, 0, false},
+		{"no commits", nil, 0, false},
+		{"fewer commits than the comparison holds", []string{botCommit}, 2, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			total := tc.total
+			if total == 0 {
+				total = len(tc.commits)
+			}
+			w := watcherOver(t, func(rw http.ResponseWriter, r *http.Request) {
+				fmt.Fprintf(rw, `{"total_commits":%d,"commits":[%s],"files":[]}`, total, strings.Join(tc.commits, ","))
+			}, "athena-bot")
+			got, err := w.Compare(context.Background(), "o/r", "aaa", "bbb")
+			if err != nil || got.OnlyAthena != tc.want {
+				t.Fatalf("OnlyAthena = %v, %v, want %v", got.OnlyAthena, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestCompareOnlyAthenaReadsEveryPage(t *testing.T) {
+	const bot = "athena-bot[bot]"
+	var srvURL string
+	w := watcherOver(t, func(rw http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("page") == "2" {
+			fmt.Fprintf(rw, `{"total_commits":2,"commits":[%s]}`, compared("alice", "alice", 1))
+			return
+		}
+		rw.Header().Set("Link", fmt.Sprintf(`<%s/repos/o/r/compare/aaa...bbb?per_page=100&page=2>; rel="next"`, srvURL))
+		fmt.Fprintf(rw, `{"total_commits":2,"commits":[%s]}`, compared(bot, bot, 1))
+	}, "athena-bot")
+	srvURL = strings.TrimSuffix(w.c.base.String(), "/")
+	got, err := w.Compare(context.Background(), "o/r", "aaa", "bbb")
+	if err != nil || got.OnlyAthena {
+		t.Fatalf("OnlyAthena = %v, %v, want false", got.OnlyAthena, err)
+	}
+}
+
+func TestCompareOnlyAthenaNeedsASlug(t *testing.T) {
+	w := watcherOver(t, func(rw http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(rw, `{"total_commits":1,"commits":[%s]}`, compared("[bot]", "[bot]", 1))
+	}, "")
+	got, err := w.Compare(context.Background(), "o/r", "aaa", "bbb")
+	if err != nil || got.OnlyAthena {
+		t.Fatalf("OnlyAthena = %v, %v, want false", got.OnlyAthena, err)
 	}
 }

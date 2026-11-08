@@ -26,11 +26,18 @@ const (
 // ErrNoCompare means the two commits cannot be compared, as after a force-push.
 var ErrNoCompare = errors.New("schedule: these commits cannot be compared")
 
+// Comparison is what lies between two commits of a repository.
+type Comparison struct {
+	Files []string
+	// OnlyAthena says every commit between them is Athena's own work, so the move is no reason to start more of it.
+	OnlyAthena bool
+}
+
 // Repos reads the repository facts that events wait for.
 type Repos interface {
 	Head(ctx context.Context, repo string) (branch, sha string, err error)
-	// ChangedFiles returns ErrNoCompare when base is no longer part of the history.
-	ChangedFiles(ctx context.Context, repo, base, head string) ([]string, error)
+	// Compare returns ErrNoCompare when base is no longer part of the history.
+	Compare(ctx context.Context, repo, base, head string) (Comparison, error)
 	CI(ctx context.Context, repo, sha string) (CIState, error)
 }
 
@@ -134,7 +141,7 @@ func (s *Source) pollEvent(ctx context.Context, e Entry, branch, sha string, now
 	}
 	switch e.Event {
 	case policy.EventBranchMoved:
-		return s.branchMoved(e, st, branch, sha, now)
+		return s.branchMoved(ctx, e, st, branch, sha, now)
 	case policy.EventManifestChanged:
 		return s.manifestChanged(ctx, e, st, branch, sha, now)
 	case policy.EventCIRed:
@@ -151,9 +158,21 @@ func (s *Source) fireEvent(e Entry, st *state, f firing, now time.Time) (bool, e
 	return out == fired, err
 }
 
-func (s *Source) branchMoved(e Entry, st *state, branch, sha string, now time.Time) error {
+func (s *Source) branchMoved(ctx context.Context, e Entry, st *state, branch, sha string, now time.Time) error {
 	if sha == st.Base {
 		return nil
+	}
+	if busy, err := s.in.ThreadBusy(ThreadKey(e.Slug)); err != nil || busy {
+		return err
+	}
+	// A move that cannot be compared (a force-push) cannot be called Athena's own, so it fires.
+	cmp, err := s.cfg.Repos.Compare(ctx, e.Repo, st.Base, sha)
+	if err != nil && !errors.Is(err, ErrNoCompare) {
+		return err
+	}
+	if cmp.OnlyAthena {
+		st.Base = sha
+		return s.save(e.Slug, st)
 	}
 	ok, err := s.fireEvent(e, st, firing{
 		ID:  fmt.Sprintf("%s:%s:head:%s", SourceName, e.Slug, sha),
@@ -173,7 +192,7 @@ func (s *Source) manifestChanged(ctx context.Context, e Entry, st *state, branch
 	if busy, err := s.in.ThreadBusy(ThreadKey(e.Slug)); err != nil || busy {
 		return err
 	}
-	files, err := s.cfg.Repos.ChangedFiles(ctx, e.Repo, st.Base, sha)
+	cmp, err := s.cfg.Repos.Compare(ctx, e.Repo, st.Base, sha)
 	if errors.Is(err, ErrNoCompare) {
 		st.Base = sha
 		return s.save(e.Slug, st)
@@ -182,8 +201,8 @@ func (s *Source) manifestChanged(ctx context.Context, e Entry, st *state, branch
 		return err
 	}
 	// A comparison of more than GitHub's 300-file limit is judged on the files returned.
-	changed := manifestFiles(files)
-	if len(changed) > 0 {
+	changed := manifestFiles(cmp.Files)
+	if len(changed) > 0 && !cmp.OnlyAthena {
 		ok, err := s.fireEvent(e, st, firing{
 			ID:  fmt.Sprintf("%s:%s:manifest:%s", SourceName, e.Slug, sha),
 			Why: fmt.Sprintf("dependency manifests changed on %s of %s: %s.", branch, e.Repo, listManifests(changed)),

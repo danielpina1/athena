@@ -17,7 +17,11 @@ type Watcher struct {
 	slug string
 }
 
-// NewWatcher returns a Watcher over c. appSlug is the App's own slug: its check suites do not count.
+// webFlow is the account GitHub commits as when it makes a commit itself, as for the Merge button.
+const webFlow = "web-flow"
+
+// NewWatcher returns a Watcher over c. appSlug is the App's own slug: its check suites do not count, and its commits
+// are Athena's own.
 func NewWatcher(c *Client, appSlug string) *Watcher { return &Watcher{c: c, slug: appSlug} }
 
 // repoPath is the API path of repo as the owner wrote it (GitHub compares names without case).
@@ -64,30 +68,69 @@ func (w *Watcher) Head(ctx context.Context, repo string) (branch, sha string, er
 	return rec.DefaultBranch, br.Commit.SHA, nil
 }
 
-// ChangedFiles lists the files that differ between base and head. A comparison of more than GitHub's 300-file limit
-// is judged on the files returned. A 404 (a base that a force-push removed) is schedule.ErrNoCompare.
-func (w *Watcher) ChangedFiles(ctx context.Context, repo, base, head string) ([]string, error) {
-	var files []string
+// Compare reads what lies between base and head. A comparison of more than GitHub's 300-file limit is judged on the
+// files returned. A 404 (a base that a force-push removed) is schedule.ErrNoCompare.
+func (w *Watcher) Compare(ctx context.Context, repo, base, head string) (schedule.Comparison, error) {
+	var (
+		cmp     schedule.Comparison
+		commits []ghCommit
+		total   int
+	)
 	path := repoPath(repo) + "/compare/" + url.PathEscape(base) + "..." + url.PathEscape(head) + "?per_page=100"
 	err := w.c.Paginate(ctx, path, func(raw json.RawMessage) error {
 		var page struct {
-			Files []struct {
+			Total   int        `json:"total_commits"`
+			Commits []ghCommit `json:"commits"`
+			Files   []struct {
 				Filename string `json:"filename"`
 			} `json:"files"`
 		}
 		if err := json.Unmarshal(raw, &page); err != nil {
 			return fmt.Errorf("github: GET %s: decode: %w", path, err)
 		}
+		total = page.Total
+		commits = append(commits, page.Commits...)
 		for _, f := range page.Files {
-			files = append(files, f.Filename)
+			cmp.Files = append(cmp.Files, f.Filename)
 		}
 		return nil
 	})
 	var api *APIError
 	if errors.As(err, &api) && api.Status == 404 {
-		return nil, schedule.ErrNoCompare
+		return schedule.Comparison{}, schedule.ErrNoCompare
 	}
-	return files, err
+	cmp.OnlyAthena = len(commits) == total && w.onlyAthena(commits)
+	return cmp, err
+}
+
+// ghCommit is a commit of a comparison. Author and committer are the GitHub accounts of its addresses, null for an
+// address tied to no account.
+type ghCommit struct {
+	Author    *ghUser           `json:"author"`
+	Committer *ghUser           `json:"committer"`
+	Parents   []json.RawMessage `json:"parents"`
+}
+
+// onlyAthena reports whether the App's bot wrote these commits. Workers commit as the bot, and a squash or rebase of
+// their pull request keeps it as the author. The one commit a person's name can be on is the merge commit of the Merge
+// button: it is the merger's, committed by GitHub, so it passes, and whatever it brought in is judged here on its own.
+// At least one commit must be the bot's, or a merge of nothing of Athena's would pass. A person who forges the bot's
+// address only stops an entry firing.
+func (w *Watcher) onlyAthena(commits []ghCommit) bool {
+	if w.slug == "" {
+		return false
+	}
+	bot, own := w.slug+"[bot]", false
+	for _, c := range commits {
+		switch {
+		case c.Author != nil && strings.EqualFold(c.Author.Login, bot):
+			own = true
+		case len(c.Parents) > 1 && c.Committer != nil && c.Committer.Login == webFlow:
+		default:
+			return false
+		}
+	}
+	return own
 }
 
 // CI summarizes the completed check suites of sha, without the App's own: Red when one concluded failure or timed_out,
