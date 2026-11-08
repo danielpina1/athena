@@ -561,3 +561,36 @@ func TestHomeToolchainsKeepsToKnownRoots(t *testing.T) {
 		t.Fatalf("homeToolchains = %v, want %v", got, want)
 	}
 }
+
+// A restricted session needs a Claude Code that knows sandbox.filesystem.allowRead: on an older one its Ticket fails,
+// saying so, and nothing starts. A version newer than the minimum, or one the node cannot read, launches as ever.
+func TestRestrictedNeedsRecentClaude(t *testing.T) {
+	failure := func(version string, p Policy) (core.Ticket, *harness) {
+		h := newHarness(t, func(c *Config) { c.Policy = p })
+		h.n.claudeVersion = func(context.Context) string { return version }
+		tk := h.submit("Stranger's change", "")
+		h.eventually("settled", func() bool {
+			tk, _ := h.ticket(tk.ID)
+			r := tk.LatestAssignment().Report
+			return r != nil && r.State == core.ReportFailed || len(h.invocations()) > 0
+		})
+		tk, _ = h.ticket(tk.ID)
+		return tk, h
+	}
+	tk, h := failure("2.1.279", restrictOwner)
+	want := "This Ticket came from someone outside your allow list, and such work needs Claude Code " + minRestrictedClaude + " or newer; this machine has 2.1.279."
+	if got := tk.LatestAssignment().Report; got == nil || got.State != core.ReportFailed || got.Summary != want {
+		t.Fatalf("report = %+v, want failed with %q", got, want)
+	}
+	if n := len(h.invocations()); n != 0 {
+		t.Fatalf("the session started %d times", n)
+	}
+	for _, v := range []string{minRestrictedClaude, "2.2.0", "", "nonsense"} {
+		if _, h := failure(v, restrictOwner); len(h.invocations()) != 1 {
+			t.Errorf("version %q: invocations = %d, want it launched", v, len(h.invocations()))
+		}
+	}
+	if _, h := failure("2.1.279", fakeToolPolicy{}); len(h.invocations()) != 1 {
+		t.Errorf("standard session on an old Claude Code did not launch")
+	}
+}

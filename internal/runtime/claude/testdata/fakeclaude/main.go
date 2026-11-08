@@ -4,6 +4,7 @@
 //
 // Behaviour is driven by environment variables so other packages can reuse it:
 //
+//	ATHENA_FAKE_VERSION            the version `claude --version` prints (default 2.1.280)
 //	ATHENA_FAKE_FIXTURE            path of a .jsonl file replayed after the first stdin line
 //	ATHENA_FAKE_REPEAT             replay the fixture this many times (default 1)
 //	ATHENA_FAKE_STDIN_LOG          file every stdin line is appended to (it may name {ticket}, below)
@@ -42,6 +43,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"regexp"
@@ -51,6 +53,10 @@ import (
 )
 
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == "--version" {
+		fmt.Println(fakeVersion())
+		return
+	}
 	rec := struct {
 		Args []string          `json:"args"`
 		Env  map[string]string `json:"env"`
@@ -279,4 +285,13 @@ func echo(out *bufio.Writer, line string) {
 	b, _ := json.Marshal(rec)
 	_, _ = out.Write(append(b, '\n'))
 	_ = out.Flush()
+}
+
+// fakeVersion is what `claude --version` prints: Claude Code's format, its version ATHENA_FAKE_VERSION or the newest
+// Athena's use of it was verified against.
+func fakeVersion() string {
+	if v := os.Getenv("ATHENA_FAKE_VERSION"); v != "" {
+		return v + " (Claude Code)"
+	}
+	return "2.1.280 (Claude Code)"
 }

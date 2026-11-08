@@ -207,6 +207,8 @@ type Node struct {
 	restartDelay func(n int) time.Duration
 	// canSandbox reports whether this machine can sandbox a session (default SandboxSupported).
 	canSandbox func() bool
+	// claudeVersion is the version of the Claude Code a session would run on (default installedClaudeVersion).
+	claudeVersion func(ctx context.Context) string
 
 	// queued is the number of launches waiting (written by the loop goroutine); statusSig is the last status
 	// OnStatus was told of (loop goroutine only).
@@ -288,6 +290,7 @@ func New(cfg Config, eng EngineCallbacks) *Node {
 		reg:          cfg.Metrics,
 		slotsGauge:   cfg.Metrics.Gauge("slots_in_use"),
 	}
+	n.claudeVersion = n.installedClaudeVersion
 	n.tokens.log = log
 	// A repository in shadow mode gets read-only tokens: what holds its work for the owner, whatever a session runs.
 	n.tokens.writable = func(repo string) bool { return !n.shadow(repo) }
@@ -2399,6 +2402,9 @@ func (n *Node) prepare(s *session) error {
 	p := s.place
 	s.readToolPolicy(func() string { return n.toolPolicy(s.t) })
 	if err := n.checkRestrictedSandbox(s); err != nil {
+		return err
+	}
+	if err := n.checkRestrictedClaude(s); err != nil {
 		return err
 	}
 	// An earlier session may have repointed the worktree's git links and its process not ended cleanly (a node that

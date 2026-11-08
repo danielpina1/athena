@@ -1,6 +1,7 @@
 package node
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/danielpina1/athena/internal/core"
 	"github.com/danielpina1/athena/internal/policy"
+	"github.com/danielpina1/athena/internal/runtime/claude"
 	"github.com/danielpina1/athena/internal/runtime/rt"
 )
 
@@ -347,15 +349,43 @@ func denyAllBut(root string, keep []string) []string {
 	return walk(root)
 }
 
-// sandboxUnavailableError is a restricted session's launch on a machine that cannot sandbox it.
-type sandboxUnavailableError struct{ cause string }
+// minRestrictedClaude is the oldest Claude Code a restricted session runs on: the first that knows
+// sandbox.filesystem.allowRead, without which the read containment of restrictedReads does not hold.
+const minRestrictedClaude = "2.1.280"
 
-func (e *sandboxUnavailableError) Error() string { return restrictedSandboxSummary + e.cause }
+// sandboxUnavailableError is a restricted session's launch on a machine that cannot start it; msg is the whole sentence
+// the Failed report says.
+type sandboxUnavailableError struct{ msg string }
+
+func (e *sandboxUnavailableError) Error() string { return e.msg }
 
 // checkRestrictedSandbox is nil when the session may start: it is standard, or this machine can sandbox it.
 func (n *Node) checkRestrictedSandbox(s *session) error {
 	if !s.restricted() || n.canSandbox() {
 		return nil
 	}
-	return &sandboxUnavailableError{cause: fmt.Sprintf("the sandbox runs on macOS and Linux, and this machine runs %s", runtime.GOOS)}
+	return &sandboxUnavailableError{msg: restrictedSandboxSummary + fmt.Sprintf("the sandbox runs on macOS and Linux, and this machine runs %s", runtime.GOOS)}
+}
+
+// checkRestrictedClaude is nil when the session may start: it is standard, or its Claude Code is new enough, or its
+// version cannot be read (a session on one that ignores allowRead fails closed anyway: docs/dev/autonomy.md §5).
+func (n *Node) checkRestrictedClaude(s *session) error {
+	if !s.restricted() {
+		return nil
+	}
+	v := n.claudeVersion(n.ctx)
+	if enough, known := claude.AtLeast(v, minRestrictedClaude); enough || !known {
+		return nil
+	}
+	return &sandboxUnavailableError{msg: fmt.Sprintf("This Ticket came from someone outside your allow list, and such work needs Claude Code %s or newer; this machine has %s.",
+		minRestrictedClaude, v)}
+}
+
+// installedClaudeVersion is the version the node's Claude Code runtime reports, "" when there is none.
+func (n *Node) installedClaudeVersion(ctx context.Context) string {
+	r, ok := n.cfg.Runtimes[core.RuntimeClaude]
+	if !ok {
+		return ""
+	}
+	return r.Check(ctx).Version
 }

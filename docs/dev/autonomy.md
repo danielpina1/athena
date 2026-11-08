@@ -167,9 +167,10 @@ What the restricted policy does not give you, today:
 - **Claude's Read, Grep and Glob tools run outside the OS sandbox.** Their reach is checked by the hook rules alone
   (item 9), by path, not by the kernel.
 - On Linux, a Unix socket outside the masked list stays reachable.
-- The read containment needs a Claude Code that knows `sandbox.filesystem.allowRead`. An older one ignores it: the
-  session's commands then cannot read their own directory when it lies in your home or the state directory, and its
-  commands fail (closed, not open).
+- The read containment needs a Claude Code that knows `sandbox.filesystem.allowRead` (2.1.280 or newer). A restricted
+  Ticket on an older one fails with a sentence saying so, and nothing starts. When Athena cannot read the version, the
+  session starts; an older Claude Code then ignores `allowRead`, and the session's commands cannot read their own
+  directory when it lies in your home or the state directory, so they fail (closed, not open).
 - Text a restricted session reads is still the stranger's text: the policy limits what the worker can do with it, not
   what it reads.
 
