@@ -653,20 +653,6 @@ func (o *op) accept(th *Thread, ev *Evaluation, d DecisionInput, p Policy, res *
 	if len(rules) > 0 {
 		basis.Rules = rules
 	}
-	mandate := Mandate{Strength: ev.Strength, PolicyVersion: ev.PolicyVersion, Actor: primary.Actor, Thread: ev.Thread, Basis: basis, Trust: p.Trust(*primary)}
-	n, err := o.tx.NextSeq(ticketSeq)
-	if err != nil {
-		return err
-	}
-	id := fmt.Sprintf("T-%04d", n)
-	decisionMandate := mandate
-	dec, err := o.finish(th, ev, &Decision{Kind: DecisionAccept, TicketID: id, Mandate: &decisionMandate, Reasons: reasons, Ack: d.Ack})
-	if err != nil {
-		return err
-	}
-	t := &Ticket{ID: id, Title: titleOf(d.Title), DecisionID: dec.ID, Mandate: mandate, CreatedAt: o.at, UpdatedAt: o.at,
-		Origin:    Origin{TriggerID: primary.ID, TriggerIDs: slices.Clone(ev.TriggerIDs)},
-		Execution: &Execution{Runtime: o.defaultRuntime}, Repo: th.Meta["repo"], Pairing: o.pairingDefaults().Mode}
 	// The primary Trigger comes first, then the rest of the batch in order.
 	batch := []*Trigger{primary}
 	for _, tid := range ev.TriggerIDs {
@@ -681,6 +667,20 @@ func (o *op) accept(th *Thread, ev *Evaluation, d DecisionInput, p Policy, res *
 			batch = append(batch, tr)
 		}
 	}
+	mandate := Mandate{Strength: ev.Strength, PolicyVersion: ev.PolicyVersion, Actor: primary.Actor, Thread: ev.Thread, Basis: basis, Trust: batchTrust(p, batch)}
+	n, err := o.tx.NextSeq(ticketSeq)
+	if err != nil {
+		return err
+	}
+	id := fmt.Sprintf("T-%04d", n)
+	decisionMandate := mandate
+	dec, err := o.finish(th, ev, &Decision{Kind: DecisionAccept, TicketID: id, Mandate: &decisionMandate, Reasons: reasons, Ack: d.Ack})
+	if err != nil {
+		return err
+	}
+	t := &Ticket{ID: id, Title: titleOf(d.Title), DecisionID: dec.ID, Mandate: mandate, CreatedAt: o.at, UpdatedAt: o.at,
+		Origin:    Origin{TriggerID: primary.ID, TriggerIDs: slices.Clone(ev.TriggerIDs)},
+		Execution: &Execution{Runtime: o.defaultRuntime}, Repo: th.Meta["repo"], Pairing: o.pairingDefaults().Mode}
 	for _, tr := range batch {
 		in := Input{ID: newID(), Kind: InputTrigger, At: o.at, TriggerID: tr.ID, Text: tr.Text, Human: tr.Human}
 		t.Inputs = append(t.Inputs, in)
@@ -1346,4 +1346,31 @@ func requeueFirst(queue, ids []string) []string {
 
 func sameChannel(a, b ChannelRef) bool {
 	return a.Source == b.Source && a.Thread == b.Thread && maps.Equal(a.Address, b.Address)
+}
+
+// trustOrder ranks the trust classes, least trusted first; a class it does not name counts as less trusted still.
+var trustOrder = []string{TrustStranger, TrustBot, TrustCI, TrustCollaborator, TrustAllowed, TrustOwner}
+
+// batchTrust is the trust class a Mandate records for a batch of Triggers, the primary first: the primary's, unless a
+// Trigger of the batch has a class under the restricted tool policy, whose text the session would read alongside: then
+// the least trusted such class.
+func batchTrust(p Policy, batch []*Trigger) string {
+	found, rank := "", len(trustOrder)
+	for _, tr := range batch {
+		class := p.Trust(*tr)
+		if p.ToolPolicy(class) == ToolStandard {
+			continue
+		}
+		r := slices.Index(trustOrder, class)
+		if r < 0 {
+			return class
+		}
+		if r < rank {
+			found, rank = class, r
+		}
+	}
+	if found != "" {
+		return found
+	}
+	return p.Trust(*batch[0])
 }

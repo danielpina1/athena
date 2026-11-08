@@ -96,8 +96,9 @@ wins:
 
 The GitHub Source copies `author_association` from the issue, pull request or comment into the Trigger's
 `association` metadata. Only the Policy reads it; the router never sees or sets a class. A Mandate records its class
-when the Ticket is created, and the Ticket's sessions use that class's tool policy. A Mandate made before classes were
-recorded counts as `owner` (owner), `bot` (a bot) or `allowed` (anything else the gate admitted).
+when the Ticket is created, and the Ticket's sessions use that class's tool policy: the class of the Trigger that
+started it, or, when a Trigger batched with it has a class under the restricted policy, the least trusted such class,
+since the session reads that text too. A Mandate made before classes were recorded counts as `owner` (owner), `bot` (a bot) or `allowed` (anything else the gate admitted).
 
 The defaults give every class the standard policy except `stranger`, which is restricted. The owner is always standard
 in the dashboard (the control is disabled).
