@@ -127,22 +127,10 @@ func validateAutopilot(s Settings) error {
 // autopilotOutcome turns an assessment of an Autopilot candidate into an Engine outcome. The entry is its own rule,
 // so there are no rule judgements to check (any given are ignored); the accept mode decides as for any inferred case.
 func autopilotOutcome(a core.Assessment, s Settings) (string, []core.Reason, bool, error) {
-	said := func() []core.Reason {
-		if strings.TrimSpace(a.Reason) == "" {
-			return nil
-		}
-		return []core.Reason{{Code: CodeSaid, Values: map[string]string{"text": a.Reason}}}
-	}
 	if !a.Accept {
-		return kindIgnore, said(), false, nil
+		return kindIgnore, saidReasons(a), false, nil
 	}
-	switch s.Mode {
-	case ModeAuto:
-		return kindAccept, said(), false, nil
-	case ModeObserve:
-		return kindIgnore, append([]core.Reason{{Code: CodeWouldAccept}}, said()...), true, nil
-	}
-	return kindIgnore, []core.Reason{{Code: CodeModeOff}}, false, nil
+	return modeOutcome(a, s)
 }
 
 // autopilotNote is the notice for an open Ticket that ran under the entry when the settings change from old to cur:

@@ -430,12 +430,7 @@ func cellToday(part SourcePart, b core.MandateBasis, sender string) string {
 // (and no other), a proactive accept needs a matching rule with evidence of intent, and only auto mode accepts:
 // observe mode turns a positive assessment into an ignore marked would-accept, and off mode ignores it.
 func AssessmentOutcome(a core.Assessment, s Settings, strength string) (string, []core.Reason, bool, error) {
-	said := func() []core.Reason {
-		if strings.TrimSpace(a.Reason) == "" {
-			return nil
-		}
-		return []core.Reason{{Code: CodeSaid, Values: map[string]string{"text": a.Reason}}}
-	}
+	said := func() []core.Reason { return saidReasons(a) }
 	switch strength {
 	case explicit:
 		if a.Accept {
@@ -466,11 +461,25 @@ func AssessmentOutcome(a core.Assessment, s Settings, strength string) (string, 
 	if !matched {
 		return kindIgnore, append([]core.Reason{{Code: CodeNoMatchingRule}}, said()...), false, nil
 	}
+	return modeOutcome(a, s)
+}
+
+// saidReasons is the assessor's own words as a reason, or none when it said nothing.
+func saidReasons(a core.Assessment) []core.Reason {
+	if strings.TrimSpace(a.Reason) == "" {
+		return nil
+	}
+	return []core.Reason{{Code: CodeSaid, Values: map[string]string{"text": a.Reason}}}
+}
+
+// modeOutcome is what the accept mode makes of a positive assessment of an inferred candidate: auto accepts, observe
+// records an ignore marked would-accept, and off ignores it.
+func modeOutcome(a core.Assessment, s Settings) (string, []core.Reason, bool, error) {
 	switch s.Mode {
 	case ModeAuto:
-		return kindAccept, said(), false, nil
+		return kindAccept, saidReasons(a), false, nil
 	case ModeObserve:
-		return kindIgnore, append([]core.Reason{{Code: CodeWouldAccept}}, said()...), true, nil
+		return kindIgnore, append([]core.Reason{{Code: CodeWouldAccept}}, saidReasons(a)...), true, nil
 	}
 	return kindIgnore, []core.Reason{{Code: CodeModeOff}}, false, nil
 }
