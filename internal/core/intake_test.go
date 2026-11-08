@@ -42,7 +42,7 @@ func (p *fakePolicy) WIPCeiling(string) int        { return 3 }
 func (p *fakePolicy) Shadow(string) bool           { return false }
 func (p *fakePolicy) Trust(Trigger) string         { return "" }
 func (p *fakePolicy) ToolPolicy(string) string     { return ToolStandard }
-func (p *fakePolicy) Assess(Assessment, string) (string, []Reason, bool, error) {
+func (p *fakePolicy) Assess(Assessment, string, string) (string, []Reason, bool, error) {
 	return "ignore", nil, false, nil
 }
 

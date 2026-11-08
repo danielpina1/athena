@@ -141,9 +141,8 @@ func newEnv(t *testing.T) *env {
 		{Name: "off-rule", Instructions: "never", Enabled: false}}
 	e.fx = effects.New(st, nil)
 	e.wake.Store(e.fx)
-	pol := policy.New(e.settings, e.reg, time.Minute)
 	e.eng = core.NewEngineWith(st.Repos(), nopExec{}, core.Options{
-		Policy: func() core.Policy { return pol }, Scope: e.reg, Wake: func() { e.wake.Load().Wake() }, Relays: true,
+		Policy: func() core.Policy { return policy.New(e.settings, e.reg, time.Minute) }, Scope: e.reg, Wake: func() { e.wake.Load().Wake() }, Relays: true,
 	})
 	sockDir, err := os.MkdirTemp("/tmp", "athrt")
 	if err != nil {

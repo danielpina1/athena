@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/danielpina1/athena/internal/core"
 	"github.com/danielpina1/athena/internal/cron"
 )
 
@@ -52,8 +53,14 @@ func AutopilotSlug(name string) string {
 	return slugSepRE.ReplaceAllString(strings.ToLower(name), "-")
 }
 
+const (
+	autopilotPrefix = "autopilot/"
+	// metaAutopilot is the Meta key of a schedule Trigger that holds the slug of the entry that raised it.
+	metaAutopilot = "autopilot"
+)
+
 // AutopilotRule is the name of the rule an entry's work runs under.
-func AutopilotRule(slug string) string { return "autopilot/" + slug }
+func AutopilotRule(slug string) string { return autopilotPrefix + slug }
 
 // AutopilotEntry returns the entry with the slug.
 func (s Settings) AutopilotEntry(slug string) (AutopilotEntry, bool) {
@@ -115,4 +122,42 @@ func validateAutopilot(s Settings) error {
 		}
 	}
 	return nil
+}
+
+// autopilotOutcome turns an assessment of an Autopilot candidate into an Engine outcome. The entry is its own rule,
+// so there are no rule judgements to check (any given are ignored); the accept mode decides as for any inferred case.
+func autopilotOutcome(a core.Assessment, s Settings) (string, []core.Reason, bool, error) {
+	said := func() []core.Reason {
+		if strings.TrimSpace(a.Reason) == "" {
+			return nil
+		}
+		return []core.Reason{{Code: CodeSaid, Values: map[string]string{"text": a.Reason}}}
+	}
+	if !a.Accept {
+		return kindIgnore, said(), false, nil
+	}
+	switch s.Mode {
+	case ModeAuto:
+		return kindAccept, said(), false, nil
+	case ModeObserve:
+		return kindIgnore, append([]core.Reason{{Code: CodeWouldAccept}}, said()...), true, nil
+	}
+	return kindIgnore, []core.Reason{{Code: CodeModeOff}}, false, nil
+}
+
+// autopilotNote is the notice for an open Ticket that ran under the entry when the settings change from old to cur:
+// the entry went away or off, or its instructions changed.
+func autopilotNote(old, cur Settings, slug string) string {
+	oe, ok := old.AutopilotEntry(slug)
+	if !ok || !oe.Enabled {
+		return ""
+	}
+	ne, ok := cur.AutopilotEntry(slug)
+	switch {
+	case !ok || !ne.Enabled:
+		return fmt.Sprintf("The Autopilot entry %q that started this work no longer applies.", oe.Name)
+	case ne.Instructions != oe.Instructions:
+		return fmt.Sprintf("The Autopilot entry %q that started this work changed. Its new instructions: %s", ne.Name, ne.Instructions)
+	}
+	return ""
 }

@@ -240,12 +240,14 @@ const (
 	ViaAdmission = "admission"
 	ViaBot       = "bot"
 	ViaOwner     = "owner"
+	// ViaAutopilot: an Autopilot entry started the work and is its own rule.
+	ViaAutopilot = "autopilot"
 )
 
 // MandateBasis records how the gate admitted a Trigger: by which path (Via) and, for revalidation, the receiving
 // Source, scope and row, the listed sender and the rules that matched.
 type MandateBasis struct {
-	// Via is addressed, followup, admission, bot or owner.
+	// Via is addressed, followup, admission, bot, owner or autopilot.
 	Via    string   `json:"via,omitempty"`
 	Source string   `json:"source,omitempty"`
 	Scope  string   `json:"scope,omitempty"`
@@ -360,6 +362,8 @@ const (
 	KindReview  = "review"
 	KindCI      = "ci"
 	KindClosed  = "closed"
+	// KindSchedule is a Trigger an Autopilot entry raised.
+	KindSchedule = "schedule"
 )
 
 // Ways a Trigger can address the agent.
@@ -377,7 +381,7 @@ type Trigger struct {
 	Human  bool      `json:"human,omitempty"`
 	At     time.Time `json:"at"`
 	Text   string    `json:"text,omitempty"`
-	// Kind is message, review, ci or closed.
+	// Kind is message, review, ci, closed or schedule.
 	Kind string `json:"kind,omitempty"`
 	// Bot is set when an automation wrote the Trigger.
 	Bot bool `json:"bot,omitempty"`

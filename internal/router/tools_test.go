@@ -375,3 +375,27 @@ func TestEvalReadUnreadable(t *testing.T) {
 		t.Fatalf("read of an unknown id = %+v", got)
 	}
 }
+
+func TestEvalShowsNoRulesForAutopilot(t *testing.T) {
+	e := newEnv(t)
+	e.reg.Register(scheduleSource{})
+	e.settings.Autopilot = []policy.AutopilotEntry{{Name: "Night", Instructions: "tidy", Repo: "o/r", Enabled: true, Cron: "0 3 * * *"}}
+	id := "schedule:night:1"
+	e.receive(core.Trigger{ID: id, Source: policy.ScheduleSource, Kind: core.KindSchedule, Scope: "schedule",
+		Threads: []string{"schedule:night"}, At: time.Now(), Text: "tidy",
+		Meta: map[string]string{"autopilot": "night", "repo": "o/r"}})
+	e.must(e.eng.EvaluateDue())
+	var ctx struct {
+		Strength string `json:"strength"`
+		Rules    []any  `json:"rules"`
+	}
+	e.call("eval", map[string]any{"trigger_id": id}, &ctx)
+	if ctx.Strength != "inferred" || len(ctx.Rules) != 0 {
+		t.Fatalf("eval = %+v, want an inferred candidate with no rules", ctx)
+	}
+}
+
+// scheduleSource listens to every schedule Thread.
+type scheduleSource struct{ fakeSource }
+
+func (scheduleSource) Name() string { return "schedule" }
