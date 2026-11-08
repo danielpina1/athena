@@ -1,13 +1,18 @@
 package node
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
+	"syscall"
 
 	"github.com/danielpina1/athena/internal/core"
 	"github.com/danielpina1/athena/internal/policy"
@@ -90,13 +95,54 @@ func (n *Node) restrictedSandboxConfig(goos, workDir string) *SandboxConfig {
 	}
 	c.Required = true
 	c.AllowedDomains = nil
-	c.AllowWrite = []string{restrictedCacheDir(workDir)}
+	c.AllowWrite = []string{restrictedCacheDir(workDir), restrictedTempDir(workDir)}
 	deny, allow := n.restrictedReads(goos, workDir)
 	c.DenyRead = append(slices.Clone(c.DenyRead), deny...)
 	slices.Sort(c.DenyRead)
 	c.DenyRead = slices.Compact(c.DenyRead)
 	c.AllowRead = allow
 	return &c
+}
+
+// restrictedTempParent holds the temporary roots of restricted sessions: one directory, so that denying it covers the
+// roots of sessions that start later. It lies in /tmp: Claude Code stops using a root too long for a Unix socket.
+func restrictedTempParent(uid int) string { return fmt.Sprintf("/tmp/athena-%d", uid) }
+
+// restrictedTempDir is the temporary root of a restricted session working in workDir (CLAUDE_CODE_TMPDIR). Claude Code
+// gives a sandboxed command the whole per-user directory in its root as $TMPDIR, so the session needs a root of its own
+// for that directory to be denied (claudeTempRoots) without taking its commands' temporary files with it.
+func restrictedTempDir(workDir string) string {
+	sum := sha256.Sum256([]byte(filepath.Clean(workDir)))
+	return filepath.Join(restrictedTempParent(os.Getuid()), hex.EncodeToString(sum[:4]))
+}
+
+// claudeTempRoots are where Claude Code keeps every session's temporary files of this user, a Ticket's background task
+// output among them: the default per-user directory, the older shared one, and the per-user directory in the owner's
+// CLAUDE_CODE_TMPDIR.
+func claudeTempRoots(uid int) []string {
+	perUser := fmt.Sprintf("claude-%d", uid)
+	roots := []string{filepath.Join("/tmp", perUser), "/tmp/claude"}
+	if d := os.Getenv("CLAUDE_CODE_TMPDIR"); filepath.IsAbs(d) {
+		roots = append(roots, filepath.Join(d, perUser))
+	}
+	return roots
+}
+
+// makeRestrictedTemp creates the session's temporary root, private to the node's user. It refuses a parent in /tmp it
+// did not make: anyone can create names there, and a session's temporary files must not be readable to another user.
+func makeRestrictedTemp(workDir string) error {
+	parent := restrictedTempParent(os.Getuid())
+	if err := os.Mkdir(parent, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
+		return err
+	}
+	st, err := os.Lstat(parent)
+	if err != nil {
+		return err
+	}
+	if sys, ok := st.Sys().(*syscall.Stat_t); !st.IsDir() || st.Mode().Perm() != 0o700 || !ok || int(sys.Uid) != os.Getuid() {
+		return fmt.Errorf("%s is not a private directory of this user", parent)
+	}
+	return os.MkdirAll(restrictedTempDir(workDir), 0o700)
 }
 
 // restrictedCacheDir holds a restricted session's package and build caches: in the Ticket's own .athena directory,
@@ -138,10 +184,11 @@ func makeRestrictedCaches(workDir string) error {
 // they may read again inside that (Claude Code's allowRead, which takes precedence over denyRead):
 //   - denied: the node's secrets (Config.Secrets: the GitHub App key) and the owner's credentials the rules know
 //     (credRel), each in its configured and its resolved spelling; the owner's home directory, Athena's state directory,
-//     the work root, the transcripts and Claude Code's session transcripts, each as a whole, so that what appears there
-//     later (another Ticket's directory or transcript) is denied too; and on Linux the daemons' sockets (daemonSockets).
-//   - read again: what the session needs: its working directory and git directories, the node socket, the gh shim, the
-//     athena binary, the CA bundle, Claude Code's shell snapshots and install, and the toolchains on PATH under the
+//     the work root, the transcripts, Claude Code's session transcripts and temporary roots (claudeTempRoots) and those
+//     of the restricted sessions, each as a whole, so that what appears there later (another Ticket's directory, output
+//     or transcript) is denied too; and on Linux the daemons' sockets (daemonSockets).
+//   - read again: what the session needs: its working directory and git directories, its own temporary root, the node
+//     socket, the gh shim, the athena binary, the CA bundle, Claude Code's shell snapshots and install, and the toolchains on PATH under the
 //     home directory (homeToolchains). Nothing that holds or lies in a secret or credential is read again.
 func (n *Node) restrictedReads(goos, workDir string) (deny, allow []string) {
 	home, _ := os.UserHomeDir()
@@ -155,7 +202,7 @@ func (n *Node) restrictedReads(goos, workDir string) (deny, allow []string) {
 		}
 	}
 	deny = slices.Clone(guarded)
-	wholes := []string{home, n.cfg.StateDir, n.cfg.WorkRoot}
+	wholes := append([]string{home, n.cfg.StateDir, n.cfg.WorkRoot, restrictedTempParent(os.Getuid())}, claudeTempRoots(os.Getuid())...)
 	if home != "" {
 		wholes = append(wholes, filepath.Join(home, ".claude", "projects"))
 	}
@@ -170,7 +217,7 @@ func (n *Node) restrictedReads(goos, workDir string) (deny, allow []string) {
 	deny = append(deny, daemonSockets(goos, os.Getenv("XDG_RUNTIME_DIR"), n.cfg.SocketPath)...)
 
 	gitDir, common := gitDirs(workDir)
-	need := []string{workDir, gitDir, common, n.cfg.SocketPath, n.cfg.AthenaBin}
+	need := []string{workDir, gitDir, common, n.cfg.SocketPath, n.cfg.AthenaBin, restrictedTempDir(workDir)}
 	if n.cfg.StateDir != "" {
 		need = append(need, filepath.Join(n.cfg.StateDir, ShimsDir))
 	}

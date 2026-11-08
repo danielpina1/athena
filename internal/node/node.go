@@ -1235,6 +1235,10 @@ func (r *runner) run() {
 	adir := filepath.Join(s.place.workDir, ".athena")
 	env := append([]string{"ATHENA_ASSIGNMENT=" + s.a.ID}, n.variables(s)...)
 	env = append(env, n.githubEnv(s)...)
+	if s.restricted() {
+		// In the process's environment: Claude Code uses its temporary root before it reads the settings file.
+		env = append(env, "CLAUDE_CODE_TMPDIR="+restrictedTempDir(s.place.workDir))
+	}
 	role, markerRole := roleWorker, roleImplement
 	var systemPrompt string
 	if s.reviewing() {
@@ -2444,6 +2448,9 @@ func (n *Node) prepare(s *session) error {
 		if err := makeRestrictedCaches(p.workDir); err != nil {
 			return err
 		}
+		if err := makeRestrictedTemp(p.workDir); err != nil {
+			return err
+		}
 	}
 	sb, sbEnv := n.sessionSandbox(p.workDir, s.reviewing(), s.restricted())
 	role := roleWorker
@@ -2622,6 +2629,9 @@ const keptNote = "its git links were checked against the placement record; its f
 // branch, no remote). Otherwise it keeps it and logs why. The branch itself is kept; the Ticket's checkpoint ref goes
 // with the worktree.
 func cleanupWorktree(p placement, t core.Ticket, workRoot string, log *slog.Logger) {
+	if err := os.RemoveAll(restrictedTempDir(p.workDir)); err != nil {
+		log.Warn("remove the session's temporary root", "ticket", t.ID, "error", err)
+	}
 	if p.repo == "" {
 		return
 	}

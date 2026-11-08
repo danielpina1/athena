@@ -2,6 +2,8 @@ package node
 
 import (
 	"context"
+	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -446,5 +448,91 @@ func TestStandardUnchanged(t *testing.T) {
 		if slices.Sort(names); !slices.Equal(names, slices.Sorted(slices.Values(WorkerTools()))) {
 			t.Errorf("policy %v: tools = %v, want %v", p, names, WorkerTools())
 		}
+	}
+}
+
+// A restricted session's commands cannot read what Claude Code keeps in its per-user temporary root (other Tickets'
+// task output), in either spelling. The session gets a temporary root of its own, in a parent of restricted roots that
+// is denied as a whole, so only its own is read again; a standard session is unchanged.
+func TestRestrictedDeniesClaudeTempRoot(t *testing.T) {
+	old := tempBase
+	tempBase = "/tmp" // what the node uses: the length below is of the real paths; nothing is made here
+	t.Cleanup(func() { tempBase = old })
+	n := New(Config{SocketPath: filepath.Join(t.TempDir(), "n.sock"), StateDir: t.TempDir(), Sandbox: &SandboxConfig{}}, nil)
+	work, other := t.TempDir(), t.TempDir()
+	sb, _ := n.sessionSandboxOn("darwin", work, false, true)
+	denied := func(p string) bool {
+		return slices.ContainsFunc(sb.DenyRead, func(d string) bool { return within(d, p) })
+	}
+	allowed := func(p string) bool {
+		return slices.ContainsFunc(sb.AllowRead, func(a string) bool { return within(a, p) })
+	}
+	for _, root := range claudeTempRoots(os.Getuid()) {
+		for _, p := range []string{root, resolvedPath(root), filepath.Join(root, "-work-T2", "sid", "tasks", "b1.output"), filepath.Join(resolvedPath(root), "-work-T2", "sid", "tasks", "b1.output")} {
+			if !denied(p) || allowed(p) {
+				t.Errorf("%s is readable: deny %v, allow %v", p, sb.DenyRead, sb.AllowRead)
+			}
+		}
+	}
+	own, theirs := restrictedTempDir(work), restrictedTempDir(other)
+	if own == theirs || !strings.HasPrefix(own, restrictedTempParent(os.Getuid())+"/") {
+		t.Fatalf("own = %s, theirs = %s", own, theirs)
+	}
+	if !denied(theirs) || allowed(theirs) || !denied(resolvedPath(theirs)) || allowed(resolvedPath(theirs)) {
+		t.Errorf("another session's temporary root is readable: deny %v, allow %v", sb.DenyRead, sb.AllowRead)
+	}
+	if !allowed(own) || !allowed(resolvedPath(own)) {
+		t.Errorf("its own temporary root %s is not read again: %v", own, sb.AllowRead)
+	}
+	// Claude Code puts claude-<uid> in the root and falls back to the shared one above 44 bytes.
+	if got := len(filepath.Join(own, fmt.Sprintf("claude-%d", os.Getuid()))); got > 44 {
+		t.Errorf("per-user directory is %d bytes, over Claude Code's 44", got)
+	}
+	std, _ := n.sessionSandboxOn("darwin", work, false, false)
+	if slices.Contains(std.DenyRead, claudeTempRoots(os.Getuid())[0]) {
+		t.Errorf("standard session denied the temp root: %v", std.DenyRead)
+	}
+}
+
+// A restricted session starts with its own temporary root, made private; a standard one keeps Claude Code's default.
+func TestRestrictedSessionGetsOwnTempRoot(t *testing.T) {
+	if !SandboxSupported() {
+		t.Skip("no sandbox on this platform")
+	}
+	startEnv := func(p Policy) (*harness, core.Ticket, []string) {
+		rec := newRecordingRuntime(fakeClaude(t))
+		h := newHarness(t, func(c *Config) { c.Policy, c.Runtimes = p, map[string]rt.Runtime{"claude": rec} })
+		tk := h.submit("A change", newRepo(t))
+		tk, _ = h.running(tk.ID)
+		rec.mu.Lock()
+		defer rec.mu.Unlock()
+		return h, tk, slices.Clone((*rec.starts)[0].Env)
+	}
+	h, tk, env := startEnv(restrictOwner)
+	own := restrictedTempDir(TicketDir(h.cfg.WorkRoot, tk))
+	t.Cleanup(func() { _ = os.RemoveAll(own) })
+	if !slices.Contains(env, "CLAUDE_CODE_TMPDIR="+own) {
+		t.Fatalf("env = %v, want CLAUDE_CODE_TMPDIR=%s", env, own)
+	}
+	st, err := os.Stat(own)
+	if err != nil || !st.IsDir() || st.Mode().Perm() != 0o700 {
+		t.Fatalf("temporary root: %v %v", st, err)
+	}
+	if _, _, env := startEnv(fakeToolPolicy{}); slices.ContainsFunc(env, func(e string) bool { return strings.HasPrefix(e, "CLAUDE_CODE_TMPDIR=") }) {
+		t.Fatalf("standard session's env = %v", env)
+	}
+}
+
+// A restricted session's temporary root goes when its Ticket ends, whatever becomes of the worktree.
+func TestCleanupRemovesRestrictedTemp(t *testing.T) {
+	work := t.TempDir()
+	if err := makeRestrictedTemp(work); err != nil {
+		t.Fatal(err)
+	}
+	own := restrictedTempDir(work)
+	t.Cleanup(func() { _ = os.RemoveAll(own) })
+	cleanupWorktree(placement{workDir: work}, core.Ticket{}, "", slog.Default())
+	if _, err := os.Stat(own); !os.IsNotExist(err) {
+		t.Fatalf("temporary root still there: %v", err)
 	}
 }
