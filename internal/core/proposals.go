@@ -66,7 +66,8 @@ type Proposal struct {
 }
 
 // Propose records a pending Proposal for an open Ticket and shows the Ticket as waiting for the owner. A pending push
-// or failed push of the same Ticket is superseded by a newer one.
+// or failed push of the same Ticket is superseded by a newer one, unless the node has begun to apply it (StartedAt): it
+// may be on GitHub already, so its result settles it and the newer push waits beside it.
 func (e *Engine) Propose(p Proposal) (Proposal, error) {
 	var out Proposal
 	err := e.command(cmdPropose, func(o *op) error {
@@ -105,7 +106,7 @@ func (o *op) propose(t *Ticket, p Proposal) (Proposal, error) {
 			return Proposal{}, err
 		}
 		for _, x := range older {
-			if x.Kind == ProposalPush && (x.State == ProposalPending || x.State == ProposalFailed) {
+			if x.Kind == ProposalPush && (x.State == ProposalFailed || x.State == ProposalPending && x.StartedAt == nil) {
 				if err := o.closeProposal(x, ProposalSuperseded, ""); err != nil {
 					return Proposal{}, err
 				}
