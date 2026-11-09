@@ -404,11 +404,19 @@ These are choices the plan made for you. Each is yours to overturn.
 | G | Cron times are local time. A time that does not exist on a daylight-saving day is skipped; one that happens twice fires once. | You think in local time. |
 | H | CI red defaults to 4 hours (1 to 168). "Red" means at least one finished check suite on the head commit ended `failure` or `timed_out`. Athena's own suites do not count; `cancelled` does not either. | `cancelled` is usually a superseded run. |
 | I | While Athena is paused, or while the GitHub Source does not yet know the repository, nothing fires and nothing is forgotten. | Nothing queued is lost (section 3). |
+| J | `branch_moved` and `manifest_changed` ignore a move of the default branch when every commit in it is Athena's own. A move with any commit of someone else's fires as usual. | Otherwise merging the pull request of an Autopilot Ticket would start the entry again, stopped only by ruling F. |
 
 Some details the table does not carry:
 
 - **The 15-minute gap.** For a clock firing it compares due times, so a late tick cannot refuse a legal schedule. For
   an event it compares against the time of the check.
+- **Athena's own commits (ruling J).** A commit is Athena's when GitHub names the App's bot (`<slug>[bot]`) as its
+  author: workers commit as the bot, and a squash or rebase of their pull request keeps it. The merge commit GitHub
+  makes when you press Merge counts too, provided the move holds at least one commit of the bot's. The ignored head
+  still becomes the point the next move is compared from, and an ignored move does not count toward the gap or the
+  daily cap. These moves still fire: a commit by anyone else or by another App, even inside a Ticket's pull request; a
+  merge you made on your own machine and pushed; and a force-push, which cannot be compared. One gap: a squash is one
+  commit credited to the bot, so a commit you added to a Ticket's pull request before squashing it does not fire.
 - **Starting over.** Nothing fires for the past when an entry starts over. That happens when you disable an entry
   and enable it again, delete one and make it again, edit its `cron` or `event`, or change an event entry's repository.
   The day's count and the last firing are kept, so the cap of 24 survives. A new entry begins from what the
@@ -440,6 +448,7 @@ Some details the table does not carry:
 | You see | What it means | What to do |
 | --- | --- | --- |
 | An entry never fires. | It is disabled, paused, busy, at the daily cap, or its repository is unknown to the GitHub Source. | Check the `schedule` row in health, `athena status` for a pause, and Routing (`schedule:<slug>`) for an open Ticket. |
+| A merge did not fire a `branch_moved` or `manifest_changed` entry. | Every commit in it was Athena's (ruling J). | Nothing; the next move by someone else fires. |
 | The Decision says `accept (would accept)`. | The accept mode is `observe`. | Switch to `auto` when you trust what it would do. |
 | The Decision says `autopilot_gone`. | The entry was turned off or deleted after it fired. | Nothing; turn it on again if you want it back. |
 | The Decision says `wip_brake`. | Things already wait on you in that repository. | Apply, merge or discard them (section 2). |
