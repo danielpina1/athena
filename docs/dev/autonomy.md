@@ -427,7 +427,13 @@ Some details the table does not carry:
 - **Waiting for a repository.** An enabled entry whose repository the GitHub Source does not poll waits, and the
   `schedule` row in the dashboard's health shows the reason. Add the repository to the GitHub Source or turn the entry off.
 - **The health row.** The `schedule` row appears in health only while an entry is enabled. A repository whose events
-  could not be read three polls in a row shows there too.
+  could not be read three polls in a row shows there too. So does a failure to read the entries' state, which stops every entry: it
+  says why nothing fires, and it clears at the next pass that can read the state.
+- **What an entry keeps.** Its Thread lives for good, so it lists only what is still in play: an accept lets go of the
+  runs that ended, and a run a person resumes from its pull request counts as busy again. The Thread lists its latest
+  50 Decisions, so the count beside it stops at 50; Routing still shows every run. The state of a deleted, renamed or
+  disabled entry is removed once its day is over and its last firing is more than 15 minutes old, so the cap and the
+  gap still hold.
 
 ### How the brakes apply
 

@@ -2,6 +2,7 @@ package core
 
 import (
 	"encoding/json"
+	"slices"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -28,6 +29,8 @@ type memRepos struct {
 	failWith error
 	// inTx is set while a Tx function runs.
 	inTx atomic.Bool
+	// decisionScans counts the reads of every Decision of a Thread.
+	decisionScans int
 }
 
 func newMemRepos() *memRepos {
@@ -56,6 +59,7 @@ func (r *memRepos) Tx(fn func(Tx) error) error {
 		kv:        map[string]string{},
 		effects:   map[string]fakeEffect{},
 		seqs:      map[string]int{},
+		scans:     &r.decisionScans,
 	}
 	for k, v := range r.kv {
 		tx.kv[k] = v
@@ -164,6 +168,7 @@ type memTx struct {
 	kv                                               map[string]string
 	effects                                          map[string]fakeEffect
 	seqs                                             map[string]int
+	scans                                            *int
 }
 
 func (tx *memTx) GetTrigger(id string) (*Trigger, error) {
@@ -223,7 +228,20 @@ func (tx *memTx) RecentDecisions(limit int) ([]*Decision, error) {
 }
 
 func (tx *memTx) Decisions(thread string, limit int) ([]*Decision, error) {
+	if limit <= 0 {
+		*tx.scans++
+	}
 	return tx.filterDecisions(&thread, limit)
+}
+
+func (tx *memTx) DecisionsOfTriggers(thread string, triggerIDs []string) ([]*Decision, error) {
+	all, err := tx.filterDecisions(&thread, 0)
+	if err != nil {
+		return nil, err
+	}
+	return slices.DeleteFunc(all, func(d *Decision) bool {
+		return !slices.ContainsFunc(d.TriggerIDs, func(id string) bool { return slices.Contains(triggerIDs, id) })
+	}), nil
 }
 
 func (tx *memTx) filterDecisions(thread *string, limit int) ([]*Decision, error) {

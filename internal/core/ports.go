@@ -47,6 +47,9 @@ type Tx interface {
 	GetDecision(id string) (*Decision, error)
 	// Decisions returns the Decisions made on a Thread, most recent first; limit <= 0 returns all.
 	Decisions(thread string, limit int) ([]*Decision, error)
+	// DecisionsOfTriggers returns the Decisions made on a Thread about any of the given Triggers, most recent first. It
+	// costs what those Triggers have, not what the Thread has.
+	DecisionsOfTriggers(thread string, triggerIDs []string) ([]*Decision, error)
 	// RecentDecisions returns the Decisions of every Thread, most recent first; limit <= 0 returns all.
 	RecentDecisions(limit int) ([]*Decision, error)
 	// Enqueue records external work for the effects runner in the same transaction. Work is identified by

@@ -164,7 +164,9 @@ func (o *op) receive(t *Trigger) error {
 	}
 	for _, id := range order {
 		tk := reached[id].ticket
-		o.wake(tk)
+		if err := o.wake(tk); err != nil {
+			return err
+		}
 		if err := o.tx.PutTicket(tk); err != nil {
 			return err
 		}

@@ -162,6 +162,14 @@ var migrations = []string{
 	UPDATE approvals SET class = lower(COALESCE(json_extract(doc, '$.tool'), '') || '|' || COALESCE(json_extract(doc, '$.rule'), '') || '|' ||
 		COALESCE(json_extract(doc, '$.repo'), (SELECT json_extract(t.doc, '$.repo') FROM tickets t WHERE t.id = approvals.ticket_id), ''));
 	CREATE INDEX approvals_class ON approvals (class, state, answered_at);`,
+	// 11: the Decisions of a Trigger, so that an Eval reads those and not every Decision of a Thread that lives for good.
+	`CREATE TABLE decision_triggers (
+		trigger_id TEXT NOT NULL,
+		decision_id TEXT NOT NULL,
+		PRIMARY KEY (trigger_id, decision_id)
+	) WITHOUT ROWID;
+	INSERT OR IGNORE INTO decision_triggers (trigger_id, decision_id)
+		SELECT j.value, d.id FROM decisions d, json_each(d.doc, '$.triggerIds') j;`,
 }
 
 const schemaKey = "schema"

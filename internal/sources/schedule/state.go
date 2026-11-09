@@ -35,12 +35,17 @@ func (s *Source) load(slug string) (*state, error) {
 	if !ok {
 		return nil, nil
 	}
+	return s.decode(slug, raw), nil
+}
+
+// decode parses a state document; an unreadable one is nil, and its entry starts over.
+func (s *Source) decode(slug, raw string) *state {
 	var st state
 	if err := json.Unmarshal([]byte(raw), &st); err != nil {
 		s.log.Warn("schedule state unreadable; starting over", "slug", slug, "error", err)
-		return nil, nil
+		return nil
 	}
-	return &st, nil
+	return &st
 }
 
 func (s *Source) save(slug string, st *state) error {

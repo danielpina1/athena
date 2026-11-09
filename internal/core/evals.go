@@ -205,7 +205,7 @@ func (o *op) startEval(key string, p Policy) error {
 	if err != nil || th == nil || th.Eval != nil || len(th.Queued) == 0 {
 		return err
 	}
-	accepted, err := o.acceptedOn(th.Key)
+	accepted, err := o.acceptedOn(th.Key, th.Queued)
 	if err != nil {
 		return err
 	}
@@ -480,7 +480,7 @@ func (o *op) decide(d DecisionInput, p Policy, res *DecisionResult) error {
 	}
 	held := th.Eval != nil && slices.Contains(th.Eval.TriggerIDs, tr.ID)
 	if d.Kind == DecisionAccept {
-		accepted, err := o.acceptedOn(th.Key)
+		accepted, err := o.acceptedOn(th.Key, []string{tr.ID})
 		if err != nil {
 			return err
 		}
@@ -830,7 +830,9 @@ func (e *Engine) Attach(ticketID, triggerID, note string) error {
 				return err
 			}
 		}
-		o.wake(t)
+		if err := o.wake(t); err != nil {
+			return err
+		}
 		return o.tx.PutTicket(t)
 	})
 }
@@ -1174,6 +1176,9 @@ func (o *op) record(th *Thread, d *Decision) error {
 	d.At = o.at
 	d.Thread = th.Key
 	th.Decisions = append(th.Decisions, d.ID)
+	if n := len(th.Decisions) - scheduleDecisionsKept; n > 0 && permanentThread(th.Key) {
+		th.Decisions = slices.Clone(th.Decisions[n:])
+	}
 	if err := o.tx.PutDecision(d); err != nil {
 		return err
 	}
@@ -1259,10 +1264,10 @@ func (o *op) reassess(th *Thread, reason Reason, skip ...string) (*Decision, err
 	return d, o.tx.PutThread(th)
 }
 
-// acceptedOn returns, by Trigger, the accept Decision that started a Ticket from it, among a Thread's Decisions: an
-// Eval and its Decision run on its Triggers' primary Thread.
-func (o *op) acceptedOn(thread string) (map[string]*Decision, error) {
-	ds, err := o.tx.Decisions(thread, 0)
+// acceptedOn returns, by Trigger, the accept Decision that started a Ticket from it, of the given Triggers: an Eval
+// and its Decision run on its Triggers' primary Thread.
+func (o *op) acceptedOn(thread string, triggerIDs []string) (map[string]*Decision, error) {
+	ds, err := o.tx.DecisionsOfTriggers(thread, triggerIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -1301,6 +1306,11 @@ func (o *op) subscribe(ticketID, key string, own bool) error {
 	if err != nil {
 		return err
 	}
+	if own {
+		if err := o.dropEndedRuns(th, ticketID); err != nil {
+			return err
+		}
+	}
 	if s := subscription(th, ticketID); s != nil {
 		s.Context = false
 		s.Own = s.Own || own
@@ -1309,6 +1319,36 @@ func (o *op) subscribe(ticketID, key string, own bool) error {
 		o.emitEvent(Event{Type: EventThreadSubscribed, TicketID: ticketID, At: o.at, Data: map[string]any{"thread": key, "own": own}})
 	}
 	return o.tx.PutThread(th)
+}
+
+// scheduleDecisionsKept is how many Decision IDs a permanent Thread lists; the Decisions themselves are all kept.
+const scheduleDecisionsKept = 50
+
+// permanentThread reports whether a Thread lives for good, collecting a run per firing: an Autopilot entry's.
+func permanentThread(key string) bool { return strings.HasPrefix(key, SourceSchedule+":") }
+
+// dropEndedRuns lets a permanent Thread forget the runs that ended, except the Ticket being subscribed, so that what
+// reads its Subscriptions costs the runs going on and not every run ever made. Only a run's own Subscription goes: a
+// Ticket attached to the Thread stays, as on any other. A run a person resumes subscribes again (wake).
+func (o *op) dropEndedRuns(th *Thread, except string) error {
+	if !permanentThread(th.Key) {
+		return nil
+	}
+	var kept []Subscription
+	for _, s := range th.Subscriptions {
+		if s.Own && s.TicketID != except {
+			t, err := o.tx.GetTicket(s.TicketID)
+			if err != nil {
+				return err
+			}
+			if t == nil || t.Ended != nil {
+				continue
+			}
+		}
+		kept = append(kept, s)
+	}
+	th.Subscriptions = kept
+	return nil
 }
 
 // currentPolicy returns the Engine's current Policy, or nil without one.
