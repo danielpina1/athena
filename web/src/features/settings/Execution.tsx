@@ -8,7 +8,7 @@ import { Waiting } from "@/ui/athena/Waiting";
 import { Block, Section } from "./Section";
 
 export function Execution() {
-  const node = useAthena((s) => s.node);
+  const node = useAthena((s) => s.nodes[0]);
   const synced = useAthena(selectSynced);
   return (
     <Section title="Execution" text="What this node runs sessions with.">

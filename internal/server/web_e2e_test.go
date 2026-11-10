@@ -177,7 +177,7 @@ func TestWebE2E(t *testing.T) {
 	}
 	// 2. The snapshot.
 	snap := c.snapshot()
-	if len(snap.GetTickets()) != 0 || snap.GetNode().GetSlots() == 0 {
+	if len(snap.GetTickets()) != 0 || snap.GetNodes()[0].GetSlots() == 0 {
 		t.Fatalf("snapshot = %v", snap)
 	}
 	if !hasHealth(snap.GetHealth(), "tls", true) {

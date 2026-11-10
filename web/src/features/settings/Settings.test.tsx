@@ -27,7 +27,7 @@ const settings = {
 beforeEach(() => {
   load({
     policy: { revision: 1, settingsJson: JSON.stringify(settings) },
-    node: { name: "mac-mini", slots: 4, slotsInUse: 1, claudeVersion: "2.1.3" },
+    nodes: [{ name: "mac-mini", slots: 4, slotsInUse: 1, claudeVersion: "2.1.3" }],
   });
   useAthena.setState({ serverVersion: "0.4.0" });
 });
@@ -108,14 +108,16 @@ test("execution shows the node's slots and Claude version, read-only", () => {
 test("execution lists each runtime's version", () => {
   load({
     policy: { revision: 1, settingsJson: JSON.stringify(settings) },
-    node: {
-      name: "mac-mini",
-      slots: 4,
-      runtimes: [
-        { name: "claude", version: "", ready: true },
-        { name: "codex", version: "0.161.0", ready: true, tested: false },
-      ],
-    },
+    nodes: [
+      {
+        name: "mac-mini",
+        slots: 4,
+        runtimes: [
+          { name: "claude", version: "", ready: true },
+          { name: "codex", version: "0.161.0", ready: true, tested: false },
+        ],
+      },
+    ],
   });
   renderSettings("/settings/execution", "desktop");
   const facts = screen.getByRole("region", { name: "Execution" });

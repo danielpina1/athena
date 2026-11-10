@@ -39,7 +39,7 @@ export function NewTask() {
   const field = useRef<HTMLTextAreaElement>(null);
   const reviewHint = useId();
   const repos = useAthena((s) => s.repos);
-  const runtimes = useAthena((s) => s.node?.runtimes) ?? [];
+  const runtimes = useAthena((s) => s.nodes[0]?.runtimes) ?? [];
   const settingsJson = useAthena((s) => s.policy?.settingsJson);
   const policyReview = useMemo(() => reviewByDefault(settingsJson), [settingsJson]);
   // A runtime that stopped being ready is not sent: the picker shows, and the task gets, Auto.

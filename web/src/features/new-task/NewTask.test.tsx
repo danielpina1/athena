@@ -223,7 +223,7 @@ function withRuntimes(runtimes: RuntimeInit[], settingsJson = "{}") {
   load({
     repos: [],
     tickets: [],
-    node: { name: "mac-mini", slots: 2, runtimes },
+    nodes: [{ name: "mac-mini", slots: 2, runtimes }],
     policy: { revision: 1, settingsJson },
   });
 }
@@ -315,7 +315,7 @@ test("Other… shows the text input with the runtime's recent models, and keeps 
       { id: "T-2", title: "b", model: "gpt-5.5", runtime: "codex" },
       { id: "T-3", title: "c", model: "sonnet" },
     ],
-    node: { name: "mac-mini", slots: 2, runtimes: both },
+    nodes: [{ name: "mac-mini", slots: 2, runtimes: both }],
     policy: { revision: 1, settingsJson: "{}" },
   });
   const user = setup();

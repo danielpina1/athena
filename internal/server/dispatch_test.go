@@ -299,7 +299,7 @@ func TestHelloWelcomeSnapshotThenDeltas(t *testing.T) {
 		t.Fatalf("welcome = %v", wl)
 	}
 	snap := c.snapshot()
-	if len(snap.GetTickets()) != 0 || snap.GetPolicy() == nil || snap.GetNode().GetSlots() == 0 {
+	if len(snap.GetTickets()) != 0 || snap.GetPolicy() == nil || snap.GetNodes()[0].GetSlots() == 0 {
 		t.Fatalf("snapshot = %v", snap)
 	}
 

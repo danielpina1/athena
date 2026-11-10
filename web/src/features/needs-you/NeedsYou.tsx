@@ -69,7 +69,7 @@ export function NeedsYou() {
   const approvals = useAthena((s) => s.approvals);
   const tickets = useAthena((s) => s.tickets);
   const counts = useAthena((s) => selectCounts(s));
-  const node = useAthena((s) => s.node);
+  const node = useAthena((s) => s.nodes[0]);
   const repos = useAthena((s) => s.repos);
   const offers = useAthena((s) => s.offers);
   const synced = useAthena(selectSynced);

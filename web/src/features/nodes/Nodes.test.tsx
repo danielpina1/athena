@@ -19,7 +19,7 @@ function renderNodes() {
 const node = { name: "mac-mini", slots: 4, slotsInUse: 2, liveTicketIds: ["T-0007", "T-0009"], queued: 3, claudeVersion: "2.1.3" };
 
 test("the node card shows its load, queue, live Tickets and Claude version", () => {
-  load({ node, health: { items: [] } });
+  load({ nodes: [node], health: { items: [] } });
   renderNodes();
   const card = screen.getByRole("region", { name: "mac-mini" });
   expect(within(card).getByText("2 of 4 slots in use")).toBeTruthy();
@@ -34,13 +34,15 @@ test("the node card shows its load, queue, live Tickets and Claude version", () 
 
 test("the node card shows each runtime's block instead of the Claude version alone", () => {
   load({
-    node: {
-      ...node,
-      runtimes: [
-        { name: "claude", ready: true, tested: false, measured: false },
-        { name: "codex", version: "0.160.1", ready: false, tested: true, why: "Codex is not logged in: run athena codex login" },
-      ],
-    },
+    nodes: [
+      {
+        ...node,
+        runtimes: [
+          { name: "claude", ready: true, tested: false, measured: false },
+          { name: "codex", version: "0.160.1", ready: false, tested: true, why: "Codex is not logged in: run athena codex login" },
+        ],
+      },
+    ],
     health: { items: [] },
   });
   renderNodes();
@@ -59,7 +61,7 @@ test("the node card shows each runtime's block instead of the Claude version alo
 test("healthy checks collapse into one line and failing ones say why and since when", async () => {
   const user = userEvent.setup();
   load({
-    node,
+    nodes: [node],
     health: {
       items: [
         { name: "router", ok: true, since: at(0) },
@@ -81,7 +83,7 @@ test("healthy checks collapse into one line and failing ones say why and since w
 });
 
 test("all checks passing is one line", () => {
-  load({ node, health: { items: [{ name: "router", ok: true }, { name: "tls", ok: true }] } });
+  load({ nodes: [node], health: { items: [{ name: "router", ok: true }, { name: "tls", ok: true }] } });
   renderNodes();
   expect(within(screen.getByRole("region", { name: "Health" })).getByText("All checks passing")).toBeTruthy();
 });

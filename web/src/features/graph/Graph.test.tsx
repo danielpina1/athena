@@ -81,7 +81,7 @@ beforeEach(() => {
   vi.mocked(actions.unwatch).mockResolvedValue(ok);
   vi.mocked(actions.onWatchLost).mockReturnValue(() => {});
   vi.stubGlobal("fetch", vi.fn(() => new Promise(() => {})));
-  load({ tickets, threads, approvals, node: { name: "mac-studio" } });
+  load({ tickets, threads, approvals, nodes: [{ name: "mac-studio" }] });
 });
 afterEach(() => {
   vi.useRealTimers();

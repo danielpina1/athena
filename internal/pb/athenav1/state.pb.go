@@ -30,7 +30,6 @@ type Snapshot struct {
 	Triggers  []*TriggerView         `protobuf:"bytes,4,rep,name=triggers,proto3" json:"triggers,omitempty"`
 	Threads   []*ThreadView          `protobuf:"bytes,5,rep,name=threads,proto3" json:"threads,omitempty"`
 	Decisions []*DecisionView        `protobuf:"bytes,6,rep,name=decisions,proto3" json:"decisions,omitempty"`
-	Node      *NodeStatus            `protobuf:"bytes,7,opt,name=node,proto3" json:"node,omitempty"`
 	Health    *Health                `protobuf:"bytes,8,opt,name=health,proto3" json:"health,omitempty"`
 	Policy    *PolicyView            `protobuf:"bytes,9,opt,name=policy,proto3" json:"policy,omitempty"`
 	// repos are the repositories and folders a task can be placed in, the last used first.
@@ -41,7 +40,9 @@ type Snapshot struct {
 	// offers are the actions the owner keeps approving, each offered as a standing allow rule.
 	Offers *OfferList `protobuf:"bytes,14,opt,name=offers,proto3" json:"offers,omitempty"`
 	// proposals are the replies, pushes and pull requests Athena holds until the owner applies or discards them.
-	Proposals     []*ProposalView `protobuf:"bytes,15,rep,name=proposals,proto3" json:"proposals,omitempty"`
+	Proposals []*ProposalView `protobuf:"bytes,15,rep,name=proposals,proto3" json:"proposals,omitempty"`
+	// nodes are the machines that run Tickets, the embedded one first.
+	Nodes         []*NodeStatus `protobuf:"bytes,16,rep,name=nodes,proto3" json:"nodes,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -118,13 +119,6 @@ func (x *Snapshot) GetDecisions() []*DecisionView {
 	return nil
 }
 
-func (x *Snapshot) GetNode() *NodeStatus {
-	if x != nil {
-		return x.Node
-	}
-	return nil
-}
-
 func (x *Snapshot) GetHealth() *Health {
 	if x != nil {
 		return x.Health
@@ -181,6 +175,13 @@ func (x *Snapshot) GetProposals() []*ProposalView {
 	return nil
 }
 
+func (x *Snapshot) GetNodes() []*NodeStatus {
+	if x != nil {
+		return x.Nodes
+	}
+	return nil
+}
+
 type Delta struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Seq   uint64                 `protobuf:"varint,1,opt,name=seq,proto3" json:"seq,omitempty"`
@@ -201,6 +202,7 @@ type Delta struct {
 	//	*Delta_Control
 	//	*Delta_Offers
 	//	*Delta_Proposal
+	//	*Delta_NodeRemoved
 	Change        isDelta_Change `protobuf_oneof:"change"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -385,6 +387,15 @@ func (x *Delta) GetProposal() *ProposalView {
 	return nil
 }
 
+func (x *Delta) GetNodeRemoved() string {
+	if x != nil {
+		if x, ok := x.Change.(*Delta_NodeRemoved); ok {
+			return x.NodeRemoved
+		}
+	}
+	return ""
+}
+
 type isDelta_Change interface {
 	isDelta_Change()
 }
@@ -453,6 +464,12 @@ type Delta_Proposal struct {
 	Proposal *ProposalView `protobuf:"bytes,24,opt,name=proposal,proto3,oneof"`
 }
 
+type Delta_NodeRemoved struct {
+	// node_removed is a node id a client drops from its list. Defined, sent by nothing yet: plan 6 defers
+	// `athena node forget`.
+	NodeRemoved string `protobuf:"bytes,25,opt,name=node_removed,json=nodeRemoved,proto3,oneof"`
+}
+
 func (*Delta_Ticket) isDelta_Change() {}
 
 func (*Delta_TicketDetail) isDelta_Change() {}
@@ -482,6 +499,8 @@ func (*Delta_Control) isDelta_Change() {}
 func (*Delta_Offers) isDelta_Change() {}
 
 func (*Delta_Proposal) isDelta_Change() {}
+
+func (*Delta_NodeRemoved) isDelta_Change() {}
 
 // Control is the kill switch: while paused, Athena makes no decisions and sends no replies.
 type Control struct {
@@ -699,9 +718,14 @@ type TicketSummary struct {
 	ReviewRounds uint32 `protobuf:"varint,21,opt,name=review_rounds,json=reviewRounds,proto3" json:"review_rounds,omitempty"`
 	// trust is the trust class of the sender the Ticket's Mandate was given on: owner, allowed, collaborator, stranger,
 	// bot or ci.
-	Trust         string `protobuf:"bytes,22,opt,name=trust,proto3" json:"trust,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Trust string `protobuf:"bytes,22,opt,name=trust,proto3" json:"trust,omitempty"`
+	// node_id and node_name are the node the latest Assignment runs on; empty before one is placed.
+	NodeId   string `protobuf:"bytes,23,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	NodeName string `protobuf:"bytes,24,opt,name=node_name,json=nodeName,proto3" json:"node_name,omitempty"`
+	// waiting_for_node is set while the Ticket waits for the node it is pinned to, which is not online.
+	WaitingForNode bool `protobuf:"varint,25,opt,name=waiting_for_node,json=waitingForNode,proto3" json:"waiting_for_node,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *TicketSummary) Reset() {
@@ -886,6 +910,27 @@ func (x *TicketSummary) GetTrust() string {
 		return x.Trust
 	}
 	return ""
+}
+
+func (x *TicketSummary) GetNodeId() string {
+	if x != nil {
+		return x.NodeId
+	}
+	return ""
+}
+
+func (x *TicketSummary) GetNodeName() string {
+	if x != nil {
+		return x.NodeName
+	}
+	return ""
+}
+
+func (x *TicketSummary) GetWaitingForNode() bool {
+	if x != nil {
+		return x.WaitingForNode
+	}
+	return false
 }
 
 type TicketDetail struct {
@@ -1724,7 +1769,17 @@ type NodeStatus struct {
 	// claude_version is kept for older clients; runtimes has it, and Codex, now.
 	ClaudeVersion string `protobuf:"bytes,6,opt,name=claude_version,json=claudeVersion,proto3" json:"claude_version,omitempty"`
 	// runtimes are the node's runtimes, sorted by name.
-	Runtimes      []*RuntimeStatus `protobuf:"bytes,7,rep,name=runtimes,proto3" json:"runtimes,omitempty"`
+	Runtimes []*RuntimeStatus `protobuf:"bytes,7,rep,name=runtimes,proto3" json:"runtimes,omitempty"`
+	// id is the node's stable id; "local" for the embedded node for now.
+	Id string `protobuf:"bytes,8,opt,name=id,proto3" json:"id,omitempty"`
+	// state is online, offline, draining or revoked.
+	State    string                 `protobuf:"bytes,9,opt,name=state,proto3" json:"state,omitempty"`
+	LastSeen *timestamppb.Timestamp `protobuf:"bytes,10,opt,name=last_seen,json=lastSeen,proto3" json:"last_seen,omitempty"`
+	Os       string                 `protobuf:"bytes,11,opt,name=os,proto3" json:"os,omitempty"`
+	Arch     string                 `protobuf:"bytes,12,opt,name=arch,proto3" json:"arch,omitempty"`
+	// local marks the node embedded in the server ("this machine").
+	Local         bool   `protobuf:"varint,13,opt,name=local,proto3" json:"local,omitempty"`
+	Version       string `protobuf:"bytes,14,opt,name=version,proto3" json:"version,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1806,6 +1861,55 @@ func (x *NodeStatus) GetRuntimes() []*RuntimeStatus {
 		return x.Runtimes
 	}
 	return nil
+}
+
+func (x *NodeStatus) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *NodeStatus) GetState() string {
+	if x != nil {
+		return x.State
+	}
+	return ""
+}
+
+func (x *NodeStatus) GetLastSeen() *timestamppb.Timestamp {
+	if x != nil {
+		return x.LastSeen
+	}
+	return nil
+}
+
+func (x *NodeStatus) GetOs() string {
+	if x != nil {
+		return x.Os
+	}
+	return ""
+}
+
+func (x *NodeStatus) GetArch() string {
+	if x != nil {
+		return x.Arch
+	}
+	return ""
+}
+
+func (x *NodeStatus) GetLocal() bool {
+	if x != nil {
+		return x.Local
+	}
+	return false
+}
+
+func (x *NodeStatus) GetVersion() string {
+	if x != nil {
+		return x.Version
+	}
+	return ""
 }
 
 // QuotaWindow is one usage-limit window of a runtime.
@@ -2680,7 +2784,7 @@ var File_athena_v1_state_proto protoreflect.FileDescriptor
 
 const file_athena_v1_state_proto_rawDesc = "" +
 	"\n" +
-	"\x15athena/v1/state.proto\x12\tathena.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xe6\x05\n" +
+	"\x15athena/v1/state.proto\x12\tathena.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xf4\x05\n" +
 	"\bSnapshot\x12\x16\n" +
 	"\x06cursor\x18\x01 \x01(\x04R\x06cursor\x122\n" +
 	"\atickets\x18\x02 \x03(\v2\x18.athena.v1.TicketSummaryR\atickets\x125\n" +
@@ -2688,7 +2792,6 @@ const file_athena_v1_state_proto_rawDesc = "" +
 	"\btriggers\x18\x04 \x03(\v2\x16.athena.v1.TriggerViewR\btriggers\x12/\n" +
 	"\athreads\x18\x05 \x03(\v2\x15.athena.v1.ThreadViewR\athreads\x125\n" +
 	"\tdecisions\x18\x06 \x03(\v2\x17.athena.v1.DecisionViewR\tdecisions\x12)\n" +
-	"\x04node\x18\a \x01(\v2\x15.athena.v1.NodeStatusR\x04node\x12)\n" +
 	"\x06health\x18\b \x01(\v2\x11.athena.v1.HealthR\x06health\x12-\n" +
 	"\x06policy\x18\t \x01(\v2\x15.athena.v1.PolicyViewR\x06policy\x12)\n" +
 	"\x05repos\x18\n" +
@@ -2697,7 +2800,8 @@ const file_athena_v1_state_proto_rawDesc = "" +
 	"\aprompts\x18\f \x01(\v2\x16.athena.v1.PromptsViewR\aprompts\x12,\n" +
 	"\acontrol\x18\r \x01(\v2\x12.athena.v1.ControlR\acontrol\x12,\n" +
 	"\x06offers\x18\x0e \x01(\v2\x14.athena.v1.OfferListR\x06offers\x125\n" +
-	"\tproposals\x18\x0f \x03(\v2\x17.athena.v1.ProposalViewR\tproposals\"\xb7\x06\n" +
+	"\tproposals\x18\x0f \x03(\v2\x17.athena.v1.ProposalViewR\tproposals\x12+\n" +
+	"\x05nodes\x18\x10 \x03(\v2\x15.athena.v1.NodeStatusR\x05nodesJ\x04\b\a\x10\bR\x04node\"\xdc\x06\n" +
 	"\x05Delta\x12\x10\n" +
 	"\x03seq\x18\x01 \x01(\x04R\x03seq\x122\n" +
 	"\x06ticket\x18\n" +
@@ -2715,7 +2819,8 @@ const file_athena_v1_state_proto_rawDesc = "" +
 	"\aprompts\x18\x15 \x01(\v2\x16.athena.v1.PromptsViewH\x00R\aprompts\x12.\n" +
 	"\acontrol\x18\x16 \x01(\v2\x12.athena.v1.ControlH\x00R\acontrol\x12.\n" +
 	"\x06offers\x18\x17 \x01(\v2\x14.athena.v1.OfferListH\x00R\x06offers\x125\n" +
-	"\bproposal\x18\x18 \x01(\v2\x17.athena.v1.ProposalViewH\x00R\bproposalB\b\n" +
+	"\bproposal\x18\x18 \x01(\v2\x17.athena.v1.ProposalViewH\x00R\bproposal\x12#\n" +
+	"\fnode_removed\x18\x19 \x01(\tH\x00R\vnodeRemovedB\b\n" +
 	"\x06change\"c\n" +
 	"\aControl\x12\x16\n" +
 	"\x06paused\x18\x01 \x01(\bR\x06paused\x120\n" +
@@ -2728,7 +2833,7 @@ const file_athena_v1_state_proto_rawDesc = "" +
 	"\x04repo\x18\x04 \x01(\tR\x04repo\x12\x1a\n" +
 	"\bapproved\x18\x05 \x01(\rR\bapproved\">\n" +
 	"\tOfferList\x121\n" +
-	"\x06offers\x18\x01 \x03(\v2\x19.athena.v1.PromotionOfferR\x06offers\"\xc4\x05\n" +
+	"\x06offers\x18\x01 \x03(\v2\x19.athena.v1.PromotionOfferR\x06offers\"\xa4\x06\n" +
 	"\rTicketSummary\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
 	"\x05title\x18\x02 \x01(\tR\x05title\x12\x14\n" +
@@ -2754,7 +2859,10 @@ const file_athena_v1_state_proto_rawDesc = "" +
 	"\x0eruntime_choice\x18\x13 \x01(\tR\rruntimeChoice\x12\x18\n" +
 	"\apairing\x18\x14 \x01(\tR\apairing\x12#\n" +
 	"\rreview_rounds\x18\x15 \x01(\rR\freviewRounds\x12\x14\n" +
-	"\x05trust\x18\x16 \x01(\tR\x05trust\"\xee\x01\n" +
+	"\x05trust\x18\x16 \x01(\tR\x05trust\x12\x17\n" +
+	"\anode_id\x18\x17 \x01(\tR\x06nodeId\x12\x1b\n" +
+	"\tnode_name\x18\x18 \x01(\tR\bnodeName\x12(\n" +
+	"\x10waiting_for_node\x18\x19 \x01(\bR\x0ewaitingForNode\"\xee\x01\n" +
 	"\fTicketDetail\x122\n" +
 	"\asummary\x18\x01 \x01(\v2\x18.athena.v1.TicketSummaryR\asummary\x124\n" +
 	"\btimeline\x18\x02 \x03(\v2\x18.athena.v1.TimelineEntryR\btimeline\x12\x18\n" +
@@ -2830,7 +2938,7 @@ const file_athena_v1_state_proto_rawDesc = "" +
 	"\x06values\x18\x02 \x03(\v2\x1d.athena.v1.Reason.ValuesEntryR\x06values\x1a9\n" +
 	"\vValuesEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xf5\x01\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xa8\x03\n" +
 	"\n" +
 	"NodeStatus\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x14\n" +
@@ -2840,7 +2948,15 @@ const file_athena_v1_state_proto_rawDesc = "" +
 	"\x0flive_ticket_ids\x18\x04 \x03(\tR\rliveTicketIds\x12\x16\n" +
 	"\x06queued\x18\x05 \x01(\rR\x06queued\x12%\n" +
 	"\x0eclaude_version\x18\x06 \x01(\tR\rclaudeVersion\x124\n" +
-	"\bruntimes\x18\a \x03(\v2\x18.athena.v1.RuntimeStatusR\bruntimes\"\x84\x01\n" +
+	"\bruntimes\x18\a \x03(\v2\x18.athena.v1.RuntimeStatusR\bruntimes\x12\x0e\n" +
+	"\x02id\x18\b \x01(\tR\x02id\x12\x14\n" +
+	"\x05state\x18\t \x01(\tR\x05state\x127\n" +
+	"\tlast_seen\x18\n" +
+	" \x01(\v2\x1a.google.protobuf.TimestampR\blastSeen\x12\x0e\n" +
+	"\x02os\x18\v \x01(\tR\x02os\x12\x12\n" +
+	"\x04arch\x18\f \x01(\tR\x04arch\x12\x14\n" +
+	"\x05local\x18\r \x01(\bR\x05local\x12\x18\n" +
+	"\aversion\x18\x0e \x01(\tR\aversion\"\x84\x01\n" +
 	"\vQuotaWindow\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x12\n" +
 	"\x04used\x18\x02 \x01(\x02R\x04used\x127\n" +
@@ -2962,15 +3078,15 @@ var file_athena_v1_state_proto_depIdxs = []int32{
 	10, // 2: athena.v1.Snapshot.triggers:type_name -> athena.v1.TriggerView
 	11, // 3: athena.v1.Snapshot.threads:type_name -> athena.v1.ThreadView
 	13, // 4: athena.v1.Snapshot.decisions:type_name -> athena.v1.DecisionView
-	15, // 5: athena.v1.Snapshot.node:type_name -> athena.v1.NodeStatus
-	19, // 6: athena.v1.Snapshot.health:type_name -> athena.v1.Health
-	21, // 7: athena.v1.Snapshot.policy:type_name -> athena.v1.PolicyView
-	22, // 8: athena.v1.Snapshot.repos:type_name -> athena.v1.RepoView
-	25, // 9: athena.v1.Snapshot.notifications:type_name -> athena.v1.NotificationPrefsView
-	26, // 10: athena.v1.Snapshot.prompts:type_name -> athena.v1.PromptsView
-	2,  // 11: athena.v1.Snapshot.control:type_name -> athena.v1.Control
-	4,  // 12: athena.v1.Snapshot.offers:type_name -> athena.v1.OfferList
-	23, // 13: athena.v1.Snapshot.proposals:type_name -> athena.v1.ProposalView
+	19, // 5: athena.v1.Snapshot.health:type_name -> athena.v1.Health
+	21, // 6: athena.v1.Snapshot.policy:type_name -> athena.v1.PolicyView
+	22, // 7: athena.v1.Snapshot.repos:type_name -> athena.v1.RepoView
+	25, // 8: athena.v1.Snapshot.notifications:type_name -> athena.v1.NotificationPrefsView
+	26, // 9: athena.v1.Snapshot.prompts:type_name -> athena.v1.PromptsView
+	2,  // 10: athena.v1.Snapshot.control:type_name -> athena.v1.Control
+	4,  // 11: athena.v1.Snapshot.offers:type_name -> athena.v1.OfferList
+	23, // 12: athena.v1.Snapshot.proposals:type_name -> athena.v1.ProposalView
+	15, // 13: athena.v1.Snapshot.nodes:type_name -> athena.v1.NodeStatus
 	5,  // 14: athena.v1.Delta.ticket:type_name -> athena.v1.TicketSummary
 	6,  // 15: athena.v1.Delta.ticket_detail:type_name -> athena.v1.TicketDetail
 	9,  // 16: athena.v1.Delta.approval:type_name -> athena.v1.ApprovalView
@@ -3007,22 +3123,23 @@ var file_athena_v1_state_proto_depIdxs = []int32{
 	29, // 47: athena.v1.DecisionView.dismissed_at:type_name -> google.protobuf.Timestamp
 	28, // 48: athena.v1.Reason.values:type_name -> athena.v1.Reason.ValuesEntry
 	17, // 49: athena.v1.NodeStatus.runtimes:type_name -> athena.v1.RuntimeStatus
-	29, // 50: athena.v1.QuotaWindow.resets_at:type_name -> google.protobuf.Timestamp
-	16, // 51: athena.v1.RuntimeStatus.windows:type_name -> athena.v1.QuotaWindow
-	29, // 52: athena.v1.RuntimeStatus.limited_until:type_name -> google.protobuf.Timestamp
-	29, // 53: athena.v1.RuntimeStatus.read_at:type_name -> google.protobuf.Timestamp
-	18, // 54: athena.v1.RuntimeStatus.models:type_name -> athena.v1.RuntimeModel
-	20, // 55: athena.v1.Health.items:type_name -> athena.v1.HealthItem
-	29, // 56: athena.v1.HealthItem.since:type_name -> google.protobuf.Timestamp
-	29, // 57: athena.v1.RepoView.last_used_at:type_name -> google.protobuf.Timestamp
-	29, // 58: athena.v1.ProposalView.created_at:type_name -> google.protobuf.Timestamp
-	22, // 59: athena.v1.RepoList.repos:type_name -> athena.v1.RepoView
-	27, // 60: athena.v1.PromptsView.parts:type_name -> athena.v1.PromptPartView
-	61, // [61:61] is the sub-list for method output_type
-	61, // [61:61] is the sub-list for method input_type
-	61, // [61:61] is the sub-list for extension type_name
-	61, // [61:61] is the sub-list for extension extendee
-	0,  // [0:61] is the sub-list for field type_name
+	29, // 50: athena.v1.NodeStatus.last_seen:type_name -> google.protobuf.Timestamp
+	29, // 51: athena.v1.QuotaWindow.resets_at:type_name -> google.protobuf.Timestamp
+	16, // 52: athena.v1.RuntimeStatus.windows:type_name -> athena.v1.QuotaWindow
+	29, // 53: athena.v1.RuntimeStatus.limited_until:type_name -> google.protobuf.Timestamp
+	29, // 54: athena.v1.RuntimeStatus.read_at:type_name -> google.protobuf.Timestamp
+	18, // 55: athena.v1.RuntimeStatus.models:type_name -> athena.v1.RuntimeModel
+	20, // 56: athena.v1.Health.items:type_name -> athena.v1.HealthItem
+	29, // 57: athena.v1.HealthItem.since:type_name -> google.protobuf.Timestamp
+	29, // 58: athena.v1.RepoView.last_used_at:type_name -> google.protobuf.Timestamp
+	29, // 59: athena.v1.ProposalView.created_at:type_name -> google.protobuf.Timestamp
+	22, // 60: athena.v1.RepoList.repos:type_name -> athena.v1.RepoView
+	27, // 61: athena.v1.PromptsView.parts:type_name -> athena.v1.PromptPartView
+	62, // [62:62] is the sub-list for method output_type
+	62, // [62:62] is the sub-list for method input_type
+	62, // [62:62] is the sub-list for extension type_name
+	62, // [62:62] is the sub-list for extension extendee
+	0,  // [0:62] is the sub-list for field type_name
 }
 
 func init() { file_athena_v1_state_proto_init() }
@@ -3046,6 +3163,7 @@ func file_athena_v1_state_proto_init() {
 		(*Delta_Control)(nil),
 		(*Delta_Offers)(nil),
 		(*Delta_Proposal)(nil),
+		(*Delta_NodeRemoved)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{

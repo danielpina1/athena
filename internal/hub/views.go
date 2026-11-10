@@ -2,6 +2,7 @@ package hub
 
 import (
 	"regexp"
+	"runtime"
 	"slices"
 	"sort"
 	"strconv"
@@ -212,7 +213,8 @@ func decisionView(d *core.Decision) *athenav1.DecisionView {
 
 func nodeStatus(s node.Status) *athenav1.NodeStatus {
 	v := &athenav1.NodeStatus{Name: s.Name, Slots: uint32(s.Slots), SlotsInUse: uint32(s.SlotsInUse),
-		LiveTicketIds: slices.Clone(s.LiveTicketIDs), Queued: uint32(s.Queued), ClaudeVersion: s.ClaudeVersion}
+		LiveTicketIds: slices.Clone(s.LiveTicketIDs), Queued: uint32(s.Queued), ClaudeVersion: s.ClaudeVersion,
+		Id: "local", State: "online", Os: runtime.GOOS, Arch: runtime.GOARCH, Local: true}
 	for _, r := range s.Runtimes {
 		v.Runtimes = append(v.Runtimes, runtimeStatus(r))
 	}

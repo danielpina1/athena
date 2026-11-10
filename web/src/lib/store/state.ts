@@ -43,7 +43,8 @@ export type AthenaData = {
   /** By thread key. */
   threads: Map<string, ThreadView>;
   decisions: Map<string, DecisionView>;
-  node?: NodeStatus;
+  /** The nodes that run Tickets, the embedded one first. */
+  nodes: NodeStatus[];
   health?: Health;
   policy?: PolicyView;
   /** The kill switch: absent until the first Snapshot; paused while Athena makes no decisions and sends no replies. */
@@ -110,7 +111,7 @@ function empty(): AthenaData {
     triggers: new Map(),
     threads: new Map(),
     decisions: new Map(),
-    node: undefined,
+    nodes: [],
     health: undefined,
     policy: undefined,
     control: undefined,
@@ -216,8 +217,15 @@ function change(s: AthenaData, d: Delta): Partial<AthenaData> {
       return { threads: upsert(s.threads, c.value.key, c.value) };
     case "decision":
       return { decisions: upsert(s.decisions, c.value.id, c.value) };
-    case "node":
-      return { node: c.value };
+    case "node": {
+      const v = c.value;
+      const at = s.nodes.findIndex((n) => n.id === v.id);
+      return { nodes: at < 0 ? [...s.nodes, v] : s.nodes.map((n, i) => (i === at ? v : n)) };
+    }
+    case "nodeRemoved": {
+      const gone = c.value;
+      return { nodes: s.nodes.filter((n) => n.id !== gone) };
+    }
     case "health":
       return { health: c.value };
     case "policy":
@@ -271,7 +279,7 @@ export const useAthena = create<AthenaState>()((set, get) => ({
       triggers: byKey(s.triggers, (t) => t.id),
       threads: byKey(s.threads, (t) => t.key),
       decisions: byKey(s.decisions, (d) => d.id),
-      node: s.node,
+      nodes: s.nodes,
       health: s.health,
       policy: s.policy,
       control: s.control,

@@ -15,7 +15,8 @@ message Snapshot {
   repeated TriggerView triggers = 4;
   repeated ThreadView threads = 5;
   repeated DecisionView decisions = 6;
-  NodeStatus node = 7;
+  reserved 7;
+  reserved "node";
   Health health = 8;
   PolicyView policy = 9;
   // repos are the repositories and folders a task can be placed in, the last used first.
@@ -27,6 +28,8 @@ message Snapshot {
   OfferList offers = 14;
   // proposals are the replies, pushes and pull requests Athena holds until the owner applies or discards them.
   repeated ProposalView proposals = 15;
+  // nodes are the machines that run Tickets, the embedded one first.
+  repeated NodeStatus nodes = 16;
 }
 
 message Delta {
@@ -51,6 +54,9 @@ message Delta {
     // proposal carries one Proposal in whatever state it now has; a client drops it from its pending list once it is
     // no longer pending.
     ProposalView proposal = 24;
+    // node_removed is a node id a client drops from its list. Defined, sent by nothing yet: plan 6 defers
+    // `athena node forget`.
+    string node_removed = 25;
   }
 }
 
@@ -108,6 +114,11 @@ message TicketSummary {
   // trust is the trust class of the sender the Ticket's Mandate was given on: owner, allowed, collaborator, stranger,
   // bot or ci.
   string trust = 22;
+  // node_id and node_name are the node the latest Assignment runs on; empty before one is placed.
+  string node_id = 23;
+  string node_name = 24;
+  // waiting_for_node is set while the Ticket waits for the node it is pinned to, which is not online.
+  bool waiting_for_node = 25;
 }
 
 message TicketDetail {
@@ -243,6 +254,16 @@ message NodeStatus {
   string claude_version = 6;
   // runtimes are the node's runtimes, sorted by name.
   repeated RuntimeStatus runtimes = 7;
+  // id is the node's stable id; "local" for the embedded node for now.
+  string id = 8;
+  // state is online, offline, draining or revoked.
+  string state = 9;
+  google.protobuf.Timestamp last_seen = 10;
+  string os = 11;
+  string arch = 12;
+  // local marks the node embedded in the server ("this machine").
+  bool local = 13;
+  string version = 14;
 }
 
 // QuotaWindow is one usage-limit window of a runtime.

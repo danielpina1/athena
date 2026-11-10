@@ -16,7 +16,7 @@ import { cn } from "@/ui/cn";
 import { QuotaBars } from "./QuotaBars";
 
 export function Nodes() {
-  const node = useAthena((s) => s.node);
+  const node = useAthena((s) => s.nodes[0]);
   const health = useAthena((s) => s.health);
   const synced = useAthena(selectSynced);
   return (

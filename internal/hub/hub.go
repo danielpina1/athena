@@ -862,7 +862,7 @@ func (h *Hub) Snapshot() (*athenav1.Snapshot, error) {
 		s.Decisions = append(s.Decisions, decisionView(&d))
 	}
 
-	s.Node = nodeStatus(h.src.NodeStatus())
+	s.Nodes = []*athenav1.NodeStatus{nodeStatus(h.src.NodeStatus())}
 	if health == nil {
 		health = h.probeHealth() // before Start
 	}

@@ -54,7 +54,7 @@ export async function editLink(page: Page, edits: LinkEdits): Promise<void> {
       const f = fromBinary(FrameSchema, new Uint8Array(message));
       const body = f.body;
       if (body.case === "snapshot") {
-        if (body.value.node) edits.node?.(body.value.node);
+        body.value.nodes.forEach((n) => edits.node?.(n));
         body.value.tickets.forEach((t) => edits.ticket?.(t));
         body.value.triggers.forEach((t) => edits.trigger?.(t));
         edits.repos?.(body.value.repos);

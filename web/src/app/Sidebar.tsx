@@ -75,7 +75,7 @@ function SideLink({ item }: { item: NavItem }) {
 const label = "px-4 pt-4 pb-1 font-mono text-xs tracking-wider text-muted uppercase";
 
 function NodeCard() {
-  const node = useAthena((s) => s.node);
+  const node = useAthena((s) => s.nodes[0]);
   const synced = useAthena(selectSynced);
   const now = useNow();
   return (

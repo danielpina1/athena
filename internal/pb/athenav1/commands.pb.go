@@ -54,6 +54,10 @@ type Command struct {
 	//	*Command_DismissOffer
 	//	*Command_ApplyProposal
 	//	*Command_DiscardProposal
+	//	*Command_RetryElsewhere
+	//	*Command_CreateNodeToken
+	//	*Command_SetNodeDraining
+	//	*Command_RevokeNode
 	Action        isCommand_Action `protobuf_oneof:"action"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -346,6 +350,42 @@ func (x *Command) GetDiscardProposal() *DiscardProposal {
 	return nil
 }
 
+func (x *Command) GetRetryElsewhere() *RetryElsewhere {
+	if x != nil {
+		if x, ok := x.Action.(*Command_RetryElsewhere); ok {
+			return x.RetryElsewhere
+		}
+	}
+	return nil
+}
+
+func (x *Command) GetCreateNodeToken() *CreateNodeToken {
+	if x != nil {
+		if x, ok := x.Action.(*Command_CreateNodeToken); ok {
+			return x.CreateNodeToken
+		}
+	}
+	return nil
+}
+
+func (x *Command) GetSetNodeDraining() *SetNodeDraining {
+	if x != nil {
+		if x, ok := x.Action.(*Command_SetNodeDraining); ok {
+			return x.SetNodeDraining
+		}
+	}
+	return nil
+}
+
+func (x *Command) GetRevokeNode() *RevokeNode {
+	if x != nil {
+		if x, ok := x.Action.(*Command_RevokeNode); ok {
+			return x.RevokeNode
+		}
+	}
+	return nil
+}
+
 type isCommand_Action interface {
 	isCommand_Action()
 }
@@ -458,6 +498,22 @@ type Command_DiscardProposal struct {
 	DiscardProposal *DiscardProposal `protobuf:"bytes,36,opt,name=discard_proposal,json=discardProposal,proto3,oneof"`
 }
 
+type Command_RetryElsewhere struct {
+	RetryElsewhere *RetryElsewhere `protobuf:"bytes,37,opt,name=retry_elsewhere,json=retryElsewhere,proto3,oneof"`
+}
+
+type Command_CreateNodeToken struct {
+	CreateNodeToken *CreateNodeToken `protobuf:"bytes,38,opt,name=create_node_token,json=createNodeToken,proto3,oneof"`
+}
+
+type Command_SetNodeDraining struct {
+	SetNodeDraining *SetNodeDraining `protobuf:"bytes,39,opt,name=set_node_draining,json=setNodeDraining,proto3,oneof"`
+}
+
+type Command_RevokeNode struct {
+	RevokeNode *RevokeNode `protobuf:"bytes,40,opt,name=revoke_node,json=revokeNode,proto3,oneof"`
+}
+
 func (*Command_SubmitTask) isCommand_Action() {}
 
 func (*Command_Reply) isCommand_Action() {}
@@ -512,6 +568,14 @@ func (*Command_ApplyProposal) isCommand_Action() {}
 
 func (*Command_DiscardProposal) isCommand_Action() {}
 
+func (*Command_RetryElsewhere) isCommand_Action() {}
+
+func (*Command_CreateNodeToken) isCommand_Action() {}
+
+func (*Command_SetNodeDraining) isCommand_Action() {}
+
+func (*Command_RevokeNode) isCommand_Action() {}
+
 type SubmitTask struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Text  string                 `protobuf:"bytes,1,opt,name=text,proto3" json:"text,omitempty"`
@@ -522,7 +586,9 @@ type SubmitTask struct {
 	Runtime string `protobuf:"bytes,5,opt,name=runtime,proto3" json:"runtime,omitempty"`
 	// review pairs the task with a review of its ready reports (true) or with none (false); unset is the Policy's
 	// default.
-	Review        *bool `protobuf:"varint,6,opt,name=review,proto3,oneof" json:"review,omitempty"`
+	Review *bool `protobuf:"varint,6,opt,name=review,proto3,oneof" json:"review,omitempty"`
+	// node is a node id to run the task on; empty means any.
+	Node          string `protobuf:"bytes,7,opt,name=node,proto3" json:"node,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -599,6 +665,261 @@ func (x *SubmitTask) GetReview() bool {
 	return false
 }
 
+func (x *SubmitTask) GetNode() string {
+	if x != nil {
+		return x.Node
+	}
+	return ""
+}
+
+// RetryElsewhere retries a Ticket on a different node than the one it ran on.
+type RetryElsewhere struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	TicketId      string                 `protobuf:"bytes,1,opt,name=ticket_id,json=ticketId,proto3" json:"ticket_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RetryElsewhere) Reset() {
+	*x = RetryElsewhere{}
+	mi := &file_athena_v1_commands_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RetryElsewhere) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RetryElsewhere) ProtoMessage() {}
+
+func (x *RetryElsewhere) ProtoReflect() protoreflect.Message {
+	mi := &file_athena_v1_commands_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RetryElsewhere.ProtoReflect.Descriptor instead.
+func (*RetryElsewhere) Descriptor() ([]byte, []int) {
+	return file_athena_v1_commands_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *RetryElsewhere) GetTicketId() string {
+	if x != nil {
+		return x.TicketId
+	}
+	return ""
+}
+
+// CreateNodeToken makes a single-use join token for a new node; the result carries a NodeToken.
+type CreateNodeToken struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Name  string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	// ttl_seconds is the token's life; 0 is the default (1 h), at most 24 h.
+	TtlSeconds    uint32 `protobuf:"varint,2,opt,name=ttl_seconds,json=ttlSeconds,proto3" json:"ttl_seconds,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CreateNodeToken) Reset() {
+	*x = CreateNodeToken{}
+	mi := &file_athena_v1_commands_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CreateNodeToken) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CreateNodeToken) ProtoMessage() {}
+
+func (x *CreateNodeToken) ProtoReflect() protoreflect.Message {
+	mi := &file_athena_v1_commands_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CreateNodeToken.ProtoReflect.Descriptor instead.
+func (*CreateNodeToken) Descriptor() ([]byte, []int) {
+	return file_athena_v1_commands_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *CreateNodeToken) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *CreateNodeToken) GetTtlSeconds() uint32 {
+	if x != nil {
+		return x.TtlSeconds
+	}
+	return 0
+}
+
+type SetNodeDraining struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	NodeId        string                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	Draining      bool                   `protobuf:"varint,2,opt,name=draining,proto3" json:"draining,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SetNodeDraining) Reset() {
+	*x = SetNodeDraining{}
+	mi := &file_athena_v1_commands_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SetNodeDraining) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SetNodeDraining) ProtoMessage() {}
+
+func (x *SetNodeDraining) ProtoReflect() protoreflect.Message {
+	mi := &file_athena_v1_commands_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SetNodeDraining.ProtoReflect.Descriptor instead.
+func (*SetNodeDraining) Descriptor() ([]byte, []int) {
+	return file_athena_v1_commands_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *SetNodeDraining) GetNodeId() string {
+	if x != nil {
+		return x.NodeId
+	}
+	return ""
+}
+
+func (x *SetNodeDraining) GetDraining() bool {
+	if x != nil {
+		return x.Draining
+	}
+	return false
+}
+
+type RevokeNode struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	NodeId        string                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RevokeNode) Reset() {
+	*x = RevokeNode{}
+	mi := &file_athena_v1_commands_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RevokeNode) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RevokeNode) ProtoMessage() {}
+
+func (x *RevokeNode) ProtoReflect() protoreflect.Message {
+	mi := &file_athena_v1_commands_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RevokeNode.ProtoReflect.Descriptor instead.
+func (*RevokeNode) Descriptor() ([]byte, []int) {
+	return file_athena_v1_commands_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *RevokeNode) GetNodeId() string {
+	if x != nil {
+		return x.NodeId
+	}
+	return ""
+}
+
+// NodeToken is the join command a CreateNodeToken answers with.
+type NodeToken struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Command       string                 `protobuf:"bytes,1,opt,name=command,proto3" json:"command,omitempty"`
+	ExpiresAt     *timestamppb.Timestamp `protobuf:"bytes,2,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *NodeToken) Reset() {
+	*x = NodeToken{}
+	mi := &file_athena_v1_commands_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *NodeToken) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*NodeToken) ProtoMessage() {}
+
+func (x *NodeToken) ProtoReflect() protoreflect.Message {
+	mi := &file_athena_v1_commands_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use NodeToken.ProtoReflect.Descriptor instead.
+func (*NodeToken) Descriptor() ([]byte, []int) {
+	return file_athena_v1_commands_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *NodeToken) GetCommand() string {
+	if x != nil {
+		return x.Command
+	}
+	return ""
+}
+
+func (x *NodeToken) GetExpiresAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.ExpiresAt
+	}
+	return nil
+}
+
 type Reply struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	TicketId      string                 `protobuf:"bytes,1,opt,name=ticket_id,json=ticketId,proto3" json:"ticket_id,omitempty"`
@@ -609,7 +930,7 @@ type Reply struct {
 
 func (x *Reply) Reset() {
 	*x = Reply{}
-	mi := &file_athena_v1_commands_proto_msgTypes[2]
+	mi := &file_athena_v1_commands_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -621,7 +942,7 @@ func (x *Reply) String() string {
 func (*Reply) ProtoMessage() {}
 
 func (x *Reply) ProtoReflect() protoreflect.Message {
-	mi := &file_athena_v1_commands_proto_msgTypes[2]
+	mi := &file_athena_v1_commands_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -634,7 +955,7 @@ func (x *Reply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Reply.ProtoReflect.Descriptor instead.
 func (*Reply) Descriptor() ([]byte, []int) {
-	return file_athena_v1_commands_proto_rawDescGZIP(), []int{2}
+	return file_athena_v1_commands_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *Reply) GetTicketId() string {
@@ -661,7 +982,7 @@ type Stop struct {
 
 func (x *Stop) Reset() {
 	*x = Stop{}
-	mi := &file_athena_v1_commands_proto_msgTypes[3]
+	mi := &file_athena_v1_commands_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -673,7 +994,7 @@ func (x *Stop) String() string {
 func (*Stop) ProtoMessage() {}
 
 func (x *Stop) ProtoReflect() protoreflect.Message {
-	mi := &file_athena_v1_commands_proto_msgTypes[3]
+	mi := &file_athena_v1_commands_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -686,7 +1007,7 @@ func (x *Stop) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Stop.ProtoReflect.Descriptor instead.
 func (*Stop) Descriptor() ([]byte, []int) {
-	return file_athena_v1_commands_proto_rawDescGZIP(), []int{3}
+	return file_athena_v1_commands_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *Stop) GetTicketId() string {
@@ -712,7 +1033,7 @@ type Retry struct {
 
 func (x *Retry) Reset() {
 	*x = Retry{}
-	mi := &file_athena_v1_commands_proto_msgTypes[4]
+	mi := &file_athena_v1_commands_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -724,7 +1045,7 @@ func (x *Retry) String() string {
 func (*Retry) ProtoMessage() {}
 
 func (x *Retry) ProtoReflect() protoreflect.Message {
-	mi := &file_athena_v1_commands_proto_msgTypes[4]
+	mi := &file_athena_v1_commands_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -737,7 +1058,7 @@ func (x *Retry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Retry.ProtoReflect.Descriptor instead.
 func (*Retry) Descriptor() ([]byte, []int) {
-	return file_athena_v1_commands_proto_rawDescGZIP(), []int{4}
+	return file_athena_v1_commands_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *Retry) GetTicketId() string {
@@ -756,7 +1077,7 @@ type Interrupt struct {
 
 func (x *Interrupt) Reset() {
 	*x = Interrupt{}
-	mi := &file_athena_v1_commands_proto_msgTypes[5]
+	mi := &file_athena_v1_commands_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -768,7 +1089,7 @@ func (x *Interrupt) String() string {
 func (*Interrupt) ProtoMessage() {}
 
 func (x *Interrupt) ProtoReflect() protoreflect.Message {
-	mi := &file_athena_v1_commands_proto_msgTypes[5]
+	mi := &file_athena_v1_commands_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -781,7 +1102,7 @@ func (x *Interrupt) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Interrupt.ProtoReflect.Descriptor instead.
 func (*Interrupt) Descriptor() ([]byte, []int) {
-	return file_athena_v1_commands_proto_rawDescGZIP(), []int{5}
+	return file_athena_v1_commands_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *Interrupt) GetTicketId() string {
@@ -802,7 +1123,7 @@ type AnswerApproval struct {
 
 func (x *AnswerApproval) Reset() {
 	*x = AnswerApproval{}
-	mi := &file_athena_v1_commands_proto_msgTypes[6]
+	mi := &file_athena_v1_commands_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -814,7 +1135,7 @@ func (x *AnswerApproval) String() string {
 func (*AnswerApproval) ProtoMessage() {}
 
 func (x *AnswerApproval) ProtoReflect() protoreflect.Message {
-	mi := &file_athena_v1_commands_proto_msgTypes[6]
+	mi := &file_athena_v1_commands_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -827,7 +1148,7 @@ func (x *AnswerApproval) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AnswerApproval.ProtoReflect.Descriptor instead.
 func (*AnswerApproval) Descriptor() ([]byte, []int) {
-	return file_athena_v1_commands_proto_rawDescGZIP(), []int{6}
+	return file_athena_v1_commands_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *AnswerApproval) GetApprovalId() string {
@@ -860,7 +1181,7 @@ type Reevaluate struct {
 
 func (x *Reevaluate) Reset() {
 	*x = Reevaluate{}
-	mi := &file_athena_v1_commands_proto_msgTypes[7]
+	mi := &file_athena_v1_commands_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -872,7 +1193,7 @@ func (x *Reevaluate) String() string {
 func (*Reevaluate) ProtoMessage() {}
 
 func (x *Reevaluate) ProtoReflect() protoreflect.Message {
-	mi := &file_athena_v1_commands_proto_msgTypes[7]
+	mi := &file_athena_v1_commands_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -885,7 +1206,7 @@ func (x *Reevaluate) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Reevaluate.ProtoReflect.Descriptor instead.
 func (*Reevaluate) Descriptor() ([]byte, []int) {
-	return file_athena_v1_commands_proto_rawDescGZIP(), []int{7}
+	return file_athena_v1_commands_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *Reevaluate) GetTriggerId() string {
@@ -903,7 +1224,7 @@ type Pause struct {
 
 func (x *Pause) Reset() {
 	*x = Pause{}
-	mi := &file_athena_v1_commands_proto_msgTypes[8]
+	mi := &file_athena_v1_commands_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -915,7 +1236,7 @@ func (x *Pause) String() string {
 func (*Pause) ProtoMessage() {}
 
 func (x *Pause) ProtoReflect() protoreflect.Message {
-	mi := &file_athena_v1_commands_proto_msgTypes[8]
+	mi := &file_athena_v1_commands_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -928,7 +1249,7 @@ func (x *Pause) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Pause.ProtoReflect.Descriptor instead.
 func (*Pause) Descriptor() ([]byte, []int) {
-	return file_athena_v1_commands_proto_rawDescGZIP(), []int{8}
+	return file_athena_v1_commands_proto_rawDescGZIP(), []int{13}
 }
 
 type Resume struct {
@@ -939,7 +1260,7 @@ type Resume struct {
 
 func (x *Resume) Reset() {
 	*x = Resume{}
-	mi := &file_athena_v1_commands_proto_msgTypes[9]
+	mi := &file_athena_v1_commands_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -951,7 +1272,7 @@ func (x *Resume) String() string {
 func (*Resume) ProtoMessage() {}
 
 func (x *Resume) ProtoReflect() protoreflect.Message {
-	mi := &file_athena_v1_commands_proto_msgTypes[9]
+	mi := &file_athena_v1_commands_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -964,7 +1285,7 @@ func (x *Resume) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Resume.ProtoReflect.Descriptor instead.
 func (*Resume) Descriptor() ([]byte, []int) {
-	return file_athena_v1_commands_proto_rawDescGZIP(), []int{9}
+	return file_athena_v1_commands_proto_rawDescGZIP(), []int{14}
 }
 
 type Dismiss struct {
@@ -976,7 +1297,7 @@ type Dismiss struct {
 
 func (x *Dismiss) Reset() {
 	*x = Dismiss{}
-	mi := &file_athena_v1_commands_proto_msgTypes[10]
+	mi := &file_athena_v1_commands_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -988,7 +1309,7 @@ func (x *Dismiss) String() string {
 func (*Dismiss) ProtoMessage() {}
 
 func (x *Dismiss) ProtoReflect() protoreflect.Message {
-	mi := &file_athena_v1_commands_proto_msgTypes[10]
+	mi := &file_athena_v1_commands_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1001,7 +1322,7 @@ func (x *Dismiss) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Dismiss.ProtoReflect.Descriptor instead.
 func (*Dismiss) Descriptor() ([]byte, []int) {
-	return file_athena_v1_commands_proto_rawDescGZIP(), []int{10}
+	return file_athena_v1_commands_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *Dismiss) GetDecisionId() string {
@@ -1020,7 +1341,7 @@ type Unsubscribe struct {
 
 func (x *Unsubscribe) Reset() {
 	*x = Unsubscribe{}
-	mi := &file_athena_v1_commands_proto_msgTypes[11]
+	mi := &file_athena_v1_commands_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1032,7 +1353,7 @@ func (x *Unsubscribe) String() string {
 func (*Unsubscribe) ProtoMessage() {}
 
 func (x *Unsubscribe) ProtoReflect() protoreflect.Message {
-	mi := &file_athena_v1_commands_proto_msgTypes[11]
+	mi := &file_athena_v1_commands_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1045,7 +1366,7 @@ func (x *Unsubscribe) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Unsubscribe.ProtoReflect.Descriptor instead.
 func (*Unsubscribe) Descriptor() ([]byte, []int) {
-	return file_athena_v1_commands_proto_rawDescGZIP(), []int{11}
+	return file_athena_v1_commands_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *Unsubscribe) GetThread() string {
@@ -1065,7 +1386,7 @@ type SetPolicy struct {
 
 func (x *SetPolicy) Reset() {
 	*x = SetPolicy{}
-	mi := &file_athena_v1_commands_proto_msgTypes[12]
+	mi := &file_athena_v1_commands_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1077,7 +1398,7 @@ func (x *SetPolicy) String() string {
 func (*SetPolicy) ProtoMessage() {}
 
 func (x *SetPolicy) ProtoReflect() protoreflect.Message {
-	mi := &file_athena_v1_commands_proto_msgTypes[12]
+	mi := &file_athena_v1_commands_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1090,7 +1411,7 @@ func (x *SetPolicy) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetPolicy.ProtoReflect.Descriptor instead.
 func (*SetPolicy) Descriptor() ([]byte, []int) {
-	return file_athena_v1_commands_proto_rawDescGZIP(), []int{12}
+	return file_athena_v1_commands_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *SetPolicy) GetBaseRevision() uint32 {
@@ -1116,7 +1437,7 @@ type WatchTicket struct {
 
 func (x *WatchTicket) Reset() {
 	*x = WatchTicket{}
-	mi := &file_athena_v1_commands_proto_msgTypes[13]
+	mi := &file_athena_v1_commands_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1128,7 +1449,7 @@ func (x *WatchTicket) String() string {
 func (*WatchTicket) ProtoMessage() {}
 
 func (x *WatchTicket) ProtoReflect() protoreflect.Message {
-	mi := &file_athena_v1_commands_proto_msgTypes[13]
+	mi := &file_athena_v1_commands_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1141,7 +1462,7 @@ func (x *WatchTicket) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WatchTicket.ProtoReflect.Descriptor instead.
 func (*WatchTicket) Descriptor() ([]byte, []int) {
-	return file_athena_v1_commands_proto_rawDescGZIP(), []int{13}
+	return file_athena_v1_commands_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *WatchTicket) GetTicketId() string {
@@ -1160,7 +1481,7 @@ type UnwatchTicket struct {
 
 func (x *UnwatchTicket) Reset() {
 	*x = UnwatchTicket{}
-	mi := &file_athena_v1_commands_proto_msgTypes[14]
+	mi := &file_athena_v1_commands_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1172,7 +1493,7 @@ func (x *UnwatchTicket) String() string {
 func (*UnwatchTicket) ProtoMessage() {}
 
 func (x *UnwatchTicket) ProtoReflect() protoreflect.Message {
-	mi := &file_athena_v1_commands_proto_msgTypes[14]
+	mi := &file_athena_v1_commands_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1185,7 +1506,7 @@ func (x *UnwatchTicket) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UnwatchTicket.ProtoReflect.Descriptor instead.
 func (*UnwatchTicket) Descriptor() ([]byte, []int) {
-	return file_athena_v1_commands_proto_rawDescGZIP(), []int{14}
+	return file_athena_v1_commands_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *UnwatchTicket) GetTicketId() string {
@@ -1206,7 +1527,7 @@ type PushSubscribe struct {
 
 func (x *PushSubscribe) Reset() {
 	*x = PushSubscribe{}
-	mi := &file_athena_v1_commands_proto_msgTypes[15]
+	mi := &file_athena_v1_commands_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1218,7 +1539,7 @@ func (x *PushSubscribe) String() string {
 func (*PushSubscribe) ProtoMessage() {}
 
 func (x *PushSubscribe) ProtoReflect() protoreflect.Message {
-	mi := &file_athena_v1_commands_proto_msgTypes[15]
+	mi := &file_athena_v1_commands_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1231,7 +1552,7 @@ func (x *PushSubscribe) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PushSubscribe.ProtoReflect.Descriptor instead.
 func (*PushSubscribe) Descriptor() ([]byte, []int) {
-	return file_athena_v1_commands_proto_rawDescGZIP(), []int{15}
+	return file_athena_v1_commands_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *PushSubscribe) GetEndpoint() string {
@@ -1264,7 +1585,7 @@ type PushUnsubscribe struct {
 
 func (x *PushUnsubscribe) Reset() {
 	*x = PushUnsubscribe{}
-	mi := &file_athena_v1_commands_proto_msgTypes[16]
+	mi := &file_athena_v1_commands_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1276,7 +1597,7 @@ func (x *PushUnsubscribe) String() string {
 func (*PushUnsubscribe) ProtoMessage() {}
 
 func (x *PushUnsubscribe) ProtoReflect() protoreflect.Message {
-	mi := &file_athena_v1_commands_proto_msgTypes[16]
+	mi := &file_athena_v1_commands_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1289,7 +1610,7 @@ func (x *PushUnsubscribe) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PushUnsubscribe.ProtoReflect.Descriptor instead.
 func (*PushUnsubscribe) Descriptor() ([]byte, []int) {
-	return file_athena_v1_commands_proto_rawDescGZIP(), []int{16}
+	return file_athena_v1_commands_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *PushUnsubscribe) GetEndpoint() string {
@@ -1308,7 +1629,7 @@ type SetNotificationPrefs struct {
 
 func (x *SetNotificationPrefs) Reset() {
 	*x = SetNotificationPrefs{}
-	mi := &file_athena_v1_commands_proto_msgTypes[17]
+	mi := &file_athena_v1_commands_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1320,7 +1641,7 @@ func (x *SetNotificationPrefs) String() string {
 func (*SetNotificationPrefs) ProtoMessage() {}
 
 func (x *SetNotificationPrefs) ProtoReflect() protoreflect.Message {
-	mi := &file_athena_v1_commands_proto_msgTypes[17]
+	mi := &file_athena_v1_commands_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1333,7 +1654,7 @@ func (x *SetNotificationPrefs) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetNotificationPrefs.ProtoReflect.Descriptor instead.
 func (*SetNotificationPrefs) Descriptor() ([]byte, []int) {
-	return file_athena_v1_commands_proto_rawDescGZIP(), []int{17}
+	return file_athena_v1_commands_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *SetNotificationPrefs) GetMuted() []string {
@@ -1352,7 +1673,7 @@ type Visibility struct {
 
 func (x *Visibility) Reset() {
 	*x = Visibility{}
-	mi := &file_athena_v1_commands_proto_msgTypes[18]
+	mi := &file_athena_v1_commands_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1364,7 +1685,7 @@ func (x *Visibility) String() string {
 func (*Visibility) ProtoMessage() {}
 
 func (x *Visibility) ProtoReflect() protoreflect.Message {
-	mi := &file_athena_v1_commands_proto_msgTypes[18]
+	mi := &file_athena_v1_commands_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1377,7 +1698,7 @@ func (x *Visibility) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Visibility.ProtoReflect.Descriptor instead.
 func (*Visibility) Descriptor() ([]byte, []int) {
-	return file_athena_v1_commands_proto_rawDescGZIP(), []int{18}
+	return file_athena_v1_commands_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *Visibility) GetVisible() bool {
@@ -1395,7 +1716,7 @@ type ListPasskeys struct {
 
 func (x *ListPasskeys) Reset() {
 	*x = ListPasskeys{}
-	mi := &file_athena_v1_commands_proto_msgTypes[19]
+	mi := &file_athena_v1_commands_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1407,7 +1728,7 @@ func (x *ListPasskeys) String() string {
 func (*ListPasskeys) ProtoMessage() {}
 
 func (x *ListPasskeys) ProtoReflect() protoreflect.Message {
-	mi := &file_athena_v1_commands_proto_msgTypes[19]
+	mi := &file_athena_v1_commands_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1420,7 +1741,7 @@ func (x *ListPasskeys) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListPasskeys.ProtoReflect.Descriptor instead.
 func (*ListPasskeys) Descriptor() ([]byte, []int) {
-	return file_athena_v1_commands_proto_rawDescGZIP(), []int{19}
+	return file_athena_v1_commands_proto_rawDescGZIP(), []int{24}
 }
 
 type RevokePasskey struct {
@@ -1432,7 +1753,7 @@ type RevokePasskey struct {
 
 func (x *RevokePasskey) Reset() {
 	*x = RevokePasskey{}
-	mi := &file_athena_v1_commands_proto_msgTypes[20]
+	mi := &file_athena_v1_commands_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1444,7 +1765,7 @@ func (x *RevokePasskey) String() string {
 func (*RevokePasskey) ProtoMessage() {}
 
 func (x *RevokePasskey) ProtoReflect() protoreflect.Message {
-	mi := &file_athena_v1_commands_proto_msgTypes[20]
+	mi := &file_athena_v1_commands_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1457,7 +1778,7 @@ func (x *RevokePasskey) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RevokePasskey.ProtoReflect.Descriptor instead.
 func (*RevokePasskey) Descriptor() ([]byte, []int) {
-	return file_athena_v1_commands_proto_rawDescGZIP(), []int{20}
+	return file_athena_v1_commands_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *RevokePasskey) GetId() string {
@@ -1477,7 +1798,7 @@ type GetPrompt struct {
 
 func (x *GetPrompt) Reset() {
 	*x = GetPrompt{}
-	mi := &file_athena_v1_commands_proto_msgTypes[21]
+	mi := &file_athena_v1_commands_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1489,7 +1810,7 @@ func (x *GetPrompt) String() string {
 func (*GetPrompt) ProtoMessage() {}
 
 func (x *GetPrompt) ProtoReflect() protoreflect.Message {
-	mi := &file_athena_v1_commands_proto_msgTypes[21]
+	mi := &file_athena_v1_commands_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1502,7 +1823,7 @@ func (x *GetPrompt) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetPrompt.ProtoReflect.Descriptor instead.
 func (*GetPrompt) Descriptor() ([]byte, []int) {
-	return file_athena_v1_commands_proto_rawDescGZIP(), []int{21}
+	return file_athena_v1_commands_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *GetPrompt) GetPart() string {
@@ -1524,7 +1845,7 @@ type SetPrompt struct {
 
 func (x *SetPrompt) Reset() {
 	*x = SetPrompt{}
-	mi := &file_athena_v1_commands_proto_msgTypes[22]
+	mi := &file_athena_v1_commands_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1536,7 +1857,7 @@ func (x *SetPrompt) String() string {
 func (*SetPrompt) ProtoMessage() {}
 
 func (x *SetPrompt) ProtoReflect() protoreflect.Message {
-	mi := &file_athena_v1_commands_proto_msgTypes[22]
+	mi := &file_athena_v1_commands_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1549,7 +1870,7 @@ func (x *SetPrompt) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetPrompt.ProtoReflect.Descriptor instead.
 func (*SetPrompt) Descriptor() ([]byte, []int) {
-	return file_athena_v1_commands_proto_rawDescGZIP(), []int{22}
+	return file_athena_v1_commands_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *SetPrompt) GetPart() string {
@@ -1584,7 +1905,7 @@ type ResetPrompt struct {
 
 func (x *ResetPrompt) Reset() {
 	*x = ResetPrompt{}
-	mi := &file_athena_v1_commands_proto_msgTypes[23]
+	mi := &file_athena_v1_commands_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1596,7 +1917,7 @@ func (x *ResetPrompt) String() string {
 func (*ResetPrompt) ProtoMessage() {}
 
 func (x *ResetPrompt) ProtoReflect() protoreflect.Message {
-	mi := &file_athena_v1_commands_proto_msgTypes[23]
+	mi := &file_athena_v1_commands_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1609,7 +1930,7 @@ func (x *ResetPrompt) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResetPrompt.ProtoReflect.Descriptor instead.
 func (*ResetPrompt) Descriptor() ([]byte, []int) {
-	return file_athena_v1_commands_proto_rawDescGZIP(), []int{23}
+	return file_athena_v1_commands_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *ResetPrompt) GetPart() string {
@@ -1639,6 +1960,7 @@ type CommandResult struct {
 	//	*CommandResult_Passkeys
 	//	*CommandResult_PolicyRevision
 	//	*CommandResult_Prompt
+	//	*CommandResult_NodeToken
 	Result        isCommandResult_Result `protobuf_oneof:"result"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1646,7 +1968,7 @@ type CommandResult struct {
 
 func (x *CommandResult) Reset() {
 	*x = CommandResult{}
-	mi := &file_athena_v1_commands_proto_msgTypes[24]
+	mi := &file_athena_v1_commands_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1658,7 +1980,7 @@ func (x *CommandResult) String() string {
 func (*CommandResult) ProtoMessage() {}
 
 func (x *CommandResult) ProtoReflect() protoreflect.Message {
-	mi := &file_athena_v1_commands_proto_msgTypes[24]
+	mi := &file_athena_v1_commands_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1671,7 +1993,7 @@ func (x *CommandResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CommandResult.ProtoReflect.Descriptor instead.
 func (*CommandResult) Descriptor() ([]byte, []int) {
-	return file_athena_v1_commands_proto_rawDescGZIP(), []int{24}
+	return file_athena_v1_commands_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *CommandResult) GetId() string {
@@ -1745,6 +2067,15 @@ func (x *CommandResult) GetPrompt() *PromptDetail {
 	return nil
 }
 
+func (x *CommandResult) GetNodeToken() *NodeToken {
+	if x != nil {
+		if x, ok := x.Result.(*CommandResult_NodeToken); ok {
+			return x.NodeToken
+		}
+	}
+	return nil
+}
+
 type isCommandResult_Result interface {
 	isCommandResult_Result()
 }
@@ -1765,6 +2096,10 @@ type CommandResult_Prompt struct {
 	Prompt *PromptDetail `protobuf:"bytes,13,opt,name=prompt,proto3,oneof"`
 }
 
+type CommandResult_NodeToken struct {
+	NodeToken *NodeToken `protobuf:"bytes,14,opt,name=node_token,json=nodeToken,proto3,oneof"`
+}
+
 func (*CommandResult_TicketId) isCommandResult_Result() {}
 
 func (*CommandResult_Passkeys) isCommandResult_Result() {}
@@ -1772,6 +2107,8 @@ func (*CommandResult_Passkeys) isCommandResult_Result() {}
 func (*CommandResult_PolicyRevision) isCommandResult_Result() {}
 
 func (*CommandResult_Prompt) isCommandResult_Result() {}
+
+func (*CommandResult_NodeToken) isCommandResult_Result() {}
 
 type PasskeyList struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -1782,7 +2119,7 @@ type PasskeyList struct {
 
 func (x *PasskeyList) Reset() {
 	*x = PasskeyList{}
-	mi := &file_athena_v1_commands_proto_msgTypes[25]
+	mi := &file_athena_v1_commands_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1794,7 +2131,7 @@ func (x *PasskeyList) String() string {
 func (*PasskeyList) ProtoMessage() {}
 
 func (x *PasskeyList) ProtoReflect() protoreflect.Message {
-	mi := &file_athena_v1_commands_proto_msgTypes[25]
+	mi := &file_athena_v1_commands_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1807,7 +2144,7 @@ func (x *PasskeyList) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PasskeyList.ProtoReflect.Descriptor instead.
 func (*PasskeyList) Descriptor() ([]byte, []int) {
-	return file_athena_v1_commands_proto_rawDescGZIP(), []int{25}
+	return file_athena_v1_commands_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *PasskeyList) GetPasskeys() []*Passkey {
@@ -1829,7 +2166,7 @@ type Passkey struct {
 
 func (x *Passkey) Reset() {
 	*x = Passkey{}
-	mi := &file_athena_v1_commands_proto_msgTypes[26]
+	mi := &file_athena_v1_commands_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1841,7 +2178,7 @@ func (x *Passkey) String() string {
 func (*Passkey) ProtoMessage() {}
 
 func (x *Passkey) ProtoReflect() protoreflect.Message {
-	mi := &file_athena_v1_commands_proto_msgTypes[26]
+	mi := &file_athena_v1_commands_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1854,7 +2191,7 @@ func (x *Passkey) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Passkey.ProtoReflect.Descriptor instead.
 func (*Passkey) Descriptor() ([]byte, []int) {
-	return file_athena_v1_commands_proto_rawDescGZIP(), []int{26}
+	return file_athena_v1_commands_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *Passkey) GetId() string {
@@ -1904,7 +2241,7 @@ type PromptDetail struct {
 
 func (x *PromptDetail) Reset() {
 	*x = PromptDetail{}
-	mi := &file_athena_v1_commands_proto_msgTypes[27]
+	mi := &file_athena_v1_commands_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1916,7 +2253,7 @@ func (x *PromptDetail) String() string {
 func (*PromptDetail) ProtoMessage() {}
 
 func (x *PromptDetail) ProtoReflect() protoreflect.Message {
-	mi := &file_athena_v1_commands_proto_msgTypes[27]
+	mi := &file_athena_v1_commands_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1929,7 +2266,7 @@ func (x *PromptDetail) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PromptDetail.ProtoReflect.Descriptor instead.
 func (*PromptDetail) Descriptor() ([]byte, []int) {
-	return file_athena_v1_commands_proto_rawDescGZIP(), []int{27}
+	return file_athena_v1_commands_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *PromptDetail) GetName() string {
@@ -1994,7 +2331,7 @@ type PromptRevision struct {
 
 func (x *PromptRevision) Reset() {
 	*x = PromptRevision{}
-	mi := &file_athena_v1_commands_proto_msgTypes[28]
+	mi := &file_athena_v1_commands_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2006,7 +2343,7 @@ func (x *PromptRevision) String() string {
 func (*PromptRevision) ProtoMessage() {}
 
 func (x *PromptRevision) ProtoReflect() protoreflect.Message {
-	mi := &file_athena_v1_commands_proto_msgTypes[28]
+	mi := &file_athena_v1_commands_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2019,7 +2356,7 @@ func (x *PromptRevision) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PromptRevision.ProtoReflect.Descriptor instead.
 func (*PromptRevision) Descriptor() ([]byte, []int) {
-	return file_athena_v1_commands_proto_rawDescGZIP(), []int{28}
+	return file_athena_v1_commands_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *PromptRevision) GetRevision() uint32 {
@@ -2060,7 +2397,7 @@ type AllowAction struct {
 
 func (x *AllowAction) Reset() {
 	*x = AllowAction{}
-	mi := &file_athena_v1_commands_proto_msgTypes[29]
+	mi := &file_athena_v1_commands_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2072,7 +2409,7 @@ func (x *AllowAction) String() string {
 func (*AllowAction) ProtoMessage() {}
 
 func (x *AllowAction) ProtoReflect() protoreflect.Message {
-	mi := &file_athena_v1_commands_proto_msgTypes[29]
+	mi := &file_athena_v1_commands_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2085,7 +2422,7 @@ func (x *AllowAction) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AllowAction.ProtoReflect.Descriptor instead.
 func (*AllowAction) Descriptor() ([]byte, []int) {
-	return file_athena_v1_commands_proto_rawDescGZIP(), []int{29}
+	return file_athena_v1_commands_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *AllowAction) GetClass() string {
@@ -2105,7 +2442,7 @@ type DismissOffer struct {
 
 func (x *DismissOffer) Reset() {
 	*x = DismissOffer{}
-	mi := &file_athena_v1_commands_proto_msgTypes[30]
+	mi := &file_athena_v1_commands_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2117,7 +2454,7 @@ func (x *DismissOffer) String() string {
 func (*DismissOffer) ProtoMessage() {}
 
 func (x *DismissOffer) ProtoReflect() protoreflect.Message {
-	mi := &file_athena_v1_commands_proto_msgTypes[30]
+	mi := &file_athena_v1_commands_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2130,7 +2467,7 @@ func (x *DismissOffer) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DismissOffer.ProtoReflect.Descriptor instead.
 func (*DismissOffer) Descriptor() ([]byte, []int) {
-	return file_athena_v1_commands_proto_rawDescGZIP(), []int{30}
+	return file_athena_v1_commands_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *DismissOffer) GetClass() string {
@@ -2150,7 +2487,7 @@ type ApplyProposal struct {
 
 func (x *ApplyProposal) Reset() {
 	*x = ApplyProposal{}
-	mi := &file_athena_v1_commands_proto_msgTypes[31]
+	mi := &file_athena_v1_commands_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2162,7 +2499,7 @@ func (x *ApplyProposal) String() string {
 func (*ApplyProposal) ProtoMessage() {}
 
 func (x *ApplyProposal) ProtoReflect() protoreflect.Message {
-	mi := &file_athena_v1_commands_proto_msgTypes[31]
+	mi := &file_athena_v1_commands_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2175,7 +2512,7 @@ func (x *ApplyProposal) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ApplyProposal.ProtoReflect.Descriptor instead.
 func (*ApplyProposal) Descriptor() ([]byte, []int) {
-	return file_athena_v1_commands_proto_rawDescGZIP(), []int{31}
+	return file_athena_v1_commands_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *ApplyProposal) GetId() string {
@@ -2195,7 +2532,7 @@ type DiscardProposal struct {
 
 func (x *DiscardProposal) Reset() {
 	*x = DiscardProposal{}
-	mi := &file_athena_v1_commands_proto_msgTypes[32]
+	mi := &file_athena_v1_commands_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2207,7 +2544,7 @@ func (x *DiscardProposal) String() string {
 func (*DiscardProposal) ProtoMessage() {}
 
 func (x *DiscardProposal) ProtoReflect() protoreflect.Message {
-	mi := &file_athena_v1_commands_proto_msgTypes[32]
+	mi := &file_athena_v1_commands_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2220,7 +2557,7 @@ func (x *DiscardProposal) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DiscardProposal.ProtoReflect.Descriptor instead.
 func (*DiscardProposal) Descriptor() ([]byte, []int) {
-	return file_athena_v1_commands_proto_rawDescGZIP(), []int{32}
+	return file_athena_v1_commands_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *DiscardProposal) GetId() string {
@@ -2234,7 +2571,7 @@ var File_athena_v1_commands_proto protoreflect.FileDescriptor
 
 const file_athena_v1_commands_proto_rawDesc = "" +
 	"\n" +
-	"\x18athena/v1/commands.proto\x12\tathena.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xdc\f\n" +
+	"\x18athena/v1/commands.proto\x12\tathena.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xf0\x0e\n" +
 	"\aCommand\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x128\n" +
 	"\vsubmit_task\x18\n" +
@@ -2272,8 +2609,13 @@ const file_athena_v1_commands_proto_rawDesc = "" +
 	"\fallow_action\x18! \x01(\v2\x16.athena.v1.AllowActionH\x00R\vallowAction\x12>\n" +
 	"\rdismiss_offer\x18\" \x01(\v2\x17.athena.v1.DismissOfferH\x00R\fdismissOffer\x12A\n" +
 	"\x0eapply_proposal\x18# \x01(\v2\x18.athena.v1.ApplyProposalH\x00R\rapplyProposal\x12G\n" +
-	"\x10discard_proposal\x18$ \x01(\v2\x1a.athena.v1.DiscardProposalH\x00R\x0fdiscardProposalB\b\n" +
-	"\x06action\"\x9e\x01\n" +
+	"\x10discard_proposal\x18$ \x01(\v2\x1a.athena.v1.DiscardProposalH\x00R\x0fdiscardProposal\x12D\n" +
+	"\x0fretry_elsewhere\x18% \x01(\v2\x19.athena.v1.RetryElsewhereH\x00R\x0eretryElsewhere\x12H\n" +
+	"\x11create_node_token\x18& \x01(\v2\x1a.athena.v1.CreateNodeTokenH\x00R\x0fcreateNodeToken\x12H\n" +
+	"\x11set_node_draining\x18' \x01(\v2\x1a.athena.v1.SetNodeDrainingH\x00R\x0fsetNodeDraining\x128\n" +
+	"\vrevoke_node\x18( \x01(\v2\x15.athena.v1.RevokeNodeH\x00R\n" +
+	"revokeNodeB\b\n" +
+	"\x06action\"\xb2\x01\n" +
 	"\n" +
 	"SubmitTask\x12\x12\n" +
 	"\x04text\x18\x01 \x01(\tR\x04text\x12\x12\n" +
@@ -2281,8 +2623,25 @@ const file_athena_v1_commands_proto_rawDesc = "" +
 	"\x03dir\x18\x03 \x01(\tR\x03dir\x12\x14\n" +
 	"\x05model\x18\x04 \x01(\tR\x05model\x12\x18\n" +
 	"\aruntime\x18\x05 \x01(\tR\aruntime\x12\x1b\n" +
-	"\x06review\x18\x06 \x01(\bH\x00R\x06review\x88\x01\x01B\t\n" +
-	"\a_review\"8\n" +
+	"\x06review\x18\x06 \x01(\bH\x00R\x06review\x88\x01\x01\x12\x12\n" +
+	"\x04node\x18\a \x01(\tR\x04nodeB\t\n" +
+	"\a_review\"-\n" +
+	"\x0eRetryElsewhere\x12\x1b\n" +
+	"\tticket_id\x18\x01 \x01(\tR\bticketId\"F\n" +
+	"\x0fCreateNodeToken\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1f\n" +
+	"\vttl_seconds\x18\x02 \x01(\rR\n" +
+	"ttlSeconds\"F\n" +
+	"\x0fSetNodeDraining\x12\x17\n" +
+	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12\x1a\n" +
+	"\bdraining\x18\x02 \x01(\bR\bdraining\"%\n" +
+	"\n" +
+	"RevokeNode\x12\x17\n" +
+	"\anode_id\x18\x01 \x01(\tR\x06nodeId\"`\n" +
+	"\tNodeToken\x12\x18\n" +
+	"\acommand\x18\x01 \x01(\tR\acommand\x129\n" +
+	"\n" +
+	"expires_at\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt\"8\n" +
 	"\x05Reply\x12\x1b\n" +
 	"\tticket_id\x18\x01 \x01(\tR\bticketId\x12\x12\n" +
 	"\x04text\x18\x02 \x01(\tR\x04text\";\n" +
@@ -2338,7 +2697,7 @@ const file_athena_v1_commands_proto_rawDesc = "" +
 	"\x04text\x18\x03 \x01(\tR\x04text\"F\n" +
 	"\vResetPrompt\x12\x12\n" +
 	"\x04part\x18\x01 \x01(\tR\x04part\x12#\n" +
-	"\rbase_revision\x18\x02 \x01(\rR\fbaseRevision\"\x9a\x02\n" +
+	"\rbase_revision\x18\x02 \x01(\rR\fbaseRevision\"\xd1\x02\n" +
 	"\rCommandResult\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x0e\n" +
 	"\x02ok\x18\x02 \x01(\bR\x02ok\x12\x12\n" +
@@ -2348,7 +2707,9 @@ const file_athena_v1_commands_proto_rawDesc = "" +
 	" \x01(\tH\x00R\bticketId\x124\n" +
 	"\bpasskeys\x18\v \x01(\v2\x16.athena.v1.PasskeyListH\x00R\bpasskeys\x12)\n" +
 	"\x0fpolicy_revision\x18\f \x01(\rH\x00R\x0epolicyRevision\x121\n" +
-	"\x06prompt\x18\r \x01(\v2\x17.athena.v1.PromptDetailH\x00R\x06promptB\b\n" +
+	"\x06prompt\x18\r \x01(\v2\x17.athena.v1.PromptDetailH\x00R\x06prompt\x125\n" +
+	"\n" +
+	"node_token\x18\x0e \x01(\v2\x14.athena.v1.NodeTokenH\x00R\tnodeTokenB\b\n" +
 	"\x06result\"=\n" +
 	"\vPasskeyList\x12.\n" +
 	"\bpasskeys\x18\x01 \x03(\v2\x12.athena.v1.PasskeyR\bpasskeys\"\xa6\x01\n" +
@@ -2395,83 +2756,94 @@ func file_athena_v1_commands_proto_rawDescGZIP() []byte {
 	return file_athena_v1_commands_proto_rawDescData
 }
 
-var file_athena_v1_commands_proto_msgTypes = make([]protoimpl.MessageInfo, 33)
+var file_athena_v1_commands_proto_msgTypes = make([]protoimpl.MessageInfo, 38)
 var file_athena_v1_commands_proto_goTypes = []any{
 	(*Command)(nil),               // 0: athena.v1.Command
 	(*SubmitTask)(nil),            // 1: athena.v1.SubmitTask
-	(*Reply)(nil),                 // 2: athena.v1.Reply
-	(*Stop)(nil),                  // 3: athena.v1.Stop
-	(*Retry)(nil),                 // 4: athena.v1.Retry
-	(*Interrupt)(nil),             // 5: athena.v1.Interrupt
-	(*AnswerApproval)(nil),        // 6: athena.v1.AnswerApproval
-	(*Reevaluate)(nil),            // 7: athena.v1.Reevaluate
-	(*Pause)(nil),                 // 8: athena.v1.Pause
-	(*Resume)(nil),                // 9: athena.v1.Resume
-	(*Dismiss)(nil),               // 10: athena.v1.Dismiss
-	(*Unsubscribe)(nil),           // 11: athena.v1.Unsubscribe
-	(*SetPolicy)(nil),             // 12: athena.v1.SetPolicy
-	(*WatchTicket)(nil),           // 13: athena.v1.WatchTicket
-	(*UnwatchTicket)(nil),         // 14: athena.v1.UnwatchTicket
-	(*PushSubscribe)(nil),         // 15: athena.v1.PushSubscribe
-	(*PushUnsubscribe)(nil),       // 16: athena.v1.PushUnsubscribe
-	(*SetNotificationPrefs)(nil),  // 17: athena.v1.SetNotificationPrefs
-	(*Visibility)(nil),            // 18: athena.v1.Visibility
-	(*ListPasskeys)(nil),          // 19: athena.v1.ListPasskeys
-	(*RevokePasskey)(nil),         // 20: athena.v1.RevokePasskey
-	(*GetPrompt)(nil),             // 21: athena.v1.GetPrompt
-	(*SetPrompt)(nil),             // 22: athena.v1.SetPrompt
-	(*ResetPrompt)(nil),           // 23: athena.v1.ResetPrompt
-	(*CommandResult)(nil),         // 24: athena.v1.CommandResult
-	(*PasskeyList)(nil),           // 25: athena.v1.PasskeyList
-	(*Passkey)(nil),               // 26: athena.v1.Passkey
-	(*PromptDetail)(nil),          // 27: athena.v1.PromptDetail
-	(*PromptRevision)(nil),        // 28: athena.v1.PromptRevision
-	(*AllowAction)(nil),           // 29: athena.v1.AllowAction
-	(*DismissOffer)(nil),          // 30: athena.v1.DismissOffer
-	(*ApplyProposal)(nil),         // 31: athena.v1.ApplyProposal
-	(*DiscardProposal)(nil),       // 32: athena.v1.DiscardProposal
-	(*timestamppb.Timestamp)(nil), // 33: google.protobuf.Timestamp
+	(*RetryElsewhere)(nil),        // 2: athena.v1.RetryElsewhere
+	(*CreateNodeToken)(nil),       // 3: athena.v1.CreateNodeToken
+	(*SetNodeDraining)(nil),       // 4: athena.v1.SetNodeDraining
+	(*RevokeNode)(nil),            // 5: athena.v1.RevokeNode
+	(*NodeToken)(nil),             // 6: athena.v1.NodeToken
+	(*Reply)(nil),                 // 7: athena.v1.Reply
+	(*Stop)(nil),                  // 8: athena.v1.Stop
+	(*Retry)(nil),                 // 9: athena.v1.Retry
+	(*Interrupt)(nil),             // 10: athena.v1.Interrupt
+	(*AnswerApproval)(nil),        // 11: athena.v1.AnswerApproval
+	(*Reevaluate)(nil),            // 12: athena.v1.Reevaluate
+	(*Pause)(nil),                 // 13: athena.v1.Pause
+	(*Resume)(nil),                // 14: athena.v1.Resume
+	(*Dismiss)(nil),               // 15: athena.v1.Dismiss
+	(*Unsubscribe)(nil),           // 16: athena.v1.Unsubscribe
+	(*SetPolicy)(nil),             // 17: athena.v1.SetPolicy
+	(*WatchTicket)(nil),           // 18: athena.v1.WatchTicket
+	(*UnwatchTicket)(nil),         // 19: athena.v1.UnwatchTicket
+	(*PushSubscribe)(nil),         // 20: athena.v1.PushSubscribe
+	(*PushUnsubscribe)(nil),       // 21: athena.v1.PushUnsubscribe
+	(*SetNotificationPrefs)(nil),  // 22: athena.v1.SetNotificationPrefs
+	(*Visibility)(nil),            // 23: athena.v1.Visibility
+	(*ListPasskeys)(nil),          // 24: athena.v1.ListPasskeys
+	(*RevokePasskey)(nil),         // 25: athena.v1.RevokePasskey
+	(*GetPrompt)(nil),             // 26: athena.v1.GetPrompt
+	(*SetPrompt)(nil),             // 27: athena.v1.SetPrompt
+	(*ResetPrompt)(nil),           // 28: athena.v1.ResetPrompt
+	(*CommandResult)(nil),         // 29: athena.v1.CommandResult
+	(*PasskeyList)(nil),           // 30: athena.v1.PasskeyList
+	(*Passkey)(nil),               // 31: athena.v1.Passkey
+	(*PromptDetail)(nil),          // 32: athena.v1.PromptDetail
+	(*PromptRevision)(nil),        // 33: athena.v1.PromptRevision
+	(*AllowAction)(nil),           // 34: athena.v1.AllowAction
+	(*DismissOffer)(nil),          // 35: athena.v1.DismissOffer
+	(*ApplyProposal)(nil),         // 36: athena.v1.ApplyProposal
+	(*DiscardProposal)(nil),       // 37: athena.v1.DiscardProposal
+	(*timestamppb.Timestamp)(nil), // 38: google.protobuf.Timestamp
 }
 var file_athena_v1_commands_proto_depIdxs = []int32{
 	1,  // 0: athena.v1.Command.submit_task:type_name -> athena.v1.SubmitTask
-	2,  // 1: athena.v1.Command.reply:type_name -> athena.v1.Reply
-	3,  // 2: athena.v1.Command.stop:type_name -> athena.v1.Stop
-	4,  // 3: athena.v1.Command.retry:type_name -> athena.v1.Retry
-	5,  // 4: athena.v1.Command.interrupt:type_name -> athena.v1.Interrupt
-	6,  // 5: athena.v1.Command.answer_approval:type_name -> athena.v1.AnswerApproval
-	7,  // 6: athena.v1.Command.reevaluate:type_name -> athena.v1.Reevaluate
-	10, // 7: athena.v1.Command.dismiss:type_name -> athena.v1.Dismiss
-	11, // 8: athena.v1.Command.unsubscribe:type_name -> athena.v1.Unsubscribe
-	12, // 9: athena.v1.Command.set_policy:type_name -> athena.v1.SetPolicy
-	13, // 10: athena.v1.Command.watch_ticket:type_name -> athena.v1.WatchTicket
-	14, // 11: athena.v1.Command.unwatch_ticket:type_name -> athena.v1.UnwatchTicket
-	15, // 12: athena.v1.Command.push_subscribe:type_name -> athena.v1.PushSubscribe
-	16, // 13: athena.v1.Command.push_unsubscribe:type_name -> athena.v1.PushUnsubscribe
-	17, // 14: athena.v1.Command.set_notification_prefs:type_name -> athena.v1.SetNotificationPrefs
-	18, // 15: athena.v1.Command.visibility:type_name -> athena.v1.Visibility
-	19, // 16: athena.v1.Command.list_passkeys:type_name -> athena.v1.ListPasskeys
-	20, // 17: athena.v1.Command.revoke_passkey:type_name -> athena.v1.RevokePasskey
-	21, // 18: athena.v1.Command.get_prompt:type_name -> athena.v1.GetPrompt
-	22, // 19: athena.v1.Command.set_prompt:type_name -> athena.v1.SetPrompt
-	23, // 20: athena.v1.Command.reset_prompt:type_name -> athena.v1.ResetPrompt
-	8,  // 21: athena.v1.Command.pause:type_name -> athena.v1.Pause
-	9,  // 22: athena.v1.Command.resume:type_name -> athena.v1.Resume
-	29, // 23: athena.v1.Command.allow_action:type_name -> athena.v1.AllowAction
-	30, // 24: athena.v1.Command.dismiss_offer:type_name -> athena.v1.DismissOffer
-	31, // 25: athena.v1.Command.apply_proposal:type_name -> athena.v1.ApplyProposal
-	32, // 26: athena.v1.Command.discard_proposal:type_name -> athena.v1.DiscardProposal
-	25, // 27: athena.v1.CommandResult.passkeys:type_name -> athena.v1.PasskeyList
-	27, // 28: athena.v1.CommandResult.prompt:type_name -> athena.v1.PromptDetail
-	26, // 29: athena.v1.PasskeyList.passkeys:type_name -> athena.v1.Passkey
-	33, // 30: athena.v1.Passkey.created_at:type_name -> google.protobuf.Timestamp
-	33, // 31: athena.v1.Passkey.last_used_at:type_name -> google.protobuf.Timestamp
-	28, // 32: athena.v1.PromptDetail.history:type_name -> athena.v1.PromptRevision
-	33, // 33: athena.v1.PromptRevision.at:type_name -> google.protobuf.Timestamp
-	34, // [34:34] is the sub-list for method output_type
-	34, // [34:34] is the sub-list for method input_type
-	34, // [34:34] is the sub-list for extension type_name
-	34, // [34:34] is the sub-list for extension extendee
-	0,  // [0:34] is the sub-list for field type_name
+	7,  // 1: athena.v1.Command.reply:type_name -> athena.v1.Reply
+	8,  // 2: athena.v1.Command.stop:type_name -> athena.v1.Stop
+	9,  // 3: athena.v1.Command.retry:type_name -> athena.v1.Retry
+	10, // 4: athena.v1.Command.interrupt:type_name -> athena.v1.Interrupt
+	11, // 5: athena.v1.Command.answer_approval:type_name -> athena.v1.AnswerApproval
+	12, // 6: athena.v1.Command.reevaluate:type_name -> athena.v1.Reevaluate
+	15, // 7: athena.v1.Command.dismiss:type_name -> athena.v1.Dismiss
+	16, // 8: athena.v1.Command.unsubscribe:type_name -> athena.v1.Unsubscribe
+	17, // 9: athena.v1.Command.set_policy:type_name -> athena.v1.SetPolicy
+	18, // 10: athena.v1.Command.watch_ticket:type_name -> athena.v1.WatchTicket
+	19, // 11: athena.v1.Command.unwatch_ticket:type_name -> athena.v1.UnwatchTicket
+	20, // 12: athena.v1.Command.push_subscribe:type_name -> athena.v1.PushSubscribe
+	21, // 13: athena.v1.Command.push_unsubscribe:type_name -> athena.v1.PushUnsubscribe
+	22, // 14: athena.v1.Command.set_notification_prefs:type_name -> athena.v1.SetNotificationPrefs
+	23, // 15: athena.v1.Command.visibility:type_name -> athena.v1.Visibility
+	24, // 16: athena.v1.Command.list_passkeys:type_name -> athena.v1.ListPasskeys
+	25, // 17: athena.v1.Command.revoke_passkey:type_name -> athena.v1.RevokePasskey
+	26, // 18: athena.v1.Command.get_prompt:type_name -> athena.v1.GetPrompt
+	27, // 19: athena.v1.Command.set_prompt:type_name -> athena.v1.SetPrompt
+	28, // 20: athena.v1.Command.reset_prompt:type_name -> athena.v1.ResetPrompt
+	13, // 21: athena.v1.Command.pause:type_name -> athena.v1.Pause
+	14, // 22: athena.v1.Command.resume:type_name -> athena.v1.Resume
+	34, // 23: athena.v1.Command.allow_action:type_name -> athena.v1.AllowAction
+	35, // 24: athena.v1.Command.dismiss_offer:type_name -> athena.v1.DismissOffer
+	36, // 25: athena.v1.Command.apply_proposal:type_name -> athena.v1.ApplyProposal
+	37, // 26: athena.v1.Command.discard_proposal:type_name -> athena.v1.DiscardProposal
+	2,  // 27: athena.v1.Command.retry_elsewhere:type_name -> athena.v1.RetryElsewhere
+	3,  // 28: athena.v1.Command.create_node_token:type_name -> athena.v1.CreateNodeToken
+	4,  // 29: athena.v1.Command.set_node_draining:type_name -> athena.v1.SetNodeDraining
+	5,  // 30: athena.v1.Command.revoke_node:type_name -> athena.v1.RevokeNode
+	38, // 31: athena.v1.NodeToken.expires_at:type_name -> google.protobuf.Timestamp
+	30, // 32: athena.v1.CommandResult.passkeys:type_name -> athena.v1.PasskeyList
+	32, // 33: athena.v1.CommandResult.prompt:type_name -> athena.v1.PromptDetail
+	6,  // 34: athena.v1.CommandResult.node_token:type_name -> athena.v1.NodeToken
+	31, // 35: athena.v1.PasskeyList.passkeys:type_name -> athena.v1.Passkey
+	38, // 36: athena.v1.Passkey.created_at:type_name -> google.protobuf.Timestamp
+	38, // 37: athena.v1.Passkey.last_used_at:type_name -> google.protobuf.Timestamp
+	33, // 38: athena.v1.PromptDetail.history:type_name -> athena.v1.PromptRevision
+	38, // 39: athena.v1.PromptRevision.at:type_name -> google.protobuf.Timestamp
+	40, // [40:40] is the sub-list for method output_type
+	40, // [40:40] is the sub-list for method input_type
+	40, // [40:40] is the sub-list for extension type_name
+	40, // [40:40] is the sub-list for extension extendee
+	0,  // [0:40] is the sub-list for field type_name
 }
 
 func init() { file_athena_v1_commands_proto_init() }
@@ -2507,13 +2879,18 @@ func file_athena_v1_commands_proto_init() {
 		(*Command_DismissOffer)(nil),
 		(*Command_ApplyProposal)(nil),
 		(*Command_DiscardProposal)(nil),
+		(*Command_RetryElsewhere)(nil),
+		(*Command_CreateNodeToken)(nil),
+		(*Command_SetNodeDraining)(nil),
+		(*Command_RevokeNode)(nil),
 	}
 	file_athena_v1_commands_proto_msgTypes[1].OneofWrappers = []any{}
-	file_athena_v1_commands_proto_msgTypes[24].OneofWrappers = []any{
+	file_athena_v1_commands_proto_msgTypes[29].OneofWrappers = []any{
 		(*CommandResult_TicketId)(nil),
 		(*CommandResult_Passkeys)(nil),
 		(*CommandResult_PolicyRevision)(nil),
 		(*CommandResult_Prompt)(nil),
+		(*CommandResult_NodeToken)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -2521,7 +2898,7 @@ func file_athena_v1_commands_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_athena_v1_commands_proto_rawDesc), len(file_athena_v1_commands_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   33,
+			NumMessages:   38,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

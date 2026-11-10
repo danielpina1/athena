@@ -23,7 +23,7 @@ describe("useAthena", () => {
         triggers: [{ id: "G-1" }],
         threads: [{ key: "github:o/r#1" }],
         decisions: [{ id: "D-1" }],
-        node: { name: "n1", slots: 4 },
+        nodes: [{ name: "n1", slots: 4 }],
         health: { items: [{ name: "tls", ok: true }] },
         policy: { revision: 2, settingsJson: "{}" },
         repos: [{ name: "o/r", kind: "github" }],
@@ -41,7 +41,7 @@ describe("useAthena", () => {
     expect([...s.triggers.keys()]).toEqual(["G-1"]);
     expect([...s.threads.keys()]).toEqual(["github:o/r#1"]);
     expect([...s.decisions.keys()]).toEqual(["D-1"]);
-    expect(s.node?.slots).toBe(4);
+    expect(s.nodes[0]?.slots).toBe(4);
     expect(s.health?.items[0].name).toBe("tls");
     expect(s.policy?.revision).toBe(2);
     expect(s.repos.map((r) => r.name)).toEqual(["o/r"]);
@@ -80,7 +80,7 @@ describe("useAthena", () => {
     expect(s.triggers.has("G-1")).toBe(true);
     expect(s.threads.has("k")).toBe(true);
     expect(s.decisions.has("D-1")).toBe(true);
-    expect(s.node?.name).toBe("n");
+    expect(s.nodes[0]?.name).toBe("n");
     expect(s.health?.items[0].name).toBe("push");
     expect(s.policy?.revision).toBe(5);
     expect(s.repos.map((r) => r.name)).toEqual(["/srv/x"]);
@@ -122,13 +122,13 @@ describe("useAthena", () => {
   });
 
   test("reset empties the store", () => {
-    st().applySnapshot(snap({ cursor: 5n, tickets: [{ id: "T-1" }], node: { name: "n" } }), "e1");
+    st().applySnapshot(snap({ cursor: 5n, tickets: [{ id: "T-1" }], nodes: [{ name: "n" }] }), "e1");
     st().reset();
     const s = st();
     expect(s.epoch).toBe("");
     expect(s.cursor).toBe(0n);
     expect(s.tickets.size).toBe(0);
-    expect(s.node).toBeUndefined();
+    expect(s.nodes).toEqual([]);
     expect(s.details.size).toBe(0);
   });
 
