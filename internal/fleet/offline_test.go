@@ -319,3 +319,50 @@ func TestSeedTooBigSaysSo(t *testing.T) {
 		t.Fatalf("seed = %+v, want no bundle and %q", seed, node.SeedTooBig)
 	}
 }
+
+// n1 → n2 (stranded before it started) → n1: the Ticket is back on the node its work last ran on, so nothing is
+// seeded; the Assignment is just started there.
+func TestBackWhereItRanIsNotSeeded(t *testing.T) {
+	e := newEnv(t)
+	e.addNode(nodeID, "mini")
+	e.addNode(otherID, "studio")
+	f := e.fleet(func(c *Config) { c.Mirror = NewMirror(filepath.Join(t.TempDir(), "checkpoints")) })
+	tk := e.placedRepo(nodeID, "o/r")
+	if err := e.eng.AssignmentStarted(tk.ID, tk.LatestAssignment().ID, "s1", "", core.RuntimeClaude); err != nil {
+		t.Fatal(err)
+	}
+	repo := nodeRepo(t)
+	checkpointIn(t, repo, tk.ID, "a.txt", "half done\n")
+	if err := f.cfg.Mirror.Receive("o/r", tk.ID, bytes.NewReader(bundleOf(t, repo, tk.ID, ""))); err != nil {
+		t.Fatal(err)
+	}
+	strand := func(from, to string) core.Ticket {
+		t.Helper()
+		if err := e.eng.NodeOffline(from, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		if err := e.eng.RetryElsewhere(tk.ID); err != nil {
+			t.Fatal(err)
+		}
+		got := e.ticket(tk.ID)
+		if err := e.eng.AssignmentPlaced(tk.ID, got.LatestAssignment().ID, to); err != nil {
+			t.Fatal(err)
+		}
+		return e.ticket(tk.ID)
+	}
+	strand(nodeID, otherID) // never started on studio
+	back := strand(otherID, nodeID)
+	if _, moved := f.seedFrom(back, *back.LatestAssignment(), nodeID); moved {
+		t.Fatal("back on the node its work last ran on, yet moved")
+	}
+	a := dialAnswering(t, f, nodeID)
+	eventually(t, "the start on mini", func() bool { return a.got(nodelink.ServeStart) })
+	time.Sleep(100 * time.Millisecond)
+	if a.got(nodelink.ServeSeed) {
+		t.Fatalf("seeded: %v", a.commands())
+	}
+	// From studio's point of view it would have moved from mini.
+	if prev, moved := f.seedFrom(back, *back.LatestAssignment(), otherID); !moved || prev != nodeID {
+		t.Fatalf("seedFrom for studio = %s, %v", prev, moved)
+	}
+}

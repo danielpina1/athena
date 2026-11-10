@@ -29,8 +29,9 @@ const (
 	seedChunk = 512 << 10
 )
 
-// seedFrom is the node the Assignment before a was placed on, when a, placed on nodeID, moves the Ticket's work from
-// it: the Ticket has a Repo and that node is another.
+// seedFrom is the node the Ticket's work is on when a, placed on nodeID, moves it from there: the node of the latest
+// earlier Assignment that ran (one stranded before it started has no work), else of the one just before a; the Ticket
+// has a Repo and that node is another. A Ticket back on the node its work last ran on is not moved.
 func (f *Fleet) seedFrom(t core.Ticket, a core.Assignment, nodeID string) (prev string, ok bool) {
 	if t.Repo == "" {
 		return "", false
@@ -40,6 +41,12 @@ func (f *Fleet) seedFrom(t core.Ticket, a core.Assignment, nodeID string) (prev 
 		return "", false
 	}
 	prev = t.Assignments[i-1].Node
+	for j := i - 1; j >= 0; j-- {
+		if x := t.Assignments[j]; x.StartedAt != nil || x.SessionID != "" {
+			prev = x.Node
+			break
+		}
+	}
 	if prev == "" {
 		prev = f.cfg.LocalID
 	}
@@ -131,21 +138,24 @@ func (f *Fleet) seedAndStart(ticketID, assignmentID, nodeID string) error {
 	if !ok || a.State == core.AssignmentEnded || t.Ended != nil {
 		return nil
 	}
-	prev, _ := f.seedFrom(t, *a, nodeID)
-	sd := node.Seed{TicketID: t.ID, AssignmentID: a.ID}
+	prev, moved := f.seedFrom(t, *a, nodeID)
+	if !moved {
+		tg.Start(t, *a) // back on the node its work last ran on: nothing to seed
+	} else if err := f.seed(t, *a, nodeID, prev, tg); err != nil {
+		return err
+	}
+	if t, a, ok = find(); ok && (a.State == core.AssignmentEnded || t.Ended != nil) {
+		tg.Stop(t, *a, a.EndedReason)
+	}
+	return nil
+}
+
+// seed sends the node the Ticket's seed from prev, then the Start.
+func (f *Fleet) seed(t core.Ticket, a core.Assignment, nodeID, prev string, tg Target) error {
+	sd := node.Seed{TicketID: t.ID, AssignmentID: a.ID, From: f.nodeName(prev)}
 	if i := slices.IndexFunc(t.Assignments, func(x core.Assignment) bool { return x.ID == a.ID }); i > 0 {
 		sd.Offline = t.Assignments[i-1].EndedReason == core.ReasonNodeOffline
-		// The node the work came from: the latest earlier Assignment that ran (one stranded before it started did not).
-		for j := i - 1; j >= 0; j-- {
-			if x := t.Assignments[j]; x.StartedAt != nil || x.SessionID != "" {
-				if prev = x.Node; prev == "" {
-					prev = f.cfg.LocalID
-				}
-				break
-			}
-		}
 	}
-	sd.From = f.nodeName(prev)
 	file, err := f.seedBundle(t, &sd)
 	if err != nil {
 		f.log.Warn("the checkpoint cannot be bundled; seeding without it", "ticket", t.ID, "error", err)
@@ -162,14 +172,10 @@ func (f *Fleet) seedAndStart(ticketID, assignmentID, nodeID string) error {
 		if err := f.cfg.Local.Seed(sd); err != nil {
 			return err
 		}
-		tg.Start(t, *a)
-	} else if err := f.Remote(nodeID).seedThenStart(sd, file, t, *a); err != nil {
-		return err
+		tg.Start(t, a)
+		return nil
 	}
-	if t, a, ok = find(); ok && (a.State == core.AssignmentEnded || t.Ended != nil) {
-		tg.Stop(t, *a, a.EndedReason)
-	}
-	return nil
+	return f.Remote(nodeID).seedThenStart(sd, file, t, a)
 }
 
 // seedBundle writes the Ticket's checkpoint from the mirror to a file in the mirror's temporary directory and sets

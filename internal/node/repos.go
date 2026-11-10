@@ -424,7 +424,7 @@ func runGit(ctx context.Context, dir string, env []string, args ...string) (stri
 // unless a seed of the Assignment moves the Ticket's work back to it (reseedWorktree).
 func (n *Node) prepareGitHub(s *session) error {
 	p := s.place
-	rec, seeded := n.seedFor(s.t.ID, s.a.ID)
+	rec, seeded := n.seedFor(s.t, s.a.ID)
 	seeded = seeded && rec.Note == ""
 	if st, err := os.Stat(p.workDir); err == nil {
 		if !st.IsDir() {

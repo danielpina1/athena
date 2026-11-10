@@ -36,6 +36,8 @@ const (
 	// seedKeep is how long a seed nobody used is kept; seedSweepEvery how often the node looks for old ones.
 	seedKeep       = 14 * 24 * time.Hour
 	seedSweepEvery = time.Hour
+	// seedBundleGrace is how young a bundle with no record may be before the sweep takes it for an orphan.
+	seedBundleGrace = 10 * time.Minute
 )
 
 // How a seeded worktree started.
@@ -114,7 +116,7 @@ func (n *Node) Seed(sd Seed) error {
 	} else {
 		sd.SHA = ""
 	}
-	if old, ok := n.seedFor(sd.TicketID, sd.AssignmentID); ok && old.SHA == sd.SHA {
+	if old, ok := n.readSeed(sd.TicketID); ok && old.AssignmentID == sd.AssignmentID && old.SHA == sd.SHA {
 		return nil // a repeated seed (placement and reconcile both sent it): the first stands
 	}
 	from := oneLine(sd.From)
@@ -185,17 +187,41 @@ func (n *Node) writeSeed(ticketID string, rec seedRecord) error {
 	return writeFileAtomic(n.seedPath(ticketID, ".json"), string(b))
 }
 
-// seedFor is the seed kept for the Ticket's Assignment assignmentID; ok is false when there is none (or it is
-// another Assignment's).
-func (n *Node) seedFor(ticketID, assignmentID string) (rec seedRecord, ok bool) {
+// seedFor is the seed kept for the Ticket's Assignment assignmentID; ok is false when there is none. A seed nobody
+// used (its restore did not complete) whose Assignment ended goes over to the Ticket's next Assignment on this node:
+// the retry of a launch that failed half-way seeds again, rather than run on what the failure left.
+func (n *Node) seedFor(t core.Ticket, assignmentID string) (rec seedRecord, ok bool) {
+	rec, ok = n.readSeed(t.ID)
+	if !ok {
+		return rec, false
+	}
+	if rec.AssignmentID == assignmentID {
+		return rec, true
+	}
+	if rec.Note != "" {
+		return seedRecord{}, false
+	}
+	for _, a := range t.Assignments {
+		if a.ID == rec.AssignmentID && a.State == core.AssignmentEnded {
+			n.log.Info("an unused seed goes to the ticket's next assignment", "ticket", t.ID, "from", rec.AssignmentID,
+				"to", assignmentID)
+			rec.AssignmentID = assignmentID
+			if err := n.writeSeed(t.ID, rec); err != nil {
+				n.log.Warn("keep the seed", "ticket", t.ID, "error", err)
+			}
+			return rec, true
+		}
+	}
+	return seedRecord{}, false
+}
+
+// readSeed is the Ticket's kept seed, whatever its Assignment.
+func (n *Node) readSeed(ticketID string) (rec seedRecord, ok bool) {
 	if n.cfg.StateDir == "" || !seedTicketRe.MatchString(ticketID) {
 		return rec, false
 	}
 	b, err := readSmall(n.seedPath(ticketID, ".json"))
-	if err != nil {
-		return rec, false
-	}
-	if json.Unmarshal(b, &rec) != nil || rec.AssignmentID != assignmentID {
+	if err != nil || json.Unmarshal(b, &rec) != nil {
 		return seedRecord{}, false
 	}
 	return rec, true
@@ -260,16 +286,22 @@ func (n *Node) sweepSeeds() {
 		kept[id] = true
 	}
 	for _, e := range entries {
-		if id, ok := strings.CutSuffix(e.Name(), ".bundle"); ok && !kept[id] {
-			_ = os.Remove(filepath.Join(dir, e.Name()))
+		id, ok := strings.CutSuffix(e.Name(), ".bundle")
+		if !ok || kept[id] {
+			continue
 		}
+		// A Seed under way writes its bundle before its record: a young bundle is left to it.
+		if info, err := e.Info(); err == nil && time.Since(info.ModTime()) < seedBundleGrace {
+			continue
+		}
+		_ = os.Remove(filepath.Join(dir, e.Name()))
 	}
 }
 
 // takeMovedNote is the moved line of the session's first message, once its worktree was built from a seed ("" when
 // it was not); the seed is dropped once it is read.
 func (n *Node) takeMovedNote(s *session) string {
-	rec, ok := n.seedFor(s.t.ID, s.a.ID)
+	rec, ok := n.seedFor(s.t, s.a.ID)
 	if !ok || rec.Note == "" {
 		return ""
 	}
@@ -337,11 +369,19 @@ func (n *Node) fetchSeed(t core.Ticket, git func(args ...string) (string, error)
 	return parent, err
 }
 
+// restoreHook, when set (tests), runs before a checkpoint is restored; an error fails the restore.
+var restoreHook func() error
+
 func seedRefOf(t core.Ticket) string { return "refs/athena/" + strings.ToLower(t.ID) + "/seed" }
 
 // restoreCheckpoint makes the worktree's files the checkpoint's tree, files the checkpoint lacks removed, and leaves
 // the index at HEAD: the work in progress is back as unstaged changes (new files untracked).
 func restoreCheckpoint(ctx context.Context, workDir string, wenv []string, sha string) error {
+	if restoreHook != nil {
+		if err := restoreHook(); err != nil {
+			return err
+		}
+	}
 	if _, err := gitInCtx(ctx, workDir, wenv, "read-tree", "--reset", "-u", sha); err != nil {
 		return err
 	}
@@ -440,10 +480,16 @@ func (n *Node) reseedWorktree(s *session, rec seedRecord) error {
 	if err != nil {
 		return err
 	}
-	side := fmt.Sprintf("refs/athena/%s/superseded-%d", strings.ToLower(t.ID), time.Now().Unix())
-	kept, err := checkpointTo(p.workDir, side, wenv, "superseded by a seed")
-	if err != nil {
-		return fmt.Errorf("keep the worktree's state before the seed: %w", err)
+	// A ref of its own, never one an earlier reseed made: created only, with another name if that one is taken.
+	var side, kept string
+	for try := 0; ; try++ {
+		side = fmt.Sprintf("%ssuperseded-%d", ticketRefs(t.ID), time.Now().UnixNano())
+		if kept, err = checkpointTo(p.workDir, side, wenv, "superseded by a seed", true); err == nil {
+			break
+		}
+		if try == 2 {
+			return fmt.Errorf("keep the worktree's state before the seed: %w", err)
+		}
 	}
 	wgit := func(args ...string) (string, error) { return gitInCtx(ctx, p.workDir, wenv, args...) }
 	if _, err := wgit("reset", "-q", "--hard", parent); err != nil {

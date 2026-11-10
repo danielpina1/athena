@@ -161,13 +161,21 @@ func TestCleanupRemovesTheCheckpointRef(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		if _, err := checkpoint(dir, c.id, nil, "test"); err != nil {
+		sha, err := checkpoint(dir, c.id, nil, "test")
+		if err != nil {
 			t.Fatal(err)
 		}
+		// The seed's refs go too; another Ticket's whose id starts alike stays.
+		git(t, repo, "update-ref", ticketRefs(c.id)+"superseded-1", sha)
+		git(t, repo, "update-ref", ticketRefs(c.id)+"seed", sha)
+		git(t, repo, "update-ref", checkpointRef(c.id+"0"), sha)
 		cleanupWorktree(placement{workDir: dir, repo: repo, common: filepath.Join(repo, ".git")}, tk, root, log)
 		_, statErr := os.Stat(dir)
-		refs := git(t, repo, "for-each-ref", "--format=%(refname)", checkpointRef(c.id))
-		if c.dirty && (statErr != nil || refs != checkpointRef(c.id)) {
+		refs := git(t, repo, "for-each-ref", "--format=%(refname)", ticketRefs(c.id))
+		if other := git(t, repo, "for-each-ref", checkpointRef(c.id+"0")); other == "" {
+			t.Errorf("%s: another Ticket's checkpoint went with it", c.id)
+		}
+		if c.dirty && (statErr != nil || !strings.Contains(refs, checkpointRef(c.id))) {
 			t.Errorf("%s: kept worktree (%v) lost its checkpoint (refs %q)", c.id, statErr, refs)
 		}
 		if !c.dirty && (!os.IsNotExist(statErr) || refs != "") {

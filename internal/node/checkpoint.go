@@ -65,11 +65,11 @@ func checkpointRef(ticketID string) string {
 // gitIn and checkpointTimeout, and returns the commit. When the ref already holds the same work on the same HEAD, that
 // commit is the checkpoint and the ref stays. why goes into the ref's log.
 func checkpoint(workDir, ticketID string, env []string, why string) (sha string, err error) {
-	return checkpointTo(workDir, checkpointRef(ticketID), env, why)
+	return checkpointTo(workDir, checkpointRef(ticketID), env, why, false)
 }
 
-// checkpointTo is checkpoint into ref.
-func checkpointTo(workDir, ref string, env []string, why string) (sha string, err error) {
+// checkpointTo is checkpoint into ref; create makes it only a new ref (an existing one is an error, left as it was).
+func checkpointTo(workDir, ref string, env []string, why string, create bool) (sha string, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), checkpointTimeout)
 	defer cancel()
 	tmp, err := os.MkdirTemp("", "athena-checkpoint-")
@@ -118,7 +118,11 @@ func checkpointTo(workDir, ref string, env []string, why string) (sha string, er
 	if sha, err = git("commit-tree", "--no-gpg-sign", "-p", head, "-m", "checkpoint", tree); err != nil {
 		return "", err
 	}
-	if _, err := git("update-ref", "-m", "athena: checkpoint ("+why+")", ref, sha); err != nil {
+	args := []string{"update-ref", "-m", "athena: checkpoint (" + why + ")", ref, sha}
+	if create {
+		args = append(args, "") // the ref must not exist yet
+	}
+	if _, err := git(args...); err != nil {
 		return "", err
 	}
 	return sha, nil

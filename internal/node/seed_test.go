@@ -1,11 +1,13 @@
 package node
 
 import (
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -230,24 +232,88 @@ func TestSweepSeeds(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	old, _ := h.n.seedFor("T-9999", "a")
+	old, _ := h.n.readSeed("T-9999")
 	old.Created = time.Now().Add(-seedKeep - time.Hour)
 	if err := h.n.writeSeed("T-9999", old); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(h.n.seedPath("T-8888", ".bundle"), []byte("x"), 0o600); err != nil {
+	orphan := h.n.seedPath("T-8888", ".bundle")
+	if err := os.WriteFile(orphan, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	long := time.Now().Add(-seedBundleGrace - time.Minute)
+	if err := os.Chtimes(orphan, long, long); err != nil {
+		t.Fatal(err)
+	}
+	young := h.n.seedPath("T-7777", ".bundle") // a Seed under way: its record comes next
+	if err := os.WriteFile(young, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	h.n.sweepSeeds()
-	if _, ok := h.n.seedFor(open.ID, "a"); !ok {
+	if _, ok := h.n.readSeed(open.ID); !ok {
 		t.Error("the open Ticket's seed was swept")
 	}
 	for _, id := range []string{ended.ID, "T-9999"} {
-		if _, ok := h.n.seedFor(id, "a"); ok {
+		if _, ok := h.n.readSeed(id); ok {
 			t.Errorf("%s's seed was kept", id)
 		}
 	}
-	if _, err := os.Stat(h.n.seedPath("T-8888", ".bundle")); !os.IsNotExist(err) {
+	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
 		t.Errorf("an orphan bundle was kept: %v", err)
 	}
+	if _, err := os.Stat(young); err != nil {
+		t.Errorf("a young bundle was swept: %v", err)
+	}
+}
+
+// A seed whose restore failed is not lost: the Ticket's next Assignment on this node (the owner's retry of the
+// failed one) takes it over, restores the checkpoint and gets the moved line.
+func TestSeedCarriesOverAFailedRestore(t *testing.T) {
+	var fails atomic.Int32
+	fails.Store(1)
+	restoreHook = func() error {
+		if fails.Add(-1) >= 0 {
+			return errors.New("injected restore failure")
+		}
+		return nil
+	}
+	t.Cleanup(func() { restoreHook = nil }) // after the node's own cleanup
+	var once sync.Once
+	h := newSeedHarness(t, func(h *ghHarness, tk core.Ticket, a core.Assignment) {
+		once.Do(func() { // the server seeds the moved Assignment only, never the retry on the same node
+			w := h.work
+			git(h.t, w, "checkout", "-q", "-b", branchName(tk))
+			if err := os.WriteFile(filepath.Join(w, "a.txt"), []byte("half done\n"), 0o644); err != nil {
+				h.t.Fatal(err)
+			}
+			git(h.t, w, "add", "a.txt")
+			cp := git(h.t, w, "commit-tree", "-p", "HEAD", "-m", "checkpoint", git(h.t, w, "write-tree"))
+			git(h.t, w, "update-ref", checkpointRef(tk.ID), cp)
+			bundle := filepath.Join(h.t.TempDir(), "seed.bundle")
+			git(h.t, w, "bundle", "create", bundle, checkpointRef(tk.ID))
+			if err := h.n.Seed(Seed{TicketID: tk.ID, AssignmentID: a.ID, Bundle: bundle, SHA: cp, From: "studio", Offline: true}); err != nil {
+				h.t.Fatal(err)
+			}
+		})
+	})
+	id := h.acceptOnly("github:issuecomment:1", "o/r", 12)
+	h.eventually("the first launch failed", func() bool {
+		tk, _ := h.ticket(id)
+		return core.CanRetry(&tk)
+	})
+	tk, _ := h.ticket(id)
+	if wd, _ := WorkingDir(h.cfg.WorkRoot, tk); func() bool { _, err := os.Stat(wd); return err == nil }() {
+		t.Fatal("the half-built worktree is left")
+	}
+	if err := h.eng.RetryTicket(id); err != nil {
+		t.Fatal(err)
+	}
+	tk, _ = h.running(id)
+	wd, _ := WorkingDir(h.cfg.WorkRoot, tk)
+	if b, err := os.ReadFile(filepath.Join(wd, "a.txt")); err != nil || string(b) != "half done\n" {
+		t.Fatalf("a.txt after the retry = %q, %v", b, err)
+	}
+	h.eventually("the moved line", func() bool {
+		return strings.Contains(h.stdin(), "This Ticket moved from studio, which went offline; the work below was restored from its last checkpoint.")
+	})
 }

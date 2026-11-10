@@ -2733,11 +2733,22 @@ func cleanupWorktree(p placement, t core.Ticket, workRoot string, log *slog.Logg
 		return
 	}
 	log.Info("removed worktree", "dir", p.workDir)
-	// Its checkpoint (checkpoint.go) goes with it: nothing of the Ticket's work in progress stays reachable.
-	if _, err := gitOut(p.repo, "update-ref", "-d", checkpointRef(t.ID)); err != nil {
-		log.Warn("remove the checkpoint ref", "ref", checkpointRef(t.ID), "error", err)
+	// Its refs go with it, the checkpoint (checkpoint.go) and any seed or superseded state (seed.go): nothing of the
+	// Ticket's work in progress stays reachable.
+	refs, err := gitOut(p.repo, "for-each-ref", "--format=%(refname)", ticketRefs(t.ID))
+	if err != nil {
+		log.Warn("list the ticket's refs", "error", err)
+		return
+	}
+	for _, ref := range strings.Fields(refs) {
+		if _, err := gitOut(p.repo, "update-ref", "-d", ref); err != nil {
+			log.Warn("remove the ticket's ref", "ref", ref, "error", err)
+		}
 	}
 }
+
+// ticketRefs is the directory of a Ticket's refs: refs/athena/<lowercased id>/.
+func ticketRefs(ticketID string) string { return "refs/athena/" + strings.ToLower(ticketID) + "/" }
 
 // gitOut runs git in dir and returns its trimmed stdout.
 func gitOut(dir string, args ...string) (string, error) { return gitIn(dir, nil, args...) }
