@@ -16,9 +16,11 @@ type Node struct {
 	// AppliedFactSeq is the high-water mark of the node's facts applied here, for exactly-once replay.
 	AppliedFactSeq uint64
 	Caps           []byte
+	// CertNotAfter is when the node's certificate expires (zero when not known: a node that joined before it was kept).
+	CertNotAfter time.Time
 }
 
-const nodeColumns = `id, name, cert_serial, created_at, last_seen, draining, revoked_at, applied_fact_seq, caps`
+const nodeColumns = `id, name, cert_serial, created_at, last_seen, draining, revoked_at, applied_fact_seq, caps, cert_not_after`
 
 // PutNode inserts the node, or updates its row if the ID exists. Names are unique (a clashing name is an error).
 func (s *Store) PutNode(n Node) error {
@@ -26,11 +28,12 @@ func (s *Store) PutNode(n Node) error {
 	if n.RevokedAt != nil {
 		revoked = formatTime(*n.RevokedAt)
 	}
-	_, err := s.db.Exec(`INSERT INTO nodes (`+nodeColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	_, err := s.db.Exec(`INSERT INTO nodes (`+nodeColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET name = excluded.name, cert_serial = excluded.cert_serial, created_at = excluded.created_at,
 			last_seen = excluded.last_seen, draining = excluded.draining, revoked_at = excluded.revoked_at,
-			applied_fact_seq = excluded.applied_fact_seq, caps = excluded.caps`,
-		n.ID, n.Name, n.CertSerial, formatTime(n.CreatedAt), formatTime(n.LastSeen), n.Draining, revoked, int64(n.AppliedFactSeq), n.Caps)
+			applied_fact_seq = excluded.applied_fact_seq, caps = excluded.caps, cert_not_after = excluded.cert_not_after`,
+		n.ID, n.Name, n.CertSerial, formatTime(n.CreatedAt), formatTime(n.LastSeen), n.Draining, revoked, int64(n.AppliedFactSeq), n.Caps,
+		formatTime(n.CertNotAfter))
 	if err != nil {
 		return fmt.Errorf("store: put node: %w", err)
 	}
@@ -41,9 +44,9 @@ type rowScanner interface{ Scan(...any) error }
 
 func scanNode(r rowScanner) (*Node, error) {
 	var n Node
-	var created, seen, revoked string
+	var created, seen, revoked, notAfter string
 	var seq int64
-	if err := r.Scan(&n.ID, &n.Name, &n.CertSerial, &created, &seen, &n.Draining, &revoked, &seq, &n.Caps); err != nil {
+	if err := r.Scan(&n.ID, &n.Name, &n.CertSerial, &created, &seen, &n.Draining, &revoked, &seq, &n.Caps, &notAfter); err != nil {
 		return nil, err
 	}
 	n.AppliedFactSeq = uint64(seq)
@@ -52,6 +55,9 @@ func scanNode(r rowScanner) (*Node, error) {
 		return nil, err
 	}
 	if n.LastSeen, err = parseTime(seen); err != nil {
+		return nil, err
+	}
+	if n.CertNotAfter, err = parseTime(notAfter); err != nil {
 		return nil, err
 	}
 	if revoked != "" {

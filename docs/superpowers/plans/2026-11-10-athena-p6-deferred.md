@@ -13,7 +13,7 @@ Plan 6 was multi-node (`docs/superpowers/plans/2026-11-10-athena-p6-multi-node.m
 - **Labels** in capabilities and dispatch (§7.2 "owner pin/labels"): only the pin is built. Labels arrive when a second kind of machine needs them (plan 8's GPU node).
 - **Node-to-node git** over the VPN (§7.4): every move goes through the server's mirror. A direct remote is an optimisation once repositories are large.
 - **Tar moves of Dir Tickets** (§7.4): a Dir Ticket stays on its node, because its folder is the owner's folder on that machine.
-- **Certificate renewal**: after 397 days a node must join again. `athena node list` shows the expiry from day 360.
+- **Certificate renewal**: after 397 days a node must join again; renewal itself is deferred. What exists: the server records each node certificate's expiry at its join (`nodes.cert_not_after`), `athena node list` shows it in an EXPIRES column (the date, or `expired`; `-` for this machine and for nodes that joined before it was recorded), and `athena node run` with an expired certificate stops before dialing with "This node's certificate has expired; run athena node join again." instead of reading the handshake refusals as a revocation. No warning ahead of the expiry yet, and the dashboard does not show it.
 - **`athena node forget`** for revoked rows, and the `node_removed` delta.
 - **Editable per-node Execution settings** in the dashboard: they stay node flags, shown read-only per node.
 - **Plan 7:** `ask_agent`/`hand_off` across nodes ride this plan's request calls.

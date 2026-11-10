@@ -240,18 +240,23 @@ func (s hubSource) Nodes() []hub.NodeInfo {
 	return out
 }
 
-// Placement is the node the Ticket's latest Assignment runs on (the server's own when none is placed) and whether the
-// Fleet holds it waiting for a node.
+// Placement is the node the Ticket's latest Assignment runs on and whether the Fleet holds it waiting for a node. A
+// pinned Ticket not placed yet shows its pin; an unpinned pending Assignment not placed yet shows no node (empty id and
+// name); anything else with no node recorded ran before there were nodes, on the server's own.
 func (s hubSource) Placement(t *core.Ticket) (string, string, string) {
-	id := fleet.LocalID
-	if a := t.LatestAssignment(); a != nil && a.Node != "" {
-		id = a.Node
-	} else if t.Execution != nil && t.Execution.Node != "" {
-		id = t.Execution.Node // pinned and not placed yet
-	}
 	waiting := ""
 	if s.d.fleet != nil {
 		waiting = s.d.fleet.WaitReason(t.ID)
+	}
+	id := fleet.LocalID
+	a := t.LatestAssignment()
+	switch {
+	case a != nil && a.Node != "":
+		id = a.Node
+	case t.Execution != nil && t.Execution.Node != "":
+		id = t.Execution.Node // pinned and not placed yet
+	case a != nil && a.State == core.AssignmentPending:
+		return "", "", waiting
 	}
 	return id, s.d.nodeName(id), waiting
 }

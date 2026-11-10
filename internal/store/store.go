@@ -183,6 +183,8 @@ var migrations = []string{
 		caps BLOB
 	);
 	ALTER TABLE enroll_tokens ADD COLUMN kind TEXT NOT NULL DEFAULT 'passkey';`,
+	// 13: when a node's certificate expires, recorded at its join ('' for a node that joined before this).
+	`ALTER TABLE nodes ADD COLUMN cert_not_after TEXT NOT NULL DEFAULT '';`,
 }
 
 const schemaKey = "schema"

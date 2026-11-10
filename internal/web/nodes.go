@@ -121,6 +121,11 @@ func NodeJoin(st *store.Store, ca *pki.CA, now func() time.Time, nodeURL string)
 			fail(w, http.StatusBadRequest, "invalid", joinBadCSR)
 			return
 		}
+		leaf, err := x509.ParseCertificate(cert)
+		if err != nil {
+			internalError(w, "web: node join: parse the signed certificate", err)
+			return
+		}
 		spent, err := st.UseEnrollToken(hash, store.EnrollNode, at)
 		if err != nil {
 			internalError(w, "web: node join: spend token", err)
@@ -139,7 +144,7 @@ func NodeJoin(st *store.Store, ca *pki.CA, now func() time.Time, nodeURL string)
 			refuseJoin(w, state)
 			return
 		}
-		if err := st.PutNode(store.Node{ID: id, Name: req.Name, CertSerial: serial, CreatedAt: at}); err != nil {
+		if err := st.PutNode(store.Node{ID: id, Name: req.Name, CertSerial: serial, CreatedAt: at, CertNotAfter: leaf.NotAfter}); err != nil {
 			// A concurrent join took the name after the check (the token is spent: the owner makes another).
 			if taken, terr := nodeNameTaken(st, req.Name); terr == nil && taken {
 				fail(w, http.StatusBadRequest, "exists", joinNameTaken(req.Name))

@@ -41,13 +41,55 @@ func args(call *athenav1.NodeCall) (any, error) {
 	return a, nil
 }
 
-// errNotOnNode refuses a node's call about a Ticket none of whose Assignments was placed on it.
+// errNotOnNode refuses a node's call about a Ticket that is not (or, for a late fact, never was) on it.
 func errNotOnNode(ticketID string) error {
 	return &core.UserError{Msg: "ticket " + ticketID + " is not on this node"}
 }
 
-// onNode checks that the Ticket has an Assignment placed on the node: a node acts only on its own Tickets.
-func onNode(eng *core.Engine, nodeID, ticketID string) error {
+// A node acts only on its own work. Three scopes, narrowest first:
+//
+//   - assignmentOn: a call naming an Assignment needs that Assignment placed on the node (it may have ended: a late
+//     fact about the node's own past Assignment is the Engine's to judge);
+//   - currentOn: a call about the Ticket as a whole needs the Ticket's latest Assignment on the node and not ended,
+//     the rule repoOnNode and latestOn use, so a node a Ticket moved away from cannot act on it;
+//   - pastOn: a late fact that names no Assignment (InputsRead, AllowedByRule) needs one of the Ticket's Assignments
+//     to have been placed on the node.
+
+// assignmentOn checks that the Ticket's Assignment assignmentID is placed on the node; with no assignmentID, that the
+// Ticket is currently on it.
+func assignmentOn(eng *core.Engine, nodeID, ticketID, assignmentID string) error {
+	if assignmentID == "" {
+		return currentOn(eng, nodeID, ticketID)
+	}
+	t, _, err := eng.Ticket(ticketID)
+	if err != nil {
+		return err
+	}
+	for _, a := range t.Assignments {
+		if a.ID == assignmentID {
+			if a.Node == nodeID {
+				return nil
+			}
+			break
+		}
+	}
+	return &core.UserError{Msg: "assignment " + assignmentID + " of ticket " + ticketID + " is not on this node"}
+}
+
+// currentOn checks that the Ticket's latest Assignment is placed on the node and not ended.
+func currentOn(eng *core.Engine, nodeID, ticketID string) error {
+	t, _, err := eng.Ticket(ticketID)
+	if err != nil {
+		return err
+	}
+	if a := t.LatestAssignment(); a == nil || a.Node != nodeID || a.State == core.AssignmentEnded {
+		return errNotOnNode(ticketID)
+	}
+	return nil
+}
+
+// pastOn checks that one of the Ticket's Assignments was placed on the node.
+func pastOn(eng *core.Engine, nodeID, ticketID string) error {
 	t, _, err := eng.Ticket(ticketID)
 	if err != nil {
 		return err
@@ -68,55 +110,55 @@ func (f *Fleet) fact(nodeID string, call *athenav1.NodeCall) error {
 		return err
 	}
 	eng := f.engine()
-	guard := func(ticketID string) error { return onNode(eng, nodeID, ticketID) }
+	own := func(ticketID, assignmentID string) error { return assignmentOn(eng, nodeID, ticketID, assignmentID) }
 	switch a := a.(type) {
 	case *nodelink.ArgsAssignmentStarted:
-		if err := guard(a.TicketID); err != nil {
+		if err := own(a.TicketID, a.AssignmentID); err != nil {
 			return err
 		}
 		return eng.AssignmentStarted(a.TicketID, a.AssignmentID, a.SessionID, a.Model, a.Runtime)
 	case *nodelink.ArgsInputsDelivered:
-		if err := guard(a.TicketID); err != nil {
+		if err := own(a.TicketID, a.AssignmentID); err != nil {
 			return err
 		}
 		return eng.InputsDelivered(a.TicketID, a.AssignmentID, a.InputIDs)
 	case *nodelink.ArgsDeliveryFailed:
-		if err := guard(a.TicketID); err != nil {
+		if err := own(a.TicketID, a.AssignmentID); err != nil {
 			return err
 		}
 		return eng.DeliveryFailed(a.TicketID, a.AssignmentID, a.ErrMsg)
 	case *nodelink.ArgsInputsRead:
-		if err := guard(a.TicketID); err != nil {
+		if err := pastOn(eng, nodeID, a.TicketID); err != nil {
 			return err
 		}
 		return eng.InputsRead(a.TicketID, a.InputIDs)
 	case *nodelink.ArgsTurnEnded:
-		if err := guard(a.TicketID); err != nil {
+		if err := own(a.TicketID, a.AssignmentID); err != nil {
 			return err
 		}
 		return eng.TurnEnded(a.TicketID, a.AssignmentID)
 	case *nodelink.ArgsAssignmentInterrupted:
-		if err := guard(a.TicketID); err != nil {
+		if err := own(a.TicketID, a.AssignmentID); err != nil {
 			return err
 		}
 		return eng.AssignmentInterrupted(a.TicketID, a.AssignmentID, a.Reason)
 	case *nodelink.ArgsAssignmentPaused:
-		if err := guard(a.TicketID); err != nil {
+		if err := own(a.TicketID, a.AssignmentID); err != nil {
 			return err
 		}
 		return eng.AssignmentPaused(a.TicketID, a.AssignmentID, a.ReportOwed)
 	case *nodelink.ArgsUsageLimited:
-		if err := guard(a.TicketID); err != nil {
+		if err := own(a.TicketID, a.AssignmentID); err != nil {
 			return err
 		}
 		return eng.UsageLimited(a.TicketID, a.AssignmentID, a.Limit)
 	case *nodelink.ArgsRecordUsage:
-		if err := guard(a.TicketID); err != nil {
+		if err := own(a.TicketID, a.AssignmentID); err != nil {
 			return err
 		}
 		return eng.RecordUsage(a.TicketID, a.AssignmentID, a.Usage)
 	case *nodelink.ArgsAllowedByRule:
-		if err := guard(a.TicketID); err != nil {
+		if err := pastOn(eng, nodeID, a.TicketID); err != nil {
 			return err
 		}
 		return eng.AllowedByRule(a.TicketID, a.Tool, a.Rule, a.Repo)
@@ -161,15 +203,15 @@ func (f *Fleet) request(ctx context.Context, nodeID string, call *athenav1.NodeC
 
 func (f *Fleet) answer(ctx context.Context, nodeID string, a any) (any, error) {
 	eng := f.engine()
-	guard := func(ticketID string) error { return onNode(eng, nodeID, ticketID) }
+	guard := func(ticketID string) error { return currentOn(eng, nodeID, ticketID) }
 	switch a := a.(type) {
 	case *nodelink.ArgsFileReport:
-		if err := guard(a.TicketID); err != nil {
+		if err := assignmentOn(eng, nodeID, a.TicketID, a.Report.AssignmentID); err != nil {
 			return nil, err
 		}
 		return nil, eng.FileReport(a.TicketID, a.Report)
 	case *nodelink.ArgsFileReview:
-		if err := guard(a.TicketID); err != nil {
+		if err := assignmentOn(eng, nodeID, a.TicketID, a.AssignmentID); err != nil {
 			return nil, err
 		}
 		return nil, eng.FileReview(a.TicketID, a.AssignmentID, a.Verdict, a.Findings)
@@ -183,7 +225,7 @@ func (f *Fleet) answer(ctx context.Context, nodeID string, a any) (any, error) {
 		}
 		return nodelink.ResultTicket{Ticket: t, Stage: st}, nil
 	case *nodelink.ArgsRequestApproval:
-		if err := guard(a.Approval.TicketID); err != nil {
+		if err := assignmentOn(eng, nodeID, a.Approval.TicketID, a.Approval.AssignmentID); err != nil {
 			return nil, err
 		}
 		return eng.RequestApproval(a.Approval)
@@ -332,25 +374,26 @@ func waitApproval(ctx context.Context, eng *core.Engine, id string, wait time.Du
 	return eng.WaitApproval(lctx, id)
 }
 
-// approvalOnNode checks that the Approval belongs to a Ticket placed on the node.
+// approvalOnNode checks that the Approval is the node's: its Assignment on the node, or, naming none, its Ticket
+// currently on the node.
 func approvalOnNode(eng *core.Engine, nodeID, id string) error {
 	a, err := eng.Approval(id)
 	if err != nil {
 		return err
 	}
-	return onNode(eng, nodeID, a.TicketID)
+	return assignmentOn(eng, nodeID, a.TicketID, a.AssignmentID)
 }
 
-// proposalOnNode checks that the Proposal belongs to a Ticket placed on the node.
+// proposalOnNode checks that the Proposal belongs to a Ticket currently on the node.
 func proposalOnNode(eng *core.Engine, nodeID, id string) error {
 	p, err := eng.Proposal(id)
 	if err != nil {
 		return err
 	}
-	return onNode(eng, nodeID, p.TicketID)
+	return currentOn(eng, nodeID, p.TicketID)
 }
 
-// pendingProposalsOn lists the pending Proposals of the Tickets placed on the node.
+// pendingProposalsOn lists the pending Proposals of the Tickets currently on the node.
 func pendingProposalsOn(eng *core.Engine, nodeID string) ([]core.Proposal, error) {
 	all, err := eng.PendingProposals()
 	if err != nil {
@@ -361,7 +404,7 @@ func pendingProposalsOn(eng *core.Engine, nodeID string) ([]core.Proposal, error
 	for _, p := range all {
 		ok, seen := on[p.TicketID]
 		if !seen {
-			ok = onNode(eng, nodeID, p.TicketID) == nil
+			ok = currentOn(eng, nodeID, p.TicketID) == nil
 			on[p.TicketID] = ok
 		}
 		if ok {
@@ -371,14 +414,14 @@ func pendingProposalsOn(eng *core.Engine, nodeID string) ([]core.Proposal, error
 	return out, nil
 }
 
-// triggerOnNode checks that the Trigger started, or reached as an Input, an open Ticket placed on the node.
+// triggerOnNode checks that the Trigger started, or reached as an Input, an open Ticket currently on the node.
 func triggerOnNode(eng *core.Engine, nodeID, id string) error {
 	tickets, err := eng.Tickets(false)
 	if err != nil {
 		return err
 	}
 	for _, t := range tickets {
-		if !placedOn(t, nodeID) {
+		if a := t.LatestAssignment(); a == nil || a.Node != nodeID || a.State == core.AssignmentEnded {
 			continue
 		}
 		if t.Origin.TriggerID == id || slices.Contains(t.Origin.TriggerIDs, id) {

@@ -366,3 +366,24 @@ func TestBackWhereItRanIsNotSeeded(t *testing.T) {
 		t.Fatalf("seedFrom for studio = %s, %v", prev, moved)
 	}
 }
+
+// TestRetryElsewhereMovesPinnedTicket: a Ticket pinned to the node that stranded it is placed on another node once the
+// owner retries it elsewhere (the pin goes), instead of waiting for the stranded node forever.
+func TestRetryElsewhereMovesPinnedTicket(t *testing.T) {
+	e, f := executorEnv(t)
+	e.addNode(nodeID, "mini")
+	e.addNode(otherID, "studio")
+	tk := e.placedWith(nodeID, core.TaskOptions{Repo: "o/r", Node: nodeID})
+	if err := e.eng.NodeOffline(nodeID, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	a := dialAnswering(t, f, otherID)
+	if err := e.eng.RetryElsewhere(tk.ID); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the start on studio", func() bool { return a.got(nodelink.ServeStart) })
+	got := e.ticket(tk.ID)
+	if got.Execution.Node != "" || got.LatestAssignment().Node != otherID {
+		t.Fatalf("pin %q, placed on %q; want no pin and studio", got.Execution.Node, got.LatestAssignment().Node)
+	}
+}

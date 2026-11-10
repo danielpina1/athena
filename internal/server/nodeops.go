@@ -34,6 +34,8 @@ type NodeRow struct {
 	Runtimes []string  `json:"runtimes,omitempty"`
 	NotReady []string  `json:"notReady,omitempty"`
 	LastSeen time.Time `json:"lastSeen"`
+	// CertExpires is when a remote node's certificate expires (zero when not known, and for the local node).
+	CertExpires time.Time `json:"certExpires"`
 }
 
 var errNoFleet = errors.New("nodes are not available")
@@ -80,7 +82,7 @@ func (d *Dispatcher) nodeRows() ([]NodeRow, error) {
 	out := make([]NodeRow, 0, len(views))
 	for _, v := range views {
 		r := NodeRow{ID: v.ID, Name: v.Name, Local: v.Local, State: v.State, LastSeen: v.LastSeen,
-			Slots: v.Status.Slots, SlotsInUse: v.Status.SlotsInUse}
+			Slots: v.Status.Slots, SlotsInUse: v.Status.SlotsInUse, CertExpires: v.CertExpires}
 		for _, rt := range v.Status.Runtimes {
 			r.Runtimes = append(r.Runtimes, rt.Name)
 			if !rt.Ready {

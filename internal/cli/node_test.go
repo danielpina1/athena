@@ -319,7 +319,9 @@ func TestNodeListDrainUndrain(t *testing.T) {
 	}
 	defer st.Close()
 	seen := time.Now().Add(-5 * time.Minute)
-	if err := st.PutNode(store.Node{ID: "n00000000b1", Name: "box", CertSerial: "1", CreatedAt: seen, LastSeen: seen}); err != nil {
+	expires := time.Now().Add(300 * 24 * time.Hour)
+	if err := st.PutNode(store.Node{ID: "n00000000b1", Name: "box", CertSerial: "1", CreatedAt: seen, LastSeen: seen,
+		CertNotAfter: expires}); err != nil {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
@@ -330,7 +332,7 @@ func TestNodeListDrainUndrain(t *testing.T) {
 			t.Fatalf("list: exit %d, stderr %q", code, errOut)
 		}
 		lines := strings.Split(strings.TrimSpace(out), "\n")
-		if h := strings.Join(strings.Fields(lines[0]), " "); h != "NAME ID STATE SLOTS RUNTIMES LAST SEEN" {
+		if h := strings.Join(strings.Fields(lines[0]), " "); h != "NAME ID STATE SLOTS RUNTIMES LAST SEEN EXPIRES" {
 			t.Fatalf("header %q", lines[0])
 		}
 		for _, l := range lines[1:] {
@@ -343,10 +345,11 @@ func TestNodeListDrainUndrain(t *testing.T) {
 	}
 	local := fleet.LocalName(mustHostname(t))
 	if f := row(local); f[1] != fleet.LocalID || f[2] != "online" || f[3] != "0/2" || !strings.Contains(f[4], "claude") ||
-		strings.Join(f[len(f)-2:], " ") != "this machine" {
+		strings.Join(f[len(f)-3:len(f)-1], " ") != "this machine" || f[len(f)-1] != "-" {
 		t.Fatalf("local row %v", f)
 	}
-	if f := row("box"); f[1] != "n00000000b1" || f[2] != "offline" || strings.Join(f[len(f)-2:], " ") != "5m ago" {
+	if f := row("box"); f[1] != "n00000000b1" || f[2] != "offline" || strings.Join(f[len(f)-3:len(f)-1], " ") != "5m ago" ||
+		f[len(f)-1] != expires.Local().Format("2006-01-02") {
 		t.Fatalf("box row %v", f)
 	}
 	if code, out, errOut := athena(ctx, "node", "drain", "box", "--state-dir", dir); code != 0 || out != "box: draining\n" {
@@ -513,4 +516,23 @@ func (n *runningNode) stderr() string {
 	n.errb.mu.Lock()
 	defer n.errb.mu.Unlock()
 	return n.buf.String()
+}
+
+// The EXPIRES column: the date, "expired" once past, "-" for this machine and when not known.
+func TestPrintNodesExpires(t *testing.T) {
+	now := time.Date(2026, 11, 10, 12, 0, 0, 0, time.Local)
+	var b strings.Builder
+	printNodes(&b, []server.NodeRow{
+		{ID: "local", Name: "server", Local: true, State: fleet.StateOnline},
+		{ID: "n1", Name: "old", State: fleet.StateOffline},
+		{ID: "n2", Name: "soon", State: fleet.StateOnline, CertExpires: now.Add(48 * time.Hour)},
+		{ID: "n3", Name: "late", State: fleet.StateOffline, CertExpires: now.Add(-time.Hour)},
+	}, now)
+	want := map[string]string{"server": "-", "old": "-", "soon": "2026-11-12", "late": "expired"}
+	for _, l := range strings.Split(strings.TrimSpace(b.String()), "\n")[1:] {
+		f := strings.Fields(l)
+		if got := f[len(f)-1]; got != want[f[0]] {
+			t.Errorf("%s expires %q, want %q", f[0], got, want[f[0]])
+		}
+	}
 }

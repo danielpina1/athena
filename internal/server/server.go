@@ -281,8 +281,9 @@ func Run(ctx context.Context, cfg Config) (err error) {
 		Policy: ncfg.Policy, Prompts: func() (string, string) { return ncfg.WorkerPrompt(), ncfg.ReviewerPrompt() },
 		Mirror: fleet.NewMirror(fleet.CheckpointDir(stateDir)), OfflineAfter: offlineAfter(), Log: logger})
 	fltRef.Store(flt)
-	// Before the store closes and after the node does (deferred later, so it runs first): node links can outlive the
-	// web server's stop, and placement records into the Engine.
+	// Closes before the store (deferred after it): node links can outlive the web server's stop, and placement records
+	// into the Engine. Once the node is serving, the deferred stop below closes the node first and this runs after it;
+	// on an earlier return this runs before the closeNode deferred above.
 	defer flt.Close()
 	emit := func(e core.Event) {
 		attrs := []any{"type", e.Type, "ticket", e.TicketID, "assignment", e.AssignmentID}

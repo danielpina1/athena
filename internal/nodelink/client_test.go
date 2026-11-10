@@ -2,14 +2,24 @@ package nodelink
 
 import (
 	"bytes"
+	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
 	"errors"
+	"math/big"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/danielpina1/athena/internal/core"
+	"github.com/danielpina1/athena/internal/link"
 	"github.com/danielpina1/athena/internal/pb/athenav1"
 )
 
@@ -28,6 +38,10 @@ func TestFactsReplayOnceInOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// The first went on an earlier link, which the server applied before it dropped.
+	if err := c.ob.markSent(0, 1); err != nil {
+		t.Fatal(err)
+	}
 	first := srv.add(1)
 	run(t, c)
 	eventually(t, "facts 2 and 3", func() bool { return len(first.facts()) >= 2 })
@@ -248,4 +262,61 @@ func promptsAsked(fs *fakeServer) bool {
 		}
 	}
 	return false
+}
+
+// A fresh node.db: facts made before the first Welcome reach a server whose mark counts an older node.db's facts,
+// numbered again above that mark, in order.
+func TestFactsBeforeFirstWelcomeSurviveAHigherMark(t *testing.T) {
+	srv := newServers(t)
+	c := newTestClient(t, srv)
+	eng := c.Engine()
+	if err := eng.TurnEnded("T1", "A1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.InputsRead("T1", []string{"I1"}); err != nil {
+		t.Fatal(err)
+	}
+	first := srv.add(7)
+	run(t, c)
+	eventually(t, "both facts", func() bool { return len(first.facts()) >= 2 })
+	got := first.facts()
+	if len(got) != 2 || got[0].GetFactSeq() != 8 || got[0].GetMethod() != MethodTurnEnded ||
+		got[1].GetFactSeq() != 9 || got[1].GetMethod() != MethodInputsRead {
+		t.Fatalf("facts = %v, want TurnEnded at 8 and InputsRead at 9", seqs(got))
+	}
+}
+
+// An expired certificate ends Run before any dial with its own error, not as a revocation (an expired certificate is
+// refused at the handshake just like a revoked one).
+func TestExpiredCertEndsRunBeforeDialing(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "n0123456789.node"},
+		NotBefore: time.Now().Add(-48 * time.Hour), NotAfter: time.Now().Add(-time.Hour)}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dials atomic.Int32
+	id := &Identity{NodeID: "n0123456789", Name: "mini", NodeURL: "wss://athena.test:8444/node",
+		Cert: tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}}
+	c, err := New(id, Options{StateDir: t.TempDir(), Version: "test", MinBackoff: time.Millisecond,
+		Dial: func(context.Context) (link.Conn, error) { dials.Add(1); return nil, errors.New("no dial expected") }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := c.Run(ctx); !errors.Is(err, ErrCertExpired) || errors.Is(err, ErrRevoked) {
+		t.Fatalf("Run = %v, want ErrCertExpired", err)
+	}
+	if n := dials.Load(); n != 0 {
+		t.Fatalf("%d dials", n)
+	}
+	if !strings.Contains(ErrCertExpired.Error(), "athena node join again") {
+		t.Fatal(ErrCertExpired)
+	}
 }

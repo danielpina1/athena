@@ -106,3 +106,31 @@ func TestRetryElsewhereKeepsReviewRole(t *testing.T) {
 		t.Error("review state lost")
 	}
 }
+
+func TestRetryElsewhereClearsPinToStrandedNode(t *testing.T) {
+	h := newHarness(t)
+	tk, err := h.eng.SubmitOwnerTask("pinned", TaskOptions{Repo: "o/r", Node: "n3"})
+	h.must(err)
+	h.must(h.eng.AssignmentPlaced(tk.ID, tk.Assignments[0].ID, "n3"))
+	h.must(h.eng.NodeOffline("n3", base))
+	h.must(h.eng.RetryElsewhere(tk.ID))
+
+	got := h.ticket(tk.ID)
+	eq(t, "pin", got.Execution.Node, "")
+	eq(t, "avoid", got.LatestAssignment().Avoid, []string{"n3"})
+	evs := h.eventsOf(EventAssignmentEnded)
+	last := evs[len(evs)-1]
+	eq(t, "ended assignment", last.AssignmentID, tk.Assignments[0].ID)
+	eq(t, "unpinned", last.Data["unpinned"], any("n3"))
+}
+
+func TestRetryElsewhereKeepsOtherPin(t *testing.T) {
+	h := newHarness(t)
+	tk, err := h.eng.SubmitOwnerTask("pinned", TaskOptions{Repo: "o/r", Node: "n3"})
+	h.must(err)
+	// Placed elsewhere (as by an older pin); the pin is not the stranded node, so it stays.
+	h.must(h.eng.AssignmentPlaced(tk.ID, tk.Assignments[0].ID, "n1"))
+	h.must(h.eng.NodeOffline("n1", base))
+	h.must(h.eng.RetryElsewhere(tk.ID))
+	eq(t, "pin", h.ticket(tk.ID).Execution.Node, "n3")
+}

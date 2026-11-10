@@ -198,6 +198,11 @@ func New(cfg Config) *Fleet {
 	}
 	if cfg.Local != nil {
 		f.localBundle = cfg.Local.CheckpointBundle
+		if v, ok, err := cfg.Store.KVGet(localDrainKey); err != nil {
+			f.log.Error("read whether this machine is drained", "error", err)
+		} else {
+			f.localDraining = ok && v == "1"
+		}
 	}
 	if cfg.Mirror != nil {
 		f.bg.Add(2)
@@ -306,6 +311,9 @@ type NodeView struct {
 	Version string
 	// Status is the node's last status (zero while it never reported one).
 	Status node.Status
+	// CertExpires is when a remote node's certificate expires: it must join again by then (zero for the local node,
+	// and for a node that joined before it was recorded).
+	CertExpires time.Time
 }
 
 // Nodes lists the local node first, then every enrolled node, revoked ones included, by name.
@@ -327,7 +335,7 @@ func (f *Fleet) Nodes() []NodeView {
 		return out
 	}
 	for _, n := range rows {
-		v := NodeView{ID: n.ID, Name: n.Name, LastSeen: n.LastSeen}
+		v := NodeView{ID: n.ID, Name: n.Name, LastSeen: n.LastSeen, CertExpires: n.CertNotAfter}
 		f.mu.Lock()
 		r := f.remotes[n.ID]
 		f.mu.Unlock()
@@ -362,9 +370,22 @@ func (f *Fleet) Nodes() []NodeView {
 	return out
 }
 
-// SetDraining marks the node as taking no new Assignments (or takes the mark off).
+// localDrainKey is the kv entry that keeps the embedded node drained across server restarts ("1" when it is).
+const localDrainKey = "fleet:local:draining"
+
+// SetDraining marks the node as taking no new Assignments (or takes the mark off). Both kinds of node keep the mark
+// across restarts: a remote's on its nodes row, the embedded node's in the kv table.
 func (f *Fleet) SetDraining(id string, on bool) error {
 	if id == f.cfg.LocalID && f.cfg.Local != nil {
+		var err error
+		if on {
+			err = f.cfg.Store.KVSet(localDrainKey, "1")
+		} else {
+			err = f.cfg.Store.KVDelete(localDrainKey)
+		}
+		if err != nil {
+			return err
+		}
 		f.mu.Lock()
 		f.localDraining = on
 		f.mu.Unlock()
@@ -395,9 +416,17 @@ func (f *Fleet) Revoke(id string) error {
 		return err
 	}
 	r := f.Remote(id)
-	// Under connMu: a link being welcomed either saw the revocation or is attached before this looks.
+	// Under connMu: a link being welcomed either saw the revocation or is attached before this looks. A revoked node
+	// never comes back, so its Tickets show it offline at once (and offer Retry elsewhere) instead of after
+	// OfflineAfter; the offline timer's check takes connMu too (lock order connMu → offMu).
 	r.connMu.Lock()
 	lk := r.link()
+	f.disarmOffline(id)
+	if eng := f.engine(); eng != nil {
+		if err := eng.NodeOffline(id, f.now()); err != nil {
+			f.log.Error("flag the revoked node's tickets offline", "node", id, "error", err)
+		}
+	}
 	r.connMu.Unlock()
 	if lk != nil {
 		lk.end(CloseRevoked, reasonRevoked)

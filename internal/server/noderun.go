@@ -170,6 +170,10 @@ func RunNode(ctx context.Context, cfg NodeRunConfig) (err error) {
 			logger.Error("this node was revoked; run athena node join again")
 			return linkErr
 		}
+		if errors.Is(linkErr, nodelink.ErrCertExpired) {
+			logger.Error("this node's certificate has expired; run athena node join again")
+			return linkErr
+		}
 		logger.Error("the link to the server stopped", "error", linkErr)
 		return fmt.Errorf("node: the link to the server stopped: %v", linkErr)
 	}

@@ -2,10 +2,12 @@ package nodelink
 
 import (
 	"context"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -21,6 +23,10 @@ import (
 )
 
 // Protocol is NodeHello.protocol.
+//
+// Any change to an Args struct (proxies.go, serve.go) or to the fields of a call bumps Protocol. Both ends decode args
+// strictly, and a fact the server cannot decode is refused as a UserError, which still advances the applied-fact mark:
+// without the bump a node and a server of different versions would drop facts silently instead of refusing the link.
 const Protocol = 1
 
 const (
@@ -52,6 +58,22 @@ const refusalsFatal = 3
 // ErrRevoked ends Run: the server closed the link because the owner revoked this node, or keeps refusing its
 // certificate at the handshake. Only a new join brings it back.
 var ErrRevoked = errors.New("This node was revoked; run athena node join again.")
+
+// ErrCertExpired ends Run: this node's own certificate is past its NotAfter, so every handshake would fail (which
+// would otherwise read as revoked). Renewal is a new join.
+var ErrCertExpired = errors.New("This node's certificate has expired; run athena node join again.")
+
+// certExpired reports whether the node's certificate has expired at now; a node without one (tests) never expires.
+func (id *Identity) certExpired(now time.Time) bool {
+	leaf := id.Cert.Leaf
+	if leaf == nil && len(id.Cert.Certificate) > 0 {
+		var err error
+		if leaf, err = x509.ParseCertificate(id.Cert.Certificate[0]); err != nil {
+			return false // the handshake says what is wrong with it
+		}
+	}
+	return leaf != nil && now.After(leaf.NotAfter)
+}
 
 // errLinkLost is a request whose link ended before its answer came; it is ErrOffline to the caller.
 var errLinkLost = fmt.Errorf("%w", ErrOffline)
@@ -276,6 +298,11 @@ func (c *Client) Run(ctx context.Context) error {
 	backoff := c.opts.MinBackoff
 	refused := 0
 	for {
+		// Checked before each dial: an expired certificate is refused at the handshake like a revoked one.
+		if c.id.certExpired(time.Now()) {
+			c.log.Error("this node's certificate has expired; run athena node join again")
+			return ErrCertExpired
+		}
 		welcomed, err := c.connect(ctx)
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -351,10 +378,24 @@ func (c *Client) connect(ctx context.Context) (welcomed bool, err error) {
 	}
 
 	// The server applied the facts through its mark: they go, and the rest are queued, in order, before anything else.
-	if err := c.ob.applied(w.GetAppliedFactSeq()); err != nil {
+	moved, err := c.ob.applied(w.GetAppliedFactSeq())
+	if err != nil {
 		cancel()
 		<-errc
 		return true, fmt.Errorf("nodelink: outbox: %w", err)
+	}
+	if len(moved) > 0 {
+		c.ansMu.Lock()
+		then := map[uint64]func(string){}
+		for from, to := range moved {
+			if fn, ok := c.answered[from]; ok {
+				then[to] = fn
+				delete(c.answered, from)
+			}
+		}
+		maps.Copy(c.answered, then)
+		c.ansMu.Unlock()
+		c.log.Warn("facts made before the first welcome numbered again after the server's mark", "facts", len(moved))
 	}
 	cn.sendMu.Lock()
 	cn.queued = w.GetAppliedFactSeq()
@@ -527,6 +568,10 @@ func (c *Client) flushFacts(cn *conn) (done bool, err error) {
 		}
 		if len(rows) == 0 {
 			return true, nil
+		}
+		// Flagged before they go, never after: a fact on the wire must not be numbered again (see applied).
+		if err := c.ob.markSent(cn.queued, rows[len(rows)-1].seq); err != nil {
+			return false, fmt.Errorf("nodelink: outbox: %w", err)
 		}
 		for _, r := range rows {
 			id := c.nextID.Add(1)

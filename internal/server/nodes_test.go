@@ -462,3 +462,23 @@ func TestPinnedUnplacedSummaryShowsNode(t *testing.T) {
 		return id == rn.id && name == "mini" && why == "Waiting for mini"
 	})
 }
+
+// A Ticket neither placed nor pinned shows no node (not "this machine"); a placed one shows its node, and one that ran
+// before there were nodes shows the server's own.
+func TestUnplacedSummaryShowsNoNode(t *testing.T) {
+	newFakeEnv(t, openTurnFixture(t))
+	w := startWebWith(t, newStateDir(t), nil)
+	src := hubSource{d: w.d}
+	unplaced := core.Ticket{ID: "T-x", Assignments: []core.Assignment{{ID: "a1", State: core.AssignmentPending}}}
+	if id, name, _ := src.Placement(&unplaced); id != "" || name != "" {
+		t.Fatalf("unplaced = %q %q, want no node", id, name)
+	}
+	placed := core.Ticket{ID: "T-y", Assignments: []core.Assignment{{ID: "a1", State: core.AssignmentPending, Node: fleet.LocalID}}}
+	if id, _, _ := src.Placement(&placed); id != fleet.LocalID {
+		t.Fatalf("placed = %q", id)
+	}
+	legacy := core.Ticket{ID: "T-z", Assignments: []core.Assignment{{ID: "a1", State: core.AssignmentEnded}}}
+	if id, name, _ := src.Placement(&legacy); id != fleet.LocalID || name == "" {
+		t.Fatalf("legacy = %q %q, want the server's own", id, name)
+	}
+}

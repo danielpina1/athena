@@ -503,3 +503,100 @@ func TestSubGapBeforeClose(t *testing.T) {
 		t.Fatalf("lines = %+v, want a, b, then a gap 4..9", got)
 	}
 }
+
+// TestCallsScopedToAssignment: once Retry elsewhere moved a Ticket from mini to studio, mini can no longer report on
+// it nor claim studio's Assignment; its late fact about its own old Assignment still reaches the Engine, and every
+// refused fact moves the mark.
+func TestCallsScopedToAssignment(t *testing.T) {
+	e := newEnv(t)
+	e.addNode(nodeID, "mini")
+	e.addNode(otherID, "studio")
+	tk := e.placedRepo(nodeID, "o/r")
+	old := tk.LatestAssignment().ID
+	if err := e.eng.AssignmentStarted(tk.ID, old, "s1", "", core.RuntimeClaude); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.eng.NodeOffline(nodeID, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.eng.RetryElsewhere(tk.ID); err != nil {
+		t.Fatal(err)
+	}
+	movedTk := e.ticket(tk.ID)
+	moved := movedTk.LatestAssignment().ID
+	if err := e.eng.AssignmentPlaced(tk.ID, moved, otherID); err != nil {
+		t.Fatal(err)
+	}
+	f := e.fleet(nil)
+	w := dialWire(t, f, nodeID, hello(nodeID))
+	w.waitWelcome()
+
+	w.fact(1, 0, nodelink.MethodFileReport, nodelink.ArgsFileReport{TicketID: tk.ID,
+		Report: core.ReportInput{State: core.ReportReady, Summary: "done"}})
+	if r := w.result(); !r.GetUserError() || !strings.Contains(r.GetError(), "not on this node") {
+		t.Fatalf("report from the node the Ticket left = %v", r)
+	}
+	w.fact(2, 1, nodelink.MethodAssignmentStarted, nodelink.ArgsAssignmentStarted{TicketID: tk.ID, AssignmentID: moved,
+		SessionID: "s2", Runtime: core.RuntimeClaude})
+	if r := w.result(); !r.GetUserError() || !strings.Contains(r.GetError(), "not on this node") {
+		t.Fatalf("start of studio's Assignment from mini = %v", r)
+	}
+	w.fact(3, 2, nodelink.MethodTurnEnded, nodelink.ArgsTurnEnded{TicketID: tk.ID, AssignmentID: old})
+	if r := w.result(); strings.Contains(r.GetError(), "not on this node") {
+		t.Fatalf("late fact about mini's own Assignment = %v, want it past the scope check", r)
+	}
+	got := e.ticket(tk.ID)
+	if a := got.LatestAssignment(); a.ID != moved || a.State != core.AssignmentPending || a.SessionID != "" || a.Report != nil {
+		t.Fatalf("studio's Assignment changed: %+v", a)
+	}
+	if n, _ := e.st.GetNode(nodeID); n.AppliedFactSeq != 2 {
+		t.Fatalf("mark = %d, want 2 (refused facts still move it)", n.AppliedFactSeq)
+	}
+}
+
+// TestRevokeFlagsTicketsOfflineAtOnce: a revoked node's Tickets show it offline (and so offer Retry elsewhere) right
+// away, without waiting OfflineAfter for a node that will never come back.
+func TestRevokeFlagsTicketsOfflineAtOnce(t *testing.T) {
+	e := newEnv(t)
+	e.addNode(nodeID, "mini")
+	tk := e.placedRepo(nodeID, "o/r")
+	f := e.fleet(func(c *Config) { c.OfflineAfter = time.Hour })
+	cn := newClient(t, f, nodeID)
+	cn.run()
+	eventually(t, "mini online", func() bool { return view(t, f, nodeID).State == StateOnline })
+	if err := f.Revoke(nodeID); err != nil {
+		t.Fatal(err)
+	}
+	revoked := e.ticket(tk.ID)
+	if a := revoked.LatestAssignment(); a.NodeOffline == nil {
+		t.Fatal("the revoked node's Ticket is not flagged offline")
+	}
+	if err := e.eng.RetryElsewhere(tk.ID); err != nil {
+		t.Fatalf("retry elsewhere after revoke: %v", err)
+	}
+}
+
+// TestLocalDrainSurvivesRestart: draining this machine is kept in the store, so a server restart keeps it drained.
+func TestLocalDrainSurvivesRestart(t *testing.T) {
+	e := newEnv(t)
+	state := t.TempDir()
+	local := node.New(node.Config{WorkRoot: filepath.Join(state, "work"), StateDir: state, AthenaBin: "/usr/bin/true",
+		SocketPath: filepath.Join(state, "n.sock"), Name: "server"}, e.eng)
+	withLocal := func(c *Config) { c.Local = local }
+	f := e.fleet(withLocal)
+	if err := f.SetDraining("local", true); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	f = e.fleet(withLocal)
+	if !f.Draining("local") {
+		t.Fatal("this machine is no longer drained after a restart")
+	}
+	if err := f.SetDraining("local", false); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	if f = e.fleet(withLocal); f.Draining("local") {
+		t.Fatal("undrained this machine, yet drained after a restart")
+	}
+}

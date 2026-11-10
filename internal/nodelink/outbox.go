@@ -15,7 +15,9 @@ import (
 const dbFile = "node.db"
 
 // outbox holds the node's facts until the server has applied them. A fact's seq is its fact_seq on the wire; rows at
-// or below the server's applied mark are deleted.
+// or below the server's applied mark are deleted once sent. A row's sent flag is set before it first goes on a link:
+// a row never sent at or below the mark (facts made on a fresh node.db before its first Welcome, while the server's
+// mark counts an older node.db's facts) is numbered again above the mark instead.
 type outbox struct{ db *sql.DB }
 
 type factRow struct {
@@ -50,9 +52,22 @@ func openOutbox(dir string) (*outbox, error) {
 		seq INTEGER PRIMARY KEY AUTOINCREMENT,
 		method TEXT NOT NULL,
 		args BLOB NOT NULL,
-		made_at TEXT NOT NULL)`); err != nil {
+		made_at TEXT NOT NULL,
+		sent INTEGER NOT NULL DEFAULT 1)`); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("nodelink: migrate %s: %w", dbFile, err)
+	}
+	// An outbox made before the sent flag: its rows count as sent (the default), so none is ever applied twice.
+	var hasSent int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('outbox') WHERE name = 'sent'`).Scan(&hasSent); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("nodelink: migrate %s: %w", dbFile, err)
+	}
+	if hasSent == 0 {
+		if _, err := db.Exec(`ALTER TABLE outbox ADD COLUMN sent INTEGER NOT NULL DEFAULT 1`); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("nodelink: migrate %s: %w", dbFile, err)
+		}
 	}
 	// The checkpoint of each Ticket the server last took: the next bundle goes after it.
 	// too_big marks a Ticket whose bundle went over the bound: none is built for it again.
@@ -70,7 +85,7 @@ func (o *outbox) close() error { return o.db.Close() }
 
 // append commits one fact and returns its seq.
 func (o *outbox) append(method string, args []byte, at time.Time) (uint64, error) {
-	res, err := o.db.Exec(`INSERT INTO outbox (method, args, made_at) VALUES (?, ?, ?)`,
+	res, err := o.db.Exec(`INSERT INTO outbox (method, args, made_at, sent) VALUES (?, ?, ?, 0)`,
 		method, args, at.UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return 0, fmt.Errorf("nodelink: outbox: %w", err)
@@ -79,31 +94,73 @@ func (o *outbox) append(method string, args []byte, at time.Time) (uint64, error
 	return uint64(id), err
 }
 
-// applied deletes the facts through seq, and makes sure the next fact is numbered after it: a server that applied
-// more than this outbox ever numbered (a node.db lost or replaced) must not skip the node's next facts as old.
-func (o *outbox) applied(seq uint64) error {
+// applied deletes the sent facts through seq, and makes sure the next fact is numbered after it: a server that
+// applied more than this outbox ever numbered (a node.db lost or replaced) must not skip the node's next facts as old.
+// Facts at or below seq that never went on a link were not applied: they are numbered again above every row, in their
+// order, with the rows after them (none of which was sent either, since facts go in seq order). renumbered maps each
+// moved fact's old seq to its new one.
+func (o *outbox) applied(seq uint64) (renumbered map[uint64]uint64, err error) {
 	tx, err := o.db.Begin()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec(`DELETE FROM outbox WHERE seq <= ?`, seq); err != nil {
-		return err
+	if _, err := tx.Exec(`DELETE FROM outbox WHERE seq <= ? AND sent = 1`, seq); err != nil {
+		return nil, err
 	}
-	var last sql.NullInt64
-	if err := tx.QueryRow(`SELECT seq FROM sqlite_sequence WHERE name = 'outbox'`).Scan(&last); err != nil && err != sql.ErrNoRows {
-		return err
+	var low sql.NullInt64
+	if err := tx.QueryRow(`SELECT MIN(seq) FROM outbox WHERE seq <= ?`, seq).Scan(&low); err != nil {
+		return nil, err
 	}
-	if !last.Valid {
-		if _, err := tx.Exec(`INSERT INTO sqlite_sequence (name, seq) VALUES ('outbox', ?)`, seq); err != nil {
-			return err
+	var top sql.NullInt64
+	if err := tx.QueryRow(`SELECT seq FROM sqlite_sequence WHERE name = 'outbox'`).Scan(&top); err != nil && err != sql.ErrNoRows {
+		return nil, err
+	}
+	next := max(seq, uint64(max(top.Int64, 0)))
+	if low.Valid {
+		rows, err := tx.Query(`SELECT seq FROM outbox WHERE seq >= ? ORDER BY seq`, low.Int64)
+		if err != nil {
+			return nil, err
 		}
-	} else if uint64(last.Int64) < seq {
-		if _, err := tx.Exec(`UPDATE sqlite_sequence SET seq = ? WHERE name = 'outbox'`, seq); err != nil {
-			return err
+		var old []uint64
+		for rows.Next() {
+			var s uint64
+			if err := rows.Scan(&s); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			old = append(old, s)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		// Each new seq is above every row, so no update meets another row's seq.
+		renumbered = map[uint64]uint64{}
+		for _, s := range old {
+			next++
+			if _, err := tx.Exec(`UPDATE outbox SET seq = ? WHERE seq = ?`, next, s); err != nil {
+				return nil, err
+			}
+			renumbered[s] = next
 		}
 	}
-	return tx.Commit()
+	if !top.Valid {
+		if _, err := tx.Exec(`INSERT INTO sqlite_sequence (name, seq) VALUES ('outbox', ?)`, next); err != nil {
+			return nil, err
+		}
+	} else if uint64(top.Int64) < next {
+		if _, err := tx.Exec(`UPDATE sqlite_sequence SET seq = ? WHERE name = 'outbox'`, next); err != nil {
+			return nil, err
+		}
+	}
+	return renumbered, tx.Commit()
+}
+
+// markSent flags the facts in (after, through] as sent, before they go on a link.
+func (o *outbox) markSent(after, through uint64) error {
+	_, err := o.db.Exec(`UPDATE outbox SET sent = 1 WHERE seq > ? AND seq <= ? AND sent = 0`, after, through)
+	return err
 }
 
 // deleteThrough deletes the facts through seq, once the server answered them.

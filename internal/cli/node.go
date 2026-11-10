@@ -125,10 +125,11 @@ func (c *command) nodeList(args []string) int {
 	return 0
 }
 
-// printNodes prints the nodes as a table: name, id, state, slots in use of all, runtimes and last seen.
+// printNodes prints the nodes as a table: name, id, state, slots in use of all, runtimes, last seen and when the
+// node's certificate expires (the date; "expired" once past; "-" for this machine and when not known).
 func printNodes(out io.Writer, rows []server.NodeRow, now time.Time) {
 	w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "NAME\tID\tSTATE\tSLOTS\tRUNTIMES\tLAST SEEN")
+	fmt.Fprintln(w, "NAME\tID\tSTATE\tSLOTS\tRUNTIMES\tLAST SEEN\tEXPIRES")
 	for _, r := range rows {
 		name := safeText(r.Name)
 		slots := "-"
@@ -155,7 +156,15 @@ func printNodes(out io.Writer, rows []server.NodeRow, now time.Time) {
 		case !r.LastSeen.IsZero():
 			seen = formatAge(now.Sub(r.LastSeen)) + " ago"
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", name, safeText(r.ID), r.State, slots, runtimes, seen)
+		expires := "-"
+		switch {
+		case r.Local || r.CertExpires.IsZero():
+		case !now.Before(r.CertExpires):
+			expires = "expired"
+		default:
+			expires = r.CertExpires.Local().Format("2006-01-02")
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", name, safeText(r.ID), r.State, slots, runtimes, seen, expires)
 	}
 	w.Flush()
 }

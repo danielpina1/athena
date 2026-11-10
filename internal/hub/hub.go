@@ -84,8 +84,8 @@ type Source interface {
 	// Nodes returns every node, the local one first, then the others by name, revoked ones included. It must not
 	// block: the hub reads it on its loop.
 	Nodes() []NodeInfo
-	// Placement tells where a Ticket's latest Assignment runs (the node's id and name; the local node's when none is
-	// placed yet) and the fleet's wait reason ("" when it does not wait).
+	// Placement tells where a Ticket's latest Assignment runs (the node's id and name; the pinned node's when it is
+	// not placed yet, empty when it is neither placed nor pinned) and the fleet's wait reason ("" when it does not wait).
 	Placement(t *core.Ticket) (id, name, waiting string)
 	// Repos returns the known repositories and folders, the last used first, then the local git repositories found on
 	// disk. It must not block on I/O beyond the store: the hub reads it on its loop.

@@ -11,7 +11,8 @@ func TestNodeRoundTrip(t *testing.T) {
 		t.Fatalf("missing node = %v, %v", n, err)
 	}
 	t0 := time.Date(2026, 11, 10, 9, 0, 0, 0, time.UTC)
-	n := Node{ID: "n1", Name: "box", CertSerial: "ab12", CreatedAt: t0, Caps: []byte(`{"claude":true}`)}
+	n := Node{ID: "n1", Name: "box", CertSerial: "ab12", CreatedAt: t0, Caps: []byte(`{"claude":true}`),
+		CertNotAfter: t0.Add(365 * 24 * time.Hour)}
 	if err := s.PutNode(n); err != nil {
 		t.Fatal(err)
 	}
@@ -20,7 +21,8 @@ func TestNodeRoundTrip(t *testing.T) {
 		t.Fatalf("GetNode = %v, %v", got, err)
 	}
 	if got.Name != "box" || got.CertSerial != "ab12" || !got.CreatedAt.Equal(t0) || !got.LastSeen.IsZero() ||
-		got.Draining || got.RevokedAt != nil || got.AppliedFactSeq != 0 || string(got.Caps) != `{"claude":true}` {
+		got.Draining || got.RevokedAt != nil || got.AppliedFactSeq != 0 || string(got.Caps) != `{"claude":true}` ||
+		!got.CertNotAfter.Equal(t0.Add(365*24*time.Hour)) {
 		t.Fatalf("node = %+v", got)
 	}
 	if err := s.TouchNode("n1", t0.Add(time.Minute)); err != nil {
@@ -39,7 +41,7 @@ func TestNodeRoundTrip(t *testing.T) {
 	if all[0].Name != "alpha" || all[1].Name != "box" {
 		t.Fatalf("order = %s, %s", all[0].Name, all[1].Name)
 	}
-	if !all[1].Draining || !all[1].LastSeen.Equal(t0.Add(time.Minute)) {
+	if !all[1].Draining || !all[1].LastSeen.Equal(t0.Add(time.Minute)) || !all[0].CertNotAfter.IsZero() {
 		t.Fatalf("node = %+v", all[1])
 	}
 	if err := s.PutNode(Node{ID: "n3", Name: "box", CreatedAt: t0}); err == nil {

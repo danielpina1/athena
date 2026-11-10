@@ -728,7 +728,7 @@ func (o *op) flagNode(nodeID, typ string, set func(*Assignment) bool) error {
 }
 
 // RetryElsewhere is a person's retry of a Ticket whose node is offline: the stranded Assignment ends and a new one
-// is queued that the fleet must not place on that node.
+// is queued that the fleet must not place on that node. A pin to that node is cleared.
 func (e *Engine) RetryElsewhere(ticketID string) error {
 	return e.command(cmdRetryElsewhere, func(o *op) error {
 		t, err := o.require(ticketID)
@@ -742,6 +742,12 @@ func (e *Engine) RetryElsewhere(ticketID string) error {
 		replaced, node, role := latest.ID, latest.Node, latest.Role
 		t.Stats.Retries++
 		o.endAssignment(t, latest, ReasonNodeOffline)
+		// A Ticket pinned to the stranded node would wait for it forever: the owner chose to move it, so the pin goes,
+		// and the Assignment's end says so.
+		if node != "" && t.Execution.Node == node {
+			t.Execution.Node = ""
+			o.annotate(EventAssignmentEnded, replaced, "unpinned", node)
+		}
 		o.requeueUntaken(t, replaced)
 		assignment := o.newAssignment(t)
 		// A stranded review is retried as a review: t.Review stays, so the Role must too (startReview leaves the
@@ -921,6 +927,20 @@ func (o *op) deliver(t *Ticket, assignmentID string) {
 
 func (o *op) stop(t *Ticket, assignmentID, reason string) {
 	o.effects = append(o.effects, effect{kind: effectStop, ticket: t, assignmentID: assignmentID, reason: reason})
+}
+
+// annotate adds key to the data of the latest queued Event of type typ about the Assignment.
+func (o *op) annotate(typ, assignmentID, key string, value any) {
+	for i := len(o.effects) - 1; i >= 0; i-- {
+		ev := &o.effects[i].event
+		if o.effects[i].kind == effectEvent && ev.Type == typ && ev.AssignmentID == assignmentID {
+			if ev.Data == nil {
+				ev.Data = map[string]any{}
+			}
+			ev.Data[key] = value
+			return
+		}
+	}
 }
 
 func (o *op) event(typ string, t *Ticket, assignmentID string, data map[string]any) {

@@ -170,7 +170,8 @@ func TestJoinIssuesCertOnce(t *testing.T) {
 	if err != nil || n == nil {
 		t.Fatalf("node row: %v %v", n, err)
 	}
-	if n.Name != "build-box" || n.CertSerial != cert.SerialNumber.Text(16) || n.RevokedAt != nil || !n.CreatedAt.Equal(e.now()) {
+	if n.Name != "build-box" || n.CertSerial != cert.SerialNumber.Text(16) || n.RevokedAt != nil || !n.CreatedAt.Equal(e.now()) ||
+		!n.CertNotAfter.Equal(cert.NotAfter) {
 		t.Fatalf("node row %+v", n)
 	}
 
