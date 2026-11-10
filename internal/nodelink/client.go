@@ -180,7 +180,7 @@ func (c *Client) Policy() node.Policy { return policyProxy{c} }
 // Online reports whether the link is up: welcomed, and the outbox's backlog queued.
 func (c *Client) Online() bool { return c.current() != nil }
 
-// Ready is closed once the first link was welcomed and the prompts were asked for.
+// Ready is closed once the server first gave the prompts (after a Welcome); `athena node run` serves only after it.
 func (c *Client) Ready() <-chan struct{} { return c.ready }
 
 // StatusChanged is node.Config.OnStatus: it only signals, so it neither blocks nor calls into the node.
@@ -329,11 +329,31 @@ func (c *Client) connect(ctx context.Context) (welcomed bool, err error) {
 	c.log.Info("linked to the server", "node", c.id.NodeID, "name", w.GetNodeName(), "applied", w.GetAppliedFactSeq())
 	go c.pump(cn)
 	go c.reportStatus(cn)
-	go func() {
-		c.prompts()
-		c.readyOnce.Do(func() { close(c.ready) })
-	}()
+	go c.awaitPrompts(cn)
 	return true, <-errc
+}
+
+// awaitPrompts fetches the prompts until the server gives them, retrying with the link's backoff while the link
+// lasts (the next link tries again), and closes Ready on the first success: a node serves only with the server's
+// prompts, never the built-in ones.
+func (c *Client) awaitPrompts(cn *conn) {
+	wait := c.opts.MinBackoff
+	for {
+		if _, err := c.fetchPrompts(cn.ctx); err == nil {
+			c.readyOnce.Do(func() { close(c.ready) })
+			return
+		} else {
+			c.log.Warn("the server gave no prompts", "error", err, "retry", wait)
+		}
+		t := time.NewTimer(wait)
+		select {
+		case <-cn.ctx.Done():
+			t.Stop()
+			return
+		case <-t.C:
+		}
+		wait = min(wait*2, c.opts.MaxBackoff)
+	}
 }
 
 // end fails the connection's waiting requests and stops its subscriptions.

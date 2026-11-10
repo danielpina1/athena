@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"slices"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -201,4 +202,50 @@ func TestRequestRoundTrip(t *testing.T) {
 	if !slices.Contains(Methods(), MethodHandback) {
 		t.Fatal("Methods")
 	}
+}
+
+// Ready waits for the server's prompts: a failed prompts request leaves it open, and it closes once they come.
+func TestReadyWaitsForTheServersPrompts(t *testing.T) {
+	srv := newServers(t)
+	c := newTestClient(t, srv)
+	var give atomic.Bool
+	fs := srv.add(0)
+	fs.answer = func(call *athenav1.NodeCall) *athenav1.NodeResult {
+		if call.GetMethod() != MethodPrompts {
+			return nil
+		}
+		if !give.Load() {
+			return &athenav1.NodeResult{Error: "store unavailable"}
+		}
+		b, _ := json.Marshal(ResultPrompts{Worker: "owner worker", Reviewer: "owner reviewer"})
+		return &athenav1.NodeResult{Value: b}
+	}
+	run(t, c)
+	eventually(t, "online", c.Online)
+	eventually(t, "a failed prompts request", func() bool { return promptsAsked(fs) })
+	select {
+	case <-c.Ready():
+		t.Fatal("ready without the server's prompts")
+	case <-time.After(50 * time.Millisecond):
+	}
+	give.Store(true)
+	select {
+	case <-c.Ready():
+	case <-time.After(5 * time.Second):
+		t.Fatal("not ready once the prompts came")
+	}
+	if c.WorkerPrompt() != "owner worker" || c.ReviewerPrompt() != "owner reviewer" {
+		t.Fatalf("prompts %q %q", c.WorkerPrompt(), c.ReviewerPrompt())
+	}
+}
+
+func promptsAsked(fs *fakeServer) bool {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	for _, c := range fs.calls {
+		if c.GetMethod() == MethodPrompts {
+			return true
+		}
+	}
+	return false
 }

@@ -784,12 +784,22 @@ type session struct {
 	toolPolicy string
 }
 
-// readToolPolicy sets the session's tool policy from read, unless it has one already.
-func (s *session) readToolPolicy(read func() string) {
+// readToolPolicy sets the session's tool policy from read of its Ticket, unless it has one already. read runs outside
+// s.mu: the Policy may be a remote call (a node on another machine asks its server), and the node's loop takes s.mu.
+// Of two concurrent reads the first one set wins, so a session's tool policy still never changes once set.
+func (s *session) readToolPolicy(read func(t core.Ticket) string) {
+	s.mu.Lock()
+	if s.toolPolicy != "" {
+		s.mu.Unlock()
+		return
+	}
+	t := s.t
+	s.mu.Unlock()
+	p := read(t)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.toolPolicy == "" {
-		s.toolPolicy = read()
+		s.toolPolicy = p
 	}
 }
 
@@ -1184,7 +1194,7 @@ func (r *runner) run() {
 		return
 	}
 	// The tool policy first: it decides which runtimes may run the session.
-	s.readToolPolicy(func() string { return n.toolPolicy(s.t) })
+	s.readToolPolicy(n.toolPolicy)
 	// The runtime next: a launch whose runtime is limited (or at its session cap) waits without a slot, like one
 	// waiting for credentials; one whose runtime cannot run it fails with why.
 	rtm, ok := r.chooseRuntime()
@@ -2400,7 +2410,7 @@ func WorktreeBranch(t core.Ticket, hasGit func(dir string) bool) string {
 // prepare makes the session's directory and writes its settings and MCP config.
 func (n *Node) prepare(s *session) error {
 	p := s.place
-	s.readToolPolicy(func() string { return n.toolPolicy(s.t) })
+	s.readToolPolicy(n.toolPolicy)
 	if err := n.checkRestrictedSandbox(s); err != nil {
 		return err
 	}

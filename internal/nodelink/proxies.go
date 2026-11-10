@@ -482,8 +482,9 @@ func (p policyProxy) Trust(t core.Trigger) string {
 	return out
 }
 
-// WorkerPrompt is node.Config.WorkerPrompt: the server's current worker prompt, else the last one it gave, else the
-// built-in one (before the first connect; `athena node run` waits for Ready to avoid that).
+// WorkerPrompt is node.Config.WorkerPrompt: the server's current worker prompt, else the last one it gave. Before
+// the server first gave one it is the built-in prompt, but `athena node run` serves only after Ready, which closes
+// once the server did, so a serving node never starts a session on it.
 func (c *Client) WorkerPrompt() string {
 	w, _ := c.prompts()
 	return w
@@ -496,11 +497,7 @@ func (c *Client) ReviewerPrompt() string {
 }
 
 func (c *Client) prompts() (worker, reviewer string) {
-	var r ResultPrompts
-	if err := c.request(context.Background(), MethodPrompts, ArgsPrompts{}, &r); err == nil {
-		c.mu.Lock()
-		c.prompt, c.hasPrompt = r, true
-		c.mu.Unlock()
+	if r, err := c.fetchPrompts(context.Background()); err == nil {
 		return r.Worker, r.Reviewer
 	}
 	c.mu.Lock()
@@ -509,6 +506,24 @@ func (c *Client) prompts() (worker, reviewer string) {
 		return prompts.Worker, prompts.Reviewer
 	}
 	return c.prompt.Worker, c.prompt.Reviewer
+}
+
+// errNoPrompts is a prompts answer without a worker prompt.
+var errNoPrompts = errors.New("the server's answer has no worker prompt")
+
+// fetchPrompts asks the server for the prompts and caches them.
+func (c *Client) fetchPrompts(ctx context.Context) (ResultPrompts, error) {
+	var r ResultPrompts
+	if err := c.request(ctx, MethodPrompts, ArgsPrompts{}, &r); err != nil {
+		return r, err
+	}
+	if r.Worker == "" {
+		return r, errNoPrompts
+	}
+	c.mu.Lock()
+	c.prompt, c.hasPrompt = r, true
+	c.mu.Unlock()
+	return r, nil
 }
 
 // decodeValue unmarshals a NodeResult's value into out (nil: the value is ignored).

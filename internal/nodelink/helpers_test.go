@@ -67,6 +67,11 @@ type fakeServer struct {
 	t       *testing.T
 	applied uint64
 	answer  func(call *athenav1.NodeCall) *athenav1.NodeResult
+	// gate, when set, stops the server reading after gateAfter messages until it is closed: a server that pushes back.
+	gate      chan struct{}
+	gateAfter int
+	// silentFacts: facts are not answered (the server has not applied them).
+	silentFacts bool
 
 	mu      sync.Mutex
 	hello   *athenav1.NodeHello
@@ -107,6 +112,9 @@ func (s *servers) add(applied uint64) *fakeServer {
 func (fs *fakeServer) start(c link.Conn) {
 	ctx, cancel := context.WithCancel(context.Background())
 	fs.stop = cancel
+	if fs.gate != nil {
+		c = &gatedConn{Conn: c, gate: fs.gate, after: fs.gateAfter}
+	}
 	fs.sess = link.New(c, link.Options{Heartbeat: 3 * time.Second, DeadAfter: 9 * time.Second, OnFrame: fs.onFrame})
 	go func() {
 		defer close(fs.done)
@@ -131,7 +139,7 @@ func (fs *fakeServer) onFrame(f *athenav1.Frame) {
 		fs.mu.Lock()
 		fs.calls = append(fs.calls, call)
 		fs.mu.Unlock()
-		if call.GetMethod() == MethodLines {
+		if call.GetMethod() == MethodLines || fs.silentFacts && call.GetFactSeq() > 0 {
 			return
 		}
 		var r *athenav1.NodeResult
@@ -263,3 +271,49 @@ func (f *fakeTarget) Subscribe(string, int64) ([]node.Line, <-chan node.Line, fu
 	return f.backfill, f.live, func() {}, nil
 }
 func (f *fakeTarget) Status() node.Status { return node.Status{Name: "mini", Slots: 2} }
+
+// gatedConn reads after messages, then waits for gate to close before reading more.
+type gatedConn struct {
+	link.Conn
+	gate  chan struct{}
+	after int
+	n     int // Read is called from one goroutine
+}
+
+func (g *gatedConn) Read(ctx context.Context) ([]byte, error) {
+	if g.n >= g.after {
+		select {
+		case <-g.gate:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	g.n++
+	return g.Conn.Read(ctx)
+}
+
+// methodsOf lists the methods of the calls the server received, leaving out prompts requests.
+func (fs *fakeServer) methodsOf() []string {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	var out []string
+	for _, c := range fs.calls {
+		if c.GetMethod() != MethodPrompts {
+			out = append(out, c.GetMethod())
+		}
+	}
+	return out
+}
+
+// checkRun asserts the fact seqs received are exactly from+1..to, in order, once each.
+func checkRun(t *testing.T, got []*athenav1.NodeCall, from, to uint64) {
+	t.Helper()
+	if uint64(len(got)) != to-from {
+		t.Fatalf("got %d facts, want %d (%d..%d)", len(got), to-from, from+1, to)
+	}
+	for i, c := range got {
+		if want := from + 1 + uint64(i); c.GetFactSeq() != want {
+			t.Fatalf("fact %d has seq %d, want %d", i, c.GetFactSeq(), want)
+		}
+	}
+}
