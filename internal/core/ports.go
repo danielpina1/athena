@@ -104,6 +104,8 @@ type Executor interface {
 // Event types the Engine emits after a change.
 const (
 	EventTicketCreated     = "ticket.created"
+	EventNodeOffline       = "node.offline"
+	EventNodeBack          = "node.back"
 	EventTicketEnded       = "ticket.ended"
 	EventTicketResumed     = "ticket.resumed"
 	EventAssignmentStarted = "assignment.started"

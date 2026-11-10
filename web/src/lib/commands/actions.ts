@@ -32,8 +32,24 @@ function undoable(mark: (s: AthenaState) => Optimistic): SubmitOptions {
  * runtime is claude, codex or auto (empty: the server's configured default). review is sent only when the owner chose
  * it: true pairs the task with a review, false with none, and left out the Policy's default decides.
  */
-export function submitTask(t: { text: string; repo?: string; dir?: string; model?: string; runtime?: string; review?: boolean }) {
-  const value = { text: t.text, repo: t.repo ?? "", dir: t.dir ?? "", model: t.model ?? "", runtime: t.runtime ?? "" };
+export function submitTask(t: {
+  text: string;
+  repo?: string;
+  dir?: string;
+  model?: string;
+  runtime?: string;
+  review?: boolean;
+  /** A node id to run it on; left out, any node. */
+  node?: string;
+}) {
+  const value = {
+    text: t.text,
+    repo: t.repo ?? "",
+    dir: t.dir ?? "",
+    model: t.model ?? "",
+    runtime: t.runtime ?? "",
+    node: t.node ?? "",
+  };
   return submit({ case: "submitTask", value: t.review === undefined ? value : { ...value, review: t.review } });
 }
 
@@ -48,6 +64,33 @@ export function stop(ticketId: string, reason: string) {
 
 export function retry(ticketId: string) {
   return submit({ case: "retry", value: { ticketId } });
+}
+
+/** Retries a Ticket whose node is offline on another node. A Dir Ticket is refused (`invalid`, with the sentence). */
+export function retryElsewhere(ticketId: string) {
+  return submit({ case: "retryElsewhere", value: { ticketId } });
+}
+
+/** How long a join command works: one hour. */
+const JOIN_TTL_SECONDS = 3600;
+
+/**
+ * A single-use join command for a new node (result `nodeToken`: the command and when it expires). Sensitive: the
+ * outbox asks for the passkey and resends. The server ignores a name (R25), so none is sent. The token is in the
+ * result only: the caller keeps it in its own state while it shows it, and nowhere else.
+ */
+export function createNodeToken() {
+  return submit({ case: "createNodeToken", value: { ttlSeconds: JOIN_TTL_SECONDS } });
+}
+
+/** A draining node finishes its sessions and takes no new ones. */
+export function setNodeDraining(nodeId: string, draining: boolean) {
+  return submit({ case: "setNodeDraining", value: { nodeId, draining } });
+}
+
+/** Revokes a node: its sessions stop and it must join again. Sensitive: the outbox asks for the passkey and resends. */
+export function revokeNode(nodeId: string) {
+  return submit({ case: "revokeNode", value: { nodeId } });
 }
 
 export function interrupt(ticketId: string) {

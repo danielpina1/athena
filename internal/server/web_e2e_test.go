@@ -65,6 +65,9 @@ func TestWebConfigNamesTheField(t *testing.T) {
 		{`{"host":"h.test","tls":"acme","acme":{"provider":"route53"}}`, "web.acme.provider"},
 		{`{"host":"h.test","tls":"acme","acme":{"provider":"exec","directory":"http://x"}}`, "web.acme.directory"},
 		{`{"host":"h.test","acme":{"agreeTOS":true,"bogus":1}}`, "unknown field"},
+		{`{"host":"h.test","listen":":9000","nodeListen":":9000"}`, "web.nodeListen"},
+		{`{"host":"h.test","nodeListen":"9000"}`, "web.nodeListen"},
+		{`{"host":"h.test","listen":":65535"}`, "web.nodeListen"},
 	} {
 		dir := t.TempDir()
 		if err := os.WriteFile(filepath.Join(dir, ConfigFile), []byte(`{"web":`+c.web+`}`), 0o600); err != nil {
@@ -92,6 +95,22 @@ func TestWebConfigNamesTheField(t *testing.T) {
 	}
 	if u := (WebConfig{Host: "localhost", Listen: "127.0.0.1:8080", TLS: "off"}).URL(); u != "http://localhost:8080" {
 		t.Fatal(u)
+	}
+}
+
+func TestWebNodeListenDefaultsToPortPlusOne(t *testing.T) {
+	for _, c := range []struct {
+		w    WebConfig
+		want string
+	}{
+		{WebConfig{Host: "h.test"}, ":8444"},
+		{WebConfig{Host: "h.test", Listen: "10.8.0.1:9000"}, "10.8.0.1:9001"},
+		{WebConfig{Host: "h.test", Listen: "127.0.0.1:0"}, "127.0.0.1:0"},
+		{WebConfig{Host: "h.test", Listen: ":8443", NodeListen: "10.8.0.1:7000"}, "10.8.0.1:7000"},
+	} {
+		if got := c.w.NodeListenAddr(); got != c.want {
+			t.Errorf("%+v: node listen %q, want %q", c.w, got, c.want)
+		}
 	}
 }
 
@@ -177,7 +196,7 @@ func TestWebE2E(t *testing.T) {
 	}
 	// 2. The snapshot.
 	snap := c.snapshot()
-	if len(snap.GetTickets()) != 0 || snap.GetNode().GetSlots() == 0 {
+	if len(snap.GetTickets()) != 0 || snap.GetNodes()[0].GetSlots() == 0 {
 		t.Fatalf("snapshot = %v", snap)
 	}
 	if !hasHealth(snap.GetHealth(), "tls", true) {

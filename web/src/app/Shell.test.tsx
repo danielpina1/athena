@@ -63,7 +63,7 @@ test("desktop shows three panes at 1024", async () => {
       { id: "T-1", title: "Open one", stage: "working" },
       { id: "T-2", title: "Open two", stage: "idle" },
     ],
-    node: create(NodeStatusSchema, { name: "mac-studio", slots: 4, slotsInUse: 1, queued: 2, liveTicketIds: ["T-1"] }),
+    nodes: [create(NodeStatusSchema, { name: "mac-studio", slots: 4, slotsInUse: 1, queued: 2, liveTicketIds: ["T-1"] })],
   });
   renderShell("/tickets", 1024);
 
@@ -98,14 +98,16 @@ test("desktop shows three panes at 1024", async () => {
 
 test("the sidebar's node has one quota line per runtime, linking to Nodes", async () => {
   load({
-    node: create(NodeStatusSchema, {
-      name: "mac-studio",
-      slots: 4,
-      runtimes: [
-        { name: "claude", ready: true, measured: false },
-        { name: "codex", ready: true, measured: true, windows: [{ name: "5h", used: 0.42 }, { name: "7d", used: 0.12 }] },
-      ],
-    }),
+    nodes: [
+      create(NodeStatusSchema, {
+        name: "mac-studio",
+        slots: 4,
+        runtimes: [
+          { name: "claude", ready: true, measured: false },
+          { name: "codex", ready: true, measured: true, windows: [{ name: "5h", used: 0.42 }, { name: "7d", used: 0.12 }] },
+        ],
+      }),
+    ],
   });
   renderShell("/tickets", 1440);
   const runtimes = within(screen.getByRole("region", { name: "Node" })).getByRole("list", { name: "Runtimes" });

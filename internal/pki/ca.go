@@ -1,7 +1,7 @@
 // Package pki is Athena's own certificate authority. Without a public domain the dashboard has no ACME certificate, so
 // Athena signs its own from a CA the owner installs on their devices. The CA is name-constrained to the owner's host
 // and VPN addresses, so a leaked CA key cannot impersonate any other site. Node client certificates (plan 6) come from
-// the same CA.
+// a second CA of the same kind, constrained to NodeCAHost (NodeCADir).
 package pki
 
 import (
@@ -262,14 +262,63 @@ func (c *CA) ClientCert(name string) (tls.Certificate, error) {
 	return c.issue(tmpl)
 }
 
+// NodeCAHost is the name the node CA is constrained to: a node's certificate is for <node-id>.nodes.athena.
+const NodeCAHost = "nodes.athena"
+
+// NodeCADir is where the node CA (ca.pem, ca.key) lives under the state directory. It is separate from the dashboard's
+// CA and exists in every TLS mode: it signs node client certificates only.
+func NodeCADir(stateDir string) string { return filepath.Join(stateDir, "pki", "nodes") }
+
+// SignClientCSR signs a node's certificate request: a client certificate (EKU clientAuth) for name, which must be one
+// label under the CA's host, valid as long as ClientCert's. The CSR must carry a valid signature and a P-256 key;
+// nothing else is taken from it (subject, names and extensions come from name alone). serial is the certificate's
+// serial number in lower-case hex.
+func (c *CA) SignClientCSR(csrDER []byte, name string) (certDER []byte, serial string, err error) {
+	name = strings.ToLower(name)
+	label, ok := strings.CutSuffix(name, "."+c.host)
+	if !ok || label == "" || strings.ContainsAny(label, " *.") {
+		return nil, "", fmt.Errorf("pki: client name %q is not one label under %s", name, c.host)
+	}
+	csr, err := x509.ParseCertificateRequest(csrDER)
+	if err != nil {
+		return nil, "", fmt.Errorf("pki: certificate request: %w", err)
+	}
+	if err := csr.CheckSignature(); err != nil {
+		return nil, "", fmt.Errorf("pki: certificate request: %w", err)
+	}
+	pub, ok := csr.PublicKey.(*ecdsa.PublicKey)
+	if !ok || pub.Curve != elliptic.P256() {
+		return nil, "", errors.New("pki: certificate request: the key is not ECDSA P-256")
+	}
+	tmpl := &x509.Certificate{
+		Subject:     pkix.Name{CommonName: name},
+		DNSNames:    []string{name},
+		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+	der, leaf, err := c.sign(tmpl, pub)
+	if err != nil {
+		return nil, "", err
+	}
+	return der, leaf.SerialNumber.Text(16), nil
+}
+
 func (c *CA) issue(tmpl *x509.Certificate) (tls.Certificate, error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return tls.Certificate{}, fmt.Errorf("pki: %w", err)
 	}
-	serial, err := newSerial()
+	der, leaf, err := c.sign(tmpl, &key.PublicKey)
 	if err != nil {
 		return tls.Certificate{}, err
+	}
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key, Leaf: leaf}, nil
+}
+
+// sign issues tmpl for pub, valid for leafValidity, and checks the result against the CA's own constraints.
+func (c *CA) sign(tmpl *x509.Certificate, pub *ecdsa.PublicKey) ([]byte, *x509.Certificate, error) {
+	serial, err := newSerial()
+	if err != nil {
+		return nil, nil, err
 	}
 	now := time.Now()
 	tmpl.SerialNumber = serial
@@ -277,20 +326,20 @@ func (c *CA) issue(tmpl *x509.Certificate) (tls.Certificate, error) {
 	tmpl.NotAfter = now.Add(leafValidity)
 	tmpl.KeyUsage = x509.KeyUsageDigitalSignature
 	tmpl.BasicConstraintsValid = true
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, c.cert, &key.PublicKey, c.key)
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, c.cert, pub, c.key)
 	if err != nil {
-		return tls.Certificate{}, fmt.Errorf("pki: %w", err)
+		return nil, nil, fmt.Errorf("pki: %w", err)
 	}
 	leaf, err := x509.ParseCertificate(der)
 	if err != nil {
-		return tls.Certificate{}, fmt.Errorf("pki: %w", err)
+		return nil, nil, fmt.Errorf("pki: %w", err)
 	}
 	roots := x509.NewCertPool()
 	roots.AddCert(c.cert)
 	if _, err := leaf.Verify(x509.VerifyOptions{Roots: roots, KeyUsages: leaf.ExtKeyUsage}); err != nil {
-		return tls.Certificate{}, fmt.Errorf("pki: the certificate for %s would not be accepted by the CA's own constraints: %w", leaf.Subject.CommonName, err)
+		return nil, nil, fmt.Errorf("pki: the certificate for %s would not be accepted by the CA's own constraints: %w", leaf.Subject.CommonName, err)
 	}
-	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key, Leaf: leaf}, nil
+	return der, leaf, nil
 }
 
 // Fingerprint is the SHA-256 of the CA certificate's DER as colon-separated upper-case hex, for the owner to compare

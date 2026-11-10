@@ -180,3 +180,16 @@ func TestCredentialCommandsWired(t *testing.T) {
 		t.Fatalf("gh auth token: exit %d, stderr %q", code, errb.String())
 	}
 }
+
+// The node commands and retry-elsewhere reach the CLI: an unjoined node says so, and a usage error is the CLI's.
+func TestNodeCommandsDispatched(t *testing.T) {
+	var out, errb bytes.Buffer
+	if code := run([]string{"node", "run", "--state", filepath.Join(t.TempDir(), "n")}, &out, &errb); code != 1 ||
+		errb.String() != "This machine has not joined yet; run athena node join first.\n" {
+		t.Fatalf("node run: exit %d, stderr %q", code, errb.String())
+	}
+	errb.Reset()
+	if code := run([]string{"retry-elsewhere"}, &out, &errb); code != 2 || !strings.Contains(errb.String(), "athena retry-elsewhere <id>") {
+		t.Fatalf("retry-elsewhere: exit %d, stderr %q", code, errb.String())
+	}
+}

@@ -9,6 +9,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/danielpina1/athena/internal/store"
 )
 
 func TestEnrollAndLogin(t *testing.T) {
@@ -102,7 +104,7 @@ func TestPlainHTTPCookieOnLoopback(t *testing.T) {
 func TestEnrollTokenSingleUseAndExpiry(t *testing.T) {
 	e := NewAuthEnv(t)
 	a := NewSoftAuthenticator(t, testOrigin, testRPID)
-	token, err := IssueEnrollToken(e.Store, 0)
+	token, err := IssueEnrollToken(e.Store, store.EnrollPasskey, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +116,7 @@ func TestEnrollTokenSingleUseAndExpiry(t *testing.T) {
 	}
 
 	// Expired.
-	token, _ = IssueEnrollToken(e.Store, time.Minute)
+	token, _ = IssueEnrollToken(e.Store, store.EnrollPasskey, time.Minute)
 	e.Advance(2 * time.Minute)
 	if rec := e.Do("POST", "/auth/register/begin", mustJSON(t, map[string]string{"token": token})); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("expired token: %d", rec.Code)
@@ -364,7 +366,7 @@ func TestEnrollTokenNotLogged(t *testing.T) {
 
 	e := NewAuthEnv(t)
 	a := NewSoftAuthenticator(t, testOrigin, testRPID)
-	token, err := IssueEnrollToken(e.Store, 0)
+	token, err := IssueEnrollToken(e.Store, store.EnrollPasskey, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -456,7 +458,7 @@ func TestNoUserVerificationRefused(t *testing.T) {
 	if s, _ := e.Auth.Session(e.Request()); e.Auth.RecentReauth(s) {
 		t.Fatal("reauth window opened without UV")
 	}
-	token, _ := IssueEnrollToken(e.Store, 0)
+	token, _ := IssueEnrollToken(e.Store, store.EnrollPasskey, 0)
 	b := NewSoftAuthenticator(t, testOrigin, testRPID)
 	b.NoUV = true
 	e.RegisterWith(b, token, "weak", http.StatusBadRequest)
@@ -468,7 +470,7 @@ func TestNoUserVerificationRefused(t *testing.T) {
 func TestWrongOriginRegisterLeavesTokenUsable(t *testing.T) {
 	e := NewAuthEnv(t)
 	a := NewSoftAuthenticator(t, testOrigin, testRPID)
-	token, _ := IssueEnrollToken(e.Store, 0)
+	token, _ := IssueEnrollToken(e.Store, store.EnrollPasskey, 0)
 	body := mustJSON(t, map[string]string{"token": token})
 	if rec := e.DoFrom("https://evil.test", "POST", "/auth/register/begin", body); rec.Code != http.StatusForbidden {
 		t.Fatalf("wrong origin: %d", rec.Code)
@@ -484,7 +486,7 @@ func TestRegisterExcludesEnrolledCredentialsAndCleansName(t *testing.T) {
 	if want := "[31mphone" + strings.Repeat("é", 64-len("[31mphone")); list[0].Name != want {
 		t.Fatalf("name %q, want %q", list[0].Name, want)
 	}
-	token, _ := IssueEnrollToken(e.Store, 0)
+	token, _ := IssueEnrollToken(e.Store, store.EnrollPasskey, 0)
 	begin := e.Do("POST", "/auth/register/begin", mustJSON(t, map[string]string{"token": token}))
 	var o struct {
 		PublicKey struct {

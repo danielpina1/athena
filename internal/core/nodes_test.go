@@ -1,0 +1,156 @@
+package core
+
+import (
+	"reflect"
+	"testing"
+)
+
+func TestAssignmentPlacedRecordsNode(t *testing.T) {
+	h := newHarness(t)
+	tk := h.submit("work")
+	aid := tk.Assignments[0].ID
+	h.must(h.eng.AssignmentPlaced(tk.ID, aid, "n1"))
+	eq(t, "node", h.ticket(tk.ID).Assignments[0].Node, "n1")
+
+	h.settle(true)
+	h.must(h.eng.StopTicket(tk.ID, "x"))
+	h.must(h.eng.AssignmentPlaced(tk.ID, aid, "n2"))
+	eq(t, "ended assignment keeps its node", h.ticket(tk.ID).Assignments[0].Node, "n1")
+}
+
+func TestNodeOfflineStageAndBack(t *testing.T) {
+	h := newHarness(t)
+	id := h.accepted()
+	h.must(h.eng.AssignmentPlaced(id, h.ticket(id).Assignments[0].ID, "n1"))
+	other := h.submit("other")
+	h.must(h.eng.AssignmentPlaced(other.ID, other.Assignments[0].ID, "n2"))
+	before := len(h.eventsOf(EventNodeOffline))
+
+	h.must(h.eng.NodeOffline("n1", base))
+	eq(t, "stage", stageOf(h.ticket(id)), Stage{"person", "offline"})
+	if h.ticket(id).Assignments[0].NodeOffline == nil {
+		t.Fatal("NodeOffline not set")
+	}
+	if h.ticket(other.ID).Assignments[0].NodeOffline != nil {
+		t.Error("other node's assignment flagged")
+	}
+	evs := h.eventsOf(EventNodeOffline)
+	eq(t, "events", len(evs)-before, 1)
+	eq(t, "event data", evs[len(evs)-1].Data["node"], any("n1"))
+
+	h.must(h.eng.NodeBack("n1"))
+	eq(t, "stage after back", stageOf(h.ticket(id)), Stage{Stage: "working"})
+	eq(t, "back events", len(h.eventsOf(EventNodeBack)), 1)
+}
+
+func TestRetryElsewhereEndsAndAvoids(t *testing.T) {
+	h := newHarness(t)
+	id := h.accepted()
+	h.must(h.eng.AssignmentPlaced(id, h.ticket(id).Assignments[0].ID, "n2"))
+	h.must(h.eng.NodeOffline("n2", base))
+	h.must(h.eng.RetryElsewhere(id))
+
+	tk := h.ticket(id)
+	eq(t, "retries", tk.Stats.Retries, 1)
+	calls := h.exec.calls
+	stop, start := calls[len(calls)-2], calls[len(calls)-1]
+	eq(t, "stop method", stop.Method, "stop")
+	eq(t, "stop assignment", stop.AssignmentID, tk.Assignments[0].ID)
+	eq(t, "stop reason", stop.Reason, ReasonNodeOffline)
+	eq(t, "start method", start.Method, "start")
+	eq(t, "start assignment", start.AssignmentID, tk.Assignments[1].ID)
+	eq(t, "start avoid", start.Assignment.Avoid, []string{"n2"})
+	eq(t, "assignments", len(tk.Assignments), 2)
+	eq(t, "old state", tk.Assignments[0].State, AssignmentEnded)
+	eq(t, "old reason", tk.Assignments[0].EndedReason, ReasonNodeOffline)
+	eq(t, "new state", tk.Assignments[1].State, AssignmentPending)
+	if !reflect.DeepEqual(tk.Assignments[1].Avoid, []string{"n2"}) {
+		t.Errorf("avoid = %v", tk.Assignments[1].Avoid)
+	}
+	if tk.Assignments[1].NodeOffline != nil || tk.Assignments[1].Node != "" {
+		t.Error("new assignment must start unplaced and online")
+	}
+}
+
+func TestRetryElsewhereRefusedWhenOnline(t *testing.T) {
+	h := newHarness(t)
+	id := h.accepted()
+	wantUserError(t, "online", h.eng.RetryElsewhere(id))
+	h.must(h.eng.AssignmentPlaced(id, h.ticket(id).Assignments[0].ID, "n1"))
+	wantUserError(t, "placed but online", h.eng.RetryElsewhere(id))
+}
+
+func TestPinStoredOnSubmit(t *testing.T) {
+	h := newHarness(t)
+	tk, err := h.eng.SubmitOwnerTask("pinned", TaskOptions{Dir: "/w", Node: "n3"})
+	h.must(err)
+	eq(t, "pin", h.ticket(tk.ID).Execution.Node, "n3")
+}
+
+func TestRetryElsewhereKeepsReviewRole(t *testing.T) {
+	h := newHarnessWith(t, pairedOptions(2))
+	id, impl := h.pairedTicket("", "")
+	h.tick(1)
+	h.ready(id, impl, "done")
+	rv := h.launch(id, "")
+	h.must(h.eng.AssignmentPlaced(id, rv, "n4"))
+	h.must(h.eng.NodeOffline("n4", base))
+	h.must(h.eng.RetryElsewhere(id))
+
+	tk := h.ticket(id)
+	next := tk.LatestAssignment()
+	eq(t, "role", next.Role, RoleReview)
+	eq(t, "state", next.State, AssignmentPending)
+	eq(t, "avoid", next.Avoid, []string{"n4"})
+	if tk.Review == nil {
+		t.Error("review state lost")
+	}
+}
+
+func TestRetryElsewhereClearsPinToStrandedNode(t *testing.T) {
+	h := newHarness(t)
+	tk, err := h.eng.SubmitOwnerTask("pinned", TaskOptions{Repo: "o/r", Node: "n3"})
+	h.must(err)
+	h.must(h.eng.AssignmentPlaced(tk.ID, tk.Assignments[0].ID, "n3"))
+	h.must(h.eng.NodeOffline("n3", base))
+	h.must(h.eng.RetryElsewhere(tk.ID))
+
+	got := h.ticket(tk.ID)
+	eq(t, "pin", got.Execution.Node, "")
+	eq(t, "avoid", got.LatestAssignment().Avoid, []string{"n3"})
+	evs := h.eventsOf(EventAssignmentEnded)
+	last := evs[len(evs)-1]
+	eq(t, "ended assignment", last.AssignmentID, tk.Assignments[0].ID)
+	eq(t, "unpinned", last.Data["unpinned"], any("n3"))
+}
+
+func TestRetryElsewhereKeepsOtherPin(t *testing.T) {
+	h := newHarness(t)
+	tk, err := h.eng.SubmitOwnerTask("pinned", TaskOptions{Repo: "o/r", Node: "n3"})
+	h.must(err)
+	// Placed elsewhere (as by an older pin); the pin is not the stranded node, so it stays.
+	h.must(h.eng.AssignmentPlaced(tk.ID, tk.Assignments[0].ID, "n1"))
+	h.must(h.eng.NodeOffline("n1", base))
+	h.must(h.eng.RetryElsewhere(tk.ID))
+	eq(t, "pin", h.ticket(tk.ID).Execution.Node, "n3")
+}
+
+func TestRetryElsewhereWithoutExecution(t *testing.T) {
+	h := newHarness(t)
+	id := h.accepted()
+	h.must(h.eng.AssignmentPlaced(id, h.ticket(id).Assignments[0].ID, "n2"))
+	h.must(h.eng.NodeOffline("n2", base))
+	// A Ticket stored before its Executor chose anything has no Execution.
+	h.must(h.repos.Tx(func(tx Tx) error {
+		tk, err := tx.GetTicket(id)
+		if err != nil {
+			return err
+		}
+		tk.Execution = nil
+		return tx.PutTicket(tk)
+	}))
+	h.must(h.eng.RetryElsewhere(id))
+	tk := h.ticket(id)
+	eq(t, "assignments", len(tk.Assignments), 2)
+	eq(t, "avoid", tk.LatestAssignment().Avoid, []string{"n2"})
+}

@@ -39,8 +39,14 @@ function Row({ ticket, selected, needsYou, search }: { ticket: TicketSummary; se
           <span dir="auto" className="min-w-0 flex-1 truncate font-semibold">
             {stripAnsi(ticket.title)}
           </span>
-          <StageBadge stage={ticket.stage} action={ticket.action} outcome={ticket.outcome} />
+          <StageBadge stage={ticket.stage} action={ticket.action} outcome={ticket.outcome} node={ticket.nodeName} />
         </span>
+        {ticket.waitingForNode && (
+          // The fleet holds its Assignment unplaced: why, in the server's words ("Waiting for mini").
+          <span data-waiting-for-node className="min-w-0 truncate text-xs text-muted">
+            {ticket.waitingForNode}
+          </span>
+        )}
         <span className="flex min-w-0 items-baseline gap-x-2">
           {where && <Mono className="min-w-0 truncate">{where}</Mono>}
           {ticket.model && <Mono className="shrink-0">{ticket.model}</Mono>}

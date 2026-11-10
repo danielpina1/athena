@@ -76,6 +76,8 @@ type TaskOptions struct {
 	// Pairing pairs the task: PairingReview with a review of each ready report, PairingOff with nothing, and empty as
 	// the Engine's Options.Pairing says. Any other value is a UserError.
 	Pairing string
+	// Node pins the task to a node by id; empty leaves the placement to the fleet.
+	Node string
 }
 
 // ReportInput is a worker's report on its Ticket. A Question asks a person (an empty one keeps the current question);
@@ -241,7 +243,7 @@ func (e *Engine) SubmitOwnerTask(text string, opts TaskOptions) (Ticket, error) 
 			ID: id, Title: title, DecisionID: decision.ID, Mandate: mandate,
 			CreatedAt: o.at, UpdatedAt: o.at,
 			Origin:    Origin{TriggerID: trigger.ID, TriggerIDs: []string{trigger.ID}},
-			Execution: &Execution{Directory: opts.Dir, Runtime: opts.Runtime, Model: opts.Model},
+			Execution: &Execution{Directory: opts.Dir, Runtime: opts.Runtime, Model: opts.Model, Node: opts.Node},
 			Repo:      opts.Repo,
 			RequestID: opts.RequestID,
 			Pairing:   o.ticketPairing(opts.Pairing),
@@ -652,6 +654,116 @@ func (e *Engine) RetryTicket(ticketID string) error {
 	})
 }
 
+// AssignmentPlaced records the node the fleet placed an Assignment on. An ended Assignment is left as it was.
+func (e *Engine) AssignmentPlaced(ticketID, assignmentID, nodeID string) error {
+	return e.command(cmdAssignmentPlaced, func(o *op) error {
+		t, err := o.require(ticketID)
+		if err != nil {
+			return err
+		}
+		a := findAssignment(t, assignmentID)
+		if a == nil || a.State == AssignmentEnded {
+			return nil
+		}
+		a.Node = nodeID
+		return o.tx.PutTicket(t)
+	})
+}
+
+// NodeOffline flags every running or pending Assignment placed on the node as offline since the given time.
+func (e *Engine) NodeOffline(nodeID string, since time.Time) error {
+	return e.command(cmdNodeOffline, func(o *op) error {
+		return o.flagNode(nodeID, EventNodeOffline, func(a *Assignment) bool {
+			if a.NodeOffline != nil {
+				return false
+			}
+			s := since
+			a.NodeOffline = &s
+			return true
+		})
+	})
+}
+
+// NodeBack clears the offline flag of the node's Assignments.
+func (e *Engine) NodeBack(nodeID string) error {
+	return e.command(cmdNodeBack, func(o *op) error {
+		return o.flagNode(nodeID, EventNodeBack, func(a *Assignment) bool {
+			if a.NodeOffline == nil {
+				return false
+			}
+			a.NodeOffline = nil
+			return true
+		})
+	})
+}
+
+// flagNode applies set to every open Ticket's running or pending Assignment placed on the node, and emits typ for
+// each Ticket it changed.
+func (o *op) flagNode(nodeID, typ string, set func(*Assignment) bool) error {
+	tickets, err := o.tx.OpenTickets()
+	if err != nil {
+		return err
+	}
+	for _, t := range tickets {
+		changed := ""
+		for i := range t.Assignments {
+			a := &t.Assignments[i]
+			if a.Node != nodeID || a.State == AssignmentEnded {
+				continue
+			}
+			if set(a) {
+				changed = a.ID
+			}
+		}
+		if changed == "" {
+			continue
+		}
+		t.UpdatedAt = o.at
+		if err := o.tx.PutTicket(t); err != nil {
+			return err
+		}
+		o.event(typ, t, changed, map[string]any{"node": nodeID})
+	}
+	return nil
+}
+
+// RetryElsewhere is a person's retry of a Ticket whose node is offline: the stranded Assignment ends and a new one
+// is queued that the fleet must not place on that node. A pin to that node is cleared.
+func (e *Engine) RetryElsewhere(ticketID string) error {
+	return e.command(cmdRetryElsewhere, func(o *op) error {
+		t, err := o.require(ticketID)
+		if err != nil {
+			return err
+		}
+		latest := t.LatestAssignment()
+		if t.Ended != nil || latest == nil || latest.NodeOffline == nil || latest.State == AssignmentEnded {
+			return userErrorf("this Ticket's node is not offline")
+		}
+		replaced, node, role := latest.ID, latest.Node, latest.Role
+		t.Stats.Retries++
+		o.endAssignment(t, latest, ReasonNodeOffline)
+		// A Ticket pinned to the stranded node would wait for it forever: the owner chose to move it, so the pin goes,
+		// and the Assignment's end says so.
+		if node != "" && t.Execution != nil && t.Execution.Node == node {
+			t.Execution.Node = ""
+			o.annotate(EventAssignmentEnded, replaced, "unpinned", node)
+		}
+		o.requeueUntaken(t, replaced)
+		assignment := o.newAssignment(t)
+		// A stranded review is retried as a review: t.Review stays, so the Role must too (startReview leaves the
+		// review's runtime unpinned, so there is no pin to carry).
+		next := findAssignment(t, assignment)
+		next.Role = role
+		if node != "" {
+			next.Avoid = []string{node}
+		}
+		t.UpdatedAt = o.at
+		o.stop(t, replaced, ReasonNodeOffline)
+		o.start(t, assignment)
+		return o.tx.PutTicket(t)
+	})
+}
+
 // --- Queries ---
 
 // Ticket returns the Ticket with the given ID and its stage.
@@ -815,6 +927,20 @@ func (o *op) deliver(t *Ticket, assignmentID string) {
 
 func (o *op) stop(t *Ticket, assignmentID, reason string) {
 	o.effects = append(o.effects, effect{kind: effectStop, ticket: t, assignmentID: assignmentID, reason: reason})
+}
+
+// annotate adds key to the data of the latest queued Event of type typ about the Assignment.
+func (o *op) annotate(typ, assignmentID, key string, value any) {
+	for i := len(o.effects) - 1; i >= 0; i-- {
+		ev := &o.effects[i].event
+		if o.effects[i].kind == effectEvent && ev.Type == typ && ev.AssignmentID == assignmentID {
+			if ev.Data == nil {
+				ev.Data = map[string]any{}
+			}
+			ev.Data[key] = value
+			return
+		}
+	}
 }
 
 func (o *op) event(typ string, t *Ticket, assignmentID string, data map[string]any) {
@@ -1156,6 +1282,8 @@ func cloneTicket(t *Ticket) Ticket {
 			a.IdleAt = clonePtr(a.IdleAt)
 			a.Report = clonePtr(a.Report)
 			a.ReviewOutcome = clonePtr(a.ReviewOutcome)
+			a.NodeOffline = clonePtr(a.NodeOffline)
+			a.Avoid = slices.Clone(a.Avoid)
 			if a.Limit != nil {
 				l := *a.Limit
 				l.ResetsAt = clonePtr(l.ResetsAt)

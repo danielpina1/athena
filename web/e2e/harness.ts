@@ -8,7 +8,9 @@
 //     with axe on the way.
 //   - simulateTouch(page, on): hold back or give the virtual authenticator's touch after signedInPage (to rest on sign-in).
 //   - addAuthenticator(page): that virtual authenticator alone, for a second device that enrolls through a link.
-//   - athena(...args): the CLI against the shared state dir, e.g. athena("task", "Deploy it") → its stdout.
+//   - athena(...args): the CLI against the shared state dir, e.g. athena("task", "Deploy it") → its stdout;
+//     athenaIn(state, ...args) against another server's (a spec's own: node-server.ts). signedInPage(page, state)
+//     signs in to that server, whose address is then the page's baseURL.
 //   - expectAccessible(page): axe on the current screen; any serious or critical violation fails.
 //   - session.requestApproval(ticket, tool, input) and session.report(ticket, state, text, question?): act as the
 //     Ticket's worker session through sessionctl (internal/testutil/sessionctl), on the real hook and MCP paths;
@@ -42,15 +44,18 @@ function env(name: "ATHENA_E2E_URL" | "ATHENA_E2E_STATE"): string {
 
 /** Runs `athena <args> --state-dir <shared>` and returns its stdout, trimmed. Fails on a non-zero exit. */
 export async function athena(...args: string[]): Promise<string> {
-  const { stdout } = await run(join(BIN, "athena"), [...args, "--state-dir", env("ATHENA_E2E_STATE")], {
-    encoding: "utf8",
-  });
+  return athenaIn(env("ATHENA_E2E_STATE"), ...args);
+}
+
+/** athena against another server's state dir (a spec's own server, as nodes.spec.ts starts). */
+export async function athenaIn(state: string, ...args: string[]): Promise<string> {
+  const { stdout } = await run(join(BIN, "athena"), [...args, "--state-dir", state], { encoding: "utf8" });
   return stdout.trim();
 }
 
-/** A fresh single-use enrollment link. */
-export async function enrollLink(): Promise<string> {
-  const link = ENROLL_LINK.exec(await athena("web", "enroll"))?.[0];
+/** A fresh single-use enrollment link, of the shared server or of the server whose state dir is given. */
+export async function enrollLink(state = env("ATHENA_E2E_STATE")): Promise<string> {
+  const link = ENROLL_LINK.exec(await athenaIn(state, "web", "enroll"))?.[0];
   if (!link) throw new Error("athena web enroll printed no link");
   return link;
 }
@@ -162,8 +167,8 @@ export async function expectShell(page: Page): Promise<void> {
 /** The passkeys the running test enrolled: kept, so a test can sign in more than once (two screens, say). */
 const ownPasskeys = new Set<string>();
 
-async function passkeyIds(): Promise<string[]> {
-  return (await athena("web", "passkeys"))
+async function passkeyIds(state: string): Promise<string[]> {
+  return (await athenaIn(state, "web", "passkeys"))
     .split("\n")
     .slice(1)
     .map((line) => line.split(/\s+/)[0])
@@ -176,9 +181,9 @@ async function passkeyIds(): Promise<string[]> {
  * one server failed), while every signedInPage enrolls one. The specs run one at a time (one worker), so a passkey
  * that is not the running test's belongs to a test that has finished.
  */
-async function revokeEarlierPasskeys(): Promise<void> {
-  for (const id of await passkeyIds()) {
-    if (!ownPasskeys.has(id)) await athena("web", "revoke", id);
+async function revokeEarlierPasskeys(state: string): Promise<void> {
+  for (const id of await passkeyIds(state)) {
+    if (!ownPasskeys.has(id)) await athenaIn(state, "web", "revoke", id);
   }
 }
 
@@ -213,21 +218,22 @@ export async function simulateTouch(page: Page, enabled: boolean): Promise<void>
 
 /**
  * Enrolls a new passkey on a virtual authenticator and signs in with it: page ends on the signed-in shell at "/".
- * Each call enrolls its own passkey; the links are single-use.
+ * Each call enrolls its own passkey; the links are single-use. state is the server's state dir: the shared server's
+ * by default, or a spec's own server (whose address is then the page's baseURL).
  */
-export async function signedInPage(page: Page): Promise<Page> {
-  await revokeEarlierPasskeys();
-  const before = new Set(await passkeyIds());
+export async function signedInPage(page: Page, state = env("ATHENA_E2E_STATE")): Promise<Page> {
+  await revokeEarlierPasskeys(state);
+  const before = new Set(await passkeyIds(state));
   const { cdp, authenticatorId } = await addAuthenticator(page);
   authenticators.set(page, { cdp, authenticatorId });
 
-  await page.goto(await enrollLink());
+  await page.goto(await enrollLink(state));
   const create = page.getByRole("button", { name: "Create passkey" });
   await expect(create).toBeVisible();
   await expectAccessible(page);
   await create.click();
   await expect(page).toHaveURL(/\/$/);
-  for (const id of await passkeyIds()) if (!before.has(id)) ownPasskeys.add(id);
+  for (const id of await passkeyIds(state)) if (!before.has(id)) ownPasskeys.add(id);
 
   // Sign in with the new passkey: start from no session, as a returning owner does. With presence simulated the
   // authenticator would answer the sign-in page's passkey autofill on its own, so the owner's touch is held back

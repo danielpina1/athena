@@ -6,6 +6,8 @@ import type { GenEnum, GenFile, GenMessage } from "@bufbuild/protobuf/codegenv2"
 import { enumDesc, fileDesc, messageDesc } from "@bufbuild/protobuf/codegenv2";
 import type { Command, CommandResult } from "./commands_pb.js";
 import { file_athena_v1_commands } from "./commands_pb.js";
+import type { BlobChunk, NodeCall, NodeHello, NodeResult, NodeStatusReport, NodeWelcome } from "./node_pb.js";
+import { file_athena_v1_node } from "./node_pb.js";
 import type { Delta, Snapshot } from "./state_pb.js";
 import { file_athena_v1_state } from "./state_pb.js";
 import type { StreamClose, StreamGap, StreamItems, StreamOpen } from "./stream_pb.js";
@@ -16,7 +18,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file athena/v1/link.proto.
  */
 export const file_athena_v1_link: GenFile = /*@__PURE__*/
-  fileDesc("ChRhdGhlbmEvdjEvbGluay5wcm90bxIJYXRoZW5hLnYxIqgFCgVGcmFtZRIjCgdjaGFubmVsGAEgASgOMhIuYXRoZW5hLnYxLkNoYW5uZWwSCwoDc2VxGAIgASgEEgsKA2FjaxgDIAEoBBIhCgVoZWxsbxgKIAEoCzIQLmF0aGVuYS52MS5IZWxsb0gAEiUKB3dlbGNvbWUYCyABKAsyEi5hdGhlbmEudjEuV2VsY29tZUgAEh8KBHBpbmcYDCABKAsyDy5hdGhlbmEudjEuUGluZ0gAEh8KBHBvbmcYDSABKAsyDy5hdGhlbmEudjEuUG9uZ0gAEiMKBmNyZWRpdBgOIAEoCzIRLmF0aGVuYS52MS5DcmVkaXRIABIhCgVlcnJvchgPIAEoCzIQLmF0aGVuYS52MS5FcnJvckgAEiMKBnJlc3luYxgQIAEoCzIRLmF0aGVuYS52MS5SZXN5bmNIABIlCgdjb21tYW5kGBEgASgLMhIuYXRoZW5hLnYxLkNvbW1hbmRIABIyCg5jb21tYW5kX3Jlc3VsdBgSIAEoCzIYLmF0aGVuYS52MS5Db21tYW5kUmVzdWx0SAASJwoIc25hcHNob3QYEyABKAsyEy5hdGhlbmEudjEuU25hcHNob3RIABIhCgVkZWx0YRgUIAEoCzIQLmF0aGVuYS52MS5EZWx0YUgAEiwKC3N0cmVhbV9vcGVuGBUgASgLMhUuYXRoZW5hLnYxLlN0cmVhbU9wZW5IABIuCgxzdHJlYW1faXRlbXMYFiABKAsyFi5hdGhlbmEudjEuU3RyZWFtSXRlbXNIABIqCgpzdHJlYW1fZ2FwGBcgASgLMhQuYXRoZW5hLnYxLlN0cmVhbUdhcEgAEi4KDHN0cmVhbV9jbG9zZRgYIAEoCzIWLmF0aGVuYS52MS5TdHJlYW1DbG9zZUgAQgYKBGJvZHkiXQoFSGVsbG8SEAoIcHJvdG9jb2wYASABKA0SEQoJY2xpZW50X2lkGAIgASgJEg0KBWVwb2NoGAMgASgJEg4KBmN1cnNvchgEIAEoBBIQCghsYXN0X3NlcRgFIAEoBCJgCgdXZWxjb21lEg0KBWVwb2NoGAEgASgJEhYKDnNlcnZlcl92ZXJzaW9uGAIgASgJEhQKDGhlYXJ0YmVhdF9tcxgDIAEoDRIYChBzbmFwc2hvdF9mb2xsb3dzGAQgASgIIhoKBFBpbmcSEgoKYXRfdW5peF9tcxgBIAEoBCIaCgRQb25nEhIKCmF0X3VuaXhfbXMYASABKAQiPAoGQ3JlZGl0EiMKB2NoYW5uZWwYASABKA4yEi5hdGhlbmEudjEuQ2hhbm5lbBINCgVpdGVtcxgCIAEoDSImCgVFcnJvchIMCgRjb2RlGAEgASgJEg8KB21lc3NhZ2UYAiABKAkiCAoGUmVzeW5jKlEKB0NoYW5uZWwSFwoTQ0hBTk5FTF9VTlNQRUNJRklFRBAAEgsKB0NPTlRST0wQARIKCgZFVkVOVFMQAhIKCgZTVFJFQU0QAxIICgRCTE9CEARCPVo7Z2l0aHViLmNvbS9kYW5pZWxwaW5hMS9hdGhlbmEvaW50ZXJuYWwvcGIvYXRoZW5hdjE7YXRoZW5hdjFiBnByb3RvMw", [file_athena_v1_commands, file_athena_v1_state, file_athena_v1_stream]);
+  fileDesc("ChRhdGhlbmEvdjEvbGluay5wcm90bxIJYXRoZW5hLnYxIsMHCgVGcmFtZRIjCgdjaGFubmVsGAEgASgOMhIuYXRoZW5hLnYxLkNoYW5uZWwSCwoDc2VxGAIgASgEEgsKA2FjaxgDIAEoBBIhCgVoZWxsbxgKIAEoCzIQLmF0aGVuYS52MS5IZWxsb0gAEiUKB3dlbGNvbWUYCyABKAsyEi5hdGhlbmEudjEuV2VsY29tZUgAEh8KBHBpbmcYDCABKAsyDy5hdGhlbmEudjEuUGluZ0gAEh8KBHBvbmcYDSABKAsyDy5hdGhlbmEudjEuUG9uZ0gAEiMKBmNyZWRpdBgOIAEoCzIRLmF0aGVuYS52MS5DcmVkaXRIABIhCgVlcnJvchgPIAEoCzIQLmF0aGVuYS52MS5FcnJvckgAEiMKBnJlc3luYxgQIAEoCzIRLmF0aGVuYS52MS5SZXN5bmNIABIlCgdjb21tYW5kGBEgASgLMhIuYXRoZW5hLnYxLkNvbW1hbmRIABIyCg5jb21tYW5kX3Jlc3VsdBgSIAEoCzIYLmF0aGVuYS52MS5Db21tYW5kUmVzdWx0SAASJwoIc25hcHNob3QYEyABKAsyEy5hdGhlbmEudjEuU25hcHNob3RIABIhCgVkZWx0YRgUIAEoCzIQLmF0aGVuYS52MS5EZWx0YUgAEiwKC3N0cmVhbV9vcGVuGBUgASgLMhUuYXRoZW5hLnYxLlN0cmVhbU9wZW5IABIuCgxzdHJlYW1faXRlbXMYFiABKAsyFi5hdGhlbmEudjEuU3RyZWFtSXRlbXNIABIqCgpzdHJlYW1fZ2FwGBcgASgLMhQuYXRoZW5hLnYxLlN0cmVhbUdhcEgAEi4KDHN0cmVhbV9jbG9zZRgYIAEoCzIWLmF0aGVuYS52MS5TdHJlYW1DbG9zZUgAEioKCm5vZGVfaGVsbG8YGSABKAsyFC5hdGhlbmEudjEuTm9kZUhlbGxvSAASLgoMbm9kZV93ZWxjb21lGBogASgLMhYuYXRoZW5hLnYxLk5vZGVXZWxjb21lSAASKAoJbm9kZV9jYWxsGBsgASgLMhMuYXRoZW5hLnYxLk5vZGVDYWxsSAASLAoLbm9kZV9yZXN1bHQYHCABKAsyFS5hdGhlbmEudjEuTm9kZVJlc3VsdEgAEioKCmJsb2JfY2h1bmsYHSABKAsyFC5hdGhlbmEudjEuQmxvYkNodW5rSAASOQoSbm9kZV9zdGF0dXNfcmVwb3J0GB4gASgLMhsuYXRoZW5hLnYxLk5vZGVTdGF0dXNSZXBvcnRIAEIGCgRib2R5Il0KBUhlbGxvEhAKCHByb3RvY29sGAEgASgNEhEKCWNsaWVudF9pZBgCIAEoCRINCgVlcG9jaBgDIAEoCRIOCgZjdXJzb3IYBCABKAQSEAoIbGFzdF9zZXEYBSABKAQiYAoHV2VsY29tZRINCgVlcG9jaBgBIAEoCRIWCg5zZXJ2ZXJfdmVyc2lvbhgCIAEoCRIUCgxoZWFydGJlYXRfbXMYAyABKA0SGAoQc25hcHNob3RfZm9sbG93cxgEIAEoCCIaCgRQaW5nEhIKCmF0X3VuaXhfbXMYASABKAQiGgoEUG9uZxISCgphdF91bml4X21zGAEgASgEIjwKBkNyZWRpdBIjCgdjaGFubmVsGAEgASgOMhIuYXRoZW5hLnYxLkNoYW5uZWwSDQoFaXRlbXMYAiABKA0iJgoFRXJyb3ISDAoEY29kZRgBIAEoCRIPCgdtZXNzYWdlGAIgASgJIggKBlJlc3luYypRCgdDaGFubmVsEhcKE0NIQU5ORUxfVU5TUEVDSUZJRUQQABILCgdDT05UUk9MEAESCgoGRVZFTlRTEAISCgoGU1RSRUFNEAMSCAoEQkxPQhAEQj1aO2dpdGh1Yi5jb20vZGFuaWVscGluYTEvYXRoZW5hL2ludGVybmFsL3BiL2F0aGVuYXYxO2F0aGVuYXYxYgZwcm90bzM", [file_athena_v1_commands, file_athena_v1_node, file_athena_v1_state, file_athena_v1_stream]);
 
 /**
  * Frame is the unit on the wire. Exactly one body member is set.
@@ -134,6 +136,42 @@ export type Frame = Message<"athena.v1.Frame"> & {
      */
     value: StreamClose;
     case: "streamClose";
+  } | {
+    /**
+     * @generated from field: athena.v1.NodeHello node_hello = 25;
+     */
+    value: NodeHello;
+    case: "nodeHello";
+  } | {
+    /**
+     * @generated from field: athena.v1.NodeWelcome node_welcome = 26;
+     */
+    value: NodeWelcome;
+    case: "nodeWelcome";
+  } | {
+    /**
+     * @generated from field: athena.v1.NodeCall node_call = 27;
+     */
+    value: NodeCall;
+    case: "nodeCall";
+  } | {
+    /**
+     * @generated from field: athena.v1.NodeResult node_result = 28;
+     */
+    value: NodeResult;
+    case: "nodeResult";
+  } | {
+    /**
+     * @generated from field: athena.v1.BlobChunk blob_chunk = 29;
+     */
+    value: BlobChunk;
+    case: "blobChunk";
+  } | {
+    /**
+     * @generated from field: athena.v1.NodeStatusReport node_status_report = 30;
+     */
+    value: NodeStatusReport;
+    case: "nodeStatusReport";
   } | { case: undefined; value?: undefined };
 };
 
@@ -331,7 +369,7 @@ export enum Channel {
   STREAM = 3,
 
   /**
-   * BLOB is reserved: defined, unused until plan 6.
+   * BLOB carries checkpoint and seed transfers between the server and a node.
    *
    * @generated from enum value: BLOB = 4;
    */

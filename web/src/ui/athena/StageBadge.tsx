@@ -11,6 +11,7 @@ const PERSON: Record<string, string> = {
   delivery: "Delivery failed",
   blocked: "Blocked",
   failed: "Failed",
+  offline: "Node offline",
 };
 
 const OUTCOME: Record<string, string> = {
@@ -29,13 +30,16 @@ export type StageProps = {
   outcome?: string;
   /** The owner asked to stop it and it has not ended yet (the store's `stopping`). */
   stopping?: boolean;
+  /** The name of the node the Ticket is on: an offline node's stage names it ("mini is offline"). */
+  node?: string;
 };
 
 /** The Global Constraints stage label for a Ticket's stage, action and outcome. */
-export function stageLabel({ stage, action = "", outcome = "", stopping = false }: StageProps): string {
+export function stageLabel({ stage, action = "", outcome = "", stopping = false, node = "" }: StageProps): string {
   if (stopping && stage !== "ended") return "Stopping…";
   switch (stage) {
     case "person":
+      if (action === "offline" && node) return `${node} is offline`;
       return PERSON[action] ?? "Needs you";
     case "working":
       return action === "queued" ? "Queued" : "Working";
@@ -66,6 +70,7 @@ export function StageBadge({
   action = "",
   outcome = "",
   stopping = false,
+  node,
   className,
 }: StageProps & { className?: string }) {
   const running = stage === "working" && action !== "queued";
@@ -78,7 +83,7 @@ export function StageBadge({
           className="size-2 shrink-0 rounded-full border-[1.5px] border-current"
         />
       )}
-      <span className="truncate">{stageLabel({ stage, action, outcome, stopping })}</span>
+      <span className="truncate">{stageLabel({ stage, action, outcome, stopping, node })}</span>
     </span>
   );
 }

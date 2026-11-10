@@ -318,7 +318,7 @@ test("header line names the count, node and load", () => {
   load({
     tickets: [approvalTicket, answerTicket],
     approvals: [approval],
-    node: create(NodeStatusSchema, { name: "mac-studio", slots: 4, slotsInUse: 2 }),
+    nodes: [create(NodeStatusSchema, { name: "mac-studio", slots: 4, slotsInUse: 2 })],
   });
   renderPage();
   expect(screen.getByRole("heading", { level: 1, name: "Needs you" })).toBeTruthy();
@@ -332,7 +332,7 @@ test("empty state copy", () => {
       { id: "T-8", title: "Busy", stage: "working" },
       { id: "T-9", title: "Done", stage: "ended", outcome: "merged", endedAt: timestampFromMs(now), updatedAt: timestampFromMs(now) },
     ],
-    node: create(NodeStatusSchema, { name: "mac-studio", slots: 4, slotsInUse: 1 }),
+    nodes: [create(NodeStatusSchema, { name: "mac-studio", slots: 4, slotsInUse: 1 })],
   });
   renderPage();
   expect(screen.getByText("Nothing needs you.")).toBeTruthy();

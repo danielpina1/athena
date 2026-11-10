@@ -58,6 +58,8 @@ type Handoff struct {
 	Reports                     []core.Report
 	GitLog, DiffStat, Untracked string
 	LastTurn                    string
+	// Opening, when set, opens the note instead of the usage-limit or moved-runtime sentence.
+	Opening string
 }
 
 // handoffNote is the note h says, at most handoffMax bytes. Everything but its own lines is quoted (quoteText), so
@@ -91,7 +93,11 @@ func handoffNote(h Handoff) string {
 		orNone(keepStart(quoteText(redact.String(h.DiffStat)), handoffGitMax)), quoteText(untracked))
 	fmt.Fprintf(&rest, "\nWhat it said last:\n%s\n", orNone(quotedEnd(quoteText(redact.String(strings.TrimSpace(h.LastTurn))), handoffLastTurnMax)))
 
-	head := fmt.Sprintf(opening, core.RuntimeLabel(runtime)) + "\n\nThe Ticket's latest messages, quoted:\n"
+	head := fmt.Sprintf(opening, core.RuntimeLabel(runtime))
+	if h.Opening != "" {
+		head = h.Opening
+	}
+	head += "\n\nThe Ticket's latest messages, quoted:\n"
 	room := handoffMax - len(head) - rest.Len()
 	inputs := orNone(quoteText(strings.TrimRight(h.Inputs, "\n")))
 	return keepStart(head+quotedEnd(inputs, max(room, len(cutMark)+1))+rest.String(), handoffMax)
@@ -140,7 +146,10 @@ func keepEnd(s string, n int) string {
 // handoffFor is the handoff note of the first message of a new process of the runner's Assignment on runtime, which
 // resumes session resumeID ("" for a new session), or "" when it gets none (handoffFrom). failover reports a limit's
 // move to another runtime: the process's marker says so.
-func (r *runner) handoffFor(runtime, resumeID string) (note string, failover bool) {
+//
+// A Ticket that moved here from another node (moved, its moved line) always gets one: the recovery note and the moved
+// line open it, and what the Ticket's last worker knew follows, when one ran.
+func (r *runner) handoffFor(runtime, resumeID, moved string) (note string, failover bool) {
 	s, n := r.s, r.n
 	if s.a.Role != "" {
 		return "", false
@@ -150,11 +159,23 @@ func (r *runner) handoffFor(runtime, resumeID string) (note string, failover boo
 		r.log.Warn("read ticket for the handoff", "error", err)
 		t = s.t
 	}
-	prev, failover := handoffFrom(t, s.a, runtime, resumeID)
-	if prev == nil {
+	var prev *core.Assignment
+	opening := ""
+	if moved != "" {
+		opening = recoveryNote + recoveryAdvice + "\n" + moved
+		for i := len(t.Assignments) - 1; i >= 0 && prev == nil; i-- {
+			if p := t.Assignments[i]; p.ID != s.a.ID && p.Role == "" && ranOn(t, p) != "" {
+				prev = &p
+				prev.Runtime = ranOn(t, p)
+			}
+		}
+		if prev == nil {
+			return opening, false
+		}
+	} else if prev, failover = handoffFrom(t, s.a, runtime, resumeID); prev == nil {
 		return "", false
 	}
-	h := Handoff{Ticket: t, Previous: *prev}
+	h := Handoff{Ticket: t, Previous: *prev, Opening: opening}
 	ids := make([]string, 0, handoffInputs)
 	for _, in := range t.Inputs[max(len(t.Inputs)-handoffInputs, 0):] {
 		ids = append(ids, in.ID)

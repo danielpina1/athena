@@ -105,7 +105,7 @@ func (c *command) webEnroll(args []string) int {
 		return c.fail(err)
 	}
 	defer st.Close()
-	token, err := web.IssueEnrollToken(st, *ttl)
+	token, err := web.IssueEnrollToken(st, store.EnrollPasskey, *ttl)
 	if err != nil {
 		return c.fail(err)
 	}

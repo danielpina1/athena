@@ -22,6 +22,7 @@ import (
 
 	"github.com/danielpina1/athena/internal/core"
 	"github.com/danielpina1/athena/internal/effects"
+	"github.com/danielpina1/athena/internal/fleet"
 	"github.com/danielpina1/athena/internal/hub"
 	"github.com/danielpina1/athena/internal/metrics"
 	"github.com/danielpina1/athena/internal/node"
@@ -248,7 +249,25 @@ func Run(ctx context.Context, cfg Config) (err error) {
 		}
 	}
 
-	// The Node needs the Engine and the Engine its Executor: the Node is made first and given the Engine after.
+	// The embedded node is named after this machine unless --node-name names it (a node name: see fleet.LocalName).
+	if ncfg.Name == "" {
+		host, _ := os.Hostname()
+		ncfg.Name = fleet.LocalName(host)
+	}
+	// The Engine's Executor is the fleet, which places each Assignment on the embedded node or a remote one; the node
+	// and the fleet need the Engine, and the Engine its Executor: both are made first and given the Engine after.
+	// The embedded node's checkpoints go straight into the server's mirror, where a remote node's arrive over its link;
+	// the fleet that keeps it is made after the node.
+	var fltRef atomic.Pointer[fleet.Fleet]
+	onCheckpoint := ncfg.OnCheckpoint
+	ncfg.OnCheckpoint = func(ticketID, repo, ref, sha string) {
+		if onCheckpoint != nil {
+			onCheckpoint(ticketID, repo, ref, sha)
+		}
+		if f := fltRef.Load(); f != nil {
+			f.LocalCheckpoint(ticketID, repo, ref, sha)
+		}
+	}
 	n := node.New(ncfg, nil)
 	nodeClosed := false
 	closeNode := func() {
@@ -258,6 +277,14 @@ func Run(ctx context.Context, cfg Config) (err error) {
 		}
 	}
 	defer closeNode()
+	flt := fleet.New(fleet.Config{Local: n, LocalID: fleet.LocalID, LocalName: ncfg.Name, Store: st, Creds: ncfg.Credentials,
+		Policy: ncfg.Policy, Prompts: func() (string, string) { return ncfg.WorkerPrompt(), ncfg.ReviewerPrompt() },
+		Mirror: fleet.NewMirror(fleet.CheckpointDir(stateDir)), OfflineAfter: offlineAfter(), Log: logger})
+	fltRef.Store(flt)
+	// Closes before the store (deferred after it): node links can outlive the web server's stop, and placement records
+	// into the Engine. Once the node is serving, the deferred stop below closes the node first and this runs after it;
+	// on an earlier return this runs before the closeNode deferred above.
+	defer flt.Close()
 	emit := func(e core.Event) {
 		attrs := []any{"type", e.Type, "ticket", e.TicketID, "assignment", e.AssignmentID}
 		if e.ApprovalID != "" {
@@ -273,11 +300,12 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	if killSwitch.Paused() {
 		logger.Warn("athena is paused; `athena resume` starts the decisions and replies again", "since", killSwitch.State().Since)
 	}
-	n.SetPaused(killSwitch.Paused())
-	eng := core.NewEngineWith(st.Repos(), n, core.Options{Now: time.Now, Emit: emit, Policy: pc.policy, Scope: sourceReg,
+	flt.SetPaused(killSwitch.Paused())
+	eng := core.NewEngineWith(st.Repos(), flt, core.Options{Now: time.Now, Emit: emit, Policy: pc.policy, Scope: sourceReg,
 		Wake: fx.Wake, Relays: routerOn, DefaultRuntime: fileCfg.Runtimes.Default, Pairing: pc.pairing})
 	eng.SetMetrics(reg)
 	n.SetEngine(eng)
+	flt.SetEngine(eng)
 	// registerSource registers the GitHub Source once the App passed its check: here, or later in the background.
 	registerSource := func() {
 		src := github.NewSource(github.SourceConfig{Repos: fileCfg.GitHub.Repos, Interval: fileCfg.GitHub.interval(),
@@ -298,7 +326,7 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	}
 	fx.Handle(core.EffectReply, outbox.Handler(sourceReg, st, killSwitch.Paused, eng.HoldIfHeld), outbox.Options)
 	// An applied push or pull request runs on the node, once: a failure settles it failed, never retried.
-	fx.Handle(core.EffectApplyProposal, applyProposals(st, eng, n, killSwitch.Paused, logger.With("component", "proposals")),
+	fx.Handle(core.EffectApplyProposal, applyProposals(st, eng, flt, killSwitch.Paused, logger.With("component", "proposals")),
 		effects.Options{Concurrency: 1})
 	var host *router.Host
 	if routerOn {
@@ -317,9 +345,9 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	// The one seam a change of the switch goes through: the node parks its sessions or starts them again, the dashboard
 	// hears of it, and the effects that were put off while paused run again at once.
 	killSwitch.OnChange(func(s pause.State) {
-		n.SetPaused(s.Paused)
+		flt.SetPaused(s.Paused)
 		if !s.Paused {
-			resumeParked(eng, n, logger)
+			resumeParked(eng, flt, logger)
 		}
 		if h := hubRef.Load(); h != nil {
 			h.OnCommit(store.Changes{Control: true})
@@ -387,7 +415,7 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	}
 	// The runner stops with Drain, which lets running effects finish first; the other parts stop with workCtx.
 	fx.Start(context.Background())
-	recoverAssignments(eng, n, logger)
+	recoverAssignments(eng, flt, n.Paused, logger)
 	sourceReg.Start(workCtx)
 	if _, ok := gh.checked(); routerOn && !ok {
 		// GitHub was unreachable or refused the check: try again in the background; the Source starts once it passes.
@@ -432,7 +460,7 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	logger.Info("athena server started", "stateDir", stateDir, "pid", os.Getpid())
 
 	c := &control{stateDir: stateDir, eng: eng, workRoot: ncfg.WorkRoot, model: ncfg.Model, log: logger, reg: reg,
-		st: st, fx: fx, gh: gh, host: host, policy: pc, node: n, pause: killSwitch, autopilot: autopilot}
+		st: st, fx: fx, gh: gh, host: host, policy: pc, node: n, fleet: flt, pause: killSwitch, autopilot: autopilot}
 	if err := c.resumePolicyChange(); err != nil {
 		logger.Error("startup: tell the pending policy change", "error", err)
 	}
@@ -444,7 +472,7 @@ func Run(ctx context.Context, cfg Config) (err error) {
 		}
 		c.local = newLocalRepos(fileCfg.localRepoRoots(home), []string{stateDir, ncfg.WorkRoot}, logger)
 		c.facts = newPlaceFacts()
-		if err := webEP.start(c, n, fx, version, &hubRef); err != nil {
+		if err := webEP.start(c, flt, fx, version, &hubRef); err != nil {
 			return err
 		}
 		c.web = webEP
@@ -505,7 +533,8 @@ func Run(ctx context.Context, cfg Config) (err error) {
 }
 
 // expirePendingApprovals expires every Approval still pending from a previous run: the hook that waited for it died
-// with that run's sessions, so nobody can act on an answer.
+// with that run's sessions, so nobody can act on an answer. An Approval of a remote node's Assignment is left: that
+// node's session did not stop with the server.
 func expirePendingApprovals(eng *core.Engine, log *slog.Logger) {
 	pending, err := eng.PendingApprovals()
 	if err != nil {
@@ -513,12 +542,30 @@ func expirePendingApprovals(eng *core.Engine, log *slog.Logger) {
 		return
 	}
 	for _, a := range pending {
+		if remoteApproval(eng, a) {
+			// Its hook runs on a remote node, which may still wait for the answer: it is that node's to expire.
+			continue
+		}
 		if err := eng.ExpireApproval(a.ID); err != nil {
 			log.Error("startup: expire approval", "ticket", a.TicketID, "assignment", a.AssignmentID, "approval", a.ID, "error", err)
 			continue
 		}
 		log.Info("expired approval from a previous run", "ticket", a.TicketID, "assignment", a.AssignmentID, "approval", a.ID)
 	}
+}
+
+// remoteApproval reports whether the Approval's Assignment is placed on a remote node.
+func remoteApproval(eng *core.Engine, ap core.Approval) bool {
+	t, _, err := eng.Ticket(ap.TicketID)
+	if err != nil {
+		return false
+	}
+	for i := range t.Assignments {
+		if t.Assignments[i].ID == ap.AssignmentID {
+			return !onLocal(&t.Assignments[i])
+		}
+	}
+	return false
 }
 
 // recoverAssignments starts again, of every open Ticket, a pending latest Assignment and a running one that was
@@ -530,7 +577,11 @@ func expirePendingApprovals(eng *core.Engine, log *slog.Logger) {
 // since its last turn (one whose worker handed off included) keeps its Session without a process: the node resumes
 // it, with the resume note, when its next Input arrives. While paused it records the interruptions but starts nothing:
 // resumeParked does, on resume.
-func recoverAssignments(eng *core.Engine, n *node.Node, log *slog.Logger) {
+//
+// Only Assignments of this server's own node are recovered: those placed on it, or on none (from before there were
+// nodes, or a pending one waiting for placement, which exec places). One placed on a remote node is left alone: its
+// session may still run there, and reconcile starts it when that node connects.
+func recoverAssignments(eng *core.Engine, exec core.Executor, paused func() bool, log *slog.Logger) {
 	tickets, err := eng.Tickets(false)
 	if err != nil {
 		log.Error("recovery: list tickets", "error", err)
@@ -538,11 +589,11 @@ func recoverAssignments(eng *core.Engine, n *node.Node, log *slog.Logger) {
 	}
 	for _, t := range tickets {
 		a := t.LatestAssignment()
-		if a == nil || (a.State != core.AssignmentRunning && a.State != core.AssignmentPending) {
+		if a == nil || (a.State != core.AssignmentRunning && a.State != core.AssignmentPending) || !onLocal(a) {
 			continue
 		}
 		if a.State == core.AssignmentRunning && !interrupted(&t, a) {
-			if !n.Paused() {
+			if !paused() {
 				liftPause(eng, &t, a, log) // a resume the server stopped before it got to
 			}
 			log.Info("idle assignment resumes on its next input", "ticket", t.ID, "assignment", a.ID)
@@ -557,12 +608,12 @@ func recoverAssignments(eng *core.Engine, n *node.Node, log *slog.Logger) {
 				t, a = fresh, fresh.LatestAssignment()
 			}
 		}
-		if n.Paused() {
+		if paused() {
 			log.Info("athena is paused; the assignment starts on resume", "ticket", t.ID, "assignment", a.ID, "state", a.State)
 			continue
 		}
 		log.Info("recovering assignment", "ticket", t.ID, "assignment", a.ID, "state", a.State, "undelivered", len(t.Undelivered))
-		n.Start(t, *a)
+		exec.Start(t, *a)
 	}
 }
 
@@ -571,7 +622,9 @@ func recoverAssignments(eng *core.Engine, n *node.Node, log *slog.Logger) {
 // Inputs wait for it). The node resumes a session with the pause or restart note. A Start of one that is queued or
 // still live changes nothing. An idle session the pause parked with nothing waiting is not started: its pause closes
 // (liftPause) and its next Input resumes it, as after a restart.
-func resumeParked(eng *core.Engine, n *node.Node, log *slog.Logger) {
+// Unlike recovery it acts on every node's Assignments (ruling R20): a remote's sessions parked too, and exec.Start
+// reaches the node the Assignment is on (an offline one drops it, and reconcile redoes it when it connects).
+func resumeParked(eng *core.Engine, exec core.Executor, log *slog.Logger) {
 	tickets, err := eng.Tickets(false)
 	if err != nil {
 		log.Error("resume: list tickets", "error", err)
@@ -590,9 +643,23 @@ func resumeParked(eng *core.Engine, n *node.Node, log *slog.Logger) {
 			continue
 		}
 		log.Info("resuming assignment", "ticket", t.ID, "assignment", a.ID, "state", a.State, "undelivered", len(t.Undelivered))
-		n.Start(t, *a)
+		exec.Start(t, *a)
 	}
 }
+
+// offlineAfter is fleet.OfflineAfter, or, for the e2e harness only (ATHENA_TEST=1), the Go duration in
+// ATHENA_TEST_OFFLINE_AFTER (Ruling R5).
+func offlineAfter() time.Duration {
+	if os.Getenv("ATHENA_TEST") == "1" {
+		if d, err := time.ParseDuration(os.Getenv("ATHENA_TEST_OFFLINE_AFTER")); err == nil && d > 0 {
+			return d
+		}
+	}
+	return fleet.OfflineAfter
+}
+
+// onLocal reports whether the Assignment is this server's own node's: placed on it, or on none.
+func onLocal(a *core.Assignment) bool { return a.Node == "" || a.Node == fleet.LocalID }
 
 // liftPause closes the open pause of an idle running Assignment that is not started again (PauseLifted: resumed
 // without a start); anything else is left alone.

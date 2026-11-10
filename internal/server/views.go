@@ -290,7 +290,7 @@ func (c *control) tell(from, to policy.Settings) (map[string]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	return notices, holdSwitched(c.eng, c.node, from, to)
+	return notices, holdSwitched(c.eng, c.tokenDropper(), from, to)
 }
 
 // tellEngine tells the Engine of a settings change: each open Ticket it bears on gets its notice, and the Evals in

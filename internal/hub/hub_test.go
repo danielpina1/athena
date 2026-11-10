@@ -35,6 +35,8 @@ type fakeSource struct {
 	revision  int
 	settings  string
 	node      node.Status
+	others    []NodeInfo // nodes after the local one
+	place     map[string]fakePlace
 	repos     []*athenav1.RepoView
 	repoReads int
 	git       map[string]bool
@@ -261,7 +263,25 @@ func (f *fakeSource) Policy() (int, string, string, error) {
 	return f.revision, "v1", f.settings, nil
 }
 
-func (f *fakeSource) NodeStatus() node.Status { f.mu.Lock(); defer f.mu.Unlock(); return f.node }
+func (f *fakeSource) Nodes() []NodeInfo {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]NodeInfo{{ID: "local", Name: f.node.Name, Local: true, State: "online", Status: f.node}}, f.others...)
+}
+
+type fakePlace struct {
+	id, name string
+	waiting  string
+}
+
+func (f *fakeSource) Placement(t *core.Ticket) (string, string, string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if p, ok := f.place[t.ID]; ok {
+		return p.id, p.name, p.waiting
+	}
+	return "local", f.node.Name, ""
+}
 
 func ticket(id string) core.Ticket {
 	return core.Ticket{ID: id, Title: "title " + id, CreatedAt: epoch0, UpdatedAt: epoch0}
@@ -1278,5 +1298,113 @@ func TestRepoOwedFollowsTicketStage(t *testing.T) {
 	next(t, sub)
 	if reads() != before+1 {
 		t.Errorf("a Ticket that still waits read the repos again")
+	}
+}
+
+func TestSnapshotListsNodes(t *testing.T) {
+	f := newFake()
+	f.node = node.Status{Name: "mac", Slots: 4}
+	f.others = []NodeInfo{
+		{ID: "n1", Name: "alpha", State: "online", OS: "linux", Arch: "amd64", Version: "v1", Status: node.Status{Name: "alpha", Slots: 2}},
+		{ID: "n2", Name: "beta", State: "revoked", LastSeen: epoch0},
+	}
+	h := start(t, f)
+	snap, _ := h.Snapshot()
+	var got []string
+	for _, n := range snap.Nodes {
+		got = append(got, n.Id+":"+n.Name+":"+n.State)
+	}
+	if want := "local:mac:online n1:alpha:online n2:beta:revoked"; strings.Join(got, " ") != want {
+		t.Fatalf("nodes = %v, want %s", got, want)
+	}
+	if n := snap.Nodes[1]; n.Os != "linux" || n.Arch != "amd64" || n.Version != "v1" || n.Slots != 2 || n.Local || n.LastSeen != nil {
+		t.Errorf("remote node = %v", n)
+	}
+	if n := snap.Nodes[2]; n.LastSeen == nil {
+		t.Errorf("a revoked node says when it was last seen: %v", n)
+	}
+	if !snap.Nodes[0].Local {
+		t.Errorf("local node = %v", snap.Nodes[0])
+	}
+}
+
+// A quota-only change on one node is held for its second without holding back another node's slot change.
+func TestNodeDeltaPerNode(t *testing.T) {
+	f := newFake()
+	f.node = node.Status{Name: "mac", Slots: 4}
+	f.others = []NodeInfo{
+		{ID: "n1", Name: "alpha", State: "online", Status: quotaNode(0.1)},
+		{ID: "n2", Name: "beta", State: "online", Status: quotaNode(0.1)},
+	}
+	h := New(f, quiet())
+	h.quotaEvery = 400 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	h.Start(ctx)
+	sub, _ := h.Subscribe(0, h.Epoch())
+	set := func(i int, st node.Status) {
+		f.mu.Lock()
+		f.others[i].Status = st
+		f.mu.Unlock()
+		h.NodeChanged()
+	}
+	set(1, quotaNode(0.2))
+	if d := next(t, sub); d.GetNode().GetId() != "n2" {
+		t.Fatalf("first = %v", d)
+	}
+	set(1, quotaNode(0.3)) // too soon: held
+	at := time.Now()
+	set(0, quotaNode(0.2)) // n1's own first quota reading in a while: not held by n2's
+	if d := next(t, sub); d.GetNode().GetId() != "n1" || d.GetNode().GetRuntimes()[0].GetWindows()[0].GetUsed() != 0.2 {
+		t.Fatalf("n1's quota reading = %v", d)
+	}
+	if since := time.Since(at); since > 250*time.Millisecond {
+		t.Fatalf("n1's reading came after %v: held by n2's throttle", since)
+	}
+	busy := quotaNode(0.1)
+	busy.SlotsInUse = 1
+	set(0, busy) // n1's slot change goes out at once
+	d := next(t, sub)
+	if d.GetNode().GetId() != "n1" || d.GetNode().GetSlotsInUse() != 1 {
+		t.Fatalf("n1's slot change = %v", d)
+	}
+	d = next(t, sub) // then n2's held reading, with the latest
+	if d.GetNode().GetId() != "n2" || d.GetNode().GetRuntimes()[0].GetWindows()[0].GetUsed() != 0.3 {
+		t.Fatalf("n2's held reading = %v", d)
+	}
+}
+
+func TestTicketSummaryCarriesNode(t *testing.T) {
+	f := newFake()
+	f.node = node.Status{Name: "mac"}
+	f.put(ticket("T-1"))
+	f.place = map[string]fakePlace{"T-1": {"n1", "alpha", "Waiting for alpha"}}
+	h := start(t, f)
+	snap, _ := h.Snapshot()
+	var got *athenav1.TicketSummary
+	for _, s := range snap.Tickets {
+		if s.Id == "T-1" {
+			got = s
+		}
+	}
+	if got == nil || got.NodeId != "n1" || got.NodeName != "alpha" || got.WaitingForNode != "Waiting for alpha" {
+		t.Fatalf("summary = %v", got)
+	}
+}
+
+// A change of why a Ticket waits for a node reaches the dashboard without a commit.
+func TestWaitChangedRepublishesTicket(t *testing.T) {
+	f := newFake()
+	f.node = node.Status{Name: "mac"}
+	f.put(ticket("T-1"))
+	h := start(t, f)
+	sub, _ := h.Subscribe(0, h.Epoch())
+	f.mu.Lock()
+	f.place = map[string]fakePlace{"T-1": {"n1", "alpha", "Waiting for alpha"}}
+	f.mu.Unlock()
+	h.WaitChanged("T-1")
+	d := next(t, sub).GetTicket()
+	if d.GetId() != "T-1" || d.GetWaitingForNode() != "Waiting for alpha" {
+		t.Fatalf("delta = %v", d)
 	}
 }

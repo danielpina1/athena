@@ -39,6 +39,7 @@ export function TicketHeader({
           stage={answered ? "working" : ticket.stage}
           action={answered ? "" : ticket.action}
           stopping={stopping}
+          node={ticket.nodeName}
           className="mt-0.5"
         />
       </div>

@@ -44,7 +44,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return node.RunGh(args[1:], stdin, stdout, stderr, os.Environ())
 	case "server", "task", "status", "logs", "reply", "stop", "retry",
 		"approvals", "approve", "deny", "metrics",
-		"github", "web", "codex", "policy", "triggers", "threads", "decisions", "reevaluate", "dismiss", "unsubscribe", "pause", "resume", "proposals", "apply", "discard":
+		"github", "web", "codex", "policy", "triggers", "threads", "decisions", "reevaluate", "dismiss", "unsubscribe", "pause", "resume", "proposals", "apply", "discard", "retry-elsewhere", "node":
 		cli.Version = version
 		return cli.Run(context.Background(), cmd, args[1:], stdout, stderr)
 	default:

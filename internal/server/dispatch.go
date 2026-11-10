@@ -17,6 +17,7 @@ import (
 
 	"github.com/danielpina1/athena/internal/core"
 	"github.com/danielpina1/athena/internal/effects"
+	"github.com/danielpina1/athena/internal/fleet"
 	"github.com/danielpina1/athena/internal/metrics"
 	"github.com/danielpina1/athena/internal/node"
 	"github.com/danielpina1/athena/internal/pause"
@@ -56,8 +57,10 @@ type Dispatcher struct {
 	autopilot *schedule.Source
 	// pause is the kill switch; nil (tests) pauses nothing and answers unavailable.
 	pause *pause.Switch
-	// node interrupts sessions; nil (tests) answers unavailable.
+	// node is the server's own node (its status, its tokens); nil in tests.
 	node *node.Node
+	// fleet routes a Ticket's calls (Interrupt) to the node that has it; nil (tests) falls back to node.
+	fleet *fleet.Fleet
 	// auth ends the open connections of a revoked passkey; until SetAuth (no web server) revoking works on the store.
 	auth atomic.Pointer[web.Auth]
 	// web is the dashboard's endpoint, nil when it is off; set before the control socket serves.
@@ -122,7 +125,7 @@ func (d *Dispatcher) handleRequest(req Request) (any, error) {
 	case OpPing:
 		return nil, nil
 	case OpSubmit:
-		t, err := d.submit(req.Text, req.Dir, req.Model, req.Repo, req.Runtime, pairingOf(req.Review), "")
+		t, err := d.submit(req.Text, req.Dir, req.Model, req.Repo, req.Runtime, pairingOf(req.Review), "", req.Node)
 		if err != nil {
 			return nil, err
 		}
@@ -146,6 +149,8 @@ func (d *Dispatcher) handleRequest(req Request) (any, error) {
 		return nil, d.eng.StopTicket(req.ID, req.Reason)
 	case OpRetry:
 		return nil, d.eng.RetryTicket(req.ID)
+	case OpRetryElsewhere:
+		return nil, d.retryElsewhere(req.ID)
 	case OpApprovals:
 		list, err := d.eng.PendingApprovals()
 		if err != nil {
@@ -226,6 +231,14 @@ func (d *Dispatcher) handleRequest(req Request) (any, error) {
 			return WebStatusResult{}, nil
 		}
 		return d.web.status(), nil
+	case OpNodeToken:
+		return d.nodeToken(req.TTL)
+	case OpNodes:
+		return d.nodeRows()
+	case OpNodeDrain, OpNodeUndrain:
+		return d.drainNode(req.ID, req.Op == OpNodeDrain)
+	case OpNodeRevoke:
+		return d.revokeNode(req.ID)
 	default:
 		return nil, userErrorf("unknown op %q", req.Op)
 	}
@@ -322,6 +335,11 @@ func (d *Dispatcher) Do(_ context.Context, o web.Origin, c *athenav1.Command) *a
 	case web.CodeReauthRequired, web.CodeUnauthenticated, web.CodeUnavailable, web.CodeInternal:
 		return res
 	}
+	if _, isToken := c.GetAction().(*athenav1.Command_CreateNodeToken); isToken {
+		// The result carries a join token, which appears once: it is never stored (or replayed). A command sent
+		// again mints a fresh token.
+		return res
+	}
 	if d.beforeStore != nil {
 		d.beforeStore()
 	}
@@ -359,7 +377,7 @@ func (d *Dispatcher) act(o web.Origin, c *athenav1.Command) *athenav1.CommandRes
 	switch a := c.GetAction().(type) {
 	case *athenav1.Command_SubmitTask:
 		s := a.SubmitTask
-		t, err := d.submit(s.GetText(), s.GetDir(), s.GetModel(), s.GetRepo(), s.GetRuntime(), pairingOf(s.Review), requestID(o, c))
+		t, err := d.submit(s.GetText(), s.GetDir(), s.GetModel(), s.GetRepo(), s.GetRuntime(), pairingOf(s.Review), requestID(o, c), s.GetNode())
 		if err != nil {
 			return d.failure(err)
 		}
@@ -374,6 +392,32 @@ func (d *Dispatcher) act(o web.Origin, c *athenav1.Command) *athenav1.CommandRes
 		}
 	case *athenav1.Command_Retry:
 		if err := d.eng.RetryTicket(a.Retry.GetTicketId()); err != nil {
+			return d.failure(err)
+		}
+	case *athenav1.Command_RetryElsewhere:
+		if err := d.retryElsewhere(a.RetryElsewhere.GetTicketId()); err != nil {
+			return d.failure(err)
+		}
+	case *athenav1.Command_CreateNodeToken:
+		if !o.Sensitive {
+			return proto.Clone(reauthRequired).(*athenav1.CommandResult)
+		}
+		// The name is ignored: the node names itself when it joins (Ruling R25).
+		r, err := d.nodeToken(time.Duration(a.CreateNodeToken.GetTtlSeconds()) * time.Second)
+		if err != nil {
+			return d.failure(err)
+		}
+		return &athenav1.CommandResult{Ok: true, Result: &athenav1.CommandResult_NodeToken{NodeToken: &athenav1.NodeToken{
+			Command: JoinCommand(r.URL, r.Token, r.Fingerprint), ExpiresAt: timestamppb.New(r.Expires)}}}
+	case *athenav1.Command_SetNodeDraining:
+		if _, err := d.drainNode(a.SetNodeDraining.GetNodeId(), a.SetNodeDraining.GetDraining()); err != nil {
+			return d.failure(err)
+		}
+	case *athenav1.Command_RevokeNode:
+		if !o.Sensitive {
+			return proto.Clone(reauthRequired).(*athenav1.CommandResult)
+		}
+		if _, err := d.revokeNode(a.RevokeNode.GetNodeId()); err != nil {
 			return d.failure(err)
 		}
 	case *athenav1.Command_Interrupt:
@@ -554,7 +598,7 @@ func pairingOf(review *bool) string {
 	return core.PairingOff
 }
 
-func (d *Dispatcher) submit(text, dir, model, repo, runtime, pairing, requestID string) (core.Ticket, error) {
+func (d *Dispatcher) submit(text, dir, model, repo, runtime, pairing, requestID, nodeID string) (core.Ticket, error) {
 	if dir != "" {
 		if !filepath.IsAbs(dir) {
 			return core.Ticket{}, userErrorf("directory %s must be an absolute path", dir)
@@ -571,8 +615,13 @@ func (d *Dispatcher) submit(text, dir, model, repo, runtime, pairing, requestID 
 		}
 		repo = name
 	}
+	if nodeID != "" {
+		if err := d.pinnable(nodeID); err != nil {
+			return core.Ticket{}, err
+		}
+	}
 	t, err := d.eng.SubmitOwnerTask(text, core.TaskOptions{Dir: dir, Model: model, Repo: repo, Runtime: runtime, Pairing: pairing,
-		RequestID: requestID})
+		RequestID: requestID, Node: nodeID})
 	if errors.Is(err, core.ErrDuplicate) {
 		return t, nil
 	}
@@ -587,10 +636,52 @@ func (d *Dispatcher) unsubscribe(thread string) error {
 	return d.eng.Unsubscribe(thread)
 }
 
+// tokenDropper is what drops a held repository's write tokens: the fleet (every node), else the node; nil without.
+func (d *Dispatcher) tokenDropper() tokenDropper {
+	switch {
+	case d.fleet != nil:
+		return d.fleet
+	case d.node != nil:
+		return d.node
+	}
+	return nil
+}
+
+// retryElsewhere is the owner's Retry elsewhere of a Ticket whose node is offline (Engine.RetryElsewhere). A Ticket
+// with no Repo works in a folder of that node, which no other node has: it waits for the node instead (Ruling R2).
+func (d *Dispatcher) retryElsewhere(ticketID string) error {
+	t, _, err := d.eng.Ticket(ticketID)
+	if err != nil {
+		return err
+	}
+	if t.Repo == "" {
+		name := "its node"
+		if a := t.LatestAssignment(); a != nil {
+			name = d.nodeName(a.Node)
+		}
+		return userErrorf("This Ticket works in a folder on %s; it continues when %s is back.", name, name)
+	}
+	return d.eng.RetryElsewhere(ticketID)
+}
+
+// nodeName is the name of the node id ("" is the server's own).
+func (d *Dispatcher) nodeName(id string) string {
+	if d.fleet != nil {
+		return d.fleet.NodeName(id)
+	}
+	if d.node != nil {
+		return d.node.Status().Name
+	}
+	return "this machine"
+}
+
 // interrupt abandons the running turn of a Ticket's session; a Ticket without a running session is node.ErrNoSession.
 func (d *Dispatcher) interrupt(ticketID string) error {
 	if _, _, err := d.eng.Ticket(ticketID); err != nil {
 		return err
+	}
+	if d.fleet != nil {
+		return d.fleet.Interrupt(ticketID)
 	}
 	if d.node == nil {
 		return node.ErrNoSession

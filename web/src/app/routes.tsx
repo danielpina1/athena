@@ -1,5 +1,5 @@
-// The signed-in app's routes and its navigation. Graph (app/routes/graph.tsx) and Settings are lazy chunks, and
-// Settings › Prompts a further one. /design and /enroll render outside the session gate (App.tsx).
+// The signed-in app's routes and its navigation. Graph (app/routes/graph.tsx), Nodes and Settings are lazy chunks,
+// and Settings › Prompts a further one. /design and /enroll render outside the session gate (App.tsx).
 //
 // Query contracts the palette already uses: /tickets/:id?tab=session opens a Ticket's live session, and
 // /routing?tab=triggers&trigger=<id> and /routing?tab=threads&thread=<key> open one record (Task 14). On the Ticket
@@ -22,7 +22,6 @@ import { NeedsYou } from "@/features/needs-you/NeedsYou";
 import { NewTask } from "@/features/new-task/NewTask";
 import { Routing } from "@/features/routing/Routing";
 import { PinnedSessions } from "@/features/session/PinnedSessions";
-import { Nodes } from "@/features/nodes/Nodes";
 import { TicketDetail } from "@/features/tickets/TicketDetail";
 import { TicketList } from "@/features/tickets/TicketList";
 import { selectCounts, selectSynced } from "@/lib/store/selectors";
@@ -118,8 +117,19 @@ function RoutingView() {
   return <Panes detail={<Routing />} />;
 }
 
+/** Nodes is a lazy chunk (its sentinel is in bundle-budget.mjs): only routes.tsx imports it. */
+const Nodes = lazy(() => import("@/features/nodes/Nodes").then((m) => ({ default: m.Nodes })));
+
 function NodesView() {
-  return <Panes detail={<Nodes />} />;
+  return (
+    <Panes
+      detail={
+        <Suspense fallback={<Waiting className="p-4 lg:p-6" />}>
+          <Nodes />
+        </Suspense>
+      }
+    />
+  );
 }
 
 const linkClass =

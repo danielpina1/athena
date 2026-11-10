@@ -68,7 +68,7 @@ export function Graph() {
   const threads = useAthena((s) => s.threads);
   const decisions = useAthena((s) => s.decisions);
   const repos = useAthena((s) => s.repos);
-  const machine = useAthena((s) => s.node?.name ?? "");
+  const machine = useAthena((s) => s.nodes[0]?.name ?? "");
   const needsYouItems = useAthena(selectNeedsYou);
   const needsYou = useMemo(() => new Set(needsYouItems.map((i) => i.ticket.id)), [needsYouItems]);
 

@@ -641,6 +641,9 @@ type WebConfig struct {
 	Enabled bool `json:"enabled"`
 	// Listen is the address the endpoint binds (default ":8443"); the VPN interface's address keeps it off the LAN.
 	Listen string `json:"listen"`
+	// NodeListen is the address the node endpoint binds (mutual TLS, plan 6): by default Listen's host with its port
+	// plus one (":8444" for ":8443"). It must differ from Listen, so browsers are never asked for a certificate.
+	NodeListen string `json:"nodeListen,omitempty"`
 	// Host is the DNS name the owner's devices use; required when Enabled.
 	Host string `json:"host"`
 	// IPs are the addresses the own CA's certificate also names (mode ca).
@@ -734,7 +737,42 @@ func (w WebConfig) validate() error {
 	default:
 		return fmt.Errorf("web.tls %q is not ca, acme or off", w.TLS)
 	}
+	if w.NodeListen == "" && port == "65535" {
+		return errors.New("web.nodeListen is required when web.listen's port is 65535 (the default is the port plus one)")
+	}
+	nl := w.NodeListenAddr()
+	_, nport, err := net.SplitHostPort(nl)
+	if err != nil {
+		return fmt.Errorf("web.nodeListen %q is not host:port (for example :8444 or 10.8.0.1:8444)", nl)
+	}
+	if n, err := strconv.Atoi(nport); err != nil || n < 0 || n > 65535 {
+		return fmt.Errorf("web.nodeListen %q: the port must be a number from 0 to 65535", nl)
+	}
+	if nl == w.Listen && nport != "0" {
+		return fmt.Errorf("web.nodeListen %q must differ from web.listen: nodes connect on their own port", nl)
+	}
 	return nil
+}
+
+// NodeListenAddr is where the node endpoint binds: NodeListen, or else Listen's host with its port plus one (port 0,
+// a test's, stays 0).
+func (w WebConfig) NodeListenAddr() string {
+	w = w.withDefaults()
+	if w.NodeListen != "" {
+		return w.NodeListen
+	}
+	host, port, err := net.SplitHostPort(w.Listen)
+	if err != nil {
+		return ""
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil {
+		return ""
+	}
+	if n != 0 {
+		n++
+	}
+	return net.JoinHostPort(host, strconv.Itoa(n))
 }
 
 // URL is where the owner reaches the dashboard: the origin for the port of Listen.

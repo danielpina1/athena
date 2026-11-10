@@ -239,3 +239,17 @@ test("a runtime in the URL is the starting point; an unknown one is no filter", 
   renderList("/tickets?runtime=gemini");
   expect(rows()).toEqual(["/tickets/T-2", "/tickets/T-5"]);
 });
+
+test("a Ticket waiting for a node says so as its stage line", () => {
+  load({
+    tickets: [
+      { id: "T-5", title: "Pinned to mini", stage: "working", action: "queued", repo: "acme/api", waitingForNode: "Waiting for mini", updatedAt: at(6000) },
+      { id: "T-1", title: "Ship the API", stage: "working", repo: "acme/api", model: "opus", updatedAt: at(5000) },
+    ],
+  });
+  renderList();
+  const row = screen.getByRole("link", { name: /Pinned to mini/ });
+  expect(within(row).getByText("Waiting for mini")).toBeTruthy();
+  // Rows that wait for nothing have no such line.
+  expect(within(screen.getByRole("link", { name: /Ship the API/ })).queryByText(/Waiting for/)).toBeNull();
+});

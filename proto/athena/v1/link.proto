@@ -3,6 +3,7 @@ syntax = "proto3";
 package athena.v1;
 
 import "athena/v1/commands.proto";
+import "athena/v1/node.proto";
 import "athena/v1/state.proto";
 import "athena/v1/stream.proto";
 
@@ -15,7 +16,7 @@ enum Channel {
   CONTROL = 1;
   EVENTS = 2;
   STREAM = 3;
-  // BLOB is reserved: defined, unused until plan 6.
+  // BLOB carries checkpoint and seed transfers between the server and a node.
   BLOB = 4;
 }
 
@@ -41,6 +42,12 @@ message Frame {
     StreamItems stream_items = 22;
     StreamGap stream_gap = 23;
     StreamClose stream_close = 24;
+    NodeHello node_hello = 25;
+    NodeWelcome node_welcome = 26;
+    NodeCall node_call = 27;
+    NodeResult node_result = 28;
+    BlobChunk blob_chunk = 29;
+    NodeStatusReport node_status_report = 30;
   }
 }
 

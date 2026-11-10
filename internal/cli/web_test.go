@@ -67,7 +67,7 @@ func TestWebEnrollPrintsLinkAndQR(t *testing.T) {
 	}
 	// The token is live (and then spent), and it is what the QR carries.
 	h := sha256.Sum256(raw)
-	if ok, err := st.UseEnrollToken(h[:], time.Now()); err != nil || !ok {
+	if ok, err := st.UseEnrollToken(h[:], store.EnrollPasskey, time.Now()); err != nil || !ok {
 		t.Fatalf("token not stored: %v %v", ok, err)
 	}
 	mu.Lock()

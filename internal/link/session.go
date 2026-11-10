@@ -36,6 +36,10 @@ const (
 	defaultDeadAfter = 45 * time.Second
 	defaultAckDelay  = 200 * time.Millisecond
 	defaultQueue     = 256
+	// blobQueue is BLOB's default queue: its frames are near MaxFrame, so 16 of them is already 16 MiB in memory.
+	blobQueue = 16
+	// defaultMaxUnackedBytes bounds the encoded size of the durable frames in flight, next to maxUnacked.
+	defaultMaxUnackedBytes = 64 << 20
 	// maxUnacked bounds the durable frames in flight (sent and not acked, plus queued): a peer that pings but never
 	// acks makes durable Sends fail with ErrBackpressure instead of growing memory.
 	maxUnacked = 1024
@@ -61,8 +65,11 @@ type Options struct {
 	Heartbeat time.Duration // Ping interval, 15 s
 	DeadAfter time.Duration // silence before the peer is dead, 45 s
 	AckDelay  time.Duration // silence before a standalone ack, 200 ms
-	// SendQueue is the bound of each channel's send queue; a channel not listed holds 256.
+	// SendQueue is the bound of each channel's send queue; a channel not listed holds 256, BLOB 16.
 	SendQueue map[athenav1.Channel]int
+	// MaxUnackedBytes bounds the encoded size of the durable frames sent and not acked, plus queued; 64 MiB. A durable
+	// Send over it is ErrBackpressure, as it is over the 1024-frame cap.
+	MaxUnackedBytes int
 	// OnFrame receives every frame except Ping, Pong and Credit, in order, once each, from the reader goroutine.
 	// It must not block for long.
 	OnFrame func(*athenav1.Frame)
@@ -71,7 +78,7 @@ type Options struct {
 	OnCredit func(ch athenav1.Channel)
 	Resume   *Resume
 	Now      func() time.Time                     // default time.Now
-	After    func(time.Duration) <-chan time.Time // default time.After
+	After    func(time.Duration) <-chan time.Time // default: stoppable timers from time.NewTimer
 }
 
 // Session is the reliable layer of one link connection. Durable frames are numbered per direction from 1 and acked
@@ -88,6 +95,8 @@ type Session struct {
 	mu       sync.Mutex
 	closed   bool
 	pending  int // durable frames in the queues
+	bytes    int // encoded size of the durable frames in the queues and in unacked
+	sizes    map[*athenav1.Frame]int
 	initErr  error
 	sendSeq  uint64
 	unacked  []*athenav1.Frame
@@ -114,11 +123,11 @@ func New(c Conn, o Options) *Session {
 	if o.AckDelay <= 0 {
 		o.AckDelay = defaultAckDelay
 	}
+	if o.MaxUnackedBytes <= 0 {
+		o.MaxUnackedBytes = defaultMaxUnackedBytes
+	}
 	if o.Now == nil {
 		o.Now = time.Now
-	}
-	if o.After == nil {
-		o.After = time.After
 	}
 	s := &Session{
 		conn:   c,
@@ -128,10 +137,15 @@ func New(c Conn, o Options) *Session {
 		ack:    make(chan struct{}, 1),
 		queues: map[athenav1.Channel][]queued{},
 		credit: map[athenav1.Channel]uint32{},
+		sizes:  map[*athenav1.Frame]int{},
 	}
 	if r := o.Resume; r != nil {
 		s.recvSeq = r.Received
 		s.sendSeq = r.PeerLastSeq
+		if n := len(r.Unacked); n > 0 && r.PeerLastSeq > r.Unacked[n-1].GetSeq() {
+			// The peer claims a frame of ours that we never numbered: another session's state, or a lie.
+			s.initErr = fmt.Errorf("%w: resume beyond sent, peer has %d, last sent is %d", ErrProtocol, r.PeerLastSeq, r.Unacked[n-1].GetSeq())
+		}
 		for _, f := range r.Unacked {
 			switch {
 			case f.GetSeq() <= r.PeerLastSeq:
@@ -141,6 +155,7 @@ func New(c Conn, o Options) *Session {
 				s.sendSeq = f.GetSeq()
 				s.unacked = append(s.unacked, f)
 				s.replay = append(s.replay, f)
+				s.track(f, proto.Size(f))
 			}
 		}
 	}
@@ -155,17 +170,30 @@ type queued struct {
 // channelOrder is the writer's service order.
 var channelOrder = []athenav1.Channel{athenav1.Channel_CONTROL, athenav1.Channel_EVENTS, athenav1.Channel_STREAM, athenav1.Channel_BLOB}
 
-// Send queues f on ch, taking ownership of it. It never blocks: a full queue, or maxUnacked durable frames in
-// flight, is ErrBackpressure. A durable frame is numbered when it is written, so seq follows write order across
-// channels, and is kept until the peer acks it. BLOB is reserved and refused, as is a frame with no body or too big
-// to carry its seq and ack.
+// track counts a durable frame of n bytes as in flight.
+func (s *Session) track(f *athenav1.Frame, n int) {
+	s.sizes[f] = n
+	s.bytes += n
+}
+
+// untrack releases a durable frame's bytes.
+func (s *Session) untrack(f *athenav1.Frame) {
+	s.bytes -= s.sizes[f]
+	delete(s.sizes, f)
+}
+
+// Send queues f on ch, taking ownership of it. It never blocks: a full queue, or maxUnacked durable frames or
+// MaxUnackedBytes in flight, is ErrBackpressure. A durable frame is numbered when it is written, so seq follows write
+// order across channels, and is kept until the peer acks it. A frame with no body, or too big to carry its seq and
+// ack, is refused.
 func (s *Session) Send(ch athenav1.Channel, durable bool, f *athenav1.Frame) error {
-	if ch == athenav1.Channel_BLOB || f.GetBody() == nil {
+	if f.GetBody() == nil {
 		return fmt.Errorf("%w: channel %v, body %T", ErrInvalid, ch, f.GetBody())
 	}
 	f.Channel = ch
 	f.Seq, f.Ack = 0, 0
-	if n := proto.Size(f); n > MaxFrame-StampSlack {
+	n := proto.Size(f)
+	if n > MaxFrame-StampSlack {
 		return fmt.Errorf("%w: %d bytes, over %d", ErrInvalid, n, MaxFrame-StampSlack)
 	}
 	s.mu.Lock()
@@ -176,14 +204,18 @@ func (s *Session) Send(ch athenav1.Channel, durable bool, f *athenav1.Frame) err
 	limit, ok := s.o.SendQueue[ch]
 	if !ok {
 		limit = defaultQueue
+		if ch == athenav1.Channel_BLOB {
+			limit = blobQueue
+		}
 	}
-	if len(s.queues[ch]) >= limit || durable && len(s.unacked)+s.pending >= maxUnacked {
+	if len(s.queues[ch]) >= limit || durable && (len(s.unacked)+s.pending >= maxUnacked || s.bytes+n > s.o.MaxUnackedBytes) {
 		s.mu.Unlock()
 		return ErrBackpressure
 	}
 	s.queues[ch] = append(s.queues[ch], queued{f, durable})
 	if durable {
 		s.pending++
+		s.track(f, n)
 	}
 	s.mu.Unlock()
 	signal(s.wake)
@@ -205,6 +237,15 @@ func (s *Session) Credit(ch athenav1.Channel) uint32 {
 	return s.credit[ch]
 }
 
+// Queued is how many frames ch's queue holds that the writer has not taken yet. The writer takes one frame at a time
+// and writes it before it takes the next: a frame sent on any channel once Queued(ch) is 0 is written after every frame
+// sent on ch before. After Run returns it is 0.
+func (s *Session) Queued(ch athenav1.Channel) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.queues[ch])
+}
+
 // Unacked is the durable frames sent and not yet acked, in seq order. After Run returns it also holds the durable
 // frames that were still queued, numbered, so nothing accepted by Send is lost.
 func (s *Session) Unacked() []*athenav1.Frame {
@@ -218,6 +259,16 @@ func (s *Session) LastReceived() uint64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.recvSeq
+}
+
+// after is Options.After, or a real timer the caller can stop: time.After would leave every unfired timer alive
+// until it expires, however soon the Session ends.
+func (s *Session) after(d time.Duration) (<-chan time.Time, func()) {
+	if s.o.After != nil {
+		return s.o.After(d), func() {}
+	}
+	t := time.NewTimer(d)
+	return t.C, func() { t.Stop() }
 }
 
 func signal(c chan struct{}) {
@@ -235,7 +286,9 @@ func (s *Session) Run(ctx context.Context) error {
 		_ = s.conn.Close(CloseProtocol, "resume gap")
 		return s.initErr
 	}
-	rctx, cancel := context.WithCancel(ctx)
+	// The loops do not end with ctx itself: the Close below must come first, so the peer reads its code and reason (a
+	// WebSocket read cancelled under it drops the connection without them).
+	rctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	defer cancel()
 	s.mu.Lock()
 	s.lastRecv = s.now()
@@ -338,6 +391,7 @@ func (s *Session) receive(f *athenav1.Frame) (deliver bool, err error) {
 	if a := f.GetAck(); a > 0 {
 		n := 0
 		for n < len(s.unacked) && s.unacked[n].GetSeq() <= a {
+			s.untrack(s.unacked[n])
 			s.unacked[n] = nil
 			n++
 		}
@@ -384,10 +438,12 @@ func (s *Session) ackLoop(ctx context.Context) error {
 			return ctx.Err()
 		case <-s.ack:
 		}
+		delay, stop := s.after(s.o.AckDelay)
 		select {
 		case <-ctx.Done():
+			stop()
 			return ctx.Err()
-		case <-s.o.After(s.o.AckDelay):
+		case <-delay:
 		}
 		s.mu.Lock()
 		if s.ackDue {
@@ -401,14 +457,15 @@ func (s *Session) ackLoop(ctx context.Context) error {
 // heartbeatLoop pings every Heartbeat and declares the peer dead exactly DeadAfter after the last frame: the
 // deadline timer is re-armed for what remains whenever it fires early.
 func (s *Session) heartbeatLoop(ctx context.Context) error {
-	ping := s.o.After(s.o.Heartbeat)
-	dead := s.o.After(s.o.DeadAfter)
+	ping, stopPing := s.after(s.o.Heartbeat)
+	dead, stopDead := s.after(s.o.DeadAfter)
+	defer func() { stopPing(); stopDead() }()
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ping:
-			ping = s.o.After(s.o.Heartbeat)
+			ping, stopPing = s.after(s.o.Heartbeat)
 			s.mu.Lock()
 			s.pingDue = true
 			s.mu.Unlock()
@@ -420,7 +477,7 @@ func (s *Session) heartbeatLoop(ctx context.Context) error {
 			if rem <= 0 {
 				return ErrPeerDead
 			}
-			dead = s.o.After(rem)
+			dead, stopDead = s.after(rem)
 		}
 	}
 }
@@ -492,6 +549,7 @@ func (s *Session) next() ([]byte, error) {
 	b, err := Encode(f)
 	if err != nil {
 		if f.Seq != 0 && len(s.unacked) > 0 && s.unacked[len(s.unacked)-1] == f {
+			s.untrack(f)
 			s.unacked[len(s.unacked)-1] = nil
 			s.unacked = s.unacked[:len(s.unacked)-1]
 			if fresh {

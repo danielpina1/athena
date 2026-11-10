@@ -123,6 +123,10 @@ type Config struct {
 	// OnStatus is called, from the node's loop goroutine, whenever the sessions in use, the launches queued, a
 	// runtime's readiness or its quota change (see Status). It must not block or call back into the node.
 	OnStatus func()
+	// OnCheckpoint is called after each checkpoint of a Ticket with a Repo (checkpoint.go): at the end of every turn
+	// that ended well and before a failover at a usage limit, with the Ticket's id, its Repo (owner/name), the ref and
+	// the commit. It is called from the session's goroutine: it must not block or call back into the node.
+	OnCheckpoint func(ticketID, repo, ref, sha string)
 	// CloseGrace is how long a session's process gets to end after its stdin closes before it is killed (default
 	// 10 s).
 	CloseGrace time.Duration
@@ -196,6 +200,8 @@ type Node struct {
 	done      chan struct{} // closed when the loop has exited
 	closeOnce sync.Once
 	runners   sync.WaitGroup
+	// seedSwept is when the seeds were last swept (seed.go), in Unix nanoseconds.
+	seedSwept atomic.Int64
 
 	mu   sync.Mutex
 	live map[string]*session // by Ticket ID: launched sessions until their runner ends
@@ -541,6 +547,7 @@ func (n *Node) onStart(st *loopState, t core.Ticket, a core.Assignment) {
 		n.goFail(t, a, "prepare ticket directory: "+err.Error())
 		return
 	}
+	n.maybeSweepSeeds()
 	st.queue = append(st.queue, n.newSession(t, a, p))
 	n.schedule(st)
 }
@@ -571,6 +578,7 @@ func (n *Node) onStop(st *loopState, t core.Ticket, a core.Assignment, reason st
 	if ended {
 		n.streams.end(t.ID)
 		n.dropPrompt(t.ID)
+		n.dropSeed(t.ID)
 	}
 	st.queue = slices.DeleteFunc(st.queue, func(q *session) bool {
 		return q.a.ID == a.ID || (ended && q.t.ID == t.ID)
@@ -784,12 +792,22 @@ type session struct {
 	toolPolicy string
 }
 
-// readToolPolicy sets the session's tool policy from read, unless it has one already.
-func (s *session) readToolPolicy(read func() string) {
+// readToolPolicy sets the session's tool policy from read of its Ticket, unless it has one already. read runs outside
+// s.mu: the Policy may be a remote call (a node on another machine asks its server), and the node's loop takes s.mu.
+// Of two concurrent reads the first one set wins, so a session's tool policy still never changes once set.
+func (s *session) readToolPolicy(read func(t core.Ticket) string) {
+	s.mu.Lock()
+	if s.toolPolicy != "" {
+		s.mu.Unlock()
+		return
+	}
+	t := s.t
+	s.mu.Unlock()
+	p := read(t)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.toolPolicy == "" {
-		s.toolPolicy = read()
+		s.toolPolicy = p
 	}
 }
 
@@ -1184,7 +1202,7 @@ func (r *runner) run() {
 		return
 	}
 	// The tool policy first: it decides which runtimes may run the session.
-	s.readToolPolicy(func() string { return n.toolPolicy(s.t) })
+	s.readToolPolicy(n.toolPolicy)
 	// The runtime next: a launch whose runtime is limited (or at its session cap) waits without a slot, like one
 	// waiting for credentials; one whose runtime cannot run it fails with why.
 	rtm, ok := r.chooseRuntime()
@@ -1213,7 +1231,12 @@ func (r *runner) run() {
 	// A running Assignment with a session resumes it after a crash or a node restart; a new Assignment of a
 	// Ticket (retry, resume) continues the Ticket's last session.
 	resumeID, recovering := s.a.SessionID, s.a.SessionID != ""
-	if resumeID == "" {
+	// A Ticket that moved here from another node (its worktree seeded) starts a new session: the last one is there.
+	moved := ""
+	if !recovering {
+		moved = n.takeMovedNote(s)
+	}
+	if resumeID == "" && moved == "" {
 		// Only a session of the same runtime and role continues: another runtime's session id means nothing here.
 		resumeID = previousSessionID(s.t, s.a.ID, rtm.Name(), s.a.Role)
 	}
@@ -1263,7 +1286,7 @@ func (r *runner) run() {
 	// A new Assignment after a usage limit (or after another runtime's work) tells its session what the one before knew.
 	failover := false
 	if !recovering {
-		r.handoff, failover = r.handoffFor(rtm.Name(), resumeID)
+		r.handoff, failover = r.handoffFor(rtm.Name(), resumeID, moved)
 	}
 	for crashes := 0; ; {
 		if crashes == 0 && r.putOffForPause() {
@@ -1831,6 +1854,8 @@ func (r *runner) onEvent(ev rt.Event) {
 			r.fail(turnFailure(e))
 			return
 		}
+		// The turn's work in progress goes into the Ticket's checkpoint, which the server keeps (checkpoint.go).
+		r.n.turnCheckpoint(r.s)
 		// The turn that took in everything sent before its end is over.
 		r.markRead(-1)
 		r.idle = true
@@ -2102,10 +2127,19 @@ func previousSessionID(t core.Ticket, assignmentID, runtime, role string) string
 	if role == core.RoleReview {
 		return ""
 	}
+	node := ""
+	for _, a := range t.Assignments {
+		if a.ID == assignmentID {
+			node = a.Node
+		}
+	}
 	for i := len(t.Assignments) - 1; i >= 0; i-- {
 		a := t.Assignments[i]
 		if a.ID == assignmentID || a.SessionID == "" || a.Role != role || ranOn(t, a) != runtime {
 			continue
+		}
+		if a.Node != "" && node != "" && a.Node != node {
+			return "" // that session is on another node
 		}
 		return a.SessionID
 	}
@@ -2400,7 +2434,7 @@ func WorktreeBranch(t core.Ticket, hasGit func(dir string) bool) string {
 // prepare makes the session's directory and writes its settings and MCP config.
 func (n *Node) prepare(s *session) error {
 	p := s.place
-	s.readToolPolicy(func() string { return n.toolPolicy(s.t) })
+	s.readToolPolicy(n.toolPolicy)
 	if err := n.checkRestrictedSandbox(s); err != nil {
 		return err
 	}
@@ -2699,11 +2733,22 @@ func cleanupWorktree(p placement, t core.Ticket, workRoot string, log *slog.Logg
 		return
 	}
 	log.Info("removed worktree", "dir", p.workDir)
-	// Its checkpoint (checkpoint.go) goes with it: nothing of the Ticket's work in progress stays reachable.
-	if _, err := gitOut(p.repo, "update-ref", "-d", checkpointRef(t.ID)); err != nil {
-		log.Warn("remove the checkpoint ref", "ref", checkpointRef(t.ID), "error", err)
+	// Its refs go with it, the checkpoint (checkpoint.go) and any seed or superseded state (seed.go): nothing of the
+	// Ticket's work in progress stays reachable.
+	refs, err := gitOut(p.repo, "for-each-ref", "--format=%(refname)", ticketRefs(t.ID))
+	if err != nil {
+		log.Warn("list the ticket's refs", "error", err)
+		return
+	}
+	for _, ref := range strings.Fields(refs) {
+		if _, err := gitOut(p.repo, "update-ref", "-d", ref); err != nil {
+			log.Warn("remove the ticket's ref", "ref", ref, "error", err)
+		}
 	}
 }
+
+// ticketRefs is the directory of a Ticket's refs: refs/athena/<lowercased id>/.
+func ticketRefs(ticketID string) string { return "refs/athena/" + strings.ToLower(ticketID) + "/" }
 
 // gitOut runs git in dir and returns its trimmed stdout.
 func gitOut(dir string, args ...string) (string, error) { return gitIn(dir, nil, args...) }

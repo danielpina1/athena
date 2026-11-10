@@ -180,25 +180,25 @@ func (a *Auth) RevokePasskey(id string) (ended int, err error) {
 
 // --- enrollment tokens ---
 
-// IssueEnrollToken makes a single-use enrollment token good for ttl (DefaultEnrollTTL if ttl <= 0): 32 random bytes,
-// base64url. Only its SHA-256 is stored. The token must reach the owner out of band and never be logged.
-func IssueEnrollToken(st *store.Store, ttl time.Duration) (string, error) {
+// IssueEnrollToken makes a single-use enrollment token of kind (store.EnrollPasskey or store.EnrollNode) good for ttl
+// (DefaultEnrollTTL if ttl <= 0), counted on the store's clock: 32 random bytes, base64url. Only its SHA-256 is stored. The token must reach the owner out of band and never be logged.
+func IssueEnrollToken(st *store.Store, kind string, ttl time.Duration) (string, error) {
 	if ttl <= 0 {
 		ttl = DefaultEnrollTTL
 	}
-	return issueEnrollTokenUntil(st, time.Now().Add(ttl))
+	return issueEnrollTokenUntil(st, kind, st.Now().Add(ttl))
 }
 
 // issueEnrollTokenUntil is IssueEnrollToken with the expiry given, so a caller that reports it reports the stored one.
-func issueEnrollTokenUntil(st *store.Store, expires time.Time) (string, error) {
+func issueEnrollTokenUntil(st *store.Store, kind string, expires time.Time) (string, error) {
 	token, hash, err := newSecret()
 	if err != nil {
 		return "", err
 	}
-	if err := st.PutEnrollToken(hash, expires); err != nil {
+	if err := st.PutEnrollToken(hash, kind, expires); err != nil {
 		return "", err
 	}
-	slog.Info("web: enrollment token issued", "ttl", time.Until(expires).Round(time.Second).String())
+	slog.Info("web: enrollment token issued", "kind", kind, "ttl", expires.Sub(st.Now()).Round(time.Second).String())
 	return token, nil
 }
 
@@ -326,7 +326,7 @@ func (a *Auth) RegisterBegin(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusUnauthorized, "unauthenticated", "invalid or expired enrollment token")
 		return
 	}
-	used, err := a.st.UseEnrollToken(hash, a.now())
+	used, err := a.st.UseEnrollToken(hash, store.EnrollPasskey, a.now())
 	if err != nil {
 		slog.Error("web: use enrollment token", "err", err)
 		fail(w, http.StatusInternalServerError, "internal", "internal error")

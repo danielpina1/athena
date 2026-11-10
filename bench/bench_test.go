@@ -20,6 +20,10 @@ const (
 	engineBudget   = 5 * time.Millisecond
 	dispatchBudget = 100 * time.Millisecond
 	rssBudget      = 100 << 20
+	// nodeRSSBudget is the idle RSS of a connected `athena node run`; remoteBudget the p99 of a remote dispatch (§10.3
+	// of the multi-node spec).
+	nodeRSSBudget = 30 << 20
+	remoteBudget  = 100 * time.Millisecond
 	// linkBudget is the p95 of the dashboard's latencies: a delta, a stream item and a command's result reaching a
 	// phone (spec §10.3); the "_ms" and "_mb" in these budgets' names are the names the spec mandates, while a result
 	// stores nanoseconds and bytes (its Unit). webRSSBudget the idle RSS with one client connected.
@@ -170,6 +174,12 @@ func TestBudgets(t *testing.T) {
 		}},
 		{"server_idle_rss", func() Result {
 			return Result{Name: "server_idle_rss", Unit: "bytes", Value: int64(idleRSS(t, rssIdle)), Floor: rssFloor, Budget: rssBudget}
+		}},
+		{"node_idle_rss", func() Result {
+			return Result{Name: "node_idle_rss", Unit: "bytes", Value: int64(nodeIdleRSS(t, rssIdle)), Floor: rssFloor, Budget: nodeRSSBudget}
+		}},
+		{"dispatch_remote_p99", func() Result {
+			return measureRounds("dispatch_remote_p99", remoteBudget, dispatchFloor, 40, func(n int) []time.Duration { return measureRemoteDispatch(t, n) }, nil)
 		}},
 		{"link_delta_p95_ms", func() Result {
 			return measureP95Rounds("link_delta_p95_ms", linkBudget, linkFloor, linkSamples, func(n int) []time.Duration { return measureLinkDelta(t, n) })
@@ -324,6 +334,7 @@ func TestHarnessSmoke(t *testing.T) {
 		"hook_codex": measureHookCodex(t, 10),
 		"engine":     measureEngine(t, 6),
 		"dispatch":   measureDispatch(t, 2, false),
+		"remote":     measureRemoteDispatch(t, 2),
 		"link":       measureLinkDelta(t, 2),
 		"stream":     measureStreamItem(t, 2),
 		"command":    measureCommandResult(t, 2),

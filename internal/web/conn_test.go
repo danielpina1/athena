@@ -82,7 +82,10 @@ func (*connSource) Decision(string) (core.Decision, error) {
 }
 func (*connSource) Health() []hub.HealthItem             { return nil }
 func (*connSource) Policy() (int, string, string, error) { return 0, "v", "{}", nil }
-func (*connSource) NodeStatus() node.Status              { return node.Status{} }
+func (*connSource) Nodes() []hub.NodeInfo {
+	return []hub.NodeInfo{{ID: "local", Local: true, State: "online"}}
+}
+func (*connSource) Placement(*core.Ticket) (string, string, string) { return "local", "", "" }
 
 // recordingCommander answers ok and remembers the Origin of each Command.
 type recordingCommander struct {
@@ -603,6 +606,7 @@ type fakeStreams struct {
 	opened  int
 	cancels int
 	from    int64
+	err     error // when set, Subscribe fails with it
 }
 
 func newFakeStreams() *fakeStreams {
@@ -613,6 +617,9 @@ func (f *fakeStreams) Subscribe(id string, from int64) ([]node.Line, <-chan node
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.from, f.opened = from, f.opened+1
+	if f.err != nil {
+		return nil, nil, nil, f.err
+	}
 	var back []node.Line
 	h := f.history[id]
 	if from < 0 {
@@ -711,6 +718,19 @@ func streamConn(t *testing.T, initial uint64, tickets ...string) (*connEnv, *fak
 	c.welcome()
 	c.snapshot()
 	return e, fs, c
+}
+
+// TestStreamNodeOffline: a stream of a Ticket whose node is offline fails with "<name> is offline".
+func TestStreamNodeOffline(t *testing.T) {
+	_, fs, c := streamConn(t, 10, "T-0001")
+	fs.mu.Lock()
+	fs.err = &core.UserError{Msg: "mini is offline", Err: core.ErrNodeOffline}
+	fs.mu.Unlock()
+	streamOpen(c, "T-0001", -1)
+	f := c.next("stream error", func(f *athenav1.Frame) bool { return f.GetError() != nil })
+	if f.GetError().GetCode() != CodeUnavailable || f.GetError().GetMessage() != "mini is offline" {
+		t.Fatalf("stream error = %v", f.GetError())
+	}
 }
 
 func TestStreamOverConnWithCredit(t *testing.T) {

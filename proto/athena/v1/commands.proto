@@ -38,6 +38,10 @@ message Command {
     DismissOffer dismiss_offer = 34;
     ApplyProposal apply_proposal = 35;
     DiscardProposal discard_proposal = 36;
+    RetryElsewhere retry_elsewhere = 37;
+    CreateNodeToken create_node_token = 38;
+    SetNodeDraining set_node_draining = 39;
+    RevokeNode revoke_node = 40;
   }
 }
 
@@ -51,6 +55,35 @@ message SubmitTask {
   // review pairs the task with a review of its ready reports (true) or with none (false); unset is the Policy's
   // default.
   optional bool review = 6;
+  // node is a node id to run the task on; empty means any.
+  string node = 7;
+}
+
+// RetryElsewhere retries a Ticket on a different node than the one it ran on.
+message RetryElsewhere {
+  string ticket_id = 1;
+}
+
+// CreateNodeToken makes a single-use join token for a new node; the result carries a NodeToken.
+message CreateNodeToken {
+  string name = 1;
+  // ttl_seconds is the token's life; 0 is the default (1 h), at most 24 h.
+  uint32 ttl_seconds = 2;
+}
+
+message SetNodeDraining {
+  string node_id = 1;
+  bool draining = 2;
+}
+
+message RevokeNode {
+  string node_id = 1;
+}
+
+// NodeToken is the join command a CreateNodeToken answers with.
+message NodeToken {
+  string command = 1;
+  google.protobuf.Timestamp expires_at = 2;
 }
 
 message Reply {
@@ -159,6 +192,7 @@ message CommandResult {
     PasskeyList passkeys = 11;
     uint32 policy_revision = 12;
     PromptDetail prompt = 13;
+    NodeToken node_token = 14;
   }
 }
 

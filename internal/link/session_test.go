@@ -678,11 +678,124 @@ func TestUnackedCapBackpressure(t *testing.T) {
 	}
 }
 
-func TestBlobChannelRefused(t *testing.T) {
+// errFrame is a frame of about n encoded bytes.
+func errFrame(n int) *athenav1.Frame {
+	f := &athenav1.Frame{Body: &athenav1.Frame_Error{Error: &athenav1.Error{}}}
+	f.Body.(*athenav1.Frame_Error).Error.Message = strings.Repeat("x", n-proto.Size(f)-8)
+	e := f.Body.(*athenav1.Frame_Error).Error
+	for proto.Size(f) < n {
+		e.Message += "x"
+	}
+	for proto.Size(f) > n {
+		e.Message = e.Message[1:]
+	}
+	return f
+}
+
+func TestBlobDoesNotStarveControl(t *testing.T) {
+	ca, cb := memPair()
+	gate := make(chan struct{})
+	slow := &gatedConn{memConn: ca, gate: gate}
+	a, _ := start(t, slow, Options{})
+	var got collector
+	_, _ = start(t, cb, Options{OnFrame: got.add})
+
+	// The writer takes the first blob and blocks in Write; the other 16 fill the queue.
+	if err := a.Send(athenav1.Channel_BLOB, true, delta(1)); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "writer in Write", func() bool { return slow.blocked() })
+	for i := uint64(2); i <= 17; i++ {
+		if err := a.Send(athenav1.Channel_BLOB, true, delta(i)); err != nil {
+			t.Fatalf("blob %d: %v", i, err)
+		}
+	}
+	if err := a.Send(athenav1.Channel_BLOB, true, delta(18)); !errors.Is(err, ErrBackpressure) {
+		t.Fatalf("17th queued blob: %v", err)
+	}
+	if err := a.Send(athenav1.Channel_CONTROL, true, delta(100)); err != nil {
+		t.Fatal(err)
+	}
+	close(gate)
+	eventually(t, "all delivered", func() bool { return got.len() == 18 })
+	if c := got.cursors(); c[0] != 1 || c[1] != 100 || c[2] != 2 || c[17] != 17 {
+		t.Fatalf("order %v, want 1 100 2 ... 17", c)
+	}
+}
+
+func TestUnackedBytesCap(t *testing.T) {
+	ca, _ := memPair() // nobody reads or acks
+	a, _ := start(t, ca, Options{MaxUnackedBytes: 64 << 20, SendQueue: map[athenav1.Channel]int{athenav1.Channel_BLOB: 1000}})
+	var err error
+	n := 0
+	for ; err == nil && n < 70; n++ {
+		err = a.Send(athenav1.Channel_BLOB, true, errFrame(MaxFrame-64))
+	}
+	if !errors.Is(err, ErrBackpressure) || n != 65 {
+		t.Fatalf("send %d returned %v; want ErrBackpressure on the 65th", n, err)
+	}
+	if err := a.Send(athenav1.Channel_BLOB, false, errFrame(MaxFrame-64)); err != nil {
+		t.Fatalf("non-durable send is not capped by unacked bytes: %v", err)
+	}
+}
+
+func TestUnackedBytesReleasedByAck(t *testing.T) {
+	ca, cb := memPair()
+	a, _ := start(t, ca, Options{MaxUnackedBytes: 3 << 20})
+	_, _ = start(t, cb, Options{})
+	for round := 0; round < 3; round++ {
+		for i := 0; i < 2; i++ {
+			if err := a.Send(athenav1.Channel_BLOB, true, errFrame(1<<20-64)); err != nil {
+				t.Fatalf("round %d send %d: %v", round, i, err)
+			}
+		}
+		eventually(t, "acked", func() bool { return len(a.Unacked()) == 0 })
+		a.mu.Lock()
+		held := a.bytes
+		a.mu.Unlock()
+		if held != 0 {
+			t.Fatalf("%d bytes still counted after ack", held)
+		}
+	}
+}
+
+func TestResumeBeyondSentIsProtocolError(t *testing.T) {
 	ca, _ := memPair()
-	a := New(ca, Options{})
-	if err := a.Send(athenav1.Channel_BLOB, false, delta(1)); !errors.Is(err, ErrInvalid) {
-		t.Fatalf("BLOB: %v", err)
+	f1, f2 := delta(1), delta(2)
+	f1.Seq, f2.Seq = 1, 2
+	s := New(ca, Options{Resume: &Resume{PeerLastSeq: 5, Unacked: []*athenav1.Frame{f1, f2}}})
+	if err := s.Run(context.Background()); !errors.Is(err, ErrProtocol) {
+		t.Fatalf("Run: %v", err)
+	}
+	if ca.closeCode() != CloseProtocol {
+		t.Fatalf("close code %d", ca.closeCode())
+	}
+	// A peer that has everything we sent is fine.
+	cc, _ := memPair()
+	ok := New(cc, Options{Resume: &Resume{PeerLastSeq: 2, Unacked: []*athenav1.Frame{f1, f2}}})
+	if ok.initErr != nil {
+		t.Fatalf("PeerLastSeq at the last sent frame: %v", ok.initErr)
+	}
+}
+
+func TestGapKeepsReceivedItems(t *testing.T) {
+	ca, cb := memPair()
+	var got collector
+	s := New(cb, Options{OnFrame: got.add})
+	for _, seq := range []uint64{1, 2, 4} {
+		f := delta(seq * 10)
+		f.Channel, f.Seq = athenav1.Channel_EVENTS, seq
+		b, _ := Encode(f)
+		_ = ca.Write(context.Background(), b)
+	}
+	if err := s.Run(context.Background()); !errors.Is(err, ErrProtocol) {
+		t.Fatalf("Run: %v", err)
+	}
+	if c := got.cursors(); len(c) != 2 || c[0] != 10 || c[1] != 20 {
+		t.Fatalf("delivered %v before the gap, want [10 20]", c)
+	}
+	if s.LastReceived() != 2 {
+		t.Fatalf("LastReceived %d", s.LastReceived())
 	}
 }
 
@@ -696,5 +809,39 @@ func TestFailedResumeClosesSession(t *testing.T) {
 	}
 	if err := s.Send(athenav1.Channel_EVENTS, true, delta(2)); !errors.Is(err, ErrClosed) {
 		t.Fatalf("Send after failed resume: %v", err)
+	}
+}
+
+// Queued counts a channel's frames not yet taken by the writer: a frame sent after it reaches 0 is written after them.
+func TestQueuedDrains(t *testing.T) {
+	ca, cb := memPair()
+	gate := make(chan struct{})
+	slow := &gatedConn{memConn: ca, gate: gate}
+	a, _ := start(t, slow, Options{})
+	var got collector
+	_, _ = start(t, cb, Options{OnFrame: got.add})
+	if err := a.Send(athenav1.Channel_BLOB, true, delta(1)); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "writer in Write", func() bool { return slow.blocked() })
+	for i := uint64(2); i <= 4; i++ {
+		if err := a.Send(athenav1.Channel_BLOB, true, delta(i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := a.Queued(athenav1.Channel_BLOB); n != 3 {
+		t.Fatalf("Queued(BLOB) = %d, want 3", n)
+	}
+	if n := a.Queued(athenav1.Channel_CONTROL); n != 0 {
+		t.Fatalf("Queued(CONTROL) = %d, want 0", n)
+	}
+	close(gate)
+	eventually(t, "the blob queue drained", func() bool { return a.Queued(athenav1.Channel_BLOB) == 0 })
+	if err := a.Send(athenav1.Channel_CONTROL, true, delta(100)); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "all delivered", func() bool { return got.len() == 5 })
+	if c := got.cursors(); c[3] != 4 || c[4] != 100 {
+		t.Fatalf("order %v, want 1 2 3 4 100", c)
 	}
 }

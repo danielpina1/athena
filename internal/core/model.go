@@ -2,7 +2,10 @@
 // It is ported from the TypeScript reference (src/core/model.ts).
 package core
 
-import "time"
+import (
+	"errors"
+	"time"
+)
 
 // ReportState is what an Assignment reports: work is in progress, its worker waits for a Trigger,
 // a result is ready, a person must act to unblock or recover it, or nothing is left to do.
@@ -66,6 +69,12 @@ type Assignment struct {
 	Role string `json:"role,omitempty"`
 	// Limit is the usage limit its session stopped at, for an Assignment that ended with ReasonUsageLimit.
 	Limit *UsageLimit `json:"limit,omitempty"`
+	// Node is the node the fleet placed the Assignment on; empty until placed.
+	Node string `json:"node,omitempty"`
+	// NodeOffline is when the Assignment's node went offline; set while it is, cleared when the node is back.
+	NodeOffline *time.Time `json:"nodeOffline,omitempty"`
+	// Avoid lists the nodes the fleet must not place the Assignment on.
+	Avoid []string `json:"avoid,omitempty"`
 	// ReviewOutcome is what a review Assignment (RoleReview) concluded, once it ended with ReasonReviewed.
 	ReviewOutcome *ReviewOutcome `json:"reviewOutcome,omitempty"`
 	// Continues is the implement Assignment whose held ready report this one applied after its review (applyHeld): it
@@ -573,3 +582,10 @@ func (t *Ticket) followsDone() *Close {
 	}
 	return latest
 }
+
+// ErrNodeOffline is in the error of a call to a node that is not connected (a *UserError whose message is
+// "<name> is offline"); the fleet returns it, the dashboard shows its message.
+var ErrNodeOffline = errors.New("node offline")
+
+// ReasonNodeOffline is why Retry elsewhere ends an Assignment whose node went offline.
+const ReasonNodeOffline = "node offline"

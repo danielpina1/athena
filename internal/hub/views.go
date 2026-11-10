@@ -210,11 +210,48 @@ func decisionView(d *core.Decision) *athenav1.DecisionView {
 	return v
 }
 
-func nodeStatus(s node.Status) *athenav1.NodeStatus {
-	v := &athenav1.NodeStatus{Name: s.Name, Slots: uint32(s.Slots), SlotsInUse: uint32(s.SlotsInUse),
-		LiveTicketIds: slices.Clone(s.LiveTicketIDs), Queued: uint32(s.Queued), ClaudeVersion: s.ClaudeVersion}
+// NodeInfo is one node as the Source reports it.
+type NodeInfo struct {
+	ID, Name string
+	// Local marks the node embedded in the server.
+	Local bool
+	// State is online, offline, draining or revoked.
+	State string
+	// LastSeen is when the node was last heard; zero for the local node.
+	LastSeen          time.Time
+	OS, Arch, Version string
+	// Status is the node's last status (zero while it never reported one).
+	Status node.Status
+	// Caps are what the node said it has in its last Hello: shown for a runtime or the slots its Status lacks.
+	Caps *athenav1.Capabilities
+}
+
+func nodeStatus(i NodeInfo) *athenav1.NodeStatus {
+	s := i.Status
+	v := &athenav1.NodeStatus{Name: i.Name, Slots: uint32(s.Slots), SlotsInUse: uint32(s.SlotsInUse),
+		LiveTicketIds: slices.Clone(s.LiveTicketIDs), Queued: uint32(s.Queued), ClaudeVersion: s.ClaudeVersion,
+		Id: i.ID, State: i.State, Os: i.OS, Arch: i.Arch, Local: i.Local, Version: i.Version}
+	// When it was last heard says something only of a node that is not here now; an online node's changes every beat.
+	if !i.LastSeen.IsZero() && (i.State == "offline" || i.State == "revoked") {
+		v.LastSeen = ts(i.LastSeen)
+	}
 	for _, r := range s.Runtimes {
 		v.Runtimes = append(v.Runtimes, runtimeStatus(r))
+	}
+	if c := i.Caps; c != nil {
+		// A node that has not reported a status since the server started: what its last Hello said.
+		if len(v.Runtimes) == 0 {
+			for _, r := range c.GetRuntimes() {
+				v.Runtimes = append(v.Runtimes, &athenav1.RuntimeStatus{Name: r.GetName(), Version: r.GetVersion(),
+					Ready: r.GetReady(), Tested: true, Why: clip(oneLine(redact.String(r.GetWhy())), WhyMaxRunes)})
+			}
+		}
+		if v.Slots == 0 {
+			v.Slots = c.GetSlots()
+		}
+		if v.Os == "" {
+			v.Os, v.Arch = c.GetOs(), c.GetArch()
+		}
 	}
 	return v
 }

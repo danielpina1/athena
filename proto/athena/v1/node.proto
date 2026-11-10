@@ -1,0 +1,76 @@
+syntax = "proto3";
+
+package athena.v1;
+
+import "athena/v1/state.proto";
+
+option go_package = "github.com/danielpina1/athena/internal/pb/athenav1;athenav1";
+
+// The messages between the server and a node (`athena node`), carried in Frames on the node link.
+
+// NodeHello is the first frame a node sends. A node link is a fresh session each time, so it carries no last_seq.
+message NodeHello {
+  uint32 protocol = 1;
+  string node_id = 2;
+  string version = 3;
+  Capabilities caps = 4;
+}
+
+message NodeWelcome {
+  string epoch = 1;
+  // applied_fact_seq is the highest node fact the server has applied; the node resends the ones after it.
+  uint64 applied_fact_seq = 2;
+  uint32 heartbeat_ms = 3;
+  string node_name = 4;
+}
+
+message Capabilities {
+  string os = 1;
+  string arch = 2;
+  repeated RuntimeCap runtimes = 3;
+  repeated RepoCap repos = 4;
+  uint32 slots = 5;
+  // dirs are the local repo roots the node will run Dir Tickets in.
+  repeated string dirs = 6;
+}
+
+message RuntimeCap {
+  string name = 1;
+  string version = 2;
+  bool ready = 3;
+  string why = 4;
+}
+
+message RepoCap {
+  string repo = 1;
+  string path = 2;
+}
+
+// NodeCall is a request (fact_seq 0) or a fact (fact_seq >= 1, numbered by the node's outbox).
+message NodeCall {
+  uint64 id = 1;
+  string method = 2;
+  bytes args = 3;
+  uint64 fact_seq = 4;
+}
+
+message NodeResult {
+  uint64 id = 1;
+  bytes value = 2;
+  string error = 3;
+  bool user_error = 4;
+}
+
+// BlobChunk is one piece of a checkpoint or seed transfer; kind is checkpoint or seed.
+message BlobChunk {
+  string transfer_id = 1;
+  string kind = 2;
+  string ticket_id = 3;
+  bytes data = 4;
+  bool last = 5;
+}
+
+// NodeStatusReport is sent by the node when its status changes, deduplicated like the hub's.
+message NodeStatusReport {
+  NodeStatus status = 1;
+}

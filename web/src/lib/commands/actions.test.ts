@@ -38,6 +38,12 @@ describe("actions", () => {
       [() => actions.stop("T-1", "wrong repo"), { case: "stop", value: { ticketId: "T-1", reason: "wrong repo" } }],
       [() => actions.retry("T-1"), { case: "retry", value: { ticketId: "T-1" } }],
       [() => actions.interrupt("T-1"), { case: "interrupt", value: { ticketId: "T-1" } }],
+      [() => actions.submitTask({ text: "on mini", node: "n-mini" }), { case: "submitTask", value: { text: "on mini", node: "n-mini" } }],
+      [() => actions.retryElsewhere("T-1"), { case: "retryElsewhere", value: { ticketId: "T-1" } }],
+      // One hour, and no name: the server ignores one (R25).
+      [() => actions.createNodeToken(), { case: "createNodeToken", value: { ttlSeconds: 3600, name: "" } }],
+      [() => actions.setNodeDraining("n-mini", true), { case: "setNodeDraining", value: { nodeId: "n-mini", draining: true } }],
+      [() => actions.revokeNode("n-mini"), { case: "revokeNode", value: { nodeId: "n-mini" } }],
       [() => actions.answerApproval("A-1", false, "no"), { case: "answerApproval", value: { approvalId: "A-1", approve: false, note: "no" } }],
       [() => actions.reevaluate("G-1"), { case: "reevaluate", value: { triggerId: "G-1" } }],
       [() => actions.dismiss("D-1"), { case: "dismiss", value: { decisionId: "D-1" } }],

@@ -28,7 +28,7 @@ const (
 	Channel_CONTROL             Channel = 1
 	Channel_EVENTS              Channel = 2
 	Channel_STREAM              Channel = 3
-	// BLOB is reserved: defined, unused until plan 6.
+	// BLOB carries checkpoint and seed transfers between the server and a node.
 	Channel_BLOB Channel = 4
 )
 
@@ -101,6 +101,12 @@ type Frame struct {
 	//	*Frame_StreamItems
 	//	*Frame_StreamGap
 	//	*Frame_StreamClose
+	//	*Frame_NodeHello
+	//	*Frame_NodeWelcome
+	//	*Frame_NodeCall
+	//	*Frame_NodeResult
+	//	*Frame_BlobChunk
+	//	*Frame_NodeStatusReport
 	Body          isFrame_Body `protobuf_oneof:"body"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -299,6 +305,60 @@ func (x *Frame) GetStreamClose() *StreamClose {
 	return nil
 }
 
+func (x *Frame) GetNodeHello() *NodeHello {
+	if x != nil {
+		if x, ok := x.Body.(*Frame_NodeHello); ok {
+			return x.NodeHello
+		}
+	}
+	return nil
+}
+
+func (x *Frame) GetNodeWelcome() *NodeWelcome {
+	if x != nil {
+		if x, ok := x.Body.(*Frame_NodeWelcome); ok {
+			return x.NodeWelcome
+		}
+	}
+	return nil
+}
+
+func (x *Frame) GetNodeCall() *NodeCall {
+	if x != nil {
+		if x, ok := x.Body.(*Frame_NodeCall); ok {
+			return x.NodeCall
+		}
+	}
+	return nil
+}
+
+func (x *Frame) GetNodeResult() *NodeResult {
+	if x != nil {
+		if x, ok := x.Body.(*Frame_NodeResult); ok {
+			return x.NodeResult
+		}
+	}
+	return nil
+}
+
+func (x *Frame) GetBlobChunk() *BlobChunk {
+	if x != nil {
+		if x, ok := x.Body.(*Frame_BlobChunk); ok {
+			return x.BlobChunk
+		}
+	}
+	return nil
+}
+
+func (x *Frame) GetNodeStatusReport() *NodeStatusReport {
+	if x != nil {
+		if x, ok := x.Body.(*Frame_NodeStatusReport); ok {
+			return x.NodeStatusReport
+		}
+	}
+	return nil
+}
+
 type isFrame_Body interface {
 	isFrame_Body()
 }
@@ -363,6 +423,30 @@ type Frame_StreamClose struct {
 	StreamClose *StreamClose `protobuf:"bytes,24,opt,name=stream_close,json=streamClose,proto3,oneof"`
 }
 
+type Frame_NodeHello struct {
+	NodeHello *NodeHello `protobuf:"bytes,25,opt,name=node_hello,json=nodeHello,proto3,oneof"`
+}
+
+type Frame_NodeWelcome struct {
+	NodeWelcome *NodeWelcome `protobuf:"bytes,26,opt,name=node_welcome,json=nodeWelcome,proto3,oneof"`
+}
+
+type Frame_NodeCall struct {
+	NodeCall *NodeCall `protobuf:"bytes,27,opt,name=node_call,json=nodeCall,proto3,oneof"`
+}
+
+type Frame_NodeResult struct {
+	NodeResult *NodeResult `protobuf:"bytes,28,opt,name=node_result,json=nodeResult,proto3,oneof"`
+}
+
+type Frame_BlobChunk struct {
+	BlobChunk *BlobChunk `protobuf:"bytes,29,opt,name=blob_chunk,json=blobChunk,proto3,oneof"`
+}
+
+type Frame_NodeStatusReport struct {
+	NodeStatusReport *NodeStatusReport `protobuf:"bytes,30,opt,name=node_status_report,json=nodeStatusReport,proto3,oneof"`
+}
+
 func (*Frame_Hello) isFrame_Body() {}
 
 func (*Frame_Welcome) isFrame_Body() {}
@@ -392,6 +476,18 @@ func (*Frame_StreamItems) isFrame_Body() {}
 func (*Frame_StreamGap) isFrame_Body() {}
 
 func (*Frame_StreamClose) isFrame_Body() {}
+
+func (*Frame_NodeHello) isFrame_Body() {}
+
+func (*Frame_NodeWelcome) isFrame_Body() {}
+
+func (*Frame_NodeCall) isFrame_Body() {}
+
+func (*Frame_NodeResult) isFrame_Body() {}
+
+func (*Frame_BlobChunk) isFrame_Body() {}
+
+func (*Frame_NodeStatusReport) isFrame_Body() {}
 
 type Hello struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -770,7 +866,7 @@ var File_athena_v1_link_proto protoreflect.FileDescriptor
 
 const file_athena_v1_link_proto_rawDesc = "" +
 	"\n" +
-	"\x14athena/v1/link.proto\x12\tathena.v1\x1a\x18athena/v1/commands.proto\x1a\x15athena/v1/state.proto\x1a\x16athena/v1/stream.proto\"\xc8\x06\n" +
+	"\x14athena/v1/link.proto\x12\tathena.v1\x1a\x18athena/v1/commands.proto\x1a\x14athena/v1/node.proto\x1a\x15athena/v1/state.proto\x1a\x16athena/v1/stream.proto\"\xae\t\n" +
 	"\x05Frame\x12,\n" +
 	"\achannel\x18\x01 \x01(\x0e2\x12.athena.v1.ChannelR\achannel\x12\x10\n" +
 	"\x03seq\x18\x02 \x01(\x04R\x03seq\x12\x10\n" +
@@ -792,7 +888,16 @@ const file_athena_v1_link_proto_rawDesc = "" +
 	"\fstream_items\x18\x16 \x01(\v2\x16.athena.v1.StreamItemsH\x00R\vstreamItems\x125\n" +
 	"\n" +
 	"stream_gap\x18\x17 \x01(\v2\x14.athena.v1.StreamGapH\x00R\tstreamGap\x12;\n" +
-	"\fstream_close\x18\x18 \x01(\v2\x16.athena.v1.StreamCloseH\x00R\vstreamCloseB\x06\n" +
+	"\fstream_close\x18\x18 \x01(\v2\x16.athena.v1.StreamCloseH\x00R\vstreamClose\x125\n" +
+	"\n" +
+	"node_hello\x18\x19 \x01(\v2\x14.athena.v1.NodeHelloH\x00R\tnodeHello\x12;\n" +
+	"\fnode_welcome\x18\x1a \x01(\v2\x16.athena.v1.NodeWelcomeH\x00R\vnodeWelcome\x122\n" +
+	"\tnode_call\x18\x1b \x01(\v2\x13.athena.v1.NodeCallH\x00R\bnodeCall\x128\n" +
+	"\vnode_result\x18\x1c \x01(\v2\x15.athena.v1.NodeResultH\x00R\n" +
+	"nodeResult\x125\n" +
+	"\n" +
+	"blob_chunk\x18\x1d \x01(\v2\x14.athena.v1.BlobChunkH\x00R\tblobChunk\x12K\n" +
+	"\x12node_status_report\x18\x1e \x01(\v2\x1b.athena.v1.NodeStatusReportH\x00R\x10nodeStatusReportB\x06\n" +
 	"\x04body\"\x89\x01\n" +
 	"\x05Hello\x12\x1a\n" +
 	"\bprotocol\x18\x01 \x01(\rR\bprotocol\x12\x1b\n" +
@@ -842,23 +947,29 @@ func file_athena_v1_link_proto_rawDescGZIP() []byte {
 var file_athena_v1_link_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
 var file_athena_v1_link_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
 var file_athena_v1_link_proto_goTypes = []any{
-	(Channel)(0),          // 0: athena.v1.Channel
-	(*Frame)(nil),         // 1: athena.v1.Frame
-	(*Hello)(nil),         // 2: athena.v1.Hello
-	(*Welcome)(nil),       // 3: athena.v1.Welcome
-	(*Ping)(nil),          // 4: athena.v1.Ping
-	(*Pong)(nil),          // 5: athena.v1.Pong
-	(*Credit)(nil),        // 6: athena.v1.Credit
-	(*Error)(nil),         // 7: athena.v1.Error
-	(*Resync)(nil),        // 8: athena.v1.Resync
-	(*Command)(nil),       // 9: athena.v1.Command
-	(*CommandResult)(nil), // 10: athena.v1.CommandResult
-	(*Snapshot)(nil),      // 11: athena.v1.Snapshot
-	(*Delta)(nil),         // 12: athena.v1.Delta
-	(*StreamOpen)(nil),    // 13: athena.v1.StreamOpen
-	(*StreamItems)(nil),   // 14: athena.v1.StreamItems
-	(*StreamGap)(nil),     // 15: athena.v1.StreamGap
-	(*StreamClose)(nil),   // 16: athena.v1.StreamClose
+	(Channel)(0),             // 0: athena.v1.Channel
+	(*Frame)(nil),            // 1: athena.v1.Frame
+	(*Hello)(nil),            // 2: athena.v1.Hello
+	(*Welcome)(nil),          // 3: athena.v1.Welcome
+	(*Ping)(nil),             // 4: athena.v1.Ping
+	(*Pong)(nil),             // 5: athena.v1.Pong
+	(*Credit)(nil),           // 6: athena.v1.Credit
+	(*Error)(nil),            // 7: athena.v1.Error
+	(*Resync)(nil),           // 8: athena.v1.Resync
+	(*Command)(nil),          // 9: athena.v1.Command
+	(*CommandResult)(nil),    // 10: athena.v1.CommandResult
+	(*Snapshot)(nil),         // 11: athena.v1.Snapshot
+	(*Delta)(nil),            // 12: athena.v1.Delta
+	(*StreamOpen)(nil),       // 13: athena.v1.StreamOpen
+	(*StreamItems)(nil),      // 14: athena.v1.StreamItems
+	(*StreamGap)(nil),        // 15: athena.v1.StreamGap
+	(*StreamClose)(nil),      // 16: athena.v1.StreamClose
+	(*NodeHello)(nil),        // 17: athena.v1.NodeHello
+	(*NodeWelcome)(nil),      // 18: athena.v1.NodeWelcome
+	(*NodeCall)(nil),         // 19: athena.v1.NodeCall
+	(*NodeResult)(nil),       // 20: athena.v1.NodeResult
+	(*BlobChunk)(nil),        // 21: athena.v1.BlobChunk
+	(*NodeStatusReport)(nil), // 22: athena.v1.NodeStatusReport
 }
 var file_athena_v1_link_proto_depIdxs = []int32{
 	0,  // 0: athena.v1.Frame.channel:type_name -> athena.v1.Channel
@@ -877,12 +988,18 @@ var file_athena_v1_link_proto_depIdxs = []int32{
 	14, // 13: athena.v1.Frame.stream_items:type_name -> athena.v1.StreamItems
 	15, // 14: athena.v1.Frame.stream_gap:type_name -> athena.v1.StreamGap
 	16, // 15: athena.v1.Frame.stream_close:type_name -> athena.v1.StreamClose
-	0,  // 16: athena.v1.Credit.channel:type_name -> athena.v1.Channel
-	17, // [17:17] is the sub-list for method output_type
-	17, // [17:17] is the sub-list for method input_type
-	17, // [17:17] is the sub-list for extension type_name
-	17, // [17:17] is the sub-list for extension extendee
-	0,  // [0:17] is the sub-list for field type_name
+	17, // 16: athena.v1.Frame.node_hello:type_name -> athena.v1.NodeHello
+	18, // 17: athena.v1.Frame.node_welcome:type_name -> athena.v1.NodeWelcome
+	19, // 18: athena.v1.Frame.node_call:type_name -> athena.v1.NodeCall
+	20, // 19: athena.v1.Frame.node_result:type_name -> athena.v1.NodeResult
+	21, // 20: athena.v1.Frame.blob_chunk:type_name -> athena.v1.BlobChunk
+	22, // 21: athena.v1.Frame.node_status_report:type_name -> athena.v1.NodeStatusReport
+	0,  // 22: athena.v1.Credit.channel:type_name -> athena.v1.Channel
+	23, // [23:23] is the sub-list for method output_type
+	23, // [23:23] is the sub-list for method input_type
+	23, // [23:23] is the sub-list for extension type_name
+	23, // [23:23] is the sub-list for extension extendee
+	0,  // [0:23] is the sub-list for field type_name
 }
 
 func init() { file_athena_v1_link_proto_init() }
@@ -891,6 +1008,7 @@ func file_athena_v1_link_proto_init() {
 		return
 	}
 	file_athena_v1_commands_proto_init()
+	file_athena_v1_node_proto_init()
 	file_athena_v1_state_proto_init()
 	file_athena_v1_stream_proto_init()
 	file_athena_v1_link_proto_msgTypes[0].OneofWrappers = []any{
@@ -909,6 +1027,12 @@ func file_athena_v1_link_proto_init() {
 		(*Frame_StreamItems)(nil),
 		(*Frame_StreamGap)(nil),
 		(*Frame_StreamClose)(nil),
+		(*Frame_NodeHello)(nil),
+		(*Frame_NodeWelcome)(nil),
+		(*Frame_NodeCall)(nil),
+		(*Frame_NodeResult)(nil),
+		(*Frame_BlobChunk)(nil),
+		(*Frame_NodeStatusReport)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{

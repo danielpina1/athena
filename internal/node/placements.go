@@ -150,3 +150,9 @@ func (n *Node) checkUnrecorded(t core.Ticket, p placement) error {
 	}
 	return nil
 }
+
+// HasWorktree reports whether the node holds a recorded placement (a worktree) of t.
+func (n *Node) HasWorktree(t core.Ticket) bool {
+	_, ok, err := n.recordedPlacement(t)
+	return ok && err == nil
+}

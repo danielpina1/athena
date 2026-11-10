@@ -220,3 +220,18 @@ func TestServerDefaultRuntimeIsAuto(t *testing.T) {
 		t.Fatalf("pinned runtime = %q", d.Runtime)
 	}
 }
+
+// A control submit names the node it pins the task to, and an unknown node is refused.
+func TestSubmitPinsToANode(t *testing.T) {
+	s := startServer(t, newStateDir(t))
+	var sub struct {
+		ID string `json:"id"`
+	}
+	s.ok(Request{Op: OpSubmit, Text: "Pinned", Node: "local"}, &sub)
+	if sub.ID == "" {
+		t.Fatal("no ticket for a task pinned to the local node")
+	}
+	if r, err := call(s.stateDir, Request{Op: OpSubmit, Text: "x", Node: "nope"}); err != nil || r.OK || !strings.Contains(r.Error, "No node has the id nope") {
+		t.Fatalf("submit to an unknown node: %+v, %v", r, err)
+	}
+}

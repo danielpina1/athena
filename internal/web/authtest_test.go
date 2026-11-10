@@ -117,7 +117,7 @@ func (e *AuthEnv) DropCookies() { e.cookies = map[string]*http.Cookie{} }
 // Enroll issues a token and registers the authenticator with it.
 func (e *AuthEnv) Enroll(a *SoftAuthenticator, name string) {
 	e.T.Helper()
-	token, err := IssueEnrollToken(e.Store, 0)
+	token, err := IssueEnrollToken(e.Store, store.EnrollPasskey, 0)
 	if err != nil {
 		e.T.Fatal(err)
 	}

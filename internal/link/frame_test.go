@@ -143,3 +143,50 @@ func TestDecodeRejectsEmptyBody(t *testing.T) {
 		t.Errorf("Encode(no body): err = %v, want ErrInvalid", err)
 	}
 }
+
+func TestNodeFramesRoundTrip(t *testing.T) {
+	n := athenav1.Channel_CONTROL
+	frames := map[string]*athenav1.Frame{
+		"node_hello": {Channel: n, Body: &athenav1.Frame_NodeHello{NodeHello: &athenav1.NodeHello{
+			Protocol: 1, NodeId: "n1", Version: "v",
+			Caps: &athenav1.Capabilities{
+				Os: "linux", Arch: "arm64", Slots: 2, Dirs: []string{"/src"},
+				Runtimes: []*athenav1.RuntimeCap{{Name: "claude", Version: "1", Ready: true}},
+				Repos:    []*athenav1.RepoCap{{Repo: "o/r", Path: "/src/r"}},
+			}}}},
+		"node_welcome": {Channel: n, Body: &athenav1.Frame_NodeWelcome{NodeWelcome: &athenav1.NodeWelcome{
+			Epoch: "e", AppliedFactSeq: 4, HeartbeatMs: 3000, NodeName: "box"}}},
+		"node_call": {Channel: n, Seq: 2, Body: &athenav1.Frame_NodeCall{NodeCall: &athenav1.NodeCall{
+			Id: 1, Method: "m", Args: []byte("a"), FactSeq: 3}}},
+		"node_result": {Channel: n, Body: &athenav1.Frame_NodeResult{NodeResult: &athenav1.NodeResult{
+			Id: 1, Value: []byte("v"), Error: "e", UserError: true}}},
+		"blob_chunk": {Channel: athenav1.Channel_BLOB, Seq: 5, Body: &athenav1.Frame_BlobChunk{BlobChunk: &athenav1.BlobChunk{
+			TransferId: "t", Kind: "checkpoint", TicketId: "T-1", Data: []byte("d"), Last: true}}},
+		"node_status_report": {Channel: n, Body: &athenav1.Frame_NodeStatusReport{NodeStatusReport: &athenav1.NodeStatusReport{
+			Status: &athenav1.NodeStatus{Id: "n1", State: "online", Os: "linux", Arch: "arm64", Local: true, Version: "v"}}}},
+	}
+	for name, in := range frames {
+		b, err := Encode(in)
+		if err != nil {
+			t.Fatalf("%s: encode: %v", name, err)
+		}
+		out, err := Decode(b)
+		if err != nil {
+			t.Fatalf("%s: decode: %v", name, err)
+		}
+		if !proto.Equal(in, out) {
+			t.Errorf("%s: round trip changed the frame: %v != %v", name, in, out)
+		}
+	}
+
+	hello, err := proto.Marshal(&athenav1.NodeHello{Protocol: 1, NodeId: "n1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hello = protowire.AppendVarint(protowire.AppendTag(hello, 999, protowire.VarintType), 1)
+	raw := protowire.AppendTag(nil, 25, protowire.BytesType)
+	raw = protowire.AppendBytes(raw, hello)
+	if _, err := Decode(raw); !errors.Is(err, ErrInvalid) {
+		t.Errorf("NodeHello with an unknown field: err = %v, want ErrInvalid", err)
+	}
+}

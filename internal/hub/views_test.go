@@ -654,13 +654,13 @@ func TestTimelineRestartResumeLimitReviewEntries(t *testing.T) {
 func TestNodeStatusRuntimesWithQuota(t *testing.T) {
 	reset := epoch0.Add(2 * time.Hour)
 	until := epoch0.Add(time.Hour)
-	v := nodeStatus(node.Status{Name: "n", ClaudeVersion: "2.1", Runtimes: []node.RuntimeStatus{
+	v := nodeStatus(NodeInfo{Name: "n", Status: node.Status{ClaudeVersion: "2.1", Runtimes: []node.RuntimeStatus{
 		{Name: "claude", Ready: true, Tested: true, Live: 1, Quota: quota.State{},
 			Models: []rt.ModelInfo{{ID: "opus", Name: "Opus"}, {ID: "sonnet", Name: "Sonnet", Default: true}}},
 		{Name: "codex", Version: "0.160.1", Ready: true, Tested: true, Live: 2, Quota: quota.State{
 			Measured: true, ReadAt: epoch0, LimitedUntil: &until,
 			Windows: []quota.Window{{Bucket: "codex", Name: "5h", Used: 0.5, ResetsAt: &reset}, {Name: "7d", Used: 0.25, Stale: true}}}},
-	}})
+	}}})
 	if v.ClaudeVersion != "2.1" || len(v.Runtimes) != 2 {
 		t.Fatalf("node = %v", v)
 	}

@@ -18,10 +18,13 @@ import (
 
 	"github.com/danielpina1/athena/internal/core"
 	"github.com/danielpina1/athena/internal/effects"
+	"github.com/danielpina1/athena/internal/fleet"
 	"github.com/danielpina1/athena/internal/hub"
+	"github.com/danielpina1/athena/internal/link"
 	"github.com/danielpina1/athena/internal/metrics"
 	"github.com/danielpina1/athena/internal/node"
 	"github.com/danielpina1/athena/internal/outbox"
+	"github.com/danielpina1/athena/internal/pki"
 	"github.com/danielpina1/athena/internal/policy"
 	"github.com/danielpina1/athena/internal/runtime/codex"
 	"github.com/danielpina1/athena/internal/sources"
@@ -650,7 +653,8 @@ const webShutdown = 2 * time.Second
 
 // webEndpoint is the dashboard's HTTPS endpoint and what feeds it. newWebEndpoint (before the effects runner starts)
 // binds the listener, so a busy port fails the start, prepares the certificate and the push key, and registers the
-// Pusher; start (once the Dispatcher exists) runs the hub, the login, the Notifier and the listener.
+// Pusher; start (once the Dispatcher exists) runs the hub, the login, the Notifier and the listener. With TLS on it
+// also binds the node listener (web.nodeListen) and loads the node CA; with TLS off nodes are not served.
 type webEndpoint struct {
 	cfg    WebConfig
 	origin string
@@ -663,14 +667,21 @@ type webEndpoint struct {
 	vapid    *web.VAPID // nil without an https origin: no push
 	pusher   *web.Pusher
 	presence *web.Presence
+	// The node endpoint: nil and "" with TLS off.
+	nodeCA  *pki.CA
+	nodeL   net.Listener
+	nodeURL string
+	// nodeLinks serves a node's link once its certificate is checked: the fleet, set by start (notServingNodes until).
+	nodeLinks web.NodeLinkHandler
 
 	// set by start
-	hub    *hub.Hub
-	auth   *web.Auth
-	dash   *web.Dashboard
-	srv    *web.Server
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
+	nodeSrv *http.Server
+	hub     *hub.Hub
+	auth    *web.Auth
+	dash    *web.Dashboard
+	srv     *web.Server
+	cancel  context.CancelFunc
+	wg      sync.WaitGroup
 
 	stopOnce sync.Once
 }
@@ -694,9 +705,13 @@ func newWebEndpoint(stateDir string, cfg WebConfig, st *store.Store, eng *core.E
 	if err != nil {
 		return nil, fmt.Errorf("server: web listen %s: %w", cfg.Listen, err)
 	}
+	var nodeL net.Listener
 	defer func() {
 		if err != nil {
 			l.Close()
+			if nodeL != nil {
+				nodeL.Close()
+			}
 		}
 	}()
 	// The origin names the bound port: the configured one, or the one the system chose for port 0.
@@ -714,6 +729,21 @@ func newWebEndpoint(stateDir string, cfg WebConfig, st *store.Store, eng *core.E
 	}
 	if w.tls, err = web.NewTLSManager(stateDir, cfg.tlsConfig(), obt, log, time.Now); err != nil {
 		return nil, err
+	}
+	w.nodeLinks = notServingNodes{}
+	if w.tls.Mode() == "off" {
+		log.Info("nodes are not served: nodes need web.tls \"ca\" or \"acme\"")
+	} else {
+		if w.nodeCA, err = pki.LoadOrCreateCA(pki.NodeCADir(stateDir), pki.NodeCAHost, nil); err != nil {
+			return nil, err
+		}
+		addr := cfg.NodeListenAddr()
+		if nodeL, err = net.Listen("tcp", addr); err != nil {
+			return nil, fmt.Errorf("server: web node listen %s: %w", addr, err)
+		}
+		w.nodeL = nodeL
+		_, nodePort, _ := net.SplitHostPort(nodeL.Addr().String())
+		w.nodeURL = "wss://" + net.JoinHostPort(cfg.Host, nodePort) + "/node"
 	}
 	if strings.HasPrefix(w.origin, "https://") {
 		// The tokens' subject is the dashboard's own origin (ruling R27).
@@ -733,7 +763,7 @@ func newWebEndpoint(stateDir string, cfg WebConfig, st *store.Store, eng *core.E
 }
 
 // start runs the hub over the Dispatcher's reads, the certificate's renewals, the push Notifier and the listener.
-func (w *webEndpoint) start(d *Dispatcher, n *node.Node, fx *effects.Runner, version string, hubRef *atomic.Pointer[hub.Hub]) error {
+func (w *webEndpoint) start(d *Dispatcher, flt *fleet.Fleet, fx *effects.Runner, version string, hubRef *atomic.Pointer[hub.Hub]) error {
 	src := newHubSource(d)
 	src.tls = w.tls
 	w.hub = hub.New(src, w.log)
@@ -742,13 +772,25 @@ func (w *webEndpoint) start(d *Dispatcher, n *node.Node, fx *effects.Runner, ver
 		return err
 	}
 	w.auth = auth
+	if w.nodeL != nil {
+		// The fleet serves each node's link once its certificate is checked.
+		w.nodeLinks = flt
+		// Made before anything runs, so a failure leaves nothing to stop.
+		if w.nodeSrv, err = web.NodeListener(web.NodeListenerConfig{Store: w.st, CA: w.nodeCA,
+			GetCertificate: w.tls.Config().GetCertificate, Handler: w.nodeLinks, Log: w.log}); err != nil {
+			return err
+		}
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	w.cancel = cancel
 	w.st.OnCommit(w.hub.OnCommit)
 	hubRef.Store(w.hub)
+	// A node that connects, leaves, reports, drains or is revoked, and why a Ticket waits for a node, reach the dashboards.
+	flt.OnChange(w.hub.NodeChanged)
+	flt.OnWaitChange(w.hub.WaitChanged)
 	w.hub.Start(ctx)
 	d.SetAuth(auth)
-	w.dash = web.NewDashboard(web.DashboardConfig{Auth: auth, Hub: w.hub, Commander: d, Streams: n, Presence: w.presence,
+	w.dash = web.NewDashboard(web.DashboardConfig{Auth: auth, Hub: w.hub, Commander: d, Streams: flt, Presence: w.presence,
 		Log: w.log, Version: version})
 	w.wg.Add(1)
 	go func() {
@@ -781,7 +823,18 @@ func (w *webEndpoint) start(d *Dispatcher, n *node.Node, fx *effects.Runner, ver
 			notifier.Run(ctx, nil)
 		}()
 	}
-	w.srv = web.NewServer(web.ServerConfig{Auth: auth, Dashboard: w.dash, VAPID: w.vapid, CA: w.tls.CA(), TLS: w.tls.Config(), UI: ui.FS(), Artifacts: n, Log: w.log})
+	w.srv = web.NewServer(web.ServerConfig{Auth: auth, Dashboard: w.dash, VAPID: w.vapid, CA: w.tls.CA(), TLS: w.tls.Config(), UI: ui.FS(), Artifacts: flt, Log: w.log,
+		NodeJoin: web.NodeJoin(w.st, w.nodeCA, w.now, w.nodeURL)})
+	if w.nodeSrv != nil {
+		w.wg.Add(1)
+		go func() {
+			defer w.wg.Done()
+			if err := w.nodeSrv.ServeTLS(w.nodeL, "", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				w.log.Error("web: node listener stopped", "error", err)
+			}
+		}()
+		w.log.Info("node endpoint serving", "url", w.nodeURL, "listen", w.nodeL.Addr().String())
+	}
 	w.wg.Add(1)
 	go func() {
 		defer w.wg.Done()
@@ -802,9 +855,19 @@ func (w *webEndpoint) stop() {
 	w.stopOnce.Do(func() {
 		if w.srv == nil {
 			w.l.Close()
+			if w.nodeL != nil {
+				w.nodeL.Close()
+			}
 			return
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), webShutdown)
+		if w.nodeSrv != nil {
+			if err := w.nodeSrv.Shutdown(ctx); err != nil {
+				_ = w.nodeSrv.Close()
+			}
+		} else if w.nodeL != nil {
+			w.nodeL.Close()
+		}
 		if err := w.srv.Shutdown(ctx); err != nil {
 			w.log.Warn("web: shutdown", "error", err)
 		}
@@ -815,6 +878,13 @@ func (w *webEndpoint) stop() {
 		// Last, with every connection and the Notifier gone: no read of the store is in flight after this.
 		w.hub.Wait()
 	})
+}
+
+// notServingNodes is the node link handler until the fleet serves nodes: it closes every link at once.
+type notServingNodes struct{}
+
+func (notServingNodes) ServeNode(_ string, c link.Conn) {
+	_ = c.Close(link.CloseProtocol, "nodes are not served yet")
 }
 
 // status is web.status: the URL, the certificate's health and the open connections.
@@ -869,7 +939,12 @@ func Executable() (string, error) { return executable() }
 // applied (node.ApplyProposal), and the Proposal is settled with the result. It is never retried: applying an outward
 // effect twice is worse than asking again, so a failure settles the Proposal failed and the owner applies it again if
 // they still want it. While Athena is paused it waits, like a reply.
-func applyProposals(st *store.Store, eng *core.Engine, n *node.Node, paused func() bool, log *slog.Logger) effects.Handler {
+// proposalApplier pushes a Proposal's branch or opens its pull request on the node that has its Ticket.
+type proposalApplier interface {
+	ApplyProposal(ctx context.Context, p core.Proposal) error
+}
+
+func applyProposals(st *store.Store, eng *core.Engine, n proposalApplier, paused func() bool, log *slog.Logger) effects.Handler {
 	return func(ctx context.Context, key string, _ []byte) error {
 		if paused != nil && paused() {
 			return effects.Later(outbox.PausedWait)
@@ -908,10 +983,15 @@ func heldRepos(from, to policy.Settings) []string {
 	return out
 }
 
-// holdSwitched holds back the work of the repositories a settings change switched to shadow mode: the node drops their
-// write tokens (revoked, so a copy a worker kept stops working), and their replies waiting to go out are held for the
-// owner. Both are safe to repeat (a change told again).
-func holdSwitched(eng *core.Engine, n *node.Node, from, to policy.Settings) error {
+// tokenDropper drops the write tokens of a repository on the nodes: the fleet (every node), or one node.
+type tokenDropper interface {
+	DropTokens(repo string)
+}
+
+// holdSwitched holds back the work of the repositories a settings change switched to shadow mode: every node drops
+// their write tokens (revoked, so a copy a worker kept stops working), and their replies waiting to go out are held for
+// the owner. Both are safe to repeat (a change told again). n may be nil (tests).
+func holdSwitched(eng *core.Engine, n tokenDropper, from, to policy.Settings) error {
 	for _, repo := range heldRepos(from, to) {
 		if n != nil {
 			n.DropTokens(repo)

@@ -17,6 +17,7 @@ vi.mock("@/lib/commands/actions", async (orig) => ({
   reply: vi.fn(),
   stop: vi.fn(),
   retry: vi.fn(),
+  retryElsewhere: vi.fn(),
   interrupt: vi.fn(),
   answerApproval: vi.fn(),
 }));
@@ -349,4 +350,42 @@ test("?file= opens the viewer over the Ticket, and closing it gives focus back t
   await userEvent.click(within(viewer).getAllByRole("button", { name: /^(Close|Back)$/ })[0]);
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   expect(document.activeElement).toBe(within(list).getByRole("link", { name: "REPORT.md" }));
+});
+
+test("with two nodes the header says which node the Ticket is on, and what it waits for", () => {
+  const nodes = [
+    { id: "local", name: "studio", local: true, state: "online", slots: 2 },
+    { id: "n-mini", name: "mini", state: "offline", slots: 2 },
+  ];
+  load({ nodes, tickets: [{ ...working, nodeId: "n-mini", nodeName: "mini", waitingForNode: "Waiting for mini" }] });
+  const view = renderDetail();
+  const header = screen.getByRole("heading", { level: 1, name: "Ship the API" }).closest("header") as HTMLElement;
+  expect(within(header).getByText("on mini")).toBeTruthy();
+  expect(within(header).getByText("Waiting for mini")).toBeTruthy();
+  view.unmount();
+  // One node: nothing to tell apart, so no chip.
+  useAthena.getState().reset();
+  load({ nodes: [nodes[0]], tickets: [{ ...working, nodeId: "local", nodeName: "studio" }] });
+  renderDetail();
+  expect(screen.queryByText("on studio")).toBeNull();
+});
+
+test("a repository Ticket whose node is offline offers Retry elsewhere in its header; a folder one does not", async () => {
+  const user = userEvent.setup();
+  vi.mocked(actions.retryElsewhere).mockResolvedValue(ok);
+  const offline = { stage: "person", action: "offline", nodeId: "n-mini", nodeName: "mini", updatedAt: at(0) };
+  load({
+    tickets: [
+      { id: "T-1", title: "In a repository", repo: "acme/api", ...offline },
+      { id: "T-2", title: "In a folder", dir: "/Users/me/notes", ...offline },
+    ],
+  });
+  const view = renderDetail("/tickets/T-1");
+  expect(screen.getByText("mini is offline")).toBeTruthy();
+  await user.click(screen.getByRole("button", { name: "Retry elsewhere" }));
+  expect(actions.retryElsewhere).toHaveBeenCalledWith("T-1");
+  await waitFor(() => expect(screen.getByText("Retrying elsewhere")).toBeTruthy());
+  view.unmount();
+  renderDetail("/tickets/T-2");
+  expect(screen.queryByRole("button", { name: "Retry elsewhere" })).toBeNull();
 });

@@ -1,35 +1,138 @@
-// The Nodes screen: the node that runs sessions (its slots in use of its slots, the queue, the live Tickets and each
-// runtime with its version, readiness and quota, QuotaBars) and the server's health checks. Failing checks say what
+// The Nodes screen: one card per node that runs sessions, this machine first. A card says the node's state (a pill:
+// green online, amber draining, grey offline or revoked; orange stays for what needs the owner), where it runs and its
+// version, its slots in use of its slots, the queue, the live Tickets and each runtime with its version, readiness and
+// quota (QuotaBars). A card's menu drains or undrains the node, and revokes one that joined (after a confirmation).
+// "Add a node" opens the join command (AddNode). Under the cards, the server's health checks: failing checks say what
 // is wrong and since when; the passing ones fold into one line. Before the first Snapshot both say "Waiting for the
-// server.".
+// server.". This view is a lazy chunk (LAZY_SENTINEL).
 import { timestampMs } from "@bufbuild/protobuf/wkt";
-import { ChevronRightIcon } from "lucide-react";
+import { ChevronRightIcon, MoreHorizontalIcon } from "lucide-react";
 import { useId, useState } from "react";
 import { Link } from "react-router";
 import type { HealthItem, NodeStatus } from "@/gen/athena/v1/state_pb";
+import { errorMessage, revokeNode, setNodeDraining } from "@/lib/commands/actions";
 import { selectSynced } from "@/lib/store/selectors";
 import { useAthena } from "@/lib/store/state";
+import { clockTime } from "@/lib/text/runtime";
 import { Mono } from "@/ui/athena/Mono";
 import { RelativeTime } from "@/ui/athena/RelativeTime";
 import { Waiting } from "@/ui/athena/Waiting";
 import { cn } from "@/ui/cn";
+import { Button } from "@/ui/primitives/button";
+import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogTitle } from "@/ui/primitives/dialog";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/ui/primitives/dropdown-menu";
+import { toast } from "@/ui/primitives/toast";
+import { AddNode } from "./AddNode";
 import { QuotaBars } from "./QuotaBars";
 
+/** bundle-budget.mjs checks this chunk stays out of the initial route. */
+export const LAZY_SENTINEL = "athena-lazy-chunk:nodes-view";
+
 export function Nodes() {
-  const node = useAthena((s) => s.node);
+  const nodes = useAthena((s) => s.nodes);
   const health = useAthena((s) => s.health);
   const synced = useAthena(selectSynced);
   return (
-    <section aria-label="Nodes" className="grid min-w-0 content-start">
+    <section aria-label="Nodes" data-chunk={LAZY_SENTINEL} className="grid min-w-0 content-start">
       <div className="grid gap-1 border-b border-line p-4 lg:px-6">
         <h1 className="text-xl font-semibold">Nodes</h1>
-        <p className="max-w-prose text-muted">The machine that runs sessions, with its load and health.</p>
+        <p className="max-w-prose text-muted">The machines that run sessions, with their load and health.</p>
       </div>
       <div className="grid min-w-0 gap-6 p-4 lg:max-w-3xl lg:px-6">
-        {synced && node ? <NodeCard node={node} /> : <Waiting />}
+        {synced && nodes.length > 0 ? (
+          <>
+            <ul className="grid min-w-0 gap-4">
+              {nodes.map((n) => (
+                <li key={n.id || n.name} className="min-w-0">
+                  <NodeCard node={n} />
+                </li>
+              ))}
+            </ul>
+            <AddNode />
+          </>
+        ) : (
+          <Waiting />
+        )}
         <Health items={synced ? health?.items : undefined} />
       </div>
     </section>
+  );
+}
+
+const STATE: Record<string, { label: string; dot: string }> = {
+  online: { label: "Online", dot: "bg-success" },
+  draining: { label: "Draining", dot: "bg-warning" },
+  offline: { label: "Offline", dot: "bg-muted" },
+  revoked: { label: "Revoked", dot: "bg-muted" },
+};
+
+/** The node's state; an older server sends none for its one node, which is online. */
+const stateOf = (n: NodeStatus) => (n.state in STATE ? n.state : "online");
+
+function StatePill({ state }: { state: string }) {
+  const s = STATE[state];
+  return (
+    <span data-node-state={state} className="inline-flex h-5 shrink-0 items-center gap-1.5 rounded-xs border border-line-soft px-2 text-xs font-semibold">
+      <span aria-hidden className={cn("size-2 rounded-full", s.dot)} />
+      {s.label}
+    </span>
+  );
+}
+
+/** The card's menu: Drain or Undrain, and Revoke for a node that joined (this machine cannot be revoked). */
+function NodeMenu({ node, name }: { node: NodeStatus; name: string }) {
+  const [revoking, setRevoking] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const draining = node.state === "draining";
+
+  const drain = async (on: boolean) => {
+    const r = await setNodeDraining(node.id, on);
+    if (r.ok) toast({ title: on ? `Draining ${name}` : `${name} takes new sessions again` });
+    else toast({ title: on ? "Not drained" : "Not undrained", description: r.message || errorMessage(r.code), tone: "danger" });
+  };
+
+  const revoke = async () => {
+    setBusy(true);
+    const r = await revokeNode(node.id);
+    setBusy(false);
+    setRevoking(false);
+    if (r.ok) toast({ title: `${name} revoked` });
+    else toast({ title: "Not revoked", description: r.message || errorMessage(r.code), tone: "danger" });
+  };
+
+  return (
+    <>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button size="icon" variant="ghost" aria-label={`Actions for ${name}`}>
+            <MoreHorizontalIcon />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end">
+          <DropdownMenuItem onSelect={() => void drain(!draining)}>{draining ? "Undrain" : "Drain"}</DropdownMenuItem>
+          {!node.local && (
+            // The Dialog stays outside the menu: the menu closing would take it along (dialog.tsx).
+            <DropdownMenuItem variant="danger" onSelect={() => setRevoking(true)}>
+              Revoke
+            </DropdownMenuItem>
+          )}
+        </DropdownMenuContent>
+      </DropdownMenu>
+      <Dialog open={revoking} onOpenChange={setRevoking}>
+        <DialogContent>
+          <DialogTitle>Revoke node</DialogTitle>
+          <DialogDescription>{`Revoke ${name}? Its sessions stop, and it must join again to come back.`}</DialogDescription>
+          <DialogFooter>
+            <DialogClose asChild>
+              <Button>Cancel</Button>
+            </DialogClose>
+            <Button variant="danger" disabled={busy} onClick={() => void revoke()}>
+              {`Revoke ${name}`}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }
 
@@ -39,11 +142,52 @@ function NodeCard({ node }: { node: NodeStatus }) {
   const id = useId();
   const name = node.name || "This machine";
   const used = Math.min(node.slotsInUse, node.slots);
+  const state = stateOf(node);
+  const seen = node.lastSeen ? timestampMs(node.lastSeen) : undefined;
+  const where = [node.os && node.arch ? `${node.os}/${node.arch}` : node.os, node.version].filter(Boolean).join(" · ");
   return (
-    <section aria-labelledby={id} className="grid min-w-0 gap-4 rounded-md border border-line p-4">
-      <h2 id={id} className="text-lg font-semibold break-words">
-        {name}
-      </h2>
+    <section aria-labelledby={id} data-node={node.id} className="grid min-w-0 gap-4 rounded-md border border-line p-4">
+      <div className="grid min-w-0 gap-1">
+        <div className="flex min-w-0 items-start gap-2">
+          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1">
+            <h2 id={id} className="min-w-0 text-lg font-semibold break-words">
+              {name}
+            </h2>
+            {node.local && <span className="rounded-xs border border-line px-1.5 font-mono text-xs">This machine</span>}
+            <StatePill state={state} />
+          </div>
+          {state !== "revoked" && <NodeMenu node={node} name={name} />}
+        </div>
+        {where && <Mono data-volatile="where">{where}</Mono>}
+        {state === "offline" && <Since text="Offline since" alone="Offline" at={seen} />}
+        {state === "revoked" && <Since text="Revoked; last seen at" alone="Revoked" at={seen} />}
+        {state === "draining" && <p className="text-sm text-muted">Finishing its sessions; it takes no new ones.</p>}
+      </div>
+      {state !== "revoked" && <Load node={node} used={used} />}
+    </section>
+  );
+}
+
+/** "Offline since 14:02", the time as a <time>; `alone` when it is not known. */
+function Since({ text, alone, at }: { text: string; alone: string; at?: number }) {
+  return (
+    <p className="text-sm text-muted">
+      {at === undefined ? (
+        alone
+      ) : (
+        <>
+          {`${text} `}
+          <time dateTime={new Date(at).toISOString()}>{clockTime(at)}</time>
+        </>
+      )}
+    </p>
+  );
+}
+
+/** The node's slots in use, its queue, its live Tickets and its runtimes. */
+function Load({ node, used }: { node: NodeStatus; used: number }) {
+  return (
+    <>
       <div className="grid gap-2">
         <p data-volatile="slots" className="text-sm">{`${node.slotsInUse} of ${node.slots} slots in use`}</p>
         <div
@@ -101,7 +245,7 @@ function NodeCard({ node }: { node: NodeStatus }) {
           ))}
         </ul>
       )}
-    </section>
+    </>
   );
 }
 

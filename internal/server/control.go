@@ -23,17 +23,19 @@ import (
 
 // Control ops.
 const (
-	OpPing      = "ping"
-	OpSubmit    = "submit"
-	OpTickets   = "tickets"
-	OpTicket    = "ticket"
-	OpReply     = "reply"
-	OpStop      = "stop"
-	OpRetry     = "retry"
-	OpApprovals = "approvals"
-	OpAnswer    = "answer"
-	OpLogs      = "logs"
-	OpMetrics   = "metrics"
+	OpPing    = "ping"
+	OpSubmit  = "submit"
+	OpTickets = "tickets"
+	OpTicket  = "ticket"
+	OpReply   = "reply"
+	OpStop    = "stop"
+	OpRetry   = "retry"
+	// OpRetryElsewhere ends the Assignment of a Ticket whose node is offline and places a new one on another node (ID).
+	OpRetryElsewhere = "retry-elsewhere"
+	OpApprovals      = "approvals"
+	OpAnswer         = "answer"
+	OpLogs           = "logs"
+	OpMetrics        = "metrics"
 	// OpHealth reports the Sources, the effects runner and the router (athena status).
 	OpHealth      = "health"
 	OpTriggers    = "triggers"
@@ -55,6 +57,15 @@ const (
 	OpWebRevoke = "web.revoke"
 	// OpWebStatus reports the dashboard's endpoint: its URL, its certificate and the open connections.
 	OpWebStatus = "web.status"
+	// OpNodeToken issues a join token for a new node (TTL, 0 for fleet.JoinTokenTTL) and answers what its join command
+	// needs (NodeTokenResult).
+	OpNodeToken = "node-token"
+	// OpNodes lists the nodes (NodeRow); OpNodeDrain, OpNodeUndrain and OpNodeRevoke act on the node ID names, by its
+	// name or its id.
+	OpNodes       = "nodes"
+	OpNodeDrain   = "node-drain"
+	OpNodeUndrain = "node-undrain"
+	OpNodeRevoke  = "node-revoke"
 )
 
 // Request is one control request; Op says which of its fields count.
@@ -83,6 +94,11 @@ type Request struct {
 	Review *bool `json:"review,omitempty"`
 	// Policy is the settings document policy.set saves.
 	Policy json.RawMessage `json:"policy,omitempty"`
+	// Node pins a submitted task to a node by id; empty leaves the placement to the fleet (the dashboard's node
+	// picker does the same over its link).
+	Node string `json:"node,omitempty"`
+	// TTL is how long a node-token's join token is good; 0 is fleet.JoinTokenTTL.
+	TTL time.Duration `json:"ttl,omitempty"`
 }
 
 // Response answers a request: OK with its Data, or the Error that refused it.

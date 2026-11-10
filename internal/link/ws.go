@@ -2,6 +2,7 @@ package link
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net/http"
@@ -69,6 +70,29 @@ func Accept(w http.ResponseWriter, r *http.Request) (Conn, error) {
 	return NewWS(c), nil
 }
 
+// Dial connects to a link endpoint (a wss:// or ws:// URL), offering athena.v1 with the permessage-deflate settings
+// Accept uses. tlsCfg is the client's TLS configuration (roots, client certificate); nil takes the defaults. A server
+// that does not select athena.v1 is closed and refused.
+func Dial(ctx context.Context, url string, tlsCfg *tls.Config) (Conn, error) {
+	client := &http.Client{}
+	if tlsCfg != nil {
+		client.Transport = &http.Transport{TLSClientConfig: tlsCfg.Clone()}
+	}
+	c, _, err := websocket.Dial(ctx, url, &websocket.DialOptions{
+		HTTPClient:      client,
+		Subprotocols:    []string{Subprotocol},
+		CompressionMode: websocket.CompressionNoContextTakeover,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if c.Subprotocol() != Subprotocol {
+		_ = c.Close(websocket.StatusProtocolError, "subprotocol "+Subprotocol+" required")
+		return nil, errors.New("link: server did not select subprotocol " + Subprotocol)
+	}
+	return NewWS(c), nil
+}
+
 func offers(r *http.Request, proto string) bool {
 	for _, h := range r.Header.Values("Sec-WebSocket-Protocol") {
 		for _, p := range strings.Split(h, ",") {
@@ -78,4 +102,9 @@ func offers(r *http.Request, proto string) bool {
 		}
 	}
 	return false
+}
+
+// CloseCode is the close code the peer sent, if err is the end of a WebSocket it closed; -1 otherwise.
+func CloseCode(err error) int {
+	return int(websocket.CloseStatus(err))
 }
