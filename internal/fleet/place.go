@@ -571,6 +571,10 @@ func (f *Fleet) launch(ticketID, assignmentID, nodeID string) {
 	if !ok || a.State == core.AssignmentEnded || t.Ended != nil {
 		return
 	}
+	if _, moved := f.seedFrom(t, *a, nodeID); moved {
+		f.launchSeeded(ticketID, assignmentID, nodeID) // its worktree comes from the checkpoint first
+		return
+	}
 	tg.Start(t, *a)
 	if t, a, ok = find(); ok && (a.State == core.AssignmentEnded || t.Ended != nil) {
 		tg.Stop(t, *a, a.EndedReason)

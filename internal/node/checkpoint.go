@@ -345,6 +345,13 @@ func (h *headerTap) head(ref string) string {
 	return ""
 }
 
+// StreamBundle runs `git <args>` (a bundle create to stdout) in dir with env and the node's pins, streaming the bundle
+// to w, and returns the commit its header names for ref; past MaxCheckpointBundle it stops git and returns
+// ErrCheckpointTooBig. On an error w may hold part of a bundle. The server's mirror makes its seeds with it.
+func StreamBundle(ctx context.Context, dir string, env []string, ref string, w io.Writer, args []string) (string, error) {
+	return bundleTo(ctx, dir, env, ref, w, args)
+}
+
 // RunGit runs git in dir with env (the process's, if nil), with no shell and the node's pins (no hook, no fsmonitor),
 // killed once ctx ends; it returns git's trimmed stdout. The server's checkpoint mirror (internal/fleet) runs its git
 // through it.

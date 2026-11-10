@@ -292,6 +292,7 @@ func (f *fakeTarget) Start(t core.Ticket, a core.Assignment) {
 	defer f.mu.Unlock()
 	f.starts = append(f.starts, t)
 }
+func (f *fakeTarget) Seed(node.Seed) error                      { return nil }
 func (f *fakeTarget) Deliver(core.Ticket, core.Assignment)      {}
 func (f *fakeTarget) Stop(core.Ticket, core.Assignment, string) {}
 func (f *fakeTarget) Interrupt(string) error                    { return node.ErrNoSession }

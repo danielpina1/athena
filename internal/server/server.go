@@ -279,7 +279,7 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	defer closeNode()
 	flt := fleet.New(fleet.Config{Local: n, LocalID: fleet.LocalID, LocalName: ncfg.Name, Store: st, Creds: ncfg.Credentials,
 		Policy: ncfg.Policy, Prompts: func() (string, string) { return ncfg.WorkerPrompt(), ncfg.ReviewerPrompt() },
-		Mirror: fleet.NewMirror(fleet.CheckpointDir(stateDir)), Log: logger})
+		Mirror: fleet.NewMirror(fleet.CheckpointDir(stateDir)), OfflineAfter: offlineAfter(), Log: logger})
 	fltRef.Store(flt)
 	// Before the store closes and after the node does (deferred later, so it runs first): node links can outlive the
 	// web server's stop, and placement records into the Engine.
@@ -647,6 +647,17 @@ func resumeParked(eng *core.Engine, exec core.Executor, log *slog.Logger) {
 }
 
 // onLocal reports whether the Assignment is this server's own node's: placed on it, or on none.
+// offlineAfter is fleet.OfflineAfter, or, for the e2e harness only (ATHENA_TEST=1), the Go duration in
+// ATHENA_TEST_OFFLINE_AFTER (Ruling R5).
+func offlineAfter() time.Duration {
+	if os.Getenv("ATHENA_TEST") == "1" {
+		if d, err := time.ParseDuration(os.Getenv("ATHENA_TEST_OFFLINE_AFTER")); err == nil && d > 0 {
+			return d
+		}
+	}
+	return fleet.OfflineAfter
+}
+
 func onLocal(a *core.Assignment) bool { return a.Node == "" || a.Node == fleet.LocalID }
 
 // liftPause closes the open pause of an idle running Assignment that is not started again (PauseLifted: resumed

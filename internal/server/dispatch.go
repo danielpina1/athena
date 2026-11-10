@@ -149,6 +149,8 @@ func (d *Dispatcher) handleRequest(req Request) (any, error) {
 		return nil, d.eng.StopTicket(req.ID, req.Reason)
 	case OpRetry:
 		return nil, d.eng.RetryTicket(req.ID)
+	case OpRetryElsewhere:
+		return nil, d.retryElsewhere(req.ID)
 	case OpApprovals:
 		list, err := d.eng.PendingApprovals()
 		if err != nil {
@@ -379,6 +381,10 @@ func (d *Dispatcher) act(o web.Origin, c *athenav1.Command) *athenav1.CommandRes
 		if err := d.eng.RetryTicket(a.Retry.GetTicketId()); err != nil {
 			return d.failure(err)
 		}
+	case *athenav1.Command_RetryElsewhere:
+		if err := d.retryElsewhere(a.RetryElsewhere.GetTicketId()); err != nil {
+			return d.failure(err)
+		}
 	case *athenav1.Command_Interrupt:
 		if err := d.interrupt(a.Interrupt.GetTicketId()); err != nil {
 			return d.failure(err)
@@ -599,6 +605,34 @@ func (d *Dispatcher) tokenDropper() tokenDropper {
 		return d.node
 	}
 	return nil
+}
+
+// retryElsewhere is the owner's Retry elsewhere of a Ticket whose node is offline (Engine.RetryElsewhere). A Ticket
+// with no Repo works in a folder of that node, which no other node has: it waits for the node instead (Ruling R2).
+func (d *Dispatcher) retryElsewhere(ticketID string) error {
+	t, _, err := d.eng.Ticket(ticketID)
+	if err != nil {
+		return err
+	}
+	if t.Repo == "" {
+		name := "its node"
+		if a := t.LatestAssignment(); a != nil {
+			name = d.nodeName(a.Node)
+		}
+		return userErrorf("This Ticket works in a folder on %s; it continues when %s is back.", name, name)
+	}
+	return d.eng.RetryElsewhere(ticketID)
+}
+
+// nodeName is the name of the node id ("" is the server's own).
+func (d *Dispatcher) nodeName(id string) string {
+	if d.fleet != nil {
+		return d.fleet.NodeName(id)
+	}
+	if d.node != nil {
+		return d.node.Status().Name
+	}
+	return "this machine"
 }
 
 // interrupt abandons the running turn of a Ticket's session; a Ticket without a running session is node.ErrNoSession.

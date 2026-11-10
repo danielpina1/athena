@@ -129,6 +129,7 @@ type conn struct {
 	pending map[uint64]chan *athenav1.NodeResult // requests waiting for their answer
 	factIDs map[uint64]uint64                    // call id -> fact seq, of facts not answered yet
 	subs    map[uint64]context.CancelFunc        // subscriptions, by the id of their subscribe call
+	seeds   map[string]*seedTransfer             // seed bundles on their way in, by transfer id (seed.go)
 
 	// sendMu orders the frames of the link's calls: every fact committed before a request is queued before it.
 	sendMu sync.Mutex
@@ -391,6 +392,7 @@ func (cn *conn) end() {
 		stop()
 	}
 	cn.subs = nil
+	cn.dropSeeds()
 }
 
 // caps are the Hello's capabilities: Options.Caps, else what the attached node's status says.
@@ -451,6 +453,8 @@ func (c *Client) onFrame(cn *conn, f *athenav1.Frame) {
 		signal(cn.ansWake)
 	case *athenav1.Frame_NodeCall:
 		c.serve(cn, b.NodeCall)
+	case *athenav1.Frame_BlobChunk:
+		c.onSeedChunk(cn, b.BlobChunk)
 	case *athenav1.Frame_Error:
 		c.log.Warn("the server reported an error", "code", b.Error.GetCode(), "message", b.Error.GetMessage())
 	}

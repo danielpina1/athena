@@ -207,6 +207,17 @@ type wireNode struct {
 	calls   chan *athenav1.NodeCall
 	conn    *pipeConn // the server's end
 	served  chan struct{}
+
+	// order is what came from the server, in order: "blob:<kind>" or a call's method; blob the chunks' data.
+	omu   sync.Mutex
+	order []string
+	blobs []byte
+}
+
+func (w *wireNode) received() ([]string, []byte) {
+	w.omu.Lock()
+	defer w.omu.Unlock()
+	return append([]string(nil), w.order...), append([]byte(nil), w.blobs...)
 }
 
 func dialWire(t *testing.T, f *Fleet, certID string, hello *athenav1.NodeHello) *wireNode {
@@ -223,7 +234,15 @@ func dialWire(t *testing.T, f *Fleet, certID string, hello *athenav1.NodeHello) 
 		case *athenav1.Frame_NodeResult:
 			w.results <- b.NodeResult
 		case *athenav1.Frame_NodeCall:
+			w.omu.Lock()
+			w.order = append(w.order, b.NodeCall.GetMethod())
+			w.omu.Unlock()
 			w.calls <- b.NodeCall
+		case *athenav1.Frame_BlobChunk:
+			w.omu.Lock()
+			w.order = append(w.order, "blob:"+b.BlobChunk.GetKind())
+			w.blobs = append(w.blobs, b.BlobChunk.GetData()...)
+			w.omu.Unlock()
 		}
 	}})
 	go func() {

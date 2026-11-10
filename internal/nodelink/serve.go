@@ -40,7 +40,7 @@ const (
 	ServeSubscribe     = "subscribe"     // ArgsSubscribe; no value, then MethodLines notifications on STREAM
 	ServeUnsubscribe   = "unsubscribe"   // ArgsUnsubscribe; no value
 	ServeStatus        = "status"        // ArgsStatus; node.Status
-	ServeSeed          = "seed"          // not supported by this node yet
+	ServeSeed          = "seed"          // ArgsSeed, after the seed's BlobChunks; no value
 )
 
 // Args of the server's calls. Start, Deliver and Stop carry the Ticket's snapshot, which the node keeps for Ticket
@@ -79,12 +79,22 @@ type (
 	}
 	ArgsUnsubscribe struct{ Sub uint64 }
 	ArgsStatus      struct{}
+	// ArgsSeed seeds the worktree of the Ticket's next Assignment, which moved to this node (node.Node.Seed). It comes
+	// after the BlobChunks of kind "seed" of Transfer, the bundle of the Ticket's checkpoint ("" when the server holds
+	// none), and before the Assignment's Start.
+	ArgsSeed struct {
+		TicketID, AssignmentID string
+		Transfer               string
+		SHA                    string
+		At                     time.Time
+		From                   string
+		Offline                bool
+	}
 )
 
 // Sentences of the node's refusals.
 const (
 	errTooLarge     = "too large to show from another node"
-	errSeed         = "not supported by this node yet"
 	errNotAttached  = "this node is not ready yet"
 	maxOpenFile     = 768 << 10
 	maxResultValue  = 900 << 10 // a NodeResult's value stays well under link.MaxFrame
@@ -108,6 +118,7 @@ type target interface {
 	Subscribe(ticketID string, from int64) ([]node.Line, <-chan node.Line, func(), error)
 	Status() node.Status
 	CheckpointBundle(ctx context.Context, ticketID, since string, w io.Writer) (string, error)
+	Seed(sd node.Seed) error
 }
 
 var _ target = (*node.Node)(nil)
@@ -190,7 +201,13 @@ func (c *Client) serve(cn *conn, call *athenav1.NodeCall) {
 		}
 		c.reply(cn, id, nil, nil)
 	case ServeSeed:
-		c.reply(cn, id, nil, &core.UserError{Msg: errSeed})
+		// On the reader goroutine, after the seed's chunks and before the Start that follows it.
+		var a ArgsSeed
+		if err := decodeArgs(call.GetArgs(), &a); err != nil {
+			c.reply(cn, id, nil, err)
+			return
+		}
+		c.reply(cn, id, nil, c.seed(cn, t, a))
 	case ServeInterrupt, ServeApplyProposal, ServeDiff, ServeFiles, ServeOpenFile, ServeSubscribe, ServeStatus:
 		go c.serveSlow(cn, t, call)
 	default:

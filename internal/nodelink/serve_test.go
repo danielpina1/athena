@@ -28,7 +28,7 @@ func TestServeCalls(t *testing.T) {
 
 	fs.call(t, 1, ServeOpenFile, ArgsOpenFile{TicketID: "T1", Path: "small.txt"})
 	fs.call(t, 2, ServeOpenFile, ArgsOpenFile{TicketID: "T1", Path: "big.bin"})
-	fs.call(t, 3, ServeSeed, struct{}{})
+	fs.call(t, 3, ServeSeed, map[string]any{"TicketID": "T1", "Bogus": 1})
 	fs.call(t, 4, ServeInterrupt, ArgsInterrupt{TicketID: "T1"})
 	fs.call(t, 5, ServeStart, map[string]any{"Ticket": map[string]any{}, "Extra": 1})
 	for id := uint64(1); id <= 5; id++ {
@@ -40,7 +40,7 @@ func TestServeCalls(t *testing.T) {
 	if r := fs.result(2); r.GetError() != "too large to show from another node" || !r.GetUserError() {
 		t.Fatalf("big file err = %q", r.GetError())
 	}
-	if r := fs.result(3); r.GetError() != "not supported by this node yet" {
+	if r := fs.result(3); !strings.Contains(r.GetError(), "unknown field") {
 		t.Fatalf("seed err = %q", r.GetError())
 	}
 	if r := fs.result(4); DecodeError(r.GetError(), r.GetUserError()) != node.ErrNoSession {

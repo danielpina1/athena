@@ -26,6 +26,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/danielpina1/athena/internal/core"
+	"github.com/danielpina1/athena/internal/fleet"
 	"github.com/danielpina1/athena/internal/hub"
 	"github.com/danielpina1/athena/internal/link"
 	"github.com/danielpina1/athena/internal/pb/athenav1"
@@ -815,5 +816,82 @@ func TestSubmitTaskUnknownRuntimeInvalid(t *testing.T) {
 	}
 	if n := len(w.tickets()); n != 0 {
 		t.Errorf("%d tickets made by an invalid submit", n)
+	}
+}
+
+// A Dir Ticket (no Repo) is never moved: Retry elsewhere refuses it, naming its node, from the dashboard and the
+// control socket alike. A Ticket with a Repo whose node is offline gets a new pending Assignment that avoids that node.
+func TestDirTicketNotMovable(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "athena.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.PutNode(store.Node{ID: "n1", Name: "mini", CertSerial: "01", CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	eng := core.NewEngine(st.Repos(), nopExec{}, nil, nil)
+	flt := fleet.New(fleet.Config{Engine: eng, Store: st, LocalID: fleet.LocalID, LocalName: "server"})
+	defer flt.Close()
+	d := &Dispatcher{st: st, eng: eng, fleet: flt, log: discardLogger()}
+	stranded := func(opts core.TaskOptions) core.Ticket {
+		tk, err := eng.SubmitOwnerTask("Fix it", opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := eng.AssignmentPlaced(tk.ID, tk.LatestAssignment().ID, "n1"); err != nil {
+			t.Fatal(err)
+		}
+		return tk
+	}
+	dir := stranded(core.TaskOptions{Dir: t.TempDir()})
+	repo := stranded(core.TaskOptions{Repo: "o/r"})
+	if err := eng.NodeOffline("n1", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	const want = "This Ticket works in a folder on mini; it continues when mini is back."
+	res := d.Do(context.Background(), web.Origin{ClientID: "phone"}, &athenav1.Command{Id: "r1",
+		Action: &athenav1.Command_RetryElsewhere{RetryElsewhere: &athenav1.RetryElsewhere{TicketId: dir.ID}}})
+	if res.GetOk() || res.GetMessage() != want {
+		t.Fatalf("dashboard retry elsewhere of a Dir Ticket = %v", res)
+	}
+	if _, err := d.handleRequest(Request{Op: OpRetryElsewhere, ID: dir.ID}); err == nil || err.Error() != want {
+		t.Fatalf("control retry-elsewhere of a Dir Ticket = %v", err)
+	}
+	if got, _, _ := eng.Ticket(dir.ID); len(got.Assignments) != 1 {
+		t.Fatal("the Dir Ticket got a new Assignment")
+	}
+
+	res = d.Do(context.Background(), web.Origin{ClientID: "phone"}, &athenav1.Command{Id: "r2",
+		Action: &athenav1.Command_RetryElsewhere{RetryElsewhere: &athenav1.RetryElsewhere{TicketId: repo.ID}}})
+	if !res.GetOk() {
+		t.Fatalf("retry elsewhere = %v", res)
+	}
+	got, _, _ := eng.Ticket(repo.ID)
+	a := got.LatestAssignment()
+	if len(got.Assignments) != 2 || a.State != core.AssignmentPending || len(a.Avoid) != 1 || a.Avoid[0] != "n1" ||
+		got.Assignments[0].EndedReason != core.ReasonNodeOffline {
+		t.Fatalf("after retry elsewhere: %+v", got.Assignments)
+	}
+	if _, err := d.handleRequest(Request{Op: OpRetryElsewhere, ID: repo.ID}); err == nil {
+		t.Fatal("a second retry elsewhere, with the node no longer stranding it, was taken")
+	}
+}
+
+// Ruling R5: ATHENA_TEST_OFFLINE_AFTER sets the offline threshold only under ATHENA_TEST=1.
+func TestOfflineAfterTestOverride(t *testing.T) {
+	t.Setenv("ATHENA_TEST_OFFLINE_AFTER", "3s")
+	t.Setenv("ATHENA_TEST", "")
+	if got := offlineAfter(); got != fleet.OfflineAfter {
+		t.Fatalf("without ATHENA_TEST: %v", got)
+	}
+	t.Setenv("ATHENA_TEST", "1")
+	if got := offlineAfter(); got != 3*time.Second {
+		t.Fatalf("with ATHENA_TEST=1: %v", got)
+	}
+	t.Setenv("ATHENA_TEST_OFFLINE_AFTER", "soon")
+	if got := offlineAfter(); got != fleet.OfflineAfter {
+		t.Fatalf("a bad duration: %v", got)
 	}
 }

@@ -306,7 +306,9 @@ func head(dir, ref string) (string, bool, error) {
 }
 
 // Bundle writes a git bundle of the Ticket's whole checkpoint ref to w and returns its commit: what a node fetches
-// into its clone to restore the work. ErrNoCheckpoint: the mirror holds none.
+// into its clone to restore the work. ErrNoCheckpoint: the mirror holds none. The bundle streams from git to w, with
+// no copy of its own; on an error w may hold part of one. The repository stays locked while w takes it: a caller that
+// sends it on (a node's link) writes it to a file first (tempFile).
 func (m *Mirror) Bundle(repo, ticketID string, w io.Writer) (sha string, err error) {
 	dir, err := m.repoDir(repo)
 	if err != nil {
@@ -316,43 +318,19 @@ func (m *Mirror) Bundle(repo, ticketID string, w io.Writer) (sha string, err err
 	if err != nil {
 		return "", err
 	}
-	unlock := m.lock(dir)
-	tmp, err := os.MkdirTemp("", "athena-seed-")
-	if err != nil {
-		unlock()
+	defer m.lock(dir)()
+	if _, ok, err := head(dir, ref); err != nil {
+		return "", err
+	} else if !ok {
+		return "", ErrNoCheckpoint
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), mirrorTimeout)
+	defer cancel()
+	if err := writeConfig(dir); err != nil {
 		return "", err
 	}
-	defer os.RemoveAll(tmp)
-	file := filepath.Join(tmp, "seed.bundle")
-	sha, err = func() (string, error) {
-		defer unlock()
-		if _, ok, err := head(dir, ref); err != nil {
-			return "", err
-		} else if !ok {
-			return "", ErrNoCheckpoint
-		}
-		if _, err := mirrorGit(context.Background(), dir, "bundle", "create", file, ref); err != nil {
-			return "", err
-		}
-		heads, err := mirrorGit(context.Background(), dir, "bundle", "list-heads", file, ref)
-		if err != nil {
-			return "", err
-		}
-		sha, _, _ := strings.Cut(heads, " ")
-		return sha, nil
-	}()
-	if err != nil {
-		return "", err
-	}
-	f, err := os.Open(file)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	if _, err := io.Copy(w, f); err != nil {
-		return "", err
-	}
-	return sha, nil
+	args := append(append([]string{}, mirrorPins...), "bundle", "create", "-", ref)
+	return node.StreamBundle(ctx, dir, mirrorEnv(dir), ref, w, args)
 }
 
 // Delete removes the Ticket's checkpoint ref from repo's mirror; none is not an error.

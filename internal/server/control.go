@@ -23,17 +23,19 @@ import (
 
 // Control ops.
 const (
-	OpPing      = "ping"
-	OpSubmit    = "submit"
-	OpTickets   = "tickets"
-	OpTicket    = "ticket"
-	OpReply     = "reply"
-	OpStop      = "stop"
-	OpRetry     = "retry"
-	OpApprovals = "approvals"
-	OpAnswer    = "answer"
-	OpLogs      = "logs"
-	OpMetrics   = "metrics"
+	OpPing    = "ping"
+	OpSubmit  = "submit"
+	OpTickets = "tickets"
+	OpTicket  = "ticket"
+	OpReply   = "reply"
+	OpStop    = "stop"
+	OpRetry   = "retry"
+	// OpRetryElsewhere ends the Assignment of a Ticket whose node is offline and places a new one on another node (ID).
+	OpRetryElsewhere = "retry-elsewhere"
+	OpApprovals      = "approvals"
+	OpAnswer         = "answer"
+	OpLogs           = "logs"
+	OpMetrics        = "metrics"
 	// OpHealth reports the Sources, the effects runner and the router (athena status).
 	OpHealth      = "health"
 	OpTriggers    = "triggers"

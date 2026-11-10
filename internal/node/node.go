@@ -575,6 +575,7 @@ func (n *Node) onStop(st *loopState, t core.Ticket, a core.Assignment, reason st
 	if ended {
 		n.streams.end(t.ID)
 		n.dropPrompt(t.ID)
+		n.dropSeed(t.ID)
 	}
 	st.queue = slices.DeleteFunc(st.queue, func(q *session) bool {
 		return q.a.ID == a.ID || (ended && q.t.ID == t.ID)
@@ -1227,7 +1228,12 @@ func (r *runner) run() {
 	// A running Assignment with a session resumes it after a crash or a node restart; a new Assignment of a
 	// Ticket (retry, resume) continues the Ticket's last session.
 	resumeID, recovering := s.a.SessionID, s.a.SessionID != ""
-	if resumeID == "" {
+	// A Ticket that moved here from another node (its worktree seeded) starts a new session: the last one is there.
+	moved := ""
+	if !recovering {
+		moved = n.takeMovedNote(s)
+	}
+	if resumeID == "" && moved == "" {
 		// Only a session of the same runtime and role continues: another runtime's session id means nothing here.
 		resumeID = previousSessionID(s.t, s.a.ID, rtm.Name(), s.a.Role)
 	}
@@ -1277,7 +1283,7 @@ func (r *runner) run() {
 	// A new Assignment after a usage limit (or after another runtime's work) tells its session what the one before knew.
 	failover := false
 	if !recovering {
-		r.handoff, failover = r.handoffFor(rtm.Name(), resumeID)
+		r.handoff, failover = r.handoffFor(rtm.Name(), resumeID, moved)
 	}
 	for crashes := 0; ; {
 		if crashes == 0 && r.putOffForPause() {
@@ -2118,10 +2124,19 @@ func previousSessionID(t core.Ticket, assignmentID, runtime, role string) string
 	if role == core.RoleReview {
 		return ""
 	}
+	node := ""
+	for _, a := range t.Assignments {
+		if a.ID == assignmentID {
+			node = a.Node
+		}
+	}
 	for i := len(t.Assignments) - 1; i >= 0; i-- {
 		a := t.Assignments[i]
 		if a.ID == assignmentID || a.SessionID == "" || a.Role != role || ranOn(t, a) != runtime {
 			continue
+		}
+		if a.Node != "" && node != "" && a.Node != node {
+			return "" // that session is on another node
 		}
 		return a.SessionID
 	}

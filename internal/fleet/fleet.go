@@ -108,8 +108,12 @@ type Config struct {
 	Prompts func() (worker, reviewer string)
 	// Mirror keeps the nodes' checkpoints (mirror.go); nil keeps none, and the nodes' CheckpointSent facts are refused.
 	Mirror *Mirror
-	Now    func() time.Time
-	Log    *slog.Logger
+	// OfflineAfter is how long a remote node may be away before its Tickets show the node offline (0: OfflineAfter).
+	OfflineAfter time.Duration
+	// Now is the clock and AfterFunc its timers (nil: time.Now and time.AfterFunc); tests move both.
+	Now       func() time.Time
+	AfterFunc func(d time.Duration, fn func()) (stop func() bool)
+	Log       *slog.Logger
 }
 
 // Fleet is the registry of the server's nodes.
@@ -152,6 +156,13 @@ type Fleet struct {
 	// localTooBig are the embedded node's Tickets whose bundle went over the bound (localCheckpoints' alone).
 	localTooBig map[string]bool
 	bg          sync.WaitGroup // the mirror's goroutines
+
+	// The offline timers (offline.go), by node id.
+	offMu     sync.Mutex
+	offTimers map[string]*offTimer
+	offGen    uint64
+	// seeds are the launches that seed a worktree first (seed.go); Close waits for them.
+	seeds sync.WaitGroup
 }
 
 // New returns a Fleet; it serves nodes once its Engine is set.
@@ -162,13 +173,19 @@ func New(cfg Config) *Fleet {
 	if cfg.Log == nil {
 		cfg.Log = slog.Default()
 	}
+	if cfg.OfflineAfter <= 0 {
+		cfg.OfflineAfter = OfflineAfter
+	}
+	if cfg.AfterFunc == nil {
+		cfg.AfterFunc = func(d time.Duration, fn func()) func() bool { return time.AfterFunc(d, fn).Stop }
+	}
 	b := make([]byte, 6)
 	_, _ = rand.Read(b)
 	ctx, cancel := context.WithCancel(context.Background())
 	f := &Fleet{cfg: cfg, log: cfg.Log.With("component", "fleet"), now: cfg.Now, epoch: hex.EncodeToString(b),
 		ctx: ctx, cancel: cancel, remotes: map[string]*Remote{}, waiting: map[string]*waitEntry{}, dropped: map[string]time.Time{},
 		placeWake: make(chan struct{}, 1), placeDone: make(chan struct{}), ckLocal: map[string]string{}, ckWake: make(chan struct{}, 1),
-		localTooBig: map[string]bool{}}
+		localTooBig: map[string]bool{}, offTimers: map[string]*offTimer{}}
 	if cfg.Engine != nil {
 		f.eng.Store(cfg.Engine)
 	}
@@ -183,6 +200,7 @@ func New(cfg Config) *Fleet {
 	// A node that connects, reports a status or is undrained may take what waits.
 	f.subs = []func(){func() { signal(f.placeWake) }}
 	go f.placeLoop()
+	f.armAtStart()
 	return f
 }
 
@@ -201,8 +219,10 @@ func (f *Fleet) Close() {
 	f.closed = true
 	f.mu.Unlock()
 	f.cancel()
+	f.disarmAll()
 	f.wg.Wait()
 	<-f.placeDone
+	f.seeds.Wait()
 	f.bg.Wait()
 }
 
@@ -396,6 +416,7 @@ func (f *Fleet) ServeNode(nodeID string, c link.Conn) {
 		close(lk.done)
 		if r := lk.r; r != nil && r.detach(lk) {
 			f.log.Info("node left", "node", nodeID, "error", err)
+			f.armOffline(nodeID, f.now(), f.cfg.OfflineAfter)
 			if err := f.cfg.Store.TouchNode(nodeID, f.now()); err != nil {
 				f.log.Error("touch node", "node", nodeID, "error", err)
 			}
@@ -494,6 +515,8 @@ func (f *Fleet) welcome(lk *nodeLink, h *athenav1.NodeHello) bool {
 	f.sendState(lk)
 	r.attach(lk, n.Name, h, at)
 	f.pubMu.Unlock()
+	// Under connMu, as the offline timer's check: the node's Tickets are not flagged offline after this.
+	f.nodeBack(id)
 	f.log.Info("node linked", "node", id, "name", n.Name, "applied", n.AppliedFactSeq, "version", h.GetVersion())
 	return true
 }
