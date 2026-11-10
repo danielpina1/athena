@@ -103,15 +103,17 @@ func startRemoteRig(tb testing.TB) *remoteRig {
 	}
 	r := &remoteRig{tb: tb, dir: dir, nodeDir: nodeDir, node: nd}
 	tb.Cleanup(func() { stopServer(nd) })
+	// Ready means bench-node's own row says online (the server's own node is always online) and the node serves its
+	// socket, which it does only once it is linked and has the server's prompts.
 	for deadline := time.Now().Add(startTimeout); ; time.Sleep(20 * time.Millisecond) {
 		out := runAthena(tb, "node", "list", "--state-dir", dir)
 		_, err := os.Stat(filepath.Join(nodeDir, server.NodeSocket))
-		if f := strings.Fields(out); strings.Contains(out, " online ") && err == nil {
-			for i, w := range f {
-				if w == "bench-node" && i+1 < len(f) {
-					r.nodeID = f[i+1]
-				}
+		for _, l := range strings.Split(out, "\n") {
+			if f := strings.Fields(l); len(f) >= 3 && f[0] == "bench-node" && f[2] == "online" {
+				r.nodeID = f[1]
 			}
+		}
+		if r.nodeID != "" && err == nil {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -121,7 +123,7 @@ func startRemoteRig(tb testing.TB) *remoteRig {
 	return r
 }
 
-// rssKB is the current resident set size of a process in bytes, read with ps (the node has no metrics socket).
+// rssBytes is the current resident set size of a process in bytes, read with ps (the node has no metrics socket).
 func rssBytes(tb testing.TB, pid int) uint64 {
 	tb.Helper()
 	out, err := exec.Command("ps", "-o", "rss=", "-p", strconv.Itoa(pid)).Output()
@@ -198,7 +200,7 @@ func measureRemoteDispatch(tb testing.TB, n int) []time.Duration {
 			if time.Now().After(deadline) {
 				tb.Fatalf("ticket %s did not start on the node", out.ID)
 			}
-			time.Sleep(2 * time.Millisecond)
+			time.Sleep(10 * time.Millisecond)
 		}
 		ids = append(ids, out.ID)
 		if err := controlCall(r.dir, server.Request{Op: server.OpStop, ID: out.ID, Reason: "done"}, nil); err != nil {

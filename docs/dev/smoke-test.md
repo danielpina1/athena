@@ -204,7 +204,6 @@ the GitHub Source. How Autopilot works is in [autonomy.md](autonomy.md) section 
 Clean up: turn the entry off or remove it in Settings > Autopilot, set the mode back to `observe`, and delete the
 throwaway repository's branch.
 
-
 ## Second machine (needs your second computer on the VPN)
 
 This part checks plan 6 with the Ryzen box as a node of the server on the Mac. How nodes work is in
@@ -232,7 +231,7 @@ and the Ryzen box has `athena`, `git` and a logged-in `claude`. On the Mac, `$S`
    once, in order, and the node's own log (`~/.athena-node/logs/athena.log`) shows no error about a refused fact. A
    Report the session wrote while the cable was out appears after it came back, once.
 5. **Drain and revoke.** `athena node drain ryzen --state-dir $S`: a new task left on "Any node" goes to the Mac, and
-   `ryzen` shows draining. `athena node undrain ryzen`, then `athena node revoke ryzen --yes --state-dir $S`. On the
+   `ryzen` shows draining. `athena node undrain ryzen --state-dir $S`, then `athena node revoke ryzen --yes --state-dir $S`. On the
    Ryzen box, `athena node run` stops with "This node was revoked; run athena node join again." and exits 1. The Nodes
    screen shows `ryzen` revoked.
 
