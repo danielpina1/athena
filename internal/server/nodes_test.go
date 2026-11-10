@@ -12,6 +12,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"slices"
 	"sync/atomic"
@@ -23,6 +24,7 @@ import (
 	"github.com/danielpina1/athena/internal/link"
 	"github.com/danielpina1/athena/internal/node"
 	"github.com/danielpina1/athena/internal/nodelink"
+	"github.com/danielpina1/athena/internal/policy"
 	"github.com/danielpina1/athena/internal/store"
 	"github.com/danielpina1/athena/internal/web"
 )
@@ -40,6 +42,8 @@ type remoteNode struct {
 	n      *node.Node
 	c      *nodelink.Client
 	stop   func()
+	// closeGrace is the node's Config.CloseGrace (0: its default).
+	closeGrace time.Duration
 }
 
 // joinRemote enrolls a node named name with the server, as `athena node join` would, and returns it not yet running.
@@ -95,7 +99,7 @@ func (r *remoteNode) start(slots int) {
 	n := node.New(node.Config{
 		WorkRoot: filepath.Join(r.dir, "work"), StateDir: r.dir, AthenaBin: "/usr/bin/true",
 		SocketPath: filepath.Join(r.dir, "node.sock"), ClaudeBinary: fakeClaude(t), ApprovalTimeout: 5 * time.Second,
-		Name: r.name, Slots: slots,
+		Name: r.name, Slots: slots, CloseGrace: r.closeGrace,
 		Credentials: c.Credentials(), Policy: c.Policy(),
 		WorkerPrompt: c.WorkerPrompt, ReviewerPrompt: c.ReviewerPrompt, OnStatus: c.StatusChanged,
 	}, c.Engine())
@@ -247,5 +251,95 @@ func TestRecoveryLeavesRemoteAssignments(t *testing.T) {
 	}
 	if d := w.detail(id); len(d.Assignments[len(d.Assignments)-1].Interruptions) != 0 {
 		t.Fatalf("interruptions after reconcile: %+v", d.Assignments[len(d.Assignments)-1].Interruptions)
+	}
+}
+
+// parkedRemote runs a server whose own node is drained and one remote, whose session parks under the pause at the end
+// of its first turn, after filing a progress Report when report is set.
+func parkedRemote(t *testing.T, report bool) (*webServer, fakeEnv, string) {
+	t.Helper()
+	fake := newFakeEnv(t, claudeFixture(t, "simple-turn.jsonl"))
+	hold := filepath.Join(t.TempDir(), "turn-may-end")
+	t.Setenv("ATHENA_FAKE_HOLD_RESULT", hold)
+	dir := newStateDir(t)
+	w := startWebWith(t, dir, fastClose)
+	if err := w.d.fleet.SetDraining(fleet.LocalID, true); err != nil {
+		t.Fatal(err)
+	}
+	r := joinRemote(t, w, "mini")
+	r.closeGrace = 300 * time.Millisecond
+	r.start(2)
+	id := w.submit("Task\nbody-r3s4")
+	a := w.running(id)
+	if a.Node != r.id {
+		t.Fatalf("placed on %q, want the remote", a.Node)
+	}
+	if report {
+		var resp node.Response
+		nodeCall(t, r.dir, node.ReportRequest{Op: node.OpReport, Ticket: id, Assignment: a.ID, Status: "progress", Summary: "going"}, &resp)
+		if !resp.OK {
+			t.Fatalf("report = %+v", resp)
+		}
+	}
+	w.ok(Request{Op: OpPause}, nil)
+	if err := os.WriteFile(hold, nil, 0o600); err != nil { // the turn ends
+		t.Fatal(err)
+	}
+	eventually(t, "the remote session parked", func() bool {
+		got := w.interruptions(id)
+		return len(got) == 1 && got[0].Reason == core.InterruptPaused && got[0].ResumedAt == nil && got[0].ReportOwed == !report
+	})
+	return w, fake, id
+}
+
+// Ruling R20: the resume reaches a remote's parked sessions as the local node's. One that owed its Report is started
+// again on its node; an idle one gets its pause lifted and waits for its next Input.
+func TestResumeReachesRemoteParked(t *testing.T) {
+	t.Run("owing its report", func(t *testing.T) {
+		w, fake, id := parkedRemote(t, false)
+		w.ok(Request{Op: OpResume}, nil)
+		eventually(t, "the session started again", func() bool { return len(fake.invocations(t)) == 2 })
+		if rid, ok := argValue(fake.invocations(t)[1], "--resume"); !ok || rid != fixtureSessionID {
+			t.Fatalf("second start args = %v, want --resume %s", fake.invocations(t)[1], fixtureSessionID)
+		}
+		eventually(t, "the pause closed by the start", func() bool {
+			got := w.interruptions(id)
+			return len(got) == 1 && got[0].ResumedAt != nil
+		})
+	})
+	t.Run("idle", func(t *testing.T) {
+		w, fake, id := parkedRemote(t, true)
+		w.ok(Request{Op: OpResume}, nil)
+		eventually(t, "the pause lifted", func() bool {
+			got := w.interruptions(id)
+			return len(got) == 1 && got[0].ResumedAt != nil
+		})
+		time.Sleep(300 * time.Millisecond)
+		if n := len(fake.invocations(t)); n != 1 {
+			t.Fatalf("claude started %d times after the resume of an idle session, want 1", n)
+		}
+	})
+}
+
+// recordingDropper records the repositories whose tokens holdSwitched drops.
+type recordingDropper struct{ repos []string }
+
+func (d *recordingDropper) DropTokens(repo string) { d.repos = append(d.repos, repo) }
+
+// TestHoldDropsTokensOnEveryNode: a repository switched to shadow has its write tokens dropped through the fleet, which
+// sends them to every node (the fleet's own tests cover a remote getting the call; nodelink's, the node acting on it).
+func TestHoldDropsTokensOnEveryNode(t *testing.T) {
+	w := startWeb(t, newStateDir(t))
+	if got := w.d.tokenDropper(); got != tokenDropper(w.d.fleet) {
+		t.Fatalf("tokens dropped through %T, want the fleet", got)
+	}
+	var d recordingDropper
+	from := policy.Settings{Repos: map[string]policy.RepoSettings{"o/r": {}}}
+	to := policy.Settings{Repos: map[string]policy.RepoSettings{"o/r": {Mode: policy.RepoShadow}}}
+	if err := holdSwitched(w.d.eng, &d, from, to); err != nil {
+		t.Fatal(err)
+	}
+	if len(d.repos) != 1 || d.repos[0] != "o/r" {
+		t.Fatalf("dropped %v, want [o/r]", d.repos)
 	}
 }

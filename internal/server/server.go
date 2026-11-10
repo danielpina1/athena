@@ -608,7 +608,8 @@ func recoverAssignments(eng *core.Engine, exec core.Executor, paused func() bool
 // Inputs wait for it). The node resumes a session with the pause or restart note. A Start of one that is queued or
 // still live changes nothing. An idle session the pause parked with nothing waiting is not started: its pause closes
 // (liftPause) and its next Input resumes it, as after a restart.
-// As recovery, it acts only on the Assignments of this server's own node (onLocal).
+// Unlike recovery it acts on every node's Assignments (ruling R20): a remote's sessions parked too, and exec.Start
+// reaches the node the Assignment is on (an offline one drops it, and reconcile redoes it when it connects).
 func resumeParked(eng *core.Engine, exec core.Executor, log *slog.Logger) {
 	tickets, err := eng.Tickets(false)
 	if err != nil {
@@ -617,7 +618,7 @@ func resumeParked(eng *core.Engine, exec core.Executor, log *slog.Logger) {
 	}
 	for _, t := range tickets {
 		a := t.LatestAssignment()
-		if a == nil || !onLocal(a) {
+		if a == nil {
 			continue
 		}
 		if a.State == core.AssignmentRunning && !interrupted(&t, a) {

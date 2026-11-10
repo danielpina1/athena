@@ -12,6 +12,7 @@ import (
 
 	"github.com/danielpina1/athena/internal/core"
 	"github.com/danielpina1/athena/internal/node"
+	"github.com/danielpina1/athena/internal/nodelink"
 )
 
 // LocalID is the id of the node embedded in the server.
@@ -97,7 +98,8 @@ func pinOf(t core.Ticket) string {
 //     Ticket's pinned node when there is one; it has the runtime ready (the pinned one, or any for auto and a review);
 //     and, for a Dir Ticket, it is the node the folder belongs to (the pinned node, else the local one).
 //  2. Warmth: the node of the Ticket's previous Assignment.
-//  3. Load: the lowest (slots in use + queued) / slots; ties go to the local node, then by name.
+//  3. For a review, a node with a ready runtime other than the implementer's (preferred, not required).
+//  4. Load: the lowest (slots in use + queued) / slots; ties go to the local node, then by name.
 //
 // While no remote node is enrolled, an unpinned Assignment that only the runtime keeps off the local node goes there
 // all the same: the node's own launch check then says why it cannot run, as before there were nodes.
@@ -156,6 +158,19 @@ func choose(t core.Ticket, a core.Assignment, nodes []candidate) (id string, wai
 			}
 		}
 	}
+	if a.Role == core.RoleReview && t.Review != nil && t.Review.Runtime != "" {
+		// A review prefers a runtime other than the implementer's (the node's chooser picks it when ready): a node that
+		// has one ready wins over one that has only the implementer's, whatever their load.
+		var other []candidate
+		for _, c := range ok {
+			if hasOtherRuntime(c, t.Review.Runtime) {
+				other = append(other, c)
+			}
+		}
+		if len(other) > 0 {
+			ok = other
+		}
+	}
 	best := slices.MinFunc(ok, func(x, y candidate) int {
 		if c := cmp.Compare(x.load(), y.load()); c != 0 {
 			return c
@@ -186,6 +201,15 @@ func previousNode(t core.Ticket, a core.Assignment, local *candidate) string {
 		prev = local.ID
 	}
 	return prev
+}
+
+func hasOtherRuntime(c candidate, not string) bool {
+	for name, r := range c.Ready {
+		if r && name != not {
+			return true
+		}
+	}
+	return false
 }
 
 func hasRuntime(c candidate, need string) bool {
@@ -239,28 +263,53 @@ func (f *Fleet) Stop(t core.Ticket, a core.Assignment, reason string) {
 
 // SetPaused sends the owner's kill switch to every node, now and to each remote that connects later.
 func (f *Fleet) SetPaused(paused bool) {
-	f.pauseMu.Lock()
-	defer f.pauseMu.Unlock()
+	f.pubMu.Lock()
+	defer f.pubMu.Unlock()
 	f.paused = paused
-	if f.cfg.Local != nil {
-		f.cfg.Local.SetPaused(paused)
-	}
-	f.mu.Lock()
-	rs := make([]*Remote, 0, len(f.remotes))
-	for _, r := range f.remotes {
-		rs = append(rs, r)
-	}
-	f.mu.Unlock()
-	for _, r := range rs {
-		r.SetPaused(paused) // dropped while offline: sendPause redoes it on connect
+	for _, tg := range f.targets() {
+		tg.SetPaused(paused) // dropped by an offline remote: sendState redoes it on connect
 	}
 }
 
-// sendPause sends a remote that just connected the kill switch, before reconcile starts anything on it.
-func (f *Fleet) sendPause(r *Remote) {
-	f.pauseMu.Lock()
-	defer f.pauseMu.Unlock()
-	r.SetPaused(f.paused)
+// DropTokens has every node drop its write tokens of a repository the owner held, now and each remote that connects
+// within a token's life (an offline remote keeps the tokens it holds).
+func (f *Fleet) DropTokens(repo string) {
+	f.pubMu.Lock()
+	defer f.pubMu.Unlock()
+	f.dropped[repo] = f.now()
+	for _, tg := range f.targets() {
+		tg.DropTokens(repo)
+	}
+}
+
+// tokenLife bounds how long a node may hold a write token: a GitHub installation token lives an hour.
+const tokenLife = time.Hour
+
+// sendState queues, on a link about to be published, the kill switch and the token drops a node that was away may
+// have missed. The caller holds pubMu.
+func (f *Fleet) sendState(lk *nodeLink) {
+	lk.command(nodelink.ServeSetPaused, nodelink.ArgsSetPaused{Paused: f.paused})
+	for repo, at := range f.dropped {
+		if f.now().Sub(at) > tokenLife {
+			delete(f.dropped, repo)
+			continue
+		}
+		lk.command(nodelink.ServeDropTokens, nodelink.ArgsDropTokens{Repo: repo})
+	}
+}
+
+// targets are the local node and every remote known.
+func (f *Fleet) targets() []Target {
+	var out []Target
+	if f.cfg.Local != nil {
+		out = append(out, f.cfg.Local)
+	}
+	f.mu.Lock()
+	for _, r := range f.remotes {
+		out = append(out, r)
+	}
+	f.mu.Unlock()
+	return out
 }
 
 // WaitReason is why the Ticket's pending Assignment is not placed yet ("Waiting for mac-studio"), or "".

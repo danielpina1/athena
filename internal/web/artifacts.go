@@ -14,6 +14,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/danielpina1/athena/internal/core"
 	"github.com/danielpina1/athena/internal/node"
 )
 
@@ -77,6 +78,10 @@ func mountArtifacts(mux *http.ServeMux, auth *Auth, a Artifacts, log *slog.Logge
 			fail(w, http.StatusNotFound, "not_found", "not found")
 			return
 		}
+		if msg, ok := nodeOffline(err); ok {
+			fail(w, http.StatusServiceUnavailable, CodeUnavailable, msg)
+			return
+		}
 		log.Error("ticket artifact failed", "method", r.Method, "ticket", r.PathValue("id"), "error", err)
 		fail(w, http.StatusInternalServerError, "internal", "internal error")
 	}
@@ -133,6 +138,18 @@ func mountArtifacts(mux *http.ServeMux, auth *Auth, a Artifacts, log *slog.Logge
 		h.Set("Content-Disposition", disposition("attachment", name))
 		http.ServeContent(w, r, "", st.ModTime(), f)
 	}))
+}
+
+// nodeOffline is the sentence of an error from a node that is not connected ("<name> is offline").
+func nodeOffline(err error) (string, bool) {
+	if !errors.Is(err, core.ErrNodeOffline) {
+		return "", false
+	}
+	var ue *core.UserError
+	if errors.As(err, &ue) && ue.Msg != "" {
+		return ue.Msg, true
+	}
+	return "the ticket's node is offline", true
 }
 
 // disposition is a Content-Disposition of kind (attachment or inline) with the file's name, when it can be quoted.

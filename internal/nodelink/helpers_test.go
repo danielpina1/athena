@@ -237,6 +237,7 @@ func run(t *testing.T, c *Client) {
 type fakeTarget struct {
 	mu       sync.Mutex
 	starts   []core.Ticket
+	dropped  []string
 	dir      string
 	backfill []node.Line
 	live     chan node.Line
@@ -247,10 +248,15 @@ func (f *fakeTarget) Start(t core.Ticket, a core.Assignment) {
 	defer f.mu.Unlock()
 	f.starts = append(f.starts, t)
 }
-func (f *fakeTarget) Deliver(core.Ticket, core.Assignment)               {}
-func (f *fakeTarget) Stop(core.Ticket, core.Assignment, string)          {}
-func (f *fakeTarget) Interrupt(string) error                             { return node.ErrNoSession }
-func (f *fakeTarget) SetPaused(bool)                                     {}
+func (f *fakeTarget) Deliver(core.Ticket, core.Assignment)      {}
+func (f *fakeTarget) Stop(core.Ticket, core.Assignment, string) {}
+func (f *fakeTarget) Interrupt(string) error                    { return node.ErrNoSession }
+func (f *fakeTarget) SetPaused(bool)                            {}
+func (f *fakeTarget) DropTokens(repo string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.dropped = append(f.dropped, repo)
+}
 func (f *fakeTarget) ApplyProposal(context.Context, core.Proposal) error { return nil }
 func (f *fakeTarget) TicketDiff(context.Context, string) (node.Diff, error) {
 	return node.Diff{}, node.ErrNoWorkspace

@@ -30,6 +30,7 @@ const (
 	ServeStop          = "stop"          // ArgsStop; no value
 	ServeInterrupt     = "interrupt"     // ArgsInterrupt; no value
 	ServeSetPaused     = "setPaused"     // ArgsSetPaused; no value
+	ServeDropTokens    = "dropTokens"    // ArgsDropTokens; no value
 	ServeApplyProposal = "applyProposal" // ArgsApplyProposal; no value
 	ServeDiff          = "diff"          // ArgsDiff; node.Diff, its patch cut to fit a frame
 	ServeFiles         = "files"         // ArgsFiles; ResultFiles
@@ -56,8 +57,10 @@ type (
 		Assignment core.Assignment
 		Reason     string
 	}
-	ArgsInterrupt     struct{ TicketID string }
-	ArgsSetPaused     struct{ Paused bool }
+	ArgsInterrupt struct{ TicketID string }
+	ArgsSetPaused struct{ Paused bool }
+	// ArgsDropTokens drops the node's write tokens of a repository the owner held (node.Node.DropTokens).
+	ArgsDropTokens    struct{ Repo string }
 	ArgsApplyProposal struct{ Proposal core.Proposal }
 	ArgsDiff          struct{ TicketID string }
 	ArgsFiles         struct{ TicketID string }
@@ -95,6 +98,7 @@ type target interface {
 	Stop(t core.Ticket, a core.Assignment, reason string)
 	Interrupt(ticketID string) error
 	SetPaused(paused bool)
+	DropTokens(repo string)
 	ApplyProposal(ctx context.Context, p core.Proposal) error
 	TicketDiff(ctx context.Context, ticketID string) (node.Diff, error)
 	TicketFiles(ctx context.Context, ticketID string) ([]node.FileEntry, bool, error)
@@ -115,7 +119,7 @@ func decodeArgs(b []byte, v any) error {
 	return nil
 }
 
-// serve handles one server call. Start, Deliver, Stop and SetPaused only post to the node's mailbox, so they run here,
+// serve handles one server call. Start, Deliver, Stop, SetPaused and DropTokens only post to the node's mailbox, so they run here,
 // on the reader goroutine, in the order they came; the rest run on their own goroutines.
 func (c *Client) serve(cn *conn, call *athenav1.NodeCall) {
 	id := call.GetId()
@@ -159,6 +163,14 @@ func (c *Client) serve(cn *conn, call *athenav1.NodeCall) {
 			return
 		}
 		t.SetPaused(a.Paused)
+		c.reply(cn, id, nil, nil)
+	case ServeDropTokens:
+		var a ArgsDropTokens
+		if err := decodeArgs(call.GetArgs(), &a); err != nil {
+			c.reply(cn, id, nil, err)
+			return
+		}
+		t.DropTokens(a.Repo)
 		c.reply(cn, id, nil, nil)
 	case ServeUnsubscribe:
 		var a ArgsUnsubscribe

@@ -39,6 +39,10 @@ func TestChooseRules(t *testing.T) {
 	warm := core.Ticket{ID: "T-5", Execution: &core.Execution{Runtime: core.RuntimeClaude},
 		Assignments: []core.Assignment{{ID: "a0", State: core.AssignmentEnded, Node: "n2"}, {ID: "a1", State: core.AssignmentPending}}}
 	pending := core.Assignment{ID: "a1", State: core.AssignmentPending}
+	review := core.Ticket{ID: "T-7", Execution: &core.Execution{Runtime: core.RuntimeClaude},
+		Review: &core.ReviewState{Runtime: core.RuntimeClaude}}
+	reviewA := core.Assignment{ID: "r1", State: core.AssignmentPending, Role: core.RoleReview}
+	both := cand("n5", "both", 2, core.RuntimeClaude, core.RuntimeCodex)
 
 	cases := []struct {
 		name     string
@@ -61,6 +65,10 @@ func TestChooseRules(t *testing.T) {
 		{"a dir ticket waits for its node", dir, pending, []candidate{drainingLocal, mini}, "", "Waiting for server"},
 		{"auto with only codex ready picks the codex node", auto, pending, []candidate{
 			cand("local", "server", 0), cand("n1", "mini", 0), codexOnly}, "n3", ""},
+		{"a review prefers a node with another runtime over the load", review, reviewA,
+			[]candidate{local, both}, "n5", ""},
+		{"a review takes the implementer's runtime when no other is ready", review, reviewA,
+			[]candidate{local, mini}, "local", ""},
 		{"a pinned runtime nobody has waits", core.Ticket{ID: "T-6", Execution: &core.Execution{Runtime: core.RuntimeCodex}},
 			pending, []candidate{mini, cand("n4", "other", 0)}, "", "Waiting for a node with Codex"},
 	}

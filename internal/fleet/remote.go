@@ -121,6 +121,11 @@ func (r *Remote) SetPaused(paused bool) {
 	r.command(nodelink.ServeSetPaused, nodelink.ArgsSetPaused{Paused: paused})
 }
 
+// DropTokens has the node drop its write tokens of a repository the owner held.
+func (r *Remote) DropTokens(repo string) {
+	r.command(nodelink.ServeDropTokens, nodelink.ArgsDropTokens{Repo: repo})
+}
+
 // command queues a call whose answer nobody waits for, in order with the others; offline it is dropped. It never
 // blocks: the Engine calls Start, Deliver and Stop under its lock.
 func (r *Remote) command(method string, args any) {
@@ -132,6 +137,16 @@ func (r *Remote) command(method string, args any) {
 	b, err := json.Marshal(args)
 	if err != nil {
 		r.f.log.Error("encode a node call", "node", r.id, "method", method, "error", err)
+		return
+	}
+	lk.queueCommand(method, b)
+}
+
+// command queues a call on this link whose answer nobody waits for.
+func (lk *nodeLink) command(method string, args any) {
+	b, err := json.Marshal(args)
+	if err != nil {
+		lk.f.log.Error("encode a node call", "node", lk.nodeID, "method", method, "error", err)
 		return
 	}
 	lk.queueCommand(method, b)

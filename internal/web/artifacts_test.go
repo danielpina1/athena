@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/danielpina1/athena/internal/core"
 	"github.com/danielpina1/athena/internal/node"
 )
 
@@ -123,6 +124,20 @@ func TestArtifactsNotFound(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "git exploded") {
 		t.Errorf("the failure was not logged: %q", logs)
+	}
+}
+
+// TestArtifactsNodeOffline: a Ticket whose node is offline answers 503 with "<name> is offline".
+func TestArtifactsNodeOffline(t *testing.T) {
+	e, fa, _ := artifactsEnv(t)
+	err := &core.UserError{Msg: "mini is offline", Err: core.ErrNodeOffline}
+	fa.diffErr, fa.filesErr, fa.openErr = err, err, err
+	for _, p := range artifactRoutes {
+		rec := e.Do("GET", p, nil)
+		if rec.Code != http.StatusServiceUnavailable ||
+			strings.TrimSpace(rec.Body.String()) != `{"code":"unavailable","error":"mini is offline"}` {
+			t.Errorf("%s with the node offline: %d %s", p, rec.Code, rec.Body)
+		}
 	}
 }
 

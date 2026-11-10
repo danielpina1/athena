@@ -980,10 +980,15 @@ func heldRepos(from, to policy.Settings) []string {
 	return out
 }
 
-// holdSwitched holds back the work of the repositories a settings change switched to shadow mode: the node drops their
-// write tokens (revoked, so a copy a worker kept stops working), and their replies waiting to go out are held for the
-// owner. Both are safe to repeat (a change told again).
-func holdSwitched(eng *core.Engine, n *node.Node, from, to policy.Settings) error {
+// tokenDropper drops the write tokens of a repository on the nodes: the fleet (every node), or one node.
+type tokenDropper interface {
+	DropTokens(repo string)
+}
+
+// holdSwitched holds back the work of the repositories a settings change switched to shadow mode: every node drops
+// their write tokens (revoked, so a copy a worker kept stops working), and their replies waiting to go out are held for
+// the owner. Both are safe to repeat (a change told again). n may be nil (tests).
+func holdSwitched(eng *core.Engine, n tokenDropper, from, to policy.Settings) error {
 	for _, repo := range heldRepos(from, to) {
 		if n != nil {
 			n.DropTokens(repo)

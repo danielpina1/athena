@@ -50,6 +50,19 @@ func TestServeCalls(t *testing.T) {
 		t.Fatalf("strict args err = %q", r.GetError())
 	}
 
+	// The owner held a repository: the node drops its write tokens.
+	fs.call(t, 7, ServeDropTokens, ArgsDropTokens{Repo: "o/r"})
+	eventually(t, "the dropTokens result", func() bool { return fs.result(7) != nil })
+	if r := fs.result(7); r.GetError() != "" {
+		t.Fatalf("dropTokens err = %q", r.GetError())
+	}
+	tgt.mu.Lock()
+	dropped := append([]string(nil), tgt.dropped...)
+	tgt.mu.Unlock()
+	if len(dropped) != 1 || dropped[0] != "o/r" {
+		t.Fatalf("dropped = %v, want [o/r]", dropped)
+	}
+
 	// A subscription: its answer, then the backfill, then live lines, then the close.
 	fs.call(t, 6, ServeSubscribe, ArgsSubscribe{TicketID: "T1", From: -1})
 	eventually(t, "the subscribe result", func() bool { return fs.result(6) != nil })

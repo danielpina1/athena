@@ -590,6 +590,17 @@ func (d *Dispatcher) unsubscribe(thread string) error {
 	return d.eng.Unsubscribe(thread)
 }
 
+// tokenDropper is what drops a held repository's write tokens: the fleet (every node), else the node; nil without.
+func (d *Dispatcher) tokenDropper() tokenDropper {
+	switch {
+	case d.fleet != nil:
+		return d.fleet
+	case d.node != nil:
+		return d.node
+	}
+	return nil
+}
+
 // interrupt abandons the running turn of a Ticket's session; a Ticket without a running session is node.ErrNoSession.
 func (d *Dispatcher) interrupt(ticketID string) error {
 	if _, _, err := d.eng.Ticket(ticketID); err != nil {

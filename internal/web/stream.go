@@ -244,6 +244,14 @@ func (p *pending) add(l node.Line) {
 	}
 }
 
+// streamError is what a stream that could not open says: "<name> is offline" for a node that is not connected.
+func streamError(err error) string {
+	if msg, ok := nodeOffline(err); ok {
+		return msg
+	}
+	return "cannot stream this ticket"
+}
+
 // runStream serves one stream until its context ends.
 func (c *conn) runStream(ctx context.Context, st *streamer) {
 	if _, err := c.d.hub.Detail(st.ticketID); err != nil {
@@ -253,7 +261,7 @@ func (c *conn) runStream(ctx context.Context, st *streamer) {
 	backfill, live, cancel, err := c.d.streams.Subscribe(st.ticketID, st.from)
 	if err != nil {
 		c.d.log.Warn("dashboard: stream subscribe", "ticket", st.ticketID, "error", err)
-		c.streamFailed(st.ticketID, CodeUnavailable, "cannot stream this ticket")
+		c.streamFailed(st.ticketID, CodeUnavailable, streamError(err))
 		return
 	}
 	defer func() { cancel() }()
@@ -275,7 +283,7 @@ func (c *conn) runStream(ctx context.Context, st *streamer) {
 			tail, newLive, newCancel, err := c.d.streams.Subscribe(st.ticketID, -1)
 			if err != nil {
 				c.d.log.Warn("dashboard: stream catch-up", "ticket", st.ticketID, "error", err)
-				c.streamFailed(st.ticketID, CodeUnavailable, "cannot stream this ticket")
+				c.streamFailed(st.ticketID, CodeUnavailable, streamError(err))
 				return
 			}
 			cancel()

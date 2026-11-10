@@ -2,7 +2,10 @@
 // It is ported from the TypeScript reference (src/core/model.ts).
 package core
 
-import "time"
+import (
+	"errors"
+	"time"
+)
 
 // ReportState is what an Assignment reports: work is in progress, its worker waits for a Trigger,
 // a result is ready, a person must act to unblock or recover it, or nothing is left to do.
@@ -579,6 +582,10 @@ func (t *Ticket) followsDone() *Close {
 	}
 	return latest
 }
+
+// ErrNodeOffline is in the error of a call to a node that is not connected (a *UserError whose message is
+// "<name> is offline"); the fleet returns it, the dashboard shows its message.
+var ErrNodeOffline = errors.New("node offline")
 
 // ReasonNodeOffline is why Retry elsewhere ends an Assignment whose node went offline.
 const ReasonNodeOffline = "node offline"

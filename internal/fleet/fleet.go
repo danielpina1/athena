@@ -8,7 +8,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -64,7 +63,7 @@ const (
 )
 
 // ErrNodeOffline is in the error of a call to a node that is not connected; its message is "<name> is offline".
-var ErrNodeOffline = errors.New("node offline")
+var ErrNodeOffline = core.ErrNodeOffline
 
 // offline is the UserError of a call to the named node while it is offline.
 func offline(name string) error {
@@ -83,6 +82,7 @@ type Target interface {
 	OpenTicketFile(ctx context.Context, ticketID, rel string) (*os.File, error)
 	ApplyProposal(ctx context.Context, p core.Proposal) error
 	SetPaused(paused bool)
+	DropTokens(repo string)
 	Status() node.Status
 }
 
@@ -134,9 +134,11 @@ type Fleet struct {
 	placeWake chan struct{}
 	placeDone chan struct{}
 
-	// pauseMu orders the kill switch's sends: a remote that connects gets the latest one.
-	pauseMu sync.Mutex
+	// pubMu orders what every node must hear before it takes work (the kill switch, the repositories whose write
+	// tokens were dropped) against a link's publication: a remote that connects gets the latest of each first.
+	pubMu   sync.Mutex
 	paused  bool
+	dropped map[string]time.Time // repo -> when its write tokens were dropped
 }
 
 // New returns a Fleet; it serves nodes once its Engine is set.
@@ -151,7 +153,7 @@ func New(cfg Config) *Fleet {
 	_, _ = rand.Read(b)
 	ctx, cancel := context.WithCancel(context.Background())
 	f := &Fleet{cfg: cfg, log: cfg.Log.With("component", "fleet"), now: cfg.Now, epoch: hex.EncodeToString(b),
-		ctx: ctx, cancel: cancel, remotes: map[string]*Remote{}, waiting: map[string]*waitEntry{},
+		ctx: ctx, cancel: cancel, remotes: map[string]*Remote{}, waiting: map[string]*waitEntry{}, dropped: map[string]time.Time{},
 		placeWake: make(chan struct{}, 1), placeDone: make(chan struct{})}
 	if cfg.Engine != nil {
 		f.eng.Store(cfg.Engine)
@@ -401,8 +403,6 @@ func (f *Fleet) ServeNode(nodeID string, c link.Conn) {
 	if !f.welcome(lk, h) {
 		return
 	}
-	// The kill switch first: nothing reconcile or placement starts on the node runs before it.
-	f.sendPause(lk.r)
 	f.changed()
 	lk.wg.Add(3)
 	go lk.applyFacts()
@@ -464,7 +464,12 @@ func (f *Fleet) welcome(lk *nodeLink, h *athenav1.NodeHello) bool {
 		lk.end(1011, "internal error")
 		return false
 	}
+	// Published only after the kill switch and the token drops are queued: nothing placement or reconcile starts on the
+	// node reaches it before them.
+	f.pubMu.Lock()
+	f.sendState(lk)
 	r.attach(lk, n.Name, h, at)
+	f.pubMu.Unlock()
 	f.log.Info("node linked", "node", id, "name", n.Name, "applied", n.AppliedFactSeq, "version", h.GetVersion())
 	return true
 }
