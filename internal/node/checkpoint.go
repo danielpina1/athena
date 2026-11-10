@@ -65,6 +65,11 @@ func checkpointRef(ticketID string) string {
 // gitIn and checkpointTimeout, and returns the commit. When the ref already holds the same work on the same HEAD, that
 // commit is the checkpoint and the ref stays. why goes into the ref's log.
 func checkpoint(workDir, ticketID string, env []string, why string) (sha string, err error) {
+	return checkpointTo(workDir, checkpointRef(ticketID), env, why)
+}
+
+// checkpointTo is checkpoint into ref.
+func checkpointTo(workDir, ref string, env []string, why string) (sha string, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), checkpointTimeout)
 	defer cancel()
 	tmp, err := os.MkdirTemp("", "athena-checkpoint-")
@@ -105,7 +110,6 @@ func checkpoint(workDir, ticketID string, env []string, why string) (sha string,
 			return "", err
 		}
 	}
-	ref := checkpointRef(ticketID)
 	if prev, err := git("rev-parse", "--verify", "--quiet", ref+"^{commit}"); err == nil && prev != "" {
 		if out, err := git("rev-parse", prev+"^{tree}", prev+"^@"); err == nil && out == tree+"\n"+head {
 			return prev, nil // nothing changed since the last checkpoint

@@ -646,7 +646,6 @@ func resumeParked(eng *core.Engine, exec core.Executor, log *slog.Logger) {
 	}
 }
 
-// onLocal reports whether the Assignment is this server's own node's: placed on it, or on none.
 // offlineAfter is fleet.OfflineAfter, or, for the e2e harness only (ATHENA_TEST=1), the Go duration in
 // ATHENA_TEST_OFFLINE_AFTER (Ruling R5).
 func offlineAfter() time.Duration {
@@ -658,6 +657,7 @@ func offlineAfter() time.Duration {
 	return fleet.OfflineAfter
 }
 
+// onLocal reports whether the Assignment is this server's own node's: placed on it, or on none.
 func onLocal(a *core.Assignment) bool { return a.Node == "" || a.Node == fleet.LocalID }
 
 // liftPause closes the open pause of an idle running Assignment that is not started again (PauseLifted: resumed

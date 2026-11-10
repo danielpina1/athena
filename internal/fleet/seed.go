@@ -69,17 +69,47 @@ func (f *Fleet) launchSeeded(ticketID, assignmentID, nodeID string) {
 		f.mu.Unlock()
 		return
 	}
+	if run := f.seeding[assignmentID]; run != nil {
+		// Placement and reconcile (or a resume) can both ask: one seed runs, and runs again only if it failed.
+		run.again = true
+		f.mu.Unlock()
+		return
+	}
+	run := &seedRun{}
+	f.seeding[assignmentID] = run
 	f.seeds.Add(1)
 	f.mu.Unlock()
 	go func() {
 		defer f.seeds.Done()
-		if err := f.seedAndStart(ticketID, assignmentID, nodeID); err != nil && f.ctx.Err() == nil {
-			f.log.Warn("seed and start", "ticket", ticketID, "assignment", assignmentID, "node", nodeID, "error", err)
+		for {
+			err := f.seedAndStart(ticketID, assignmentID, nodeID)
+			if err != nil && f.ctx.Err() == nil {
+				f.log.Warn("seed and start", "ticket", ticketID, "assignment", assignmentID, "node", nodeID, "error", err)
+			}
+			f.mu.Lock()
+			again := run.again && err != nil && !f.closed
+			run.again = false
+			if !again {
+				delete(f.seeding, assignmentID)
+			}
+			f.mu.Unlock()
+			if !again {
+				return
+			}
 		}
 	}()
 }
 
+// seedRun is a seed under way; again is set when another launch of the same Assignment asked meanwhile.
+type seedRun struct{ again bool }
+
+// seedHook, when set (tests), runs as a seed starts.
+var seedHook func()
+
 func (f *Fleet) seedAndStart(ticketID, assignmentID, nodeID string) error {
+	if seedHook != nil {
+		seedHook()
+	}
 	eng := f.engine()
 	tg := f.Target(nodeID)
 	if eng == nil || tg == nil {
@@ -102,13 +132,27 @@ func (f *Fleet) seedAndStart(ticketID, assignmentID, nodeID string) error {
 		return nil
 	}
 	prev, _ := f.seedFrom(t, *a, nodeID)
-	sd := node.Seed{TicketID: t.ID, AssignmentID: a.ID, From: f.nodeName(prev)}
+	sd := node.Seed{TicketID: t.ID, AssignmentID: a.ID}
 	if i := slices.IndexFunc(t.Assignments, func(x core.Assignment) bool { return x.ID == a.ID }); i > 0 {
 		sd.Offline = t.Assignments[i-1].EndedReason == core.ReasonNodeOffline
+		// The node the work came from: the latest earlier Assignment that ran (one stranded before it started did not).
+		for j := i - 1; j >= 0; j-- {
+			if x := t.Assignments[j]; x.StartedAt != nil || x.SessionID != "" {
+				if prev = x.Node; prev == "" {
+					prev = f.cfg.LocalID
+				}
+				break
+			}
+		}
 	}
+	sd.From = f.nodeName(prev)
 	file, err := f.seedBundle(t, &sd)
 	if err != nil {
 		f.log.Warn("the checkpoint cannot be bundled; seeding without it", "ticket", t.ID, "error", err)
+		sd.Unsent = node.SeedSendFailed
+		if errors.Is(err, node.ErrCheckpointTooBig) {
+			sd.Unsent = node.SeedTooBig
+		}
 	}
 	if file != "" {
 		defer os.Remove(file)
@@ -164,7 +208,7 @@ func (r *Remote) seedThenStart(sd node.Seed, file string, t core.Ticket, a core.
 		return offline(r.nodeName())
 	}
 	args := nodelink.ArgsSeed{TicketID: sd.TicketID, AssignmentID: sd.AssignmentID, SHA: sd.SHA, At: sd.At, From: sd.From,
-		Offline: sd.Offline}
+		Offline: sd.Offline, Unsent: sd.Unsent}
 	if file != "" {
 		id, err := lk.sendSeed(sd.TicketID, file)
 		if err != nil {

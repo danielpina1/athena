@@ -330,7 +330,21 @@ func (m *Mirror) Bundle(repo, ticketID string, w io.Writer) (sha string, err err
 		return "", err
 	}
 	args := append(append([]string{}, mirrorPins...), "bundle", "create", "-", ref)
-	return node.StreamBundle(ctx, dir, mirrorEnv(dir), ref, w, args)
+	return node.StreamBundle(ctx, dir, mirrorEnv(dir), ref, &capWriter{w: w, left: maxBundle}, args)
+}
+
+// capWriter passes at most left bytes to w; past them it fails with ErrCheckpointTooBig.
+type capWriter struct {
+	w    io.Writer
+	left int64
+}
+
+func (c *capWriter) Write(p []byte) (int, error) {
+	if int64(len(p)) > c.left {
+		return 0, node.ErrCheckpointTooBig
+	}
+	c.left -= int64(len(p))
+	return c.w.Write(p)
 }
 
 // Delete removes the Ticket's checkpoint ref from repo's mirror; none is not an error.

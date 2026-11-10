@@ -103,7 +103,8 @@ func (c *Client) onSeedChunk(cn *conn, ch *athenav1.BlobChunk) {
 // seed serves the seed call: the node takes the transfer's bundle, if it came whole, else seeds without one (the
 // worktree then starts from the pushed branch or the default branch, and the session hears so).
 func (c *Client) seed(cn *conn, t target, a ArgsSeed) error {
-	sd := node.Seed{TicketID: a.TicketID, AssignmentID: a.AssignmentID, SHA: a.SHA, At: a.At, From: a.From, Offline: a.Offline}
+	sd := node.Seed{TicketID: a.TicketID, AssignmentID: a.AssignmentID, SHA: a.SHA, At: a.At, From: a.From, Offline: a.Offline,
+		Unsent: a.Unsent}
 	var path string
 	if a.Transfer != "" {
 		cn.mu.Lock()

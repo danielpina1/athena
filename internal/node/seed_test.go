@@ -71,12 +71,17 @@ func TestSeedRestoresCheckpoint(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(w, "README"), []byte("hi there\n"), 0o644); err != nil {
 			h.t.Fatal(err)
 		}
+		if err := os.WriteFile(filepath.Join(w, "gone.txt"), []byte("to be deleted\n"), 0o644); err != nil {
+			h.t.Fatal(err)
+		}
+		git(h.t, w, "add", "gone.txt")
 		git(h.t, w, "commit", "-qam", "committed on the other node")
 		parent = git(h.t, w, "rev-parse", "HEAD")
 		if err := os.WriteFile(filepath.Join(w, "a.txt"), []byte("half done\n"), 0o644); err != nil {
 			h.t.Fatal(err)
 		}
 		git(h.t, w, "add", "a.txt")
+		git(h.t, w, "rm", "-q", "gone.txt")
 		tree := git(h.t, w, "write-tree")
 		cp = git(h.t, w, "commit-tree", "-p", "HEAD", "-m", "checkpoint", tree)
 		git(h.t, w, "update-ref", checkpointRef(tk.ID), cp)
@@ -103,9 +108,13 @@ func TestSeedRestoresCheckpoint(t *testing.T) {
 	if b, err := os.ReadFile(filepath.Join(wd, "a.txt")); err != nil || string(b) != "half done\n" {
 		t.Fatalf("a.txt = %q, %v", b, err)
 	}
-	if st := git(t, wd, "status", "--porcelain", "--untracked-files=no"); !strings.Contains(st, "a.txt") {
-		t.Fatalf("a.txt is not an uncommitted change: %q", st)
+	if _, err := os.Stat(filepath.Join(wd, "gone.txt")); !os.IsNotExist(err) {
+		t.Fatalf("gone.txt, which the checkpoint deleted, is in the worktree: %v", err)
 	}
+	if st := git(t, wd, "status", "--porcelain"); !strings.Contains(st, "?? a.txt") || !strings.Contains(st, "D gone.txt") {
+		t.Fatalf("the checkpoint's work is not back as uncommitted changes: %q", st)
+	}
+	git(t, wd, "diff", "--cached", "--quiet") // nothing staged
 	clone := CloneDir(h.cfg.StateDir, "o/r")
 	if out := git(t, clone, "for-each-ref", "refs/athena/"+strings.ToLower(tk.ID)+"/seed"); out != "" {
 		t.Fatalf("the seed ref is left: %s", out)
@@ -191,5 +200,54 @@ func TestSeedBadBundle(t *testing.T) {
 		if err := h.n.Seed(sd); err == nil {
 			t.Errorf("Seed(%+v) was taken", sd)
 		}
+	}
+}
+
+// The moved line says why a checkpoint the server had did not come.
+func TestMovedLineReasons(t *testing.T) {
+	rec := seedRecord{From: "studio", Offline: true, Unsent: SeedTooBig}
+	if got, want := movedLine(rec, seedFromBase, "athena/t-1", "trunk"),
+		"This Ticket moved from studio, which went offline; its last checkpoint was too large to send here and its branch was never pushed, so the work starts again from trunk. Nothing done on studio is here."; got != want {
+		t.Errorf("too big, base:\n%s\nwant\n%s", got, want)
+	}
+	rec.Unsent = SeedSendFailed
+	if got, want := movedLine(rec, seedFromPushed, "athena/t-1", "trunk"),
+		"This Ticket moved from studio, which went offline; its last checkpoint could not be sent here, so the work below starts from the branch athena/t-1 as it was last pushed. Work in progress after that push is not here."; got != want {
+		t.Errorf("failed, pushed:\n%s\nwant\n%s", got, want)
+	}
+}
+
+// The sweep drops the seeds of ended Tickets, those past seedKeep and bundles with no seed; it keeps the others.
+func TestSweepSeeds(t *testing.T) {
+	h := newHarness(t, nil)
+	ended := h.submit("Ends", t.TempDir())
+	if err := h.eng.StopTicket(ended.ID, "done"); err != nil {
+		t.Fatal(err)
+	}
+	open := h.submit("Stays", t.TempDir())
+	for _, id := range []string{ended.ID, open.ID, "T-9999"} {
+		if err := h.n.Seed(Seed{TicketID: id, AssignmentID: "a", From: "studio"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old, _ := h.n.seedFor("T-9999", "a")
+	old.Created = time.Now().Add(-seedKeep - time.Hour)
+	if err := h.n.writeSeed("T-9999", old); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(h.n.seedPath("T-8888", ".bundle"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.n.sweepSeeds()
+	if _, ok := h.n.seedFor(open.ID, "a"); !ok {
+		t.Error("the open Ticket's seed was swept")
+	}
+	for _, id := range []string{ended.ID, "T-9999"} {
+		if _, ok := h.n.seedFor(id, "a"); ok {
+			t.Errorf("%s's seed was kept", id)
+		}
+	}
+	if _, err := os.Stat(h.n.seedPath("T-8888", ".bundle")); !os.IsNotExist(err) {
+		t.Errorf("an orphan bundle was kept: %v", err)
 	}
 }

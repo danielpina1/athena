@@ -161,8 +161,10 @@ type Fleet struct {
 	offMu     sync.Mutex
 	offTimers map[string]*offTimer
 	offGen    uint64
-	// seeds are the launches that seed a worktree first (seed.go); Close waits for them.
-	seeds sync.WaitGroup
+	// seeds are the launches that seed a worktree first (seed.go); Close waits for them. seeding are those under
+	// way, by Assignment id (under mu).
+	seeds   sync.WaitGroup
+	seeding map[string]*seedRun
 }
 
 // New returns a Fleet; it serves nodes once its Engine is set.
@@ -185,7 +187,7 @@ func New(cfg Config) *Fleet {
 	f := &Fleet{cfg: cfg, log: cfg.Log.With("component", "fleet"), now: cfg.Now, epoch: hex.EncodeToString(b),
 		ctx: ctx, cancel: cancel, remotes: map[string]*Remote{}, waiting: map[string]*waitEntry{}, dropped: map[string]time.Time{},
 		placeWake: make(chan struct{}, 1), placeDone: make(chan struct{}), ckLocal: map[string]string{}, ckWake: make(chan struct{}, 1),
-		localTooBig: map[string]bool{}, offTimers: map[string]*offTimer{}}
+		localTooBig: map[string]bool{}, offTimers: map[string]*offTimer{}, seeding: map[string]*seedRun{}}
 	if cfg.Engine != nil {
 		f.eng.Store(cfg.Engine)
 	}

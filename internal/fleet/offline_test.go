@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/danielpina1/athena/internal/core"
+	"github.com/danielpina1/athena/internal/node"
 	"github.com/danielpina1/athena/internal/nodelink"
 )
 
@@ -219,4 +220,102 @@ func TestSeedBeforeStart(t *testing.T) {
 		entries, _ := os.ReadDir(filepath.Join(f.cfg.Mirror.dir, mirrorTmp))
 		return len(entries) == 0
 	})
+}
+
+// A placed, pending Assignment that moved, started again by the Engine (a resume after a restart between its
+// placement and its seed), is seeded before its Start; a second Start while that seed is under way sends no second.
+func TestStartOfMovedPendingSeeds(t *testing.T) {
+	e := newEnv(t)
+	e.addNode(nodeID, "mini")
+	e.addNode(otherID, "studio")
+	f := e.fleet(func(c *Config) { c.Mirror = NewMirror(filepath.Join(t.TempDir(), "checkpoints")) })
+	tk := e.placedRepo(nodeID, "o/r")
+	if err := e.eng.AssignmentStarted(tk.ID, tk.LatestAssignment().ID, "s1", "", core.RuntimeClaude); err != nil {
+		t.Fatal(err)
+	}
+	repo := nodeRepo(t)
+	sha := checkpointIn(t, repo, tk.ID, "a.txt", "half done\n")
+	if err := f.cfg.Mirror.Receive("o/r", tk.ID, bytes.NewReader(bundleOf(t, repo, tk.ID, ""))); err != nil {
+		t.Fatal(err)
+	}
+	a := dialAnswering(t, f, otherID)
+	if err := e.eng.NodeOffline(nodeID, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.eng.RetryElsewhere(tk.ID); err != nil { // the Executor records nothing: no placement here
+		t.Fatal(err)
+	}
+	moved := e.ticket(tk.ID)
+	next := moved.LatestAssignment()
+	if err := e.eng.AssignmentPlaced(tk.ID, next.ID, otherID); err != nil {
+		t.Fatal(err)
+	}
+	moved = e.ticket(tk.ID)
+	release := make(chan struct{})
+	seedHook = func() { <-release }
+	defer func() { seedHook = nil }()
+	f.Start(moved, *moved.LatestAssignment())
+	f.Start(moved, *moved.LatestAssignment())
+	close(release)
+	eventually(t, "the start on studio", func() bool { return a.got(nodelink.ServeStart) })
+	time.Sleep(100 * time.Millisecond)
+	seeds := 0
+	var got []string
+	order, _ := a.received()
+	for _, o := range order {
+		if o == nodelink.ServeSeed {
+			seeds++
+		}
+		if o != nodelink.ServeStatus && (len(got) == 0 || got[len(got)-1] != o) {
+			got = append(got, o)
+		}
+	}
+	if seeds != 1 || strings.Join(got, ",") != "setPaused,blob:seed,seed,start" {
+		t.Fatalf("order = %v (%d seeds), want one seed's chunks, the seed, then the start", order, seeds)
+	}
+	a.mu.Lock()
+	var seed nodelink.ArgsSeed
+	for i, m := range a.methods {
+		if m == nodelink.ServeSeed {
+			_ = json.Unmarshal(a.args[i], &seed)
+		}
+	}
+	a.mu.Unlock()
+	if seed.SHA != sha || seed.From != "mini" || !seed.Offline {
+		t.Fatalf("seed = %+v", seed)
+	}
+}
+
+// A checkpoint the mirror cannot bundle (over the bound) is not sent: the seed says why.
+func TestSeedTooBigSaysSo(t *testing.T) {
+	e, f := executorEnv(t, func(c *Config) { c.Mirror = NewMirror(filepath.Join(t.TempDir(), "checkpoints")) })
+	e.addNode(nodeID, "mini")
+	e.addNode(otherID, "studio")
+	tk := e.placedRepo(nodeID, "o/r")
+	repo := nodeRepo(t)
+	checkpointIn(t, repo, tk.ID, "a.txt", strings.Repeat("x", 4096))
+	if err := f.cfg.Mirror.Receive("o/r", tk.ID, bytes.NewReader(bundleOf(t, repo, tk.ID, ""))); err != nil {
+		t.Fatal(err)
+	}
+	defer func(old int64) { maxBundle = old }(maxBundle)
+	maxBundle = 64
+	if err := e.eng.NodeOffline(nodeID, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	a := dialAnswering(t, f, otherID)
+	if err := e.eng.RetryElsewhere(tk.ID); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the start on studio", func() bool { return a.got(nodelink.ServeStart) })
+	a.mu.Lock()
+	var seed nodelink.ArgsSeed
+	for i, m := range a.methods {
+		if m == nodelink.ServeSeed {
+			_ = json.Unmarshal(a.args[i], &seed)
+		}
+	}
+	a.mu.Unlock()
+	if seed.Transfer != "" || seed.Unsent != node.SeedTooBig {
+		t.Fatalf("seed = %+v, want no bundle and %q", seed, node.SeedTooBig)
+	}
 }

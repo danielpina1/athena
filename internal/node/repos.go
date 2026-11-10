@@ -420,12 +420,20 @@ func runGit(ctx context.Context, dir string, env []string, args ...string) (stri
 
 // prepareGitHub makes a GitHub Ticket's worktree: the first time, it clones or fetches the repository with the
 // Assignment's token and adds the worktree on the Ticket's branch from origin/<default branch>, or, for a Ticket that
-// moved here from another node, from its seed (seed.go); an existing worktree (a resumed Ticket) is used as it is.
+// moved here from another node, from its seed (seed.go); an existing worktree (a resumed Ticket) is used as it is,
+// unless a seed of the Assignment moves the Ticket's work back to it (reseedWorktree).
 func (n *Node) prepareGitHub(s *session) error {
 	p := s.place
+	rec, seeded := n.seedFor(s.t.ID, s.a.ID)
+	seeded = seeded && rec.Note == ""
 	if st, err := os.Stat(p.workDir); err == nil {
 		if !st.IsDir() {
 			return fmt.Errorf("%s exists and is not a directory", p.workDir)
+		}
+		if seeded {
+			unlock := lockRepo(p.repo)
+			defer unlock()
+			return n.reseedWorktree(s, rec)
 		}
 		return nil
 	}
@@ -440,7 +448,7 @@ func (n *Node) prepareGitHub(s *session) error {
 	unlock := lockRepo(clone)
 	defer unlock()
 	env := cloneGitEnv(clone, p.github)
-	if rec, ok := n.seedFor(s.t.ID, s.a.ID); ok && rec.Note == "" {
+	if seeded {
 		// The Ticket moved here from another node: its work comes from the server's checkpoint (seed.go).
 		return n.seedWorktree(s, clone, defaultBranch, base, env, rec)
 	}

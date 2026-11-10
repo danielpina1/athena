@@ -235,6 +235,11 @@ func (f *Fleet) Start(t core.Ticket, a core.Assignment) {
 		f.enqueue(t.ID, a.ID)
 		return
 	}
+	if _, moved := f.seedFrom(t, a, a.Node); moved && a.State == core.AssignmentPending {
+		// Placed, not yet started, and moved (a resume after a restart between its placement and its seed): seeded first.
+		f.launchSeeded(t.ID, a.ID, a.Node)
+		return
+	}
 	if tg := f.Target(a.Node); tg != nil {
 		tg.Start(t, a)
 	}

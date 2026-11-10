@@ -18,17 +18,24 @@ import (
 // When a Ticket's Assignment moves to this node from another (Retry elsewhere, after its node went offline; or a
 // review placed away from the implementer's node), the server seeds its worktree before the Start: Seed hands the node
 // the Ticket's latest checkpoint from the server's mirror (a git bundle of refs/athena/<id>/checkpoint), or tells it
-// there is none. prepareGitHub then builds the worktree from it instead of from the default branch: the bundle is
-// fetched into the clone at refs/athena/<id>/seed only, the branch athena/<id> starts at the checkpoint's parent (the
-// branch head the checkpoint was taken on), and `git checkout <checkpoint> -- .` brings the work in progress back as
-// uncommitted changes. With no checkpoint, the branch starts from the one pushed to GitHub, if it was, else from the
-// default branch. The session's first message says where the work came from (movedLine).
+// there is none (or why it could not send it). prepareGitHub then builds the worktree from it instead of from the
+// default branch: the bundle is fetched into the clone at refs/athena/<id>/seed only, the branch athena/<id> starts at
+// the checkpoint's parent (the branch head the checkpoint was taken on), and the checkpoint's tree is restored into the
+// worktree, its changes left unstaged (restoreCheckpoint). With no checkpoint, the branch starts from the one pushed
+// to GitHub, if it was, else from the default branch.
+//
+// A Ticket that moves back to a node that kept its worktree (Ruling R22) has that worktree's state committed to a side
+// ref, refs/athena/<id>/superseded-<unix time>, then the branch and the worktree reset to the seed's checkpoint. The
+// session's first message says where the work came from (movedLine), and names the side ref.
 
 const (
 	// seedTimeout bounds the git calls that build a worktree from a seed.
 	seedTimeout = 5 * time.Minute
 	// seedNameMax bounds the moved-from node name a seed carries.
 	seedNameMax = 64
+	// seedKeep is how long a seed nobody used is kept; seedSweepEvery how often the node looks for old ones.
+	seedKeep       = 14 * 24 * time.Hour
+	seedSweepEvery = time.Hour
 )
 
 // How a seeded worktree started.
@@ -36,6 +43,14 @@ const (
 	seedFromCheckpoint = "checkpoint"
 	seedFromPushed     = "pushed"
 	seedFromBase       = "base"
+	seedFromOwn        = "own" // a worktree this node kept, the seed's checkpoint not restorable
+)
+
+// Why a seed holds no checkpoint although the server had one (Seed.Unsent), or the node could not restore it.
+const (
+	SeedTooBig     = "too-big"
+	SeedSendFailed = "failed"
+	seedRestore    = "restore"
 )
 
 // Seed is the server's word that the Ticket's next Assignment moved to this node, with the work to restore.
@@ -50,17 +65,22 @@ type Seed struct {
 	// From is the name of the node the Ticket moved from; Offline says it moved because that node went offline.
 	From    string
 	Offline bool
+	// Unsent, with no Bundle, says the server had a checkpoint it could not send: SeedTooBig or SeedSendFailed.
+	Unsent string
 }
 
 // seedRecord is a Seed as the node keeps it, <StateDir>/seeds/<lowercased id>.json, its bundle beside it (.bundle).
 // Note is the moved line, set once the worktree is built from it; the session's first message takes it.
 type seedRecord struct {
+	TicketID     string    `json:"ticketId"`
 	AssignmentID string    `json:"assignmentId"`
 	Bundle       bool      `json:"bundle,omitempty"`
 	SHA          string    `json:"sha,omitempty"`
 	At           time.Time `json:"at,omitzero"`
 	From         string    `json:"from"`
 	Offline      bool      `json:"offline,omitempty"`
+	Unsent       string    `json:"unsent,omitempty"`
+	Created      time.Time `json:"created,omitzero"`
 	Note         string    `json:"note,omitempty"`
 }
 
@@ -72,8 +92,8 @@ func (n *Node) seedPath(ticketID, ext string) string {
 }
 
 // Seed keeps the server's seed of the Ticket's next Assignment, replacing any earlier one; the launch of that
-// Assignment builds its worktree from it, if the node has no worktree of the Ticket yet. The bundle file is the node's
-// once Seed returns (moved, else copied and left for the caller to remove).
+// Assignment builds its worktree from it. The same seed again (the same Assignment and checkpoint) changes nothing.
+// The bundle file is the node's once Seed returns (moved, else copied and left for the caller to remove).
 func (n *Node) Seed(sd Seed) error {
 	if n.cfg.StateDir == "" {
 		return errors.New("no state directory for seeds")
@@ -83,6 +103,19 @@ func (n *Node) Seed(sd Seed) error {
 	}
 	if sd.Bundle != "" && !shaRe.MatchString(sd.SHA) {
 		return &core.UserError{Msg: "bad seed: the checkpoint is not a commit name"}
+	}
+	switch sd.Unsent {
+	case "", SeedTooBig, SeedSendFailed:
+	default:
+		return &core.UserError{Msg: "bad seed: unknown reason " + sd.Unsent}
+	}
+	if sd.Bundle != "" {
+		sd.Unsent = ""
+	} else {
+		sd.SHA = ""
+	}
+	if old, ok := n.seedFor(sd.TicketID, sd.AssignmentID); ok && old.SHA == sd.SHA {
+		return nil // a repeated seed (placement and reconcile both sent it): the first stands
 	}
 	from := oneLine(sd.From)
 	if r := []rune(from); len(r) > seedNameMax {
@@ -95,7 +128,7 @@ func (n *Node) Seed(sd Seed) error {
 		return err
 	}
 	n.dropSeed(sd.TicketID)
-	rec := seedRecord{AssignmentID: sd.AssignmentID, From: from, Offline: sd.Offline}
+	rec := seedRecord{TicketID: sd.TicketID, AssignmentID: sd.AssignmentID, From: from, Offline: sd.Offline, Unsent: sd.Unsent, Created: time.Now()}
 	if sd.Bundle != "" {
 		if err := takeFile(sd.Bundle, n.seedPath(sd.TicketID, ".bundle"), MaxCheckpointBundle); err != nil {
 			return fmt.Errorf("keep the seed bundle: %w", err)
@@ -180,6 +213,59 @@ func (n *Node) dropSeed(ticketID string) {
 	}
 }
 
+// maybeSweepSeeds sweeps the seeds, on a goroutine of the node's, at most once per seedSweepEvery (every launch asks).
+func (n *Node) maybeSweepSeeds() {
+	if n.cfg.StateDir == "" {
+		return
+	}
+	now := time.Now().UnixNano()
+	last := n.seedSwept.Load()
+	if last != 0 && time.Duration(now-last) < seedSweepEvery || !n.seedSwept.CompareAndSwap(last, now) {
+		return
+	}
+	n.runners.Add(1)
+	go func() {
+		defer n.runners.Done()
+		n.sweepSeeds()
+	}()
+}
+
+// sweepSeeds removes the seeds of Tickets that ended, those older than seedKeep, and bundles with no seed.
+func (n *Node) sweepSeeds() {
+	dir := filepath.Join(n.cfg.StateDir, "seeds")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	eng := n.engine()
+	kept := map[string]bool{}
+	for _, e := range entries {
+		id, ok := strings.CutSuffix(e.Name(), ".json")
+		if !ok || !seedTicketRe.MatchString(id) {
+			continue
+		}
+		var rec seedRecord
+		b, err := readSmall(filepath.Join(dir, e.Name()))
+		old := err != nil || json.Unmarshal(b, &rec) != nil || time.Since(rec.Created) > seedKeep
+		ended := false
+		if !old && eng != nil && seedTicketRe.MatchString(rec.TicketID) {
+			if t, _, err := eng.Ticket(rec.TicketID); err == nil && t.Ended != nil {
+				ended = true
+			}
+		}
+		if old || ended {
+			n.dropSeed(id)
+			continue
+		}
+		kept[id] = true
+	}
+	for _, e := range entries {
+		if id, ok := strings.CutSuffix(e.Name(), ".bundle"); ok && !kept[id] {
+			_ = os.Remove(filepath.Join(dir, e.Name()))
+		}
+	}
+}
+
 // takeMovedNote is the moved line of the session's first message, once its worktree was built from a seed ("" when
 // it was not); the seed is dropped once it is read.
 func (n *Node) takeMovedNote(s *session) string {
@@ -191,12 +277,21 @@ func (n *Node) takeMovedNote(s *session) string {
 	return rec.Note
 }
 
-// movedLine says where the moved Ticket's work came from: rec's checkpoint, the branch pushed to GitHub, or the
-// default branch (how).
+// movedLine says where the moved Ticket's work came from (how): rec's checkpoint, the branch pushed to GitHub, the
+// default branch, or this node's own worktree.
 func movedLine(rec seedRecord, how, branch, defaultBranch string) string {
 	from := "This Ticket moved from " + rec.From
 	if rec.Offline {
 		from += ", which went offline"
+	}
+	why := "no checkpoint of its work reached the server"
+	switch rec.Unsent {
+	case SeedTooBig:
+		why = "its last checkpoint was too large to send here"
+	case SeedSendFailed:
+		why = "its last checkpoint could not be sent here"
+	case seedRestore:
+		why = "its last checkpoint could not be restored here"
 	}
 	switch how {
 	case seedFromCheckpoint:
@@ -205,43 +300,83 @@ func movedLine(rec seedRecord, how, branch, defaultBranch string) string {
 		}
 		return from + "; the work below was restored from its last checkpoint at " + rec.At.UTC().Format("2006-01-02 15:04 UTC") + "."
 	case seedFromPushed:
-		return from + "; no checkpoint of its work reached the server, so the work below starts from the branch " + branch +
+		return from + "; " + why + ", so the work below starts from the branch " + branch +
 			" as it was last pushed. Work in progress after that push is not here."
+	case seedFromOwn:
+		return from + "; " + why + ", so the work below is this node's own, as it was when the Ticket left it."
 	}
-	return from + "; no checkpoint of its work reached the server and its branch was never pushed, so the work starts again from " +
+	return from + "; " + why + " and its branch was never pushed, so the work starts again from " +
 		defaultBranch + ". Nothing done on " + rec.From + " is here."
 }
 
-// seedWorktree builds the session's worktree of the clone from its seed (under the clone's lock): see the top of the
-// file. A bundle git refuses, or one that does not hold the seed's checkpoint, is logged and the worktree starts as if
-// there were none. The bundle is removed and the moved line kept for the first message.
+// seedGit runs git on the clone with its pinned environment, bounded by ctx.
+func seedGit(ctx context.Context, clone string, env []string) func(args ...string) (string, error) {
+	cenv := repoGitEnv(env, filepath.Join(clone, ".git"), clone)
+	return func(args ...string) (string, error) { return gitInCtx(ctx, clone, cenv, args...) }
+}
+
+// fetchSeed fetches the seed's bundle into the clone's seed ref of the Ticket and returns the checkpoint's parent.
+// Only the checkpoint ref is taken, with every object checked and no protocol but the bundle file, and it must be the
+// seed's commit.
+func (n *Node) fetchSeed(t core.Ticket, git func(args ...string) (string, error), rec seedRecord) (parent string, err error) {
+	seedRef := seedRefOf(t)
+	_, err = git("-c", "protocol.allow=never", "-c", "protocol.file.allow=always", "-c", "transfer.fsckObjects=true",
+		"-c", "fetch.fsckObjects=true", "-c", "gc.auto=0", "-c", "maintenance.auto=false", "fetch", "--quiet", "--no-tags",
+		"--no-write-fetch-head", "--no-auto-gc", "--no-recurse-submodules", n.seedPath(t.ID, ".bundle"),
+		"+"+checkpointRef(t.ID)+":"+seedRef)
+	var got string
+	if err == nil {
+		got, err = git("rev-parse", "--verify", "--quiet", seedRef+"^{commit}")
+	}
+	if err == nil && got != rec.SHA {
+		err = fmt.Errorf("the seed holds %s, not the checkpoint %s", got, rec.SHA)
+	}
+	if err == nil {
+		parent, err = git("rev-parse", "--verify", "--quiet", rec.SHA+"^1^{commit}")
+	}
+	return parent, err
+}
+
+func seedRefOf(t core.Ticket) string { return "refs/athena/" + strings.ToLower(t.ID) + "/seed" }
+
+// restoreCheckpoint makes the worktree's files the checkpoint's tree, files the checkpoint lacks removed, and leaves
+// the index at HEAD: the work in progress is back as unstaged changes (new files untracked).
+func restoreCheckpoint(ctx context.Context, workDir string, wenv []string, sha string) error {
+	if _, err := gitInCtx(ctx, workDir, wenv, "read-tree", "--reset", "-u", sha); err != nil {
+		return err
+	}
+	_, err := gitInCtx(ctx, workDir, wenv, "reset", "-q")
+	return err
+}
+
+// finishSeed keeps the moved line for the first message and drops the bundle and the seed ref.
+func (n *Node) finishSeed(s *session, git func(args ...string) (string, error), rec seedRecord, note string) {
+	if _, err := git("update-ref", "-d", seedRefOf(s.t)); err != nil {
+		s.log.Warn("remove the seed ref", "error", err)
+	}
+	rec.Note, rec.Bundle = note, false
+	if err := n.writeSeed(s.t.ID, rec); err != nil {
+		s.log.Warn("keep the moved note", "error", err)
+	}
+	if err := os.Remove(n.seedPath(s.t.ID, ".bundle")); err != nil && !errors.Is(err, os.ErrNotExist) {
+		s.log.Warn("remove the seed bundle", "error", err)
+	}
+}
+
+// seedWorktree builds the session's new worktree of the clone from its seed (under the clone's lock): see the top of
+// the file. A bundle git refuses, or one that does not hold the seed's checkpoint, is logged and the worktree starts
+// as if there were none. A worktree whose restore failed is removed, so the next launch seeds it again.
 func (n *Node) seedWorktree(s *session, clone, defaultBranch, base string, env []string, rec seedRecord) error {
 	ctx, cancel := context.WithTimeout(n.ctx, seedTimeout)
 	defer cancel()
 	t, p := s.t, s.place
-	cenv := repoGitEnv(env, filepath.Join(clone, ".git"), clone)
-	git := func(args ...string) (string, error) { return gitInCtx(ctx, clone, cenv, args...) }
-	branch, seedRef := branchName(t), "refs/athena/"+strings.ToLower(t.ID)+"/seed"
-	bundle := n.seedPath(t.ID, ".bundle")
+	git := seedGit(ctx, clone, env)
+	branch := branchName(t)
 	from, how := base, seedFromBase
 	if rec.Bundle {
-		// Only the checkpoint ref is taken, into a ref of this Ticket's, with every object checked and no protocol but
-		// the bundle file.
-		_, err := git("-c", "protocol.allow=never", "-c", "protocol.file.allow=always", "-c", "transfer.fsckObjects=true",
-			"-c", "fetch.fsckObjects=true", "-c", "gc.auto=0", "-c", "maintenance.auto=false", "fetch", "--quiet", "--no-tags",
-			"--no-write-fetch-head", "--no-auto-gc", "--no-recurse-submodules", bundle, "+"+checkpointRef(t.ID)+":"+seedRef)
-		var got, parent string
-		if err == nil {
-			got, err = git("rev-parse", "--verify", "--quiet", seedRef+"^{commit}")
-		}
-		if err == nil && got != rec.SHA {
-			err = fmt.Errorf("the seed holds %s, not the checkpoint %s", got, rec.SHA)
-		}
-		if err == nil {
-			parent, err = git("rev-parse", "--verify", "--quiet", rec.SHA+"^1^{commit}")
-		}
-		if err != nil {
+		if parent, err := n.fetchSeed(t, git, rec); err != nil {
 			s.log.Warn("the seed's checkpoint cannot be restored; the worktree starts without it", "error", err)
+			rec.Unsent = seedRestore
 		} else {
 			from, how = parent, seedFromCheckpoint
 		}
@@ -264,23 +399,64 @@ func (n *Node) seedWorktree(s *session, clone, defaultBranch, base string, env [
 	if how == seedFromCheckpoint {
 		wenv, err := n.worktreeEnv(p, t)
 		if err == nil {
-			_, err = gitInCtx(ctx, p.workDir, wenv, "checkout", rec.SHA, "--", ".")
+			err = restoreCheckpoint(ctx, p.workDir, wenv, rec.SHA)
 		}
 		if err != nil {
+			// Half built: gone, so the retry seeds it again rather than run on the parent with no word of it.
+			_, _ = git("worktree", "remove", "--force", p.workDir)
+			_ = os.RemoveAll(p.workDir)
+			_, _ = git("worktree", "prune")
 			return fmt.Errorf("restore the checkpoint into the worktree: %w", err)
 		}
 	}
-	if _, err := git("update-ref", "-d", seedRef); err != nil {
-		s.log.Warn("remove the seed ref", "error", err)
-	}
-	rec.Note = movedLine(rec, how, branch, defaultBranch)
-	rec.Bundle = false
-	if err := n.writeSeed(t.ID, rec); err != nil {
-		s.log.Warn("keep the moved note", "error", err)
-	}
-	if err := os.Remove(bundle); err != nil && !errors.Is(err, os.ErrNotExist) {
-		s.log.Warn("remove the seed bundle", "error", err)
-	}
+	n.finishSeed(s, git, rec, movedLine(rec, how, branch, defaultBranch))
 	s.log.Info("worktree seeded", "from", how, "commit", from)
+	return nil
+}
+
+// reseedWorktree is a seed for a Ticket whose worktree this node kept (it moved back here): the worktree's state goes
+// to a side ref, then the branch and the worktree are reset to the seed's checkpoint (Ruling R22). Without a
+// checkpoint it can restore, the worktree stays as it is. Under the clone's lock.
+func (n *Node) reseedWorktree(s *session, rec seedRecord) error {
+	ctx, cancel := context.WithTimeout(n.ctx, seedTimeout)
+	defer cancel()
+	t, p := s.t, s.place
+	clone := p.repo
+	git := seedGit(ctx, clone, cloneGitEnv(clone, p.github))
+	branch := branchName(t)
+	parent := ""
+	if rec.Bundle {
+		var err error
+		if parent, err = n.fetchSeed(t, git, rec); err != nil {
+			s.log.Warn("the seed's checkpoint cannot be restored; the kept worktree stays", "error", err)
+			rec.Unsent = seedRestore
+		}
+	}
+	if parent == "" {
+		n.finishSeed(s, git, rec, movedLine(rec, seedFromOwn, branch, ""))
+		return nil
+	}
+	wenv, err := n.worktreeEnv(p, t)
+	if err != nil {
+		return err
+	}
+	side := fmt.Sprintf("refs/athena/%s/superseded-%d", strings.ToLower(t.ID), time.Now().Unix())
+	kept, err := checkpointTo(p.workDir, side, wenv, "superseded by a seed")
+	if err != nil {
+		return fmt.Errorf("keep the worktree's state before the seed: %w", err)
+	}
+	wgit := func(args ...string) (string, error) { return gitInCtx(ctx, p.workDir, wenv, args...) }
+	if _, err := wgit("reset", "-q", "--hard", parent); err != nil {
+		return err
+	}
+	if _, err := wgit("clean", "-fdq"); err != nil {
+		return err
+	}
+	if err := restoreCheckpoint(ctx, p.workDir, wenv, rec.SHA); err != nil {
+		return fmt.Errorf("restore the checkpoint into the worktree: %w", err)
+	}
+	note := movedLine(rec, seedFromCheckpoint, branch, "") + " This node's own earlier work on it is kept at " + side + "."
+	n.finishSeed(s, git, rec, note)
+	s.log.Info("kept worktree reset to the seed", "commit", parent, "superseded", kept, "ref", side)
 	return nil
 }

@@ -200,6 +200,8 @@ type Node struct {
 	done      chan struct{} // closed when the loop has exited
 	closeOnce sync.Once
 	runners   sync.WaitGroup
+	// seedSwept is when the seeds were last swept (seed.go), in Unix nanoseconds.
+	seedSwept atomic.Int64
 
 	mu   sync.Mutex
 	live map[string]*session // by Ticket ID: launched sessions until their runner ends
@@ -545,6 +547,7 @@ func (n *Node) onStart(st *loopState, t core.Ticket, a core.Assignment) {
 		n.goFail(t, a, "prepare ticket directory: "+err.Error())
 		return
 	}
+	n.maybeSweepSeeds()
 	st.queue = append(st.queue, n.newSession(t, a, p))
 	n.schedule(st)
 }

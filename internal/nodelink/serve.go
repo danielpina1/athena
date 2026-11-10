@@ -89,6 +89,8 @@ type (
 		At                     time.Time
 		From                   string
 		Offline                bool
+		// Unsent says why a checkpoint the server had is not sent (node.SeedTooBig, node.SeedSendFailed).
+		Unsent string `json:",omitempty"`
 	}
 )
 
