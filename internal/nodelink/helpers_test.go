@@ -254,6 +254,7 @@ type fakeTarget struct {
 	bundle []byte
 	sha    string
 	sinces []string
+	tooBig bool
 }
 
 func (f *fakeTarget) CheckpointBundle(_ context.Context, _ string, since string, w io.Writer) (string, error) {
@@ -266,6 +267,9 @@ func (f *fakeTarget) CheckpointBundle(_ context.Context, _ string, since string,
 	}
 	if since == sha {
 		return sha, node.ErrCheckpointUnchanged
+	}
+	if f.tooBig {
+		return "", node.ErrCheckpointTooBig
 	}
 	_, err := w.Write(b)
 	return sha, err

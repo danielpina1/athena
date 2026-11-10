@@ -55,9 +55,11 @@ func openOutbox(dir string) (*outbox, error) {
 		return nil, fmt.Errorf("nodelink: migrate %s: %w", dbFile, err)
 	}
 	// The checkpoint of each Ticket the server last took: the next bundle goes after it.
+	// too_big marks a Ticket whose bundle went over the bound: none is built for it again.
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS checkpoints (
 		ticket_id TEXT PRIMARY KEY,
-		sha TEXT NOT NULL)`); err != nil {
+		sha TEXT NOT NULL,
+		too_big INTEGER NOT NULL DEFAULT 0)`); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("nodelink: migrate %s: %w", dbFile, err)
 	}
@@ -128,22 +130,24 @@ func (o *outbox) after(seq uint64, limit int) ([]factRow, error) {
 	return out, rows.Err()
 }
 
-// checkpointSent is the Ticket's checkpoint the server last took, or "".
-func (o *outbox) checkpointSent(ticketID string) (string, error) {
-	var sha string
-	err := o.db.QueryRow(`SELECT sha FROM checkpoints WHERE ticket_id = ?`, ticketID).Scan(&sha)
+// checkpointSent is the Ticket's checkpoint the server last took, or "", and whether its bundle went over the bound.
+func (o *outbox) checkpointSent(ticketID string) (sha string, tooBig bool, err error) {
+	err = o.db.QueryRow(`SELECT sha, too_big FROM checkpoints WHERE ticket_id = ?`, ticketID).Scan(&sha, &tooBig)
 	if err == sql.ErrNoRows {
-		return "", nil
+		return "", false, nil
 	}
-	return sha, err
+	return sha, tooBig, err
+}
+
+// setCheckpointTooBig marks the Ticket's checkpoint as over the bound.
+func (o *outbox) setCheckpointTooBig(ticketID string) error {
+	_, err := o.db.Exec(`INSERT INTO checkpoints (ticket_id, sha, too_big) VALUES (?, '', 1)
+		ON CONFLICT (ticket_id) DO UPDATE SET too_big = 1`, ticketID)
+	return err
 }
 
 // setCheckpointSent records the Ticket's checkpoint the server took; "" forgets it, so the next bundle is whole.
 func (o *outbox) setCheckpointSent(ticketID, sha string) error {
-	if sha == "" {
-		_, err := o.db.Exec(`DELETE FROM checkpoints WHERE ticket_id = ?`, ticketID)
-		return err
-	}
 	_, err := o.db.Exec(`INSERT INTO checkpoints (ticket_id, sha) VALUES (?, ?)
 		ON CONFLICT (ticket_id) DO UPDATE SET sha = excluded.sha`, ticketID, sha)
 	return err

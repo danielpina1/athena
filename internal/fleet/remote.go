@@ -45,6 +45,23 @@ type Remote struct {
 	version  string
 	status   node.Status
 	lastSeen time.Time
+	// blobFrom and blobUsed are the node's checkpoint bytes in its current blobWindow (mirror.go).
+	blobFrom time.Time
+	blobUsed int64
+}
+
+// spend counts n checkpoint bytes from the node at now; false once its blobBudget for the window is spent.
+func (r *Remote) spend(n int64, now time.Time) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if now.Sub(r.blobFrom) >= blobWindow {
+		r.blobFrom, r.blobUsed = now, 0
+	}
+	if r.blobUsed+n > blobBudget {
+		return false
+	}
+	r.blobUsed += n
+	return true
 }
 
 // ID is the node's id.

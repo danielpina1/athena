@@ -276,6 +276,13 @@ func TestCheckpointEveryTurnEnd(t *testing.T) {
 	if _, err := h.n.CheckpointBundle(ctx, "T-9999", "", io.Discard); !errors.Is(err, ErrNoCheckpoint) {
 		t.Fatalf("CheckpointBundle of an unknown Ticket = %v, want ErrNoCheckpoint", err)
 	}
+	// Past the cap, git is stopped and nothing is written.
+	defer func(old int64) { bundleCap = old }(bundleCap)
+	bundleCap = int64(full.Len()) / 2
+	var cut bytes.Buffer
+	if _, err := h.n.CheckpointBundle(ctx, tk.ID, "", &cut); !errors.Is(err, ErrCheckpointTooBig) || cut.Len() != 0 {
+		t.Fatalf("CheckpointBundle over the cap = %v, %d bytes written", err, cut.Len())
+	}
 }
 
 // A checkpoint of an unchanged worktree is the one already made: its ref does not move.
@@ -288,5 +295,26 @@ func TestCheckpointUnchangedReused(t *testing.T) {
 	again, err := checkpoint(dir, "T-1", nil, "test")
 	if err != nil || again != first {
 		t.Fatalf("second checkpoint = %s, %v; want %s", again, err, first)
+	}
+}
+
+// The index of a checkpoint starts from the worktree's own: a tracked file deleted, staged or not, is gone from the
+// checkpoint, and the worktree's index is as it was.
+func TestCheckpointFromWorktreeIndex(t *testing.T) {
+	_, dir := wipWorktree(t)
+	if err := os.Remove(filepath.Join(dir, ".gitignore")); err != nil {
+		t.Fatal(err)
+	}
+	staged := git(t, dir, "diff", "--cached", "--name-status")
+	sha, err := checkpoint(dir, "T-1", nil, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree := git(t, dir, "ls-tree", "--name-only", sha)
+	if strings.Contains(tree, ".gitignore") || !strings.Contains(tree, "staged.txt") || !strings.Contains(tree, "new.txt") {
+		t.Fatalf("tree = %q", tree)
+	}
+	if got := git(t, dir, "diff", "--cached", "--name-status"); got != staged {
+		t.Fatalf("the worktree's index changed:\n%s\nwant\n%s", got, staged)
 	}
 }

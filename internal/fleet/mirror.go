@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -36,8 +37,10 @@ const (
 	mirrorTimeout = 5 * time.Minute
 	// blobKindCheckpoint is BlobChunk.kind of a checkpoint bundle.
 	blobKindCheckpoint = "checkpoint"
-	// maxTransfers bounds the checkpoint transfers one link holds at once.
+	// maxTransfers bounds the checkpoint transfers one link holds at once; a Ticket has at most one under way.
 	maxTransfers = 4
+	// blobWindow is the window of a node's blob budget (blobBudget).
+	blobWindow = time.Hour
 	// checkpointKey prefixes the store's record of each Ticket's checkpoint in the mirror.
 	checkpointKey = "fleet:checkpoint:"
 )
@@ -45,14 +48,23 @@ const (
 // maxBundle is the largest checkpoint bundle the mirror takes: node.MaxCheckpointBundle; a variable for tests.
 var maxBundle int64 = node.MaxCheckpointBundle
 
+// blobBudget is how many checkpoint bytes one node may send in a blobWindow; past it, its transfers are refused, so a
+// node cannot fill the server's disk on purpose. A variable for tests.
+var blobBudget int64 = 4 * node.MaxCheckpointBundle
+
+// CheckpointDir is the checkpoint mirror's root under the server's state directory: a directory of its own, apart
+// from the embedded node's GitHub mirrors (node.MirrorDir), which its worktrees fetch from.
+func CheckpointDir(stateDir string) string { return filepath.Join(stateDir, "checkpoints") }
+
 // ErrNoCheckpoint is a Ticket the mirror holds no checkpoint of.
 var ErrNoCheckpoint = node.ErrNoCheckpoint
 
-// mirrorTicketRe is a Ticket id the mirror names a ref after.
-var mirrorTicketRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+// mirrorTicketRe is a Ticket id, lowercased, the mirror names a ref and a record after: ids that differ only in case
+// are one Ticket to the mirror.
+var mirrorTicketRe = regexp.MustCompile(`^[a-z0-9_-]{1,64}$`)
 
-// mirrorConfig is the whole config of a mirror repository, written before each git call on it (as the node writes its
-// own GitHub mirror's, which on the server is the same directory): nothing anyone wrote there applies.
+// mirrorConfig is the whole config of a mirror repository, written before each git call on it: nothing anyone wrote
+// there applies.
 const mirrorConfig = "[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = true\n"
 
 // mirrorPins are the command-scope settings of every git call on a mirror, besides node.RunGit's (no hook, no
@@ -71,8 +83,24 @@ type Mirror struct {
 	locks map[string]*sync.Mutex // by repository directory
 }
 
-// NewMirror returns the mirror rooted at dir (<stateDir>/mirrors); its repositories are made on first use.
-func NewMirror(dir string) *Mirror { return &Mirror{dir: dir, locks: map[string]*sync.Mutex{}} }
+// NewMirror returns the mirror rooted at dir (CheckpointDir); its repositories are made on first use. The bundles a
+// previous run left in its temporary directory are removed.
+func NewMirror(dir string) *Mirror {
+	_ = os.RemoveAll(filepath.Join(dir, mirrorTmp))
+	return &Mirror{dir: dir, locks: map[string]*sync.Mutex{}}
+}
+
+// mirrorTmp is the mirror's directory of bundles on their way in; no repository has its name (repoDir).
+const mirrorTmp = ".tmp"
+
+// tempFile makes a temporary file in the mirror's own temporary directory.
+func (m *Mirror) tempFile(pattern string) (*os.File, error) {
+	dir := filepath.Join(m.dir, mirrorTmp)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, err
+	}
+	return os.CreateTemp(dir, pattern)
+}
 
 // repoDir is repo's (owner/name) bare repository; a name that is not owner/name is refused.
 func (m *Mirror) repoDir(repo string) (string, error) {
@@ -80,7 +108,7 @@ func (m *Mirror) repoDir(repo string) (string, error) {
 		return "", err
 	}
 	owner, name, _ := strings.Cut(strings.ToLower(repo), "/")
-	if strings.HasPrefix(owner, "-") || strings.HasPrefix(name, "-") {
+	if strings.HasPrefix(owner, "-") || strings.HasPrefix(name, "-") || strings.HasPrefix(owner, ".") || strings.HasPrefix(name, ".") {
 		return "", fmt.Errorf("repository %q is not owner/name", repo)
 	}
 	return filepath.Join(m.dir, owner, name+".git"), nil
@@ -88,10 +116,11 @@ func (m *Mirror) repoDir(repo string) (string, error) {
 
 // mirrorRef is the Ticket's ref; an id that is not a plain name is refused.
 func mirrorRef(ticketID string) (string, error) {
-	if !mirrorTicketRe.MatchString(ticketID) {
+	id := strings.ToLower(ticketID)
+	if !mirrorTicketRe.MatchString(id) {
 		return "", fmt.Errorf("ticket id %q is not a plain name", ticketID)
 	}
-	return node.CheckpointRef(ticketID), nil
+	return node.CheckpointRef(id), nil
 }
 
 // lock serializes the mirror's git calls on one repository.
@@ -190,7 +219,7 @@ func (m *Mirror) ReceiveContext(ctx context.Context, repo, ticketID string, bund
 	if err != nil {
 		return err
 	}
-	f, err := os.CreateTemp("", "athena-checkpoint-*.bundle")
+	f, err := m.tempFile("athena-checkpoint-*.bundle")
 	if err != nil {
 		return err
 	}
@@ -205,6 +234,24 @@ func (m *Mirror) ReceiveContext(ctx context.Context, repo, ticketID string, bund
 	if n > maxBundle {
 		return fmt.Errorf("the checkpoint bundle is over %d MiB", maxBundle>>20)
 	}
+	return m.receivePath(ctx, dir, ref, f.Name())
+}
+
+// receiveFile is ReceiveContext from a bundle file already held, at most maxBundle long.
+func (m *Mirror) receiveFile(ctx context.Context, repo, ticketID, file string) error {
+	dir, err := m.repoDir(repo)
+	if err != nil {
+		return err
+	}
+	ref, err := mirrorRef(ticketID)
+	if err != nil {
+		return err
+	}
+	return m.receivePath(ctx, dir, ref, file)
+}
+
+// receivePath fetches ref from the bundle file into the repository dir.
+func (m *Mirror) receivePath(ctx context.Context, dir, ref, file string) error {
 	defer m.lock(dir)()
 	if err := ensure(ctx, dir); err != nil {
 		return err
@@ -215,8 +262,8 @@ func (m *Mirror) ReceiveContext(ctx context.Context, repo, ticketID string, bund
 		return err
 	}
 	// The ref is forced: each checkpoint is a sibling of the last, on the branch's head.
-	_, err = mirrorGit(ctx, dir, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--no-auto-gc",
-		"--no-recurse-submodules", f.Name(), "+"+ref+":"+ref)
+	_, err := mirrorGit(ctx, dir, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--no-auto-gc",
+		"--no-recurse-submodules", file, "+"+ref+":"+ref)
 	return err
 }
 
@@ -305,12 +352,81 @@ func (m *Mirror) Delete(repo, ticketID string) error {
 	if err != nil {
 		return err
 	}
+	return m.deleteRef(dir, ref)
+}
+
+func (m *Mirror) deleteRef(dir, ref string) error {
 	defer m.lock(dir)()
 	if _, ok, err := head(dir, ref); err != nil || !ok {
 		return err
 	}
-	_, err = mirrorGit(context.Background(), dir, "update-ref", "-d", ref)
+	_, err := mirrorGit(context.Background(), dir, "update-ref", "-d", ref)
 	return err
+}
+
+// repos lists the mirror's repositories.
+func (m *Mirror) repos() ([]string, error) {
+	dirs, err := filepath.Glob(filepath.Join(m.dir, "*", "*.git"))
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, d := range dirs {
+		if !strings.HasPrefix(filepath.Base(filepath.Dir(d)), ".") {
+			out = append(out, d)
+		}
+	}
+	return out, nil
+}
+
+// mirrorRefInfo is a checkpoint ref in a repository: its lowercased Ticket id and its commit's date.
+type mirrorRefInfo struct {
+	dir, ref, id string
+	at           time.Time
+}
+
+// refs lists the checkpoint refs of the repository dir.
+func (m *Mirror) refs(dir string) ([]mirrorRefInfo, error) {
+	defer m.lock(dir)()
+	out, err := mirrorGit(context.Background(), dir, "for-each-ref", "--format=%(refname) %(committerdate:unix)", "refs/athena/")
+	if err != nil || out == "" {
+		return nil, err
+	}
+	var refs []mirrorRefInfo
+	for _, line := range strings.Split(out, "\n") {
+		ref, unix, _ := strings.Cut(line, " ")
+		id, ok := strings.CutPrefix(ref, "refs/athena/")
+		if id, ok = strings.CutSuffix(id, "/checkpoint"); !ok || !mirrorTicketRe.MatchString(id) {
+			continue
+		}
+		sec, err := strconv.ParseInt(unix, 10, 64)
+		if err != nil {
+			continue
+		}
+		refs = append(refs, mirrorRefInfo{dir: dir, ref: ref, id: id, at: time.Unix(sec, 0)})
+	}
+	return refs, nil
+}
+
+// Compact repacks each repository and prunes what no ref reaches any more (the checkpoints replaced or deleted), under
+// its lock: the mirror's disk follows the checkpoints it keeps.
+func (m *Mirror) Compact() error {
+	dirs, err := m.repos()
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, dir := range dirs {
+		errs = append(errs, func() error {
+			defer m.lock(dir)()
+			if _, err := mirrorGit(context.Background(), dir, "repack", "-a", "-d", "-q"); err != nil {
+				return err
+			}
+			_, err := mirrorGit(context.Background(), dir, "prune", "--expire=now")
+			return err
+		}())
+	}
+	return errors.Join(errs...)
 }
 
 // Checkpoint is the server's record of a Ticket's checkpoint in the mirror: the commit, the node it came from, when.
@@ -324,7 +440,7 @@ type Checkpoint struct {
 
 // Checkpoint is the Ticket's latest checkpoint in the mirror; ok is false when the server has none.
 func (f *Fleet) Checkpoint(ticketID string) (c Checkpoint, ok bool, err error) {
-	v, ok, err := f.cfg.Store.KVGet(checkpointKey + ticketID)
+	v, ok, err := f.cfg.Store.KVGet(checkpointKey + strings.ToLower(ticketID))
 	if err != nil || !ok {
 		return Checkpoint{}, false, err
 	}
@@ -339,7 +455,7 @@ func (f *Fleet) recordCheckpoint(c Checkpoint) error {
 	if err != nil {
 		return err
 	}
-	return f.cfg.Store.KVSet(checkpointKey+c.TicketID, string(b))
+	return f.cfg.Store.KVSet(checkpointKey+strings.ToLower(c.TicketID), string(b))
 }
 
 // checkpointSent applies a node's CheckpointSent: the Ticket is placed on the node and works in repo, and its bundle,
@@ -350,7 +466,7 @@ func (f *Fleet) checkpointSent(eng *core.Engine, nodeID, ticketID, repo, sha str
 	if err != nil {
 		return err
 	}
-	if !placedOn(t, nodeID) {
+	if !f.latestOn(t, nodeID) {
 		return errNotOnNode(ticketID)
 	}
 	if t.Repo == "" || !strings.EqualFold(t.Repo, repo) {
@@ -367,6 +483,13 @@ func (f *Fleet) checkpointSent(eng *core.Engine, nodeID, ticketID, repo, sha str
 		return &core.UserError{Msg: "the checkpoint's bundle did not reach the server"}
 	}
 	return f.recordCheckpoint(Checkpoint{TicketID: t.ID, Repo: t.Repo, SHA: sha, Node: nodeID, At: f.now()})
+}
+
+// latestOn reports whether the Ticket's latest Assignment is placed on the node: only that node's checkpoints count,
+// so one that comes late from a node the Ticket left never moves the mirror's ref back.
+func (f *Fleet) latestOn(t core.Ticket, nodeID string) bool {
+	a := t.LatestAssignment()
+	return a != nil && (a.Node == nodeID || a.Node == "" && nodeID == f.cfg.LocalID)
 }
 
 // LocalCheckpoint is the embedded node's node.Config.OnCheckpoint: the checkpoint goes into the mirror, after the one
@@ -405,7 +528,18 @@ func (f *Fleet) localCheckpoints() {
 // saveLocal brings the mirror's checkpoint of the local node's Ticket up to the node's: a bundle after the mirror's
 // commit, or the whole ref when that fails, and records it.
 func (f *Fleet) saveLocal(ctx context.Context, ticketID, repo string) error {
-	if f.localBundle == nil {
+	eng := f.engine()
+	if f.localBundle == nil || eng == nil {
+		return nil
+	}
+	t, _, err := eng.Ticket(ticketID)
+	if err != nil {
+		return err
+	}
+	if !f.latestOn(t, f.cfg.LocalID) {
+		return nil // the Ticket moved to another node: its checkpoints count from there
+	}
+	if f.localTooBig[strings.ToLower(ticketID)] {
 		return nil
 	}
 	m := f.cfg.Mirror
@@ -414,11 +548,17 @@ func (f *Fleet) saveLocal(ctx context.Context, ticketID, repo string) error {
 		return err
 	}
 	sha, err := f.pipeLocal(ctx, ticketID, repo, base)
-	if err != nil && base != "" && !errors.Is(err, node.ErrCheckpointUnchanged) && ctx.Err() == nil {
+	if err != nil && base != "" && !errors.Is(err, node.ErrCheckpointUnchanged) && !errors.Is(err, node.ErrCheckpointTooBig) &&
+		ctx.Err() == nil {
 		sha, err = f.pipeLocal(ctx, ticketID, repo, "")
 	}
 	if errors.Is(err, node.ErrCheckpointUnchanged) {
 		err = nil
+	}
+	if errors.Is(err, node.ErrCheckpointTooBig) {
+		f.localTooBig[strings.ToLower(ticketID)] = true // localCheckpoints' alone
+		f.log.Warn("the local checkpoint is too big for the mirror; no more are kept for this ticket", "ticket", ticketID)
+		return nil
 	}
 	if err != nil {
 		return err
@@ -479,7 +619,8 @@ func (f *Fleet) sweepLoop() {
 }
 
 // SweepMirror deletes from the mirror, with their records, the checkpoints of Tickets that ended MirrorKeep ago or
-// more, or that the Engine no longer knows.
+// more, or that the Engine no longer knows; then the refs no record names (a bundle whose fact was refused or never
+// applied) whose commit is MirrorKeep old and whose Ticket ended or is unknown; then compacts each repository.
 func (f *Fleet) SweepMirror() error {
 	eng := f.engine()
 	if eng == nil || f.cfg.Mirror == nil {
@@ -491,6 +632,7 @@ func (f *Fleet) SweepMirror() error {
 	}
 	now := f.now()
 	var errs []error
+	kept := map[string]bool{} // lowercased ids of the records that stay
 	for key, v := range recs {
 		var c Checkpoint
 		if err := json.Unmarshal([]byte(v), &c); err != nil || c.TicketID == "" {
@@ -503,16 +645,63 @@ func (f *Fleet) SweepMirror() error {
 		case errors.As(err, &ue): // a Ticket the Engine does not know
 		case err != nil:
 			errs = append(errs, err)
+			kept[strings.ToLower(c.TicketID)] = true
 			continue
 		case t.Ended == nil || now.Sub(t.Ended.At) < MirrorKeep:
+			kept[strings.ToLower(c.TicketID)] = true
 			continue
 		}
 		if err := f.cfg.Mirror.Delete(c.Repo, c.TicketID); err != nil {
 			errs = append(errs, err)
+			kept[strings.ToLower(c.TicketID)] = true
 			continue
 		}
 		errs = append(errs, f.cfg.Store.KVDelete(key))
 		f.log.Info("dropped an ended ticket's checkpoint from the mirror", "ticket", c.TicketID, "repo", c.Repo)
+	}
+	errs = append(errs, f.sweepOrphans(eng, kept, now), f.cfg.Mirror.Compact())
+	return errors.Join(errs...)
+}
+
+// sweepOrphans deletes the checkpoint refs no record names, MirrorKeep old by their commit, whose Ticket ended or is
+// unknown.
+func (f *Fleet) sweepOrphans(eng *core.Engine, kept map[string]bool, now time.Time) error {
+	m := f.cfg.Mirror
+	dirs, err := m.repos()
+	if err != nil {
+		return err
+	}
+	var tickets map[string]core.Ticket // by lowercased id, read once when an orphan is old enough
+	var errs []error
+	for _, dir := range dirs {
+		refs, err := m.refs(dir)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		for _, r := range refs {
+			if kept[r.id] || now.Sub(r.at) < MirrorKeep {
+				continue
+			}
+			if tickets == nil {
+				all, err := eng.Tickets(true)
+				if err != nil {
+					return errors.Join(append(errs, err)...)
+				}
+				tickets = map[string]core.Ticket{}
+				for _, t := range all {
+					tickets[strings.ToLower(t.ID)] = t
+				}
+			}
+			if t, ok := tickets[r.id]; ok && t.Ended == nil {
+				continue
+			}
+			if err := m.deleteRef(r.dir, r.ref); err != nil {
+				errs = append(errs, err)
+				continue
+			}
+			f.log.Info("dropped an unrecorded checkpoint from the mirror", "ref", r.ref, "repo", filepath.Base(dir))
+		}
 	}
 	return errors.Join(errs...)
 }
@@ -545,10 +734,15 @@ func (lk *nodeLink) onChunk(c *athenav1.BlobChunk) {
 			return
 		}
 		tr = &transfer{ticketID: c.GetTicketId(), done: make(chan struct{})}
-		if c.GetKind() != blobKindCheckpoint || lk.f.cfg.Mirror == nil {
+		busy := false
+		for _, o := range lk.transfers {
+			busy = busy || strings.EqualFold(o.ticketID, tr.ticketID)
+		}
+		if c.GetKind() != blobKindCheckpoint || lk.f.cfg.Mirror == nil || busy {
 			tr.refused = true
-			lk.f.log.Warn("node blob refused", "node", lk.nodeID, "kind", c.GetKind(), "ticket", tr.ticketID)
-		} else if f, err := os.CreateTemp("", "athena-node-checkpoint-*.bundle"); err != nil {
+			lk.f.log.Warn("node blob refused", "node", lk.nodeID, "kind", c.GetKind(), "ticket", tr.ticketID,
+				"another under way", busy)
+		} else if f, err := lk.f.cfg.Mirror.tempFile("athena-node-checkpoint-*.bundle"); err != nil {
 			tr.refused = true
 			lk.f.log.Error("hold a node's checkpoint", "node", lk.nodeID, "error", err)
 		} else {
@@ -564,6 +758,8 @@ func (lk *nodeLink) onChunk(c *athenav1.BlobChunk) {
 			why = "a chunk names another ticket"
 		case tr.size+int64(len(c.GetData())) > maxBundle:
 			why = fmt.Sprintf("over %d MiB", maxBundle>>20)
+		case !lk.r.spend(int64(len(c.GetData())), lk.f.now()):
+			why = fmt.Sprintf("the node sent over %d MiB of checkpoints within %s", blobBudget>>20, blobWindow)
 		default:
 			if _, err := tr.file.Write(c.GetData()); err != nil {
 				why = err.Error()
@@ -619,18 +815,18 @@ func (lk *nodeLink) receive(id string, tr *transfer) {
 	case err != nil:
 		log.Warn("node checkpoint refused", "error", err)
 		return
-	case !placedOn(t, lk.nodeID):
+	case !lk.f.latestOn(t, lk.nodeID):
 		log.Warn("node checkpoint refused: the ticket is not on this node")
 		return
 	case t.Repo == "":
 		log.Warn("node checkpoint refused: the ticket works in no repository")
 		return
 	}
-	if _, err := tr.file.Seek(0, io.SeekStart); err != nil {
-		log.Error("read a node's checkpoint", "error", err)
+	if err := tr.file.Sync(); err != nil {
+		log.Error("hold a node's checkpoint", "error", err)
 		return
 	}
-	if err := lk.f.cfg.Mirror.ReceiveContext(lk.ctx, t.Repo, t.ID, tr.file); err != nil {
+	if err := lk.f.cfg.Mirror.receiveFile(lk.ctx, t.Repo, t.ID, tr.file.Name()); err != nil {
 		if lk.ctx.Err() == nil {
 			log.Warn("node checkpoint not taken into the mirror", "error", err)
 		}

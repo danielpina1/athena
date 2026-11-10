@@ -279,7 +279,7 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	defer closeNode()
 	flt := fleet.New(fleet.Config{Local: n, LocalID: fleet.LocalID, LocalName: ncfg.Name, Store: st, Creds: ncfg.Credentials,
 		Policy: ncfg.Policy, Prompts: func() (string, string) { return ncfg.WorkerPrompt(), ncfg.ReviewerPrompt() },
-		Mirror: fleet.NewMirror(filepath.Join(stateDir, "mirrors")), Log: logger})
+		Mirror: fleet.NewMirror(fleet.CheckpointDir(stateDir)), Log: logger})
 	fltRef.Store(flt)
 	// Before the store closes and after the node does (deferred later, so it runs first): node links can outlive the
 	// web server's stop, and placement records into the Engine.

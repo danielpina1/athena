@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
+	"os"
+	"path/filepath"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -103,6 +105,8 @@ type Client struct {
 	ckMu      sync.Mutex
 	ckPending map[string]string
 	ckWake    chan struct{}
+	// tmpDir holds the bundles being sent: <StateDir>/tmp, emptied when the Client is made.
+	tmpDir string
 }
 
 type cachedTicket struct {
@@ -160,10 +164,20 @@ func New(id *Identity, opts Options) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Bundles a previous run left half-sent go.
+	tmpDir := filepath.Join(opts.StateDir, "tmp")
+	if err := os.RemoveAll(tmpDir); err != nil {
+		ob.close()
+		return nil, fmt.Errorf("nodelink: clear %s: %w", tmpDir, err)
+	}
+	if err := os.MkdirAll(tmpDir, 0o700); err != nil {
+		ob.close()
+		return nil, fmt.Errorf("nodelink: make %s: %w", tmpDir, err)
+	}
 	return &Client{id: id, opts: opts, log: opts.Log.With("component", "nodelink"), ob: ob,
 		factWake: make(chan struct{}, 1), statWake: make(chan struct{}, 1), ready: make(chan struct{}),
 		onlineSig: make(chan struct{}), tickets: map[string]cachedTicket{}, answered: map[uint64]func(string){},
-		ckPending: map[string]string{}, ckWake: make(chan struct{}, 1)}, nil
+		ckPending: map[string]string{}, ckWake: make(chan struct{}, 1), tmpDir: tmpDir}, nil
 }
 
 // Attach gives the Client the node the server's calls are served onto.

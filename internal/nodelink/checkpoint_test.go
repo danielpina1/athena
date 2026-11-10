@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/danielpina1/athena/internal/pb/athenav1"
 )
@@ -78,14 +79,14 @@ func TestCheckpointChunksThenFact(t *testing.T) {
 	if f := fs.checkpointFacts()[0]; f != (ArgsCheckpointSent{TicketID: "T-0001", Repo: "o/r", SHA: sha1}) {
 		t.Fatalf("fact %+v", f)
 	}
-	eventually(t, "the base is recorded", func() bool { b, _ := c.ob.checkpointSent("T-0001"); return b == sha1 })
+	eventually(t, "the base is recorded", func() bool { b, _, _ := c.ob.checkpointSent("T-0001"); return b == sha1 })
 
 	// The next goes after it; the same checkpoint again sends nothing.
 	sha2 := strings.Repeat("b", 40)
 	tgt.setCheckpoint([]byte("small"), sha2)
 	c.Checkpointed("T-0001", "o/r", "refs/athena/t-0001/checkpoint", sha2)
 	eventually(t, "the second fact", func() bool { return len(fs.checkpointFacts()) == 2 })
-	eventually(t, "the second base", func() bool { b, _ := c.ob.checkpointSent("T-0001"); return b == sha2 })
+	eventually(t, "the second base", func() bool { b, _, _ := c.ob.checkpointSent("T-0001"); return b == sha2 })
 	c.Checkpointed("T-0001", "o/r", "refs/athena/t-0001/checkpoint", sha2)
 	eventually(t, "the third bundle asked", func() bool { return len(tgt.bases()) == 3 })
 	if b := tgt.bases(); b[0] != "" || b[1] != sha1 || b[2] != sha2 {
@@ -97,10 +98,31 @@ func TestCheckpointChunksThenFact(t *testing.T) {
 	tgt.setCheckpoint([]byte("refused"), sha3)
 	c.Checkpointed("T-0001", "o/r", "refs/athena/t-0001/checkpoint", sha3)
 	eventually(t, "the base is forgotten", func() bool {
-		b, _ := c.ob.checkpointSent("T-0001")
+		b, _, _ := c.ob.checkpointSent("T-0001")
 		return len(fs.checkpointFacts()) == 3 && b == ""
 	})
 	if n := len(fs.checkpointFacts()); n != 3 {
 		t.Fatalf("%d facts, want 3", n)
+	}
+}
+
+// A bundle over the bound is not sent, and no bundle of that Ticket is built again.
+func TestCheckpointTooBigOnce(t *testing.T) {
+	srv := newServers(t)
+	c := newTestClient(t, srv)
+	tgt := &fakeTarget{tooBig: true}
+	c.attach(tgt)
+	srv.add(0)
+	run(t, c)
+	eventually(t, "online", c.Online)
+	tgt.setCheckpoint([]byte("huge"), strings.Repeat("a", 40))
+	c.Checkpointed("T-0001", "o/r", "refs/athena/t-0001/checkpoint", strings.Repeat("a", 40))
+	eventually(t, "marked too big", func() bool { _, big, _ := c.ob.checkpointSent("T-0001"); return big })
+	c.Checkpointed("T-0001", "o/r", "refs/athena/t-0001/checkpoint", strings.Repeat("b", 40))
+	c.Checkpointed("T-0002", "o/r", "refs/athena/t-0002/checkpoint", strings.Repeat("b", 40))
+	eventually(t, "the other ticket's bundle", func() bool { return len(tgt.bases()) == 2 })
+	time.Sleep(50 * time.Millisecond)
+	if n := len(tgt.bases()); n != 2 {
+		t.Fatalf("%d bundles built, want 2 (one per ticket)", n)
 	}
 }

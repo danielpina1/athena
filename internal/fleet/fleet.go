@@ -149,6 +149,8 @@ type Fleet struct {
 	ckWake  chan struct{}
 	// localBundle is the embedded node's CheckpointBundle.
 	localBundle func(ctx context.Context, ticketID, since string, w io.Writer) (string, error)
+	// localTooBig are the embedded node's Tickets whose bundle went over the bound (localCheckpoints' alone).
+	localTooBig map[string]bool
 	bg          sync.WaitGroup // the mirror's goroutines
 }
 
@@ -165,7 +167,8 @@ func New(cfg Config) *Fleet {
 	ctx, cancel := context.WithCancel(context.Background())
 	f := &Fleet{cfg: cfg, log: cfg.Log.With("component", "fleet"), now: cfg.Now, epoch: hex.EncodeToString(b),
 		ctx: ctx, cancel: cancel, remotes: map[string]*Remote{}, waiting: map[string]*waitEntry{}, dropped: map[string]time.Time{},
-		placeWake: make(chan struct{}, 1), placeDone: make(chan struct{}), ckLocal: map[string]string{}, ckWake: make(chan struct{}, 1)}
+		placeWake: make(chan struct{}, 1), placeDone: make(chan struct{}), ckLocal: map[string]string{}, ckWake: make(chan struct{}, 1),
+		localTooBig: map[string]bool{}}
 	if cfg.Engine != nil {
 		f.eng.Store(cfg.Engine)
 	}

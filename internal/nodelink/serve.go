@@ -563,11 +563,11 @@ func (c *Client) sendCheckpoints(cn *conn) {
 // the CheckpointSent fact, which the server applies only with the bundle in its mirror. The server's answer moves the
 // base in node.db, or forgets it so the next bundle is whole.
 func (c *Client) sendCheckpoint(cn *conn, t target, ticketID, repo string) error {
-	base, err := c.ob.checkpointSent(ticketID)
-	if err != nil {
-		return err
+	base, tooBig, err := c.ob.checkpointSent(ticketID)
+	if err != nil || tooBig {
+		return err // a Ticket whose bundle went over the bound is not built again
 	}
-	f, err := os.CreateTemp("", "athena-checkpoint-*.bundle")
+	f, err := os.CreateTemp(c.tmpDir, "athena-checkpoint-*.bundle")
 	if err != nil {
 		return err
 	}
@@ -576,7 +576,8 @@ func (c *Client) sendCheckpoint(cn *conn, t target, ticketID, repo string) error
 		os.Remove(f.Name())
 	}()
 	sha, err := t.CheckpointBundle(cn.ctx, ticketID, base, f)
-	if err != nil && base != "" && !errors.Is(err, node.ErrCheckpointUnchanged) && !errors.Is(err, node.ErrNoCheckpoint) && cn.ctx.Err() == nil {
+	if err != nil && base != "" && !errors.Is(err, node.ErrCheckpointUnchanged) && !errors.Is(err, node.ErrNoCheckpoint) &&
+		!errors.Is(err, node.ErrCheckpointTooBig) && cn.ctx.Err() == nil {
 		// The base is unknown here (a repository made again): the whole ref.
 		if err := f.Truncate(0); err != nil {
 			return err
@@ -589,6 +590,10 @@ func (c *Client) sendCheckpoint(cn *conn, t target, ticketID, repo string) error
 	}
 	if errors.Is(err, node.ErrCheckpointUnchanged) {
 		return nil // the server has it
+	}
+	if errors.Is(err, node.ErrCheckpointTooBig) {
+		c.log.Warn("the checkpoint is too big to send; no more are sent for this ticket", "ticket", ticketID, "error", err)
+		return c.ob.setCheckpointTooBig(ticketID)
 	}
 	if err != nil {
 		return err

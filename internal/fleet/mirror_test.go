@@ -400,3 +400,187 @@ func (lk *nodeLink) transferFiles() []string {
 	}
 	return out
 }
+
+// The checkpoint mirror is a directory of its own: never the embedded node's GitHub mirror, which its worktrees fetch
+// from.
+func TestCheckpointDirApartFromNodeMirrors(t *testing.T) {
+	state := t.TempDir()
+	m := NewMirror(CheckpointDir(state))
+	dir, err := m.repoDir("O/R")
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodeMirror := node.MirrorDir(state, "o/r")
+	if dir == nodeMirror || strings.HasPrefix(dir, filepath.Dir(filepath.Dir(nodeMirror))+string(filepath.Separator)) {
+		t.Fatalf("checkpoint repo %s shares the node's mirrors (%s)", dir, nodeMirror)
+	}
+	if strings.HasPrefix(nodeMirror, CheckpointDir(state)+string(filepath.Separator)) {
+		t.Fatalf("the node's mirror %s is under the checkpoint root", nodeMirror)
+	}
+}
+
+// Ids that differ only in case are one Ticket to the mirror and its records; a leftover temporary file goes when the
+// mirror is made.
+func TestMirrorTicketCaseAndTemp(t *testing.T) {
+	e := newEnv(t)
+	root := filepath.Join(e.dir, "checkpoints")
+	if err := os.MkdirAll(filepath.Join(root, mirrorTmp), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stale := filepath.Join(root, mirrorTmp, "athena-node-checkpoint-1.bundle")
+	if err := os.WriteFile(stale, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m := NewMirror(root)
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Fatalf("a stale temporary bundle survived: %v", err)
+	}
+	if _, err := m.repoDir(".tmp/x"); err == nil {
+		t.Fatal("a repository named like the temporary directory was taken")
+	}
+	repo := nodeRepo(t)
+	sha := checkpointIn(t, repo, "T-0001", "a.txt", "x\n")
+	if err := m.Receive("o/r", "T-0001", bytes.NewReader(bundleOf(t, repo, "T-0001", ""))); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok, _ := m.Head("o/r", "t-0001"); !ok || got != sha {
+		t.Fatalf("Head by the lowercased id = %s %v", got, ok)
+	}
+	f := e.fleet(func(c *Config) { c.Mirror = m })
+	if err := f.recordCheckpoint(Checkpoint{TicketID: "T-0001", Repo: "o/r", SHA: sha, Node: "n1"}); err != nil {
+		t.Fatal(err)
+	}
+	if c, ok, _ := f.Checkpoint("t-0001"); !ok || c.TicketID != "T-0001" {
+		t.Fatalf("Checkpoint by the lowercased id = %+v %v", c, ok)
+	}
+}
+
+// commitDated is checkpointIn with the commit dated at.
+func commitDated(t *testing.T, repo, ticketID string, at time.Time) string {
+	t.Helper()
+	t.Setenv("GIT_COMMITTER_DATE", at.Format(time.RFC3339))
+	defer os.Unsetenv("GIT_COMMITTER_DATE")
+	return checkpointIn(t, repo, ticketID, ticketID+".txt", "x\n")
+}
+
+// The sweep compacts each repository, so a replaced checkpoint's objects go; and it drops the refs no record names,
+// once their commit is 14 days old and their Ticket ended or is unknown.
+func TestMirrorSweepCompactsAndDropsOrphans(t *testing.T) {
+	e := newEnv(t)
+	m := NewMirror(filepath.Join(e.dir, "checkpoints"))
+	f := e.fleet(func(c *Config) { c.Mirror = m })
+	repo := nodeRepo(t)
+	first := checkpointIn(t, repo, "T-0100", "a.txt", "first\n")
+	if err := m.Receive("o/r", "T-0100", bytes.NewReader(bundleOf(t, repo, "T-0100", ""))); err != nil {
+		t.Fatal(err)
+	}
+	second := checkpointIn(t, repo, "T-0100", "b.txt", "second\n")
+	if err := m.Receive("o/r", "T-0100", bytes.NewReader(bundleOf(t, repo, "T-0100", first))); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(m.dir, "o", "r.git")
+	gitT(t, dir, "cat-file", "-e", first+"^{commit}") // replaced, still on disk
+
+	open := e.placedRepo("n1", "o/r")
+	old := time.Now().Add(-20 * 24 * time.Hour)
+	for _, id := range []string{"T-9001", open.ID} {
+		commitDated(t, repo, id, old)
+		if err := m.Receive("o/r", id, bytes.NewReader(bundleOf(t, repo, id, ""))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	checkpointIn(t, repo, "T-9002", "c.txt", "recent\n")
+	if err := m.Receive("o/r", "T-9002", bytes.NewReader(bundleOf(t, repo, "T-9002", ""))); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.SweepMirror(); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("git", "-C", dir, "cat-file", "-e", first+"^{commit}")
+	cmd.Env = append(os.Environ(), "GIT_DIR="+dir)
+	if cmd.Run() == nil {
+		t.Fatal("the replaced checkpoint's commit survived the compaction")
+	}
+	gitT(t, dir, "cat-file", "-e", second+"^{commit}")
+	refs := gitT(t, dir, "for-each-ref", "--format=%(refname)")
+	for _, want := range []string{"refs/athena/t-0100/checkpoint", "refs/athena/" + strings.ToLower(open.ID) + "/checkpoint",
+		"refs/athena/t-9002/checkpoint"} {
+		if !strings.Contains(refs, want) {
+			t.Errorf("%s was swept: %q", want, refs)
+		}
+	}
+	if strings.Contains(refs, "t-9001") {
+		t.Errorf("the old unrecorded checkpoint of an unknown Ticket survived: %q", refs)
+	}
+}
+
+// A late checkpoint of the embedded node for a Ticket that moved to another node does not move the mirror's ref.
+func TestLocalCheckpointOfMovedTicket(t *testing.T) {
+	e := newEnv(t)
+	m := NewMirror(filepath.Join(e.dir, "checkpoints"))
+	f := e.fleet(func(c *Config) { c.Mirror = m })
+	repo := nodeRepo(t)
+	called := make(chan struct{}, 4)
+	f.localBundle = func(ctx context.Context, ticketID, since string, w io.Writer) (string, error) {
+		called <- struct{}{}
+		_, err := w.Write(bundleOf(t, repo, ticketID, since))
+		return gitT(t, repo, "rev-parse", node.CheckpointRef(ticketID)), err
+	}
+	moved := e.placedRepo("n1", "o/r")
+	checkpointIn(t, repo, moved.ID, "a.txt", "x\n")
+	if err := f.saveLocal(context.Background(), moved.ID, "o/r"); err != nil {
+		t.Fatal(err)
+	}
+	if len(called) != 0 {
+		t.Fatal("the local node's bundle was built for a Ticket on another node")
+	}
+	if _, ok, _ := m.Head("o/r", moved.ID); ok {
+		t.Fatal("the mirror took it")
+	}
+}
+
+// A node has one transfer per Ticket under way, and a byte budget per hour; past it, its transfers are refused.
+func TestTransferLimits(t *testing.T) {
+	e := newEnv(t)
+	e.addNode("n1", "mini")
+	m := NewMirror(filepath.Join(e.dir, "checkpoints"))
+	f := e.fleet(func(c *Config) { c.Mirror = m })
+	tk := e.placedRepo("n1", "acme/web")
+	repo := nodeRepo(t)
+	sha := checkpointIn(t, repo, tk.ID, "a.txt", "wip\n")
+	b := bundleOf(t, repo, tk.ID, "")
+	w := dialWire(t, f, "n1", hello("n1"))
+	w.waitWelcome()
+	lk := f.Remote("n1").link()
+
+	// A second transfer of the same Ticket while one is under way is refused.
+	w.blob(&athenav1.BlobChunk{TransferId: "a", Kind: "checkpoint", TicketId: tk.ID, Data: b[:10]})
+	w.blob(&athenav1.BlobChunk{TransferId: "b", Kind: "checkpoint", TicketId: tk.ID, Data: b[:10]})
+	eventually(t, "both transfers seen", func() bool {
+		lk.mu.Lock()
+		defer lk.mu.Unlock()
+		return len(lk.transfers) == 2
+	})
+	if n := len(lk.transferFiles()); n != 1 {
+		t.Fatalf("%d transfers hold a file, want 1", n)
+	}
+	w.blob(&athenav1.BlobChunk{TransferId: "a", Kind: "checkpoint", TicketId: tk.ID, Data: b[10:], Last: true})
+	w.blob(&athenav1.BlobChunk{TransferId: "b", Kind: "checkpoint", TicketId: tk.ID, Last: true})
+	w.fact(1, 1, nodelink.MethodCheckpointSent, nodelink.ArgsCheckpointSent{TicketID: tk.ID, Repo: "acme/web", SHA: sha})
+	if r := w.result(); r.GetError() != "" {
+		t.Fatalf("CheckpointSent refused: %s", r.GetError())
+	}
+
+	// Past the budget, the bundle is refused and the fact with it.
+	defer func(old int64) { blobBudget = old }(blobBudget)
+	blobBudget = int64(len(b)) + 10
+	later := checkpointIn(t, repo, tk.ID, "b.txt", "more\n")
+	w.sendBundle("c", tk.ID, bundleOf(t, repo, tk.ID, ""), 1<<20)
+	w.fact(2, 2, nodelink.MethodCheckpointSent, nodelink.ArgsCheckpointSent{TicketID: tk.ID, Repo: "acme/web", SHA: later})
+	if r := w.result(); r.GetError() == "" {
+		t.Fatal("a checkpoint over the node's budget was taken")
+	}
+	if got, _, _ := m.Head("acme/web", tk.ID); got != sha {
+		t.Fatalf("mirror = %s, want %s", got, sha)
+	}
+}

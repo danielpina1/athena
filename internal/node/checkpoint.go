@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -41,7 +43,12 @@ var (
 	ErrNoCheckpoint = errors.New("no checkpoint of this ticket")
 	// ErrCheckpointUnchanged is a CheckpointBundle asked for what its base already holds: there is nothing to send.
 	ErrCheckpointUnchanged = errors.New("the checkpoint is unchanged since its base")
+	// ErrCheckpointTooBig is a bundle over MaxCheckpointBundle: it is never sent.
+	ErrCheckpointTooBig = fmt.Errorf("the checkpoint bundle is over %d MiB", MaxCheckpointBundle>>20)
 )
+
+// bundleCap is the bound CheckpointBundle stops at: MaxCheckpointBundle; a variable for tests.
+var bundleCap int64 = MaxCheckpointBundle
 
 // CheckpointRef is the ref a Ticket's checkpoint is kept at, on a node and in the server's mirror.
 func CheckpointRef(ticketID string) string { return checkpointRef(ticketID) }
@@ -73,15 +80,30 @@ func checkpoint(workDir, ticketID string, env []string, why string) (sha string,
 	if err != nil {
 		return "", err
 	}
-	if _, err := git("read-tree", head); err != nil {
-		return "", err
+	// The index of its own starts as a copy of the worktree's, so git's stat cache skips the files that did not change
+	// (a turn end is no full re-hash); the worktree's own index is only read. When there is none, or the copy does not
+	// take, it starts from HEAD's tree.
+	index := filepath.Join(tmp, "index")
+	tree := ""
+	if seedIndex(ctx, workDir, gitBase(env), index) {
+		if _, err = git("add", "-A"); err == nil {
+			tree, err = git("write-tree")
+		}
+		if err != nil {
+			tree = ""
+			_ = os.Remove(index)
+		}
 	}
-	if _, err := git("add", "-A"); err != nil {
-		return "", err
-	}
-	tree, err := git("write-tree")
-	if err != nil {
-		return "", err
+	if tree == "" {
+		if _, err := git("read-tree", head); err != nil {
+			return "", err
+		}
+		if _, err := git("add", "-A"); err != nil {
+			return "", err
+		}
+		if tree, err = git("write-tree"); err != nil {
+			return "", err
+		}
 	}
 	ref := checkpointRef(ticketID)
 	if prev, err := git("rev-parse", "--verify", "--quiet", ref+"^{commit}"); err == nil && prev != "" {
@@ -96,6 +118,39 @@ func checkpoint(workDir, ticketID string, env []string, why string) (sha string,
 		return "", err
 	}
 	return sha, nil
+}
+
+// seedIndex copies the worktree's own index (git's --git-path index, under env) to index; false when there is none
+// or it cannot be copied.
+func seedIndex(ctx context.Context, workDir string, env []string, index string) bool {
+	var clean []string
+	for _, kv := range env {
+		if !strings.HasPrefix(kv, "GIT_INDEX_FILE=") {
+			clean = append(clean, kv)
+		}
+	}
+	src, err := gitInCtx(ctx, workDir, clean, "rev-parse", "--path-format=absolute", "--git-path", "index")
+	if err != nil || src == "" {
+		return false
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return false
+	}
+	defer in.Close()
+	out, err := os.OpenFile(index, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return false
+	}
+	_, err = io.Copy(out, in)
+	if cerr := out.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		_ = os.Remove(index)
+		return false
+	}
+	return true
 }
 
 // worktreeEnv is the git environment of the node's git in the Ticket's worktree (placement p, which has a repo): the
@@ -177,7 +232,7 @@ func (n *Node) checkpointWork(s *session, why string) {
 // for the whole ref), and returns the commit the bundle carries. ErrNoCheckpoint: the node keeps none for the Ticket;
 // ErrCheckpointUnchanged: the ref is at since, and nothing is written. A since this repository does not know is an
 // error: send the whole ref instead. git runs with no shell, the pins of gitIn and the Ticket's git directories pinned,
-// bounded by ctx and bundleTimeout; a bundle over MaxCheckpointBundle is refused.
+// bounded by ctx and bundleTimeout; a bundle over MaxCheckpointBundle is stopped as it grows: ErrCheckpointTooBig.
 func (n *Node) CheckpointBundle(ctx context.Context, ticketID, since string, w io.Writer) (sha string, err error) {
 	if since != "" && !shaRe.MatchString(since) {
 		return "", fmt.Errorf("checkpoint base %q is not a commit name", since)
@@ -217,11 +272,11 @@ func (n *Node) CheckpointBundle(ctx context.Context, ticketID, since string, w i
 	}
 	defer os.RemoveAll(tmp)
 	file := filepath.Join(tmp, "checkpoint.bundle")
-	args := []string{"bundle", "create", file, ref}
+	args := []string{"bundle", "create", "-", ref}
 	if since != "" {
 		args = append(args, "^"+since)
 	}
-	if _, err := git(args...); err != nil {
+	if err := bundleTo(ctx, p.repo, env, file, args); err != nil {
 		return "", err
 	}
 	// The commit the bundle carries: the ref may have moved since it was read.
@@ -238,15 +293,50 @@ func (n *Node) CheckpointBundle(ctx context.Context, ticketID, since string, w i
 		return "", err
 	}
 	defer f.Close()
-	if st, err := f.Stat(); err != nil {
-		return "", err
-	} else if st.Size() > MaxCheckpointBundle {
-		return "", fmt.Errorf("the checkpoint bundle is %d MiB, over %d MiB", st.Size()>>20, MaxCheckpointBundle>>20)
-	}
 	if _, err := io.Copy(w, f); err != nil {
 		return "", err
 	}
 	return sha, nil
+}
+
+// bundleTo runs `git <args>` (a bundle create to stdout) in dir with env and the pins of gitIn, writing its output to
+// file; past bundleCap it kills git and returns ErrCheckpointTooBig, so an oversized bundle is never built whole.
+func bundleTo(ctx context.Context, dir string, env []string, file string, args []string) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	out, err := os.OpenFile(file, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	cmd := exec.CommandContext(ctx, "git", append(append(slices.Clone(gitPins), "-C", dir), args...)...)
+	cmd.WaitDelay = time.Second
+	cmd.Env = append(slices.Clone(env), "GIT_TERMINAL_PROMPT=0")
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	n, cerr := io.Copy(out, io.LimitReader(stdout, bundleCap+1))
+	tooBig := n > bundleCap
+	if tooBig {
+		cancel()
+		_, _ = io.Copy(io.Discard, stdout)
+	}
+	werr := cmd.Wait()
+	switch {
+	case tooBig:
+		return ErrCheckpointTooBig
+	case werr != nil:
+		return fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), werr, strings.TrimSpace(stderr.String()))
+	case cerr != nil:
+		return cerr
+	}
+	return out.Close()
 }
 
 // RunGit runs git in dir with env (the process's, if nil), with no shell and the node's pins (no hook, no fsmonitor),
