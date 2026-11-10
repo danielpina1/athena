@@ -744,7 +744,7 @@ func (e *Engine) RetryElsewhere(ticketID string) error {
 		o.endAssignment(t, latest, ReasonNodeOffline)
 		// A Ticket pinned to the stranded node would wait for it forever: the owner chose to move it, so the pin goes,
 		// and the Assignment's end says so.
-		if node != "" && t.Execution.Node == node {
+		if node != "" && t.Execution != nil && t.Execution.Node == node {
 			t.Execution.Node = ""
 			o.annotate(EventAssignmentEnded, replaced, "unpinned", node)
 		}

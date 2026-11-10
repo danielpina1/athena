@@ -420,16 +420,47 @@ func (f *Fleet) OpenTicketFile(ctx context.Context, ticketID, rel string) (*os.F
 	return tg.OpenTicketFile(ctx, ticketID, rel)
 }
 
-// ApplyProposal has the node that has the Proposal's Ticket push its branch or open its pull request.
+// ApplyProposal has the node that holds the Proposal's Ticket's worktree push its branch or open its pull request:
+// the node of the latest Assignment that ran, whether or not it ended or the Ticket moved on since. With that node
+// offline the local node applies it when it has the worktree; otherwise the apply fails "<name> is offline". A remote
+// node may start the Proposal, get a write token for its repository and settle it while the apply is out, whatever
+// its Ticket's current Assignment (grantApply).
 func (f *Fleet) ApplyProposal(ctx context.Context, p core.Proposal) error {
-	tg, err := f.ticketTarget(p.TicketID)
-	if err != nil {
-		return err
+	id := ""
+	var t core.Ticket
+	if eng := f.engine(); eng != nil {
+		var err error
+		if t, _, err = eng.Ticket(p.TicketID); err != nil {
+			var ue *core.UserError
+			if !errors.As(err, &ue) {
+				return err
+			}
+		} else {
+			id = workNode(t)
+		}
 	}
-	if tg == nil {
+	if id != "" && id != f.cfg.LocalID {
+		r := f.Remote(id)
+		if r.Online() || f.cfg.Local == nil || !f.cfg.Local.HasWorktree(t) {
+			defer f.grantApply(id, p)()
+			return r.ApplyProposal(ctx, p)
+		}
+	}
+	if f.cfg.Local == nil {
 		return node.ErrNoWorkspace
 	}
-	return tg.ApplyProposal(ctx, p)
+	return f.cfg.Local.ApplyProposal(ctx, p)
+}
+
+// workNode is the node that holds the Ticket's worktree: the one its latest Assignment that ran was placed on ("" the
+// local node). A Ticket none of whose Assignments ran has its latest placed node (placedNode).
+func workNode(t core.Ticket) string {
+	for i := len(t.Assignments) - 1; i >= 0; i-- {
+		if a := t.Assignments[i]; a.State != core.AssignmentPending {
+			return a.Node
+		}
+	}
+	return placedNode(t)
 }
 
 // --- placement ---

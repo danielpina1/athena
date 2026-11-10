@@ -162,6 +162,13 @@ type Fleet struct {
 	localTooBig map[string]bool
 	bg          sync.WaitGroup // the mirror's goroutines
 
+	// Held Proposals being applied (calls.go): applying is each apply out to a remote node (Proposal id -> its
+	// grant, from dispatch until the apply returns and is settled); started is the node each StartProposal was granted
+	// to, until that node settles it.
+	amu      sync.Mutex
+	applying map[string]applyGrant
+	started  map[string]string
+
 	// The offline timers (offline.go), by node id.
 	offMu     sync.Mutex
 	offTimers map[string]*offTimer
@@ -192,7 +199,8 @@ func New(cfg Config) *Fleet {
 	f := &Fleet{cfg: cfg, log: cfg.Log.With("component", "fleet"), now: cfg.Now, epoch: hex.EncodeToString(b),
 		ctx: ctx, cancel: cancel, remotes: map[string]*Remote{}, waiting: map[string]*waitEntry{}, dropped: map[string]time.Time{},
 		placeWake: make(chan struct{}, 1), placeDone: make(chan struct{}), ckLocal: map[string]string{}, ckWake: make(chan struct{}, 1),
-		localTooBig: map[string]bool{}, offTimers: map[string]*offTimer{}, seeding: map[string]*seedRun{}}
+		localTooBig: map[string]bool{}, offTimers: map[string]*offTimer{}, seeding: map[string]*seedRun{},
+		applying: map[string]applyGrant{}, started: map[string]string{}}
 	if cfg.Engine != nil {
 		f.eng.Store(cfg.Engine)
 	}

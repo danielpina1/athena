@@ -170,14 +170,18 @@ func (f *Fleet) fact(nodeID string, call *athenav1.NodeCall) error {
 	case *nodelink.ArgsCheckpointSent:
 		return f.checkpointSent(eng, nodeID, a.TicketID, a.Repo, a.SHA, nil)
 	case *nodelink.ArgsSettleProposal:
-		if err := proposalOnNode(eng, nodeID, a.ID); err != nil {
+		if err := f.settleOnNode(eng, nodeID, a.ID); err != nil {
 			return err
 		}
 		var applyErr error
 		if a.Error != "" {
 			applyErr = errors.New(a.Error)
 		}
-		return eng.SettleProposal(a.ID, applyErr)
+		if err := eng.SettleProposal(a.ID, applyErr); err != nil {
+			return err
+		}
+		f.settled(a.ID)
+		return nil
 	}
 	return &core.UserError{Msg: fmt.Sprintf("unknown fact %q", call.GetMethod())}
 }
@@ -270,18 +274,22 @@ func (f *Fleet) answer(ctx context.Context, nodeID string, a any) (any, error) {
 		}
 		return eng.Propose(a.Proposal)
 	case *nodelink.ArgsPendingProposals:
-		return pendingProposalsOn(eng, nodeID)
+		return pendingProposalsOn(eng, nodeID, func(ticketID string) bool { return f.applyingOn(nodeID, ticketID) })
 	case *nodelink.ArgsStartProposal:
-		if err := proposalOnNode(eng, nodeID, a.ID); err != nil {
+		if err := f.proposalOnNode(eng, nodeID, a.ID); err != nil {
 			return nil, err
 		}
-		return eng.StartProposal(a.ID)
+		first, err := eng.StartProposal(a.ID)
+		if err == nil {
+			f.startedOn(a.ID, nodeID)
+		}
+		return first, err
 
 	case *nodelink.ArgsToken:
 		if f.cfg.Creds == nil {
 			return nil, &core.UserError{Msg: "the server has no GitHub credentials"}
 		}
-		if err := repoOnNode(eng, nodeID, a.Repo); err != nil {
+		if err := repoOnNode(eng, nodeID, a.Repo); err != nil && !f.applyingRepo(nodeID, a.Repo) {
 			return nil, err
 		}
 		tctx, cancel := context.WithTimeout(ctx, RequestTimeout)
@@ -384,17 +392,101 @@ func approvalOnNode(eng *core.Engine, nodeID, id string) error {
 	return assignmentOn(eng, nodeID, a.TicketID, a.AssignmentID)
 }
 
-// proposalOnNode checks that the Proposal belongs to a Ticket currently on the node.
-func proposalOnNode(eng *core.Engine, nodeID, id string) error {
+// proposalOnNode checks that the Proposal belongs to a Ticket currently on the node, or to one an apply the fleet
+// sent the node is under way for (an owner-approved apply of a Ticket that ended or moved).
+func (f *Fleet) proposalOnNode(eng *core.Engine, nodeID, id string) error {
 	p, err := eng.Proposal(id)
 	if err != nil {
 		return err
 	}
+	if f.applyingOn(nodeID, p.TicketID) {
+		return nil
+	}
 	return currentOn(eng, nodeID, p.TicketID)
 }
 
-// pendingProposalsOn lists the pending Proposals of the Tickets currently on the node.
-func pendingProposalsOn(eng *core.Engine, nodeID string) ([]core.Proposal, error) {
+// settleOnNode checks a SettleProposal, a late fact: the node StartProposal was granted to settles it, and no other.
+// Without a record of that (the server restarted since), a node under an apply of the Ticket, or one the Ticket was
+// ever placed on, may.
+func (f *Fleet) settleOnNode(eng *core.Engine, nodeID, id string) error {
+	p, err := eng.Proposal(id)
+	if err != nil {
+		return err
+	}
+	f.amu.Lock()
+	by, ok := f.started[id]
+	f.amu.Unlock()
+	if ok {
+		if by != nodeID {
+			return errNotOnNode(p.TicketID)
+		}
+		return nil
+	}
+	if f.applyingOn(nodeID, p.TicketID) {
+		return nil
+	}
+	return pastOn(eng, nodeID, p.TicketID)
+}
+
+// applyGrant lets a node act on one held Proposal while the fleet's apply of it is out to the node: start it (and the
+// Ticket's pending push a pull request applies first), get a write token for its repository, and settle it.
+type applyGrant struct {
+	node, ticketID, repo string
+}
+
+// grantApply records the grant of p's apply on the node; the returned func clears it.
+func (f *Fleet) grantApply(nodeID string, p core.Proposal) func() {
+	f.amu.Lock()
+	f.applying[p.ID] = applyGrant{node: nodeID, ticketID: p.TicketID, repo: p.Repo}
+	f.amu.Unlock()
+	return func() {
+		f.amu.Lock()
+		delete(f.applying, p.ID)
+		delete(f.started, p.ID) // the server settles the applied Proposal itself
+		f.amu.Unlock()
+	}
+}
+
+// applyingOn reports whether an apply of one of the Ticket's Proposals is out to the node.
+func (f *Fleet) applyingOn(nodeID, ticketID string) bool {
+	f.amu.Lock()
+	defer f.amu.Unlock()
+	for _, g := range f.applying {
+		if g.node == nodeID && g.ticketID == ticketID {
+			return true
+		}
+	}
+	return false
+}
+
+// applyingRepo reports whether an apply of a Proposal of repo is out to the node.
+func (f *Fleet) applyingRepo(nodeID, repo string) bool {
+	f.amu.Lock()
+	defer f.amu.Unlock()
+	for _, g := range f.applying {
+		if g.node == nodeID && g.repo != "" && strings.EqualFold(g.repo, repo) {
+			return true
+		}
+	}
+	return false
+}
+
+// startedOn records that StartProposal of id was granted to the node.
+func (f *Fleet) startedOn(id, nodeID string) {
+	f.amu.Lock()
+	f.started[id] = nodeID
+	f.amu.Unlock()
+}
+
+// settled forgets who started id.
+func (f *Fleet) settled(id string) {
+	f.amu.Lock()
+	delete(f.started, id)
+	f.amu.Unlock()
+}
+
+// pendingProposalsOn lists the pending Proposals of the Tickets currently on the node, or applying on it.
+func pendingProposalsOn(eng *core.Engine, nodeID string, applying func(ticketID string) bool) ([]core.Proposal, error) {
 	all, err := eng.PendingProposals()
 	if err != nil {
 		return nil, err
@@ -404,7 +496,7 @@ func pendingProposalsOn(eng *core.Engine, nodeID string) ([]core.Proposal, error
 	for _, p := range all {
 		ok, seen := on[p.TicketID]
 		if !seen {
-			ok = currentOn(eng, nodeID, p.TicketID) == nil
+			ok = currentOn(eng, nodeID, p.TicketID) == nil || applying(p.TicketID)
 			on[p.TicketID] = ok
 		}
 		if ok {

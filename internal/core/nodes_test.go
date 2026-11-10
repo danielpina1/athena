@@ -134,3 +134,23 @@ func TestRetryElsewhereKeepsOtherPin(t *testing.T) {
 	h.must(h.eng.RetryElsewhere(tk.ID))
 	eq(t, "pin", h.ticket(tk.ID).Execution.Node, "n3")
 }
+
+func TestRetryElsewhereWithoutExecution(t *testing.T) {
+	h := newHarness(t)
+	id := h.accepted()
+	h.must(h.eng.AssignmentPlaced(id, h.ticket(id).Assignments[0].ID, "n2"))
+	h.must(h.eng.NodeOffline("n2", base))
+	// A Ticket stored before its Executor chose anything has no Execution.
+	h.must(h.repos.Tx(func(tx Tx) error {
+		tk, err := tx.GetTicket(id)
+		if err != nil {
+			return err
+		}
+		tk.Execution = nil
+		return tx.PutTicket(tk)
+	}))
+	h.must(h.eng.RetryElsewhere(id))
+	tk := h.ticket(id)
+	eq(t, "assignments", len(tk.Assignments), 2)
+	eq(t, "avoid", tk.LatestAssignment().Avoid, []string{"n2"})
+}
