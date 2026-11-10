@@ -722,8 +722,9 @@ type TicketSummary struct {
 	// node_id and node_name are the node the latest Assignment runs on; empty before one is placed.
 	NodeId   string `protobuf:"bytes,23,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
 	NodeName string `protobuf:"bytes,24,opt,name=node_name,json=nodeName,proto3" json:"node_name,omitempty"`
-	// waiting_for_node is set while the Ticket waits for the node it is pinned to, which is not online.
-	WaitingForNode bool `protobuf:"varint,25,opt,name=waiting_for_node,json=waitingForNode,proto3" json:"waiting_for_node,omitempty"`
+	// waiting_for_node is why the Ticket's Assignment is not placed yet ("Waiting for mac-studio", "Waiting for a node
+	// with Codex"); empty when it is not waiting.
+	WaitingForNode string `protobuf:"bytes,25,opt,name=waiting_for_node,json=waitingForNode,proto3" json:"waiting_for_node,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -926,11 +927,11 @@ func (x *TicketSummary) GetNodeName() string {
 	return ""
 }
 
-func (x *TicketSummary) GetWaitingForNode() bool {
+func (x *TicketSummary) GetWaitingForNode() string {
 	if x != nil {
 		return x.WaitingForNode
 	}
-	return false
+	return ""
 }
 
 type TicketDetail struct {
@@ -2862,7 +2863,7 @@ const file_athena_v1_state_proto_rawDesc = "" +
 	"\x05trust\x18\x16 \x01(\tR\x05trust\x12\x17\n" +
 	"\anode_id\x18\x17 \x01(\tR\x06nodeId\x12\x1b\n" +
 	"\tnode_name\x18\x18 \x01(\tR\bnodeName\x12(\n" +
-	"\x10waiting_for_node\x18\x19 \x01(\bR\x0ewaitingForNode\"\xee\x01\n" +
+	"\x10waiting_for_node\x18\x19 \x01(\tR\x0ewaitingForNode\"\xee\x01\n" +
 	"\fTicketDetail\x122\n" +
 	"\asummary\x18\x01 \x01(\v2\x18.athena.v1.TicketSummaryR\asummary\x124\n" +
 	"\btimeline\x18\x02 \x03(\v2\x18.athena.v1.TimelineEntryR\btimeline\x12\x18\n" +

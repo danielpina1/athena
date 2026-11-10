@@ -335,6 +335,11 @@ func (d *Dispatcher) Do(_ context.Context, o web.Origin, c *athenav1.Command) *a
 	case web.CodeReauthRequired, web.CodeUnauthenticated, web.CodeUnavailable, web.CodeInternal:
 		return res
 	}
+	if _, isToken := c.GetAction().(*athenav1.Command_CreateNodeToken); isToken {
+		// The result carries a join token, which appears once: it is never stored (or replayed). A command sent
+		// again mints a fresh token.
+		return res
+	}
 	if d.beforeStore != nil {
 		d.beforeStore()
 	}

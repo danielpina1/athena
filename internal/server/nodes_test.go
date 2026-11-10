@@ -429,3 +429,36 @@ func TestSubmitUnknownNodeRefused(t *testing.T) {
 		t.Errorf("%d Tickets were made", len(ts))
 	}
 }
+
+// The join token appears once: no command_results row holds it, and the same command sent again mints a fresh one.
+func TestNodeTokenResultNotStored(t *testing.T) {
+	newFakeEnv(t, openTurnFixture(t))
+	w := startWebWith(t, newStateDir(t), nil)
+	mk := func() *athenav1.Command {
+		return &athenav1.Command{Action: &athenav1.Command_CreateNodeToken{CreateNodeToken: &athenav1.CreateNodeToken{}}}
+	}
+	a := doCommand(w, true, "tok", mk()).GetNodeToken().GetCommand()
+	if _, ok, err := w.d.st.CommandResult("phone", "tok"); err != nil || ok {
+		t.Fatalf("a result was stored: ok=%v err=%v", ok, err)
+	}
+	b := doCommand(w, true, "tok", mk()).GetNodeToken().GetCommand()
+	if a == "" || a == b {
+		t.Fatalf("a resend replayed the token: %q %q", a, b)
+	}
+}
+
+// A Ticket pinned to a node that is offline shows that node, and why it waits.
+func TestPinnedUnplacedSummaryShowsNode(t *testing.T) {
+	newFakeEnv(t, openTurnFixture(t))
+	w := startWebWith(t, newStateDir(t), nil)
+	rn := joinRemote(t, w, "mini") // never started: offline
+	r := submitOn(w, "s1", rn.id)
+	tk, _, err := w.d.eng.Ticket(r.GetTicketId())
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "it waits for mini", func() bool {
+		id, name, why := (hubSource{d: w.d}).Placement(&tk)
+		return id == rn.id && name == "mini" && why == "Waiting for mini"
+	})
+}

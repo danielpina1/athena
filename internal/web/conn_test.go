@@ -85,7 +85,7 @@ func (*connSource) Policy() (int, string, string, error) { return 0, "v", "{}", 
 func (*connSource) Nodes() []hub.NodeInfo {
 	return []hub.NodeInfo{{ID: "local", Local: true, State: "online"}}
 }
-func (*connSource) Placement(*core.Ticket) (string, string, bool) { return "local", "", false }
+func (*connSource) Placement(*core.Ticket) (string, string, string) { return "local", "", "" }
 
 // recordingCommander answers ok and remembers the Origin of each Command.
 type recordingCommander struct {

@@ -117,8 +117,9 @@ message TicketSummary {
   // node_id and node_name are the node the latest Assignment runs on; empty before one is placed.
   string node_id = 23;
   string node_name = 24;
-  // waiting_for_node is set while the Ticket waits for the node it is pinned to, which is not online.
-  bool waiting_for_node = 25;
+  // waiting_for_node is why the Ticket's Assignment is not placed yet ("Waiting for mac-studio", "Waiting for a node
+  // with Codex"); empty when it is not waiting.
+  string waiting_for_node = 25;
 }
 
 message TicketDetail {

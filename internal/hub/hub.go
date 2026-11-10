@@ -85,8 +85,8 @@ type Source interface {
 	// block: the hub reads it on its loop.
 	Nodes() []NodeInfo
 	// Placement tells where a Ticket's latest Assignment runs (the node's id and name; the local node's when none is
-	// placed yet) and whether the Ticket waits for a node (the fleet's wait reason is set).
-	Placement(t *core.Ticket) (id, name string, waiting bool)
+	// placed yet) and the fleet's wait reason ("" when it does not wait).
+	Placement(t *core.Ticket) (id, name, waiting string)
 	// Repos returns the known repositories and folders, the last used first, then the local git repositories found on
 	// disk. It must not block on I/O beyond the store: the hub reads it on its loop.
 	Repos() ([]*athenav1.RepoView, error)

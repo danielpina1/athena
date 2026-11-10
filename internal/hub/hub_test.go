@@ -271,16 +271,16 @@ func (f *fakeSource) Nodes() []NodeInfo {
 
 type fakePlace struct {
 	id, name string
-	waiting  bool
+	waiting  string
 }
 
-func (f *fakeSource) Placement(t *core.Ticket) (string, string, bool) {
+func (f *fakeSource) Placement(t *core.Ticket) (string, string, string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if p, ok := f.place[t.ID]; ok {
 		return p.id, p.name, p.waiting
 	}
-	return "local", f.node.Name, false
+	return "local", f.node.Name, ""
 }
 
 func ticket(id string) core.Ticket {
@@ -1378,7 +1378,7 @@ func TestTicketSummaryCarriesNode(t *testing.T) {
 	f := newFake()
 	f.node = node.Status{Name: "mac"}
 	f.put(ticket("T-1"))
-	f.place = map[string]fakePlace{"T-1": {"n1", "alpha", true}}
+	f.place = map[string]fakePlace{"T-1": {"n1", "alpha", "Waiting for alpha"}}
 	h := start(t, f)
 	snap, _ := h.Snapshot()
 	var got *athenav1.TicketSummary
@@ -1387,7 +1387,7 @@ func TestTicketSummaryCarriesNode(t *testing.T) {
 			got = s
 		}
 	}
-	if got == nil || got.NodeId != "n1" || got.NodeName != "alpha" || !got.WaitingForNode {
+	if got == nil || got.NodeId != "n1" || got.NodeName != "alpha" || got.WaitingForNode != "Waiting for alpha" {
 		t.Fatalf("summary = %v", got)
 	}
 }
@@ -1400,11 +1400,11 @@ func TestWaitChangedRepublishesTicket(t *testing.T) {
 	h := start(t, f)
 	sub, _ := h.Subscribe(0, h.Epoch())
 	f.mu.Lock()
-	f.place = map[string]fakePlace{"T-1": {"n1", "alpha", true}}
+	f.place = map[string]fakePlace{"T-1": {"n1", "alpha", "Waiting for alpha"}}
 	f.mu.Unlock()
 	h.WaitChanged("T-1")
 	d := next(t, sub).GetTicket()
-	if d.GetId() != "T-1" || !d.GetWaitingForNode() {
+	if d.GetId() != "T-1" || d.GetWaitingForNode() != "Waiting for alpha" {
 		t.Fatalf("delta = %v", d)
 	}
 }
