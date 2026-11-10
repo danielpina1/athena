@@ -12,7 +12,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"strings"
 	"testing"
 
 	"github.com/danielpina1/athena/internal/link"
@@ -37,7 +36,7 @@ func postJoin(t *testing.T, client *http.Client, base, token string, csr []byte)
 }
 
 // TestNodeJoinAndListenerWired: with TLS on, a node joins on the dashboard port and reaches the node listener on its
-// own port with the certificate it got, where (until the fleet) the link is closed as not served.
+// own port with the certificate it got.
 func TestNodeJoinAndListenerWired(t *testing.T) {
 	dir := newStateDir(t)
 	w := startWeb(t, dir)
@@ -77,9 +76,8 @@ func TestNodeJoinAndListenerWired(t *testing.T) {
 	if err != nil {
 		t.Fatalf("node dial: %v", err)
 	}
-	if _, err := c.Read(ctx); err == nil || !strings.Contains(err.Error(), "nodes are not served yet") {
-		t.Fatalf("read: %v", err)
-	}
+	// The fleet serves the link: it waits for the node's Hello (nodes_test.go runs whole nodes over it).
+	_ = c.Close(1000, "")
 }
 
 // TestNodeJoinRefusedWithTLSOff: with TLS off no node listener runs, and the join says why.

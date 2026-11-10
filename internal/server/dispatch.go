@@ -17,6 +17,7 @@ import (
 
 	"github.com/danielpina1/athena/internal/core"
 	"github.com/danielpina1/athena/internal/effects"
+	"github.com/danielpina1/athena/internal/fleet"
 	"github.com/danielpina1/athena/internal/metrics"
 	"github.com/danielpina1/athena/internal/node"
 	"github.com/danielpina1/athena/internal/pause"
@@ -56,8 +57,10 @@ type Dispatcher struct {
 	autopilot *schedule.Source
 	// pause is the kill switch; nil (tests) pauses nothing and answers unavailable.
 	pause *pause.Switch
-	// node interrupts sessions; nil (tests) answers unavailable.
+	// node is the server's own node (its status, its tokens); nil in tests.
 	node *node.Node
+	// fleet routes a Ticket's calls (Interrupt) to the node that has it; nil (tests) falls back to node.
+	fleet *fleet.Fleet
 	// auth ends the open connections of a revoked passkey; until SetAuth (no web server) revoking works on the store.
 	auth atomic.Pointer[web.Auth]
 	// web is the dashboard's endpoint, nil when it is off; set before the control socket serves.
@@ -591,6 +594,9 @@ func (d *Dispatcher) unsubscribe(thread string) error {
 func (d *Dispatcher) interrupt(ticketID string) error {
 	if _, _, err := d.eng.Ticket(ticketID); err != nil {
 		return err
+	}
+	if d.fleet != nil {
+		return d.fleet.Interrupt(ticketID)
 	}
 	if d.node == nil {
 		return node.ErrNoSession

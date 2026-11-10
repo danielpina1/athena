@@ -18,6 +18,7 @@ import (
 
 	"github.com/danielpina1/athena/internal/core"
 	"github.com/danielpina1/athena/internal/effects"
+	"github.com/danielpina1/athena/internal/fleet"
 	"github.com/danielpina1/athena/internal/hub"
 	"github.com/danielpina1/athena/internal/link"
 	"github.com/danielpina1/athena/internal/metrics"
@@ -670,7 +671,7 @@ type webEndpoint struct {
 	nodeCA  *pki.CA
 	nodeL   net.Listener
 	nodeURL string
-	// nodeLinks serves a node's link once its certificate is checked (default notServingNodes, until the fleet).
+	// nodeLinks serves a node's link once its certificate is checked: the fleet, set by start (notServingNodes until).
 	nodeLinks web.NodeLinkHandler
 
 	// set by start
@@ -762,7 +763,7 @@ func newWebEndpoint(stateDir string, cfg WebConfig, st *store.Store, eng *core.E
 }
 
 // start runs the hub over the Dispatcher's reads, the certificate's renewals, the push Notifier and the listener.
-func (w *webEndpoint) start(d *Dispatcher, n *node.Node, fx *effects.Runner, version string, hubRef *atomic.Pointer[hub.Hub]) error {
+func (w *webEndpoint) start(d *Dispatcher, flt *fleet.Fleet, fx *effects.Runner, version string, hubRef *atomic.Pointer[hub.Hub]) error {
 	src := newHubSource(d)
 	src.tls = w.tls
 	w.hub = hub.New(src, w.log)
@@ -772,6 +773,8 @@ func (w *webEndpoint) start(d *Dispatcher, n *node.Node, fx *effects.Runner, ver
 	}
 	w.auth = auth
 	if w.nodeL != nil {
+		// The fleet serves each node's link once its certificate is checked.
+		w.nodeLinks = flt
 		// Made before anything runs, so a failure leaves nothing to stop.
 		if w.nodeSrv, err = web.NodeListener(web.NodeListenerConfig{Store: w.st, CA: w.nodeCA,
 			GetCertificate: w.tls.Config().GetCertificate, Handler: w.nodeLinks, Log: w.log}); err != nil {
@@ -784,7 +787,7 @@ func (w *webEndpoint) start(d *Dispatcher, n *node.Node, fx *effects.Runner, ver
 	hubRef.Store(w.hub)
 	w.hub.Start(ctx)
 	d.SetAuth(auth)
-	w.dash = web.NewDashboard(web.DashboardConfig{Auth: auth, Hub: w.hub, Commander: d, Streams: n, Presence: w.presence,
+	w.dash = web.NewDashboard(web.DashboardConfig{Auth: auth, Hub: w.hub, Commander: d, Streams: flt, Presence: w.presence,
 		Log: w.log, Version: version})
 	w.wg.Add(1)
 	go func() {
@@ -817,7 +820,7 @@ func (w *webEndpoint) start(d *Dispatcher, n *node.Node, fx *effects.Runner, ver
 			notifier.Run(ctx, nil)
 		}()
 	}
-	w.srv = web.NewServer(web.ServerConfig{Auth: auth, Dashboard: w.dash, VAPID: w.vapid, CA: w.tls.CA(), TLS: w.tls.Config(), UI: ui.FS(), Artifacts: n, Log: w.log,
+	w.srv = web.NewServer(web.ServerConfig{Auth: auth, Dashboard: w.dash, VAPID: w.vapid, CA: w.tls.CA(), TLS: w.tls.Config(), UI: ui.FS(), Artifacts: flt, Log: w.log,
 		NodeJoin: web.NodeJoin(w.st, w.nodeCA, w.now, w.nodeURL)})
 	if w.nodeSrv != nil {
 		w.wg.Add(1)
@@ -933,7 +936,12 @@ func Executable() (string, error) { return executable() }
 // applied (node.ApplyProposal), and the Proposal is settled with the result. It is never retried: applying an outward
 // effect twice is worse than asking again, so a failure settles the Proposal failed and the owner applies it again if
 // they still want it. While Athena is paused it waits, like a reply.
-func applyProposals(st *store.Store, eng *core.Engine, n *node.Node, paused func() bool, log *slog.Logger) effects.Handler {
+// proposalApplier pushes a Proposal's branch or opens its pull request on the node that has its Ticket.
+type proposalApplier interface {
+	ApplyProposal(ctx context.Context, p core.Proposal) error
+}
+
+func applyProposals(st *store.Store, eng *core.Engine, n proposalApplier, paused func() bool, log *slog.Logger) effects.Handler {
 	return func(ctx context.Context, key string, _ []byte) error {
 		if paused != nil && paused() {
 			return effects.Later(outbox.PausedWait)

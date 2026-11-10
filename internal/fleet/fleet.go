@@ -126,6 +126,17 @@ type Fleet struct {
 	remotes       map[string]*Remote
 	subs          []func()
 	localDraining bool
+
+	// Placement: the pending Assignments waiting for a node, by Ticket id (pmu), and the goroutine that places them.
+	pmu       sync.Mutex
+	waiting   map[string]*waitEntry
+	pseq      uint64
+	placeWake chan struct{}
+	placeDone chan struct{}
+
+	// pauseMu orders the kill switch's sends: a remote that connects gets the latest one.
+	pauseMu sync.Mutex
+	paused  bool
 }
 
 // New returns a Fleet; it serves nodes once its Engine is set.
@@ -140,26 +151,34 @@ func New(cfg Config) *Fleet {
 	_, _ = rand.Read(b)
 	ctx, cancel := context.WithCancel(context.Background())
 	f := &Fleet{cfg: cfg, log: cfg.Log.With("component", "fleet"), now: cfg.Now, epoch: hex.EncodeToString(b),
-		ctx: ctx, cancel: cancel, remotes: map[string]*Remote{}}
+		ctx: ctx, cancel: cancel, remotes: map[string]*Remote{}, waiting: map[string]*waitEntry{},
+		placeWake: make(chan struct{}, 1), placeDone: make(chan struct{})}
 	if cfg.Engine != nil {
 		f.eng.Store(cfg.Engine)
 	}
+	// A node that connects, reports a status or is undrained may take what waits.
+	f.subs = []func(){func() { signal(f.placeWake) }}
+	go f.placeLoop()
 	return f
 }
 
-// SetEngine sets the Engine the nodes report to.
-func (f *Fleet) SetEngine(e *core.Engine) { f.eng.Store(e) }
+// SetEngine sets the Engine the nodes report to and placement records into.
+func (f *Fleet) SetEngine(e *core.Engine) {
+	f.eng.Store(e)
+	signal(f.placeWake)
+}
 
 func (f *Fleet) engine() *core.Engine { return f.eng.Load() }
 
-// Close ends every node link and waits for them, so the store can close after it. Nodes that connect later are
-// refused.
+// Close ends every node link and placement and waits for them, so the store can close after it. Nodes that connect
+// later are refused.
 func (f *Fleet) Close() {
 	f.mu.Lock()
 	f.closed = true
 	f.mu.Unlock()
 	f.cancel()
 	f.wg.Wait()
+	<-f.placeDone
 }
 
 // OnChange registers fn, called whenever a node connects, leaves, changes status, or is drained or revoked. fn must
@@ -382,6 +401,8 @@ func (f *Fleet) ServeNode(nodeID string, c link.Conn) {
 	if !f.welcome(lk, h) {
 		return
 	}
+	// The kill switch first: nothing reconcile or placement starts on the node runs before it.
+	f.sendPause(lk.r)
 	f.changed()
 	lk.wg.Add(3)
 	go lk.applyFacts()

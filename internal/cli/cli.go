@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/danielpina1/athena/internal/core"
+	"github.com/danielpina1/athena/internal/fleet"
 	"github.com/danielpina1/athena/internal/metrics"
 	"github.com/danielpina1/athena/internal/node"
 	"github.com/danielpina1/athena/internal/render"
@@ -35,7 +36,7 @@ const dialTimeout = 2 * time.Second
 
 // usage is each command's usage line, without the --state-dir flag every command takes.
 var usage = map[string]string{
-	"server":      "athena server [--slots N] [--model M] [--blocked a,b] [--approval-timeout D] [--claude PATH] [--codex PATH]",
+	"server":      "athena server [--slots N] [--model M] [--blocked a,b] [--approval-timeout D] [--claude PATH] [--codex PATH] [--node-name NAME]",
 	"task":        `athena task "<text>" [--dir D | --repo owner/name] [--model M] [--runtime claude|codex|auto] [--review[=false]]`,
 	"github":      "athena github setup --app-id N --slug S --key FILE --installation N --repo owner/name [--repo ...] [--receive-all owner/name ...] | athena github check",
 	"policy":      "athena policy show | athena policy set FILE",
@@ -179,8 +180,12 @@ func (c *command) server(ctx context.Context, args []string) int {
 	timeout := c.fs.Duration("approval-timeout", 0, "how long an escalated tool call waits for an answer (default 30m)")
 	claudeBin := c.fs.String("claude", "", "the claude executable (default claude)")
 	codexBin := c.fs.String("codex", "", "the codex executable (default: runtimes.codex.binary of config.json, or codex)")
+	nodeName := c.fs.String("node-name", "", "the name of this machine's node (default: its host name)")
 	if _, code, ok := c.parse(args, 0, 0); !ok {
 		return code
+	}
+	if *nodeName != "" && !fleet.ValidName(*nodeName) {
+		return c.fail(errors.New("--node-name: a node name is 1 to 32 characters of a-z, 0-9 and -, starting with a letter"))
 	}
 	var list []string
 	for _, b := range strings.Split(*blocked, ",") {
@@ -196,6 +201,7 @@ func (c *command) server(ctx context.Context, args []string) int {
 		StateDir: c.stateDir,
 		Node: node.Config{
 			Slots: *slots, Model: *model, Blocked: list, ApprovalTimeout: *timeout, ClaudeBinary: *claudeBin,
+			Name: *nodeName,
 		},
 		CodexBinary: *codexBin,
 		Stderr:      c.stderr,
