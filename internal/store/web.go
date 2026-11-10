@@ -276,9 +276,15 @@ func (s *Store) PruneWebSessions(now time.Time) (int, error) {
 	return rowsAffected(res, err, "prune web sessions")
 }
 
-// PutEnrollToken stores the hash of an enrollment token that is good until expiresAt.
-func (s *Store) PutEnrollToken(hash []byte, expiresAt time.Time) error {
-	_, err := s.db.Exec(`INSERT INTO enroll_tokens (hash, expires_at) VALUES (?, ?)`, hash, formatTime(expiresAt))
+// The kinds of an enrollment (join) token: a token of one kind is never accepted for the other.
+const (
+	EnrollPasskey = "passkey"
+	EnrollNode    = "node"
+)
+
+// PutEnrollToken stores the hash of an enrollment token of kind that is good until expiresAt.
+func (s *Store) PutEnrollToken(hash []byte, kind string, expiresAt time.Time) error {
+	_, err := s.db.Exec(`INSERT INTO enroll_tokens (hash, kind, expires_at) VALUES (?, ?, ?)`, hash, kind, formatTime(expiresAt))
 	if err != nil {
 		return fmt.Errorf("store: put enroll token: %w", err)
 	}
@@ -291,11 +297,11 @@ func (s *Store) PruneEnrollTokens(now time.Time) (int, error) {
 	return rowsAffected(res, err, "prune enroll tokens")
 }
 
-// UseEnrollToken spends an enrollment token: true if the hash names a token that is unspent and not expired at now,
+// UseEnrollToken spends an enrollment token: true if the hash names a token of kind that is unspent and not expired at now,
 // which is then spent, in one statement, so two concurrent uses cannot both succeed.
-func (s *Store) UseEnrollToken(hash []byte, now time.Time) (bool, error) {
-	res, err := s.db.Exec(`UPDATE enroll_tokens SET used_at = ? WHERE hash = ? AND used_at = '' AND expires_at > ?`,
-		formatTime(now), hash, formatTime(now))
+func (s *Store) UseEnrollToken(hash []byte, kind string, now time.Time) (bool, error) {
+	res, err := s.db.Exec(`UPDATE enroll_tokens SET used_at = ? WHERE hash = ? AND kind = ? AND used_at = '' AND expires_at > ?`,
+		formatTime(now), hash, kind, formatTime(now))
 	n, err := rowsAffected(res, err, "use enroll token")
 	return n > 0, err
 }

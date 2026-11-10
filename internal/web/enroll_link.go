@@ -5,6 +5,8 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/danielpina1/athena/internal/store"
 )
 
 // maxEnrollLinkTTL is the longest a link requested over HTTP may be good for.
@@ -50,8 +52,8 @@ func (a *Auth) EnrollLink(w http.ResponseWriter, r *http.Request) {
 			ttl = time.Duration(*req.TTLSeconds) * time.Second
 		}
 	}
-	expires := time.Now().Add(ttl)
-	token, err := issueEnrollTokenUntil(a.st, expires)
+	expires := a.st.Now().Add(ttl)
+	token, err := issueEnrollTokenUntil(a.st, store.EnrollPasskey, expires)
 	if err != nil {
 		fail(w, http.StatusInternalServerError, "internal", "internal error")
 		return

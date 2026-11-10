@@ -170,6 +170,19 @@ var migrations = []string{
 	) WITHOUT ROWID;
 	INSERT OR IGNORE INTO decision_triggers (trigger_id, decision_id)
 		SELECT j.value, d.id FROM decisions d, json_each(d.doc, '$.triggerIds') j;`,
+	// 12: remote nodes, with the high-water mark of the node facts applied (exactly-once replay), and the kind of a join token.
+	`CREATE TABLE nodes (
+		id TEXT PRIMARY KEY,
+		name TEXT NOT NULL UNIQUE,
+		cert_serial TEXT NOT NULL DEFAULT '',
+		created_at TEXT NOT NULL,
+		last_seen TEXT NOT NULL DEFAULT '',
+		draining INTEGER NOT NULL DEFAULT 0,
+		revoked_at TEXT NOT NULL DEFAULT '',
+		applied_fact_seq INTEGER NOT NULL DEFAULT 0,
+		caps BLOB
+	);
+	ALTER TABLE enroll_tokens ADD COLUMN kind TEXT NOT NULL DEFAULT 'passkey';`,
 }
 
 const schemaKey = "schema"

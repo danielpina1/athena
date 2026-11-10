@@ -282,19 +282,19 @@ func TestPruneWebSessions(t *testing.T) {
 func TestEnrollTokens(t *testing.T) {
 	s, _ := openTemp(t)
 	h := []byte("tok")
-	if err := s.PutEnrollToken(h, t0.Add(10*time.Minute)); err != nil {
+	if err := s.PutEnrollToken(h, EnrollPasskey, t0.Add(10*time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	if ok, err := s.UseEnrollToken(h, t0.Add(11*time.Minute)); err != nil || ok {
+	if ok, err := s.UseEnrollToken(h, EnrollPasskey, t0.Add(11*time.Minute)); err != nil || ok {
 		t.Fatalf("expired token used: %v %v", ok, err)
 	}
-	if ok, err := s.UseEnrollToken(h, t0.Add(9*time.Minute)); err != nil || !ok {
+	if ok, err := s.UseEnrollToken(h, EnrollPasskey, t0.Add(9*time.Minute)); err != nil || !ok {
 		t.Fatalf("valid token refused: %v %v", ok, err)
 	}
-	if ok, err := s.UseEnrollToken(h, t0.Add(9*time.Minute)); err != nil || ok {
+	if ok, err := s.UseEnrollToken(h, EnrollPasskey, t0.Add(9*time.Minute)); err != nil || ok {
 		t.Fatalf("token used twice: %v %v", ok, err)
 	}
-	if ok, _ := s.UseEnrollToken([]byte("nope"), t0); ok {
+	if ok, _ := s.UseEnrollToken([]byte("nope"), EnrollPasskey, t0); ok {
 		t.Fatal("unknown token used")
 	}
 }
@@ -470,17 +470,17 @@ func TestPruneCascadesAndEnrollTokens(t *testing.T) {
 	}
 
 	for name, exp := range map[string]time.Time{"live": t0.Add(time.Hour), "spent": t0.Add(time.Hour), "old": t0.Add(-time.Hour)} {
-		if err := s.PutEnrollToken([]byte(name), exp); err != nil {
+		if err := s.PutEnrollToken([]byte(name), EnrollPasskey, exp); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if ok, err := s.UseEnrollToken([]byte("spent"), t0); err != nil || !ok {
+	if ok, err := s.UseEnrollToken([]byte("spent"), EnrollPasskey, t0); err != nil || !ok {
 		t.Fatal(ok, err)
 	}
 	if n, err := s.PruneEnrollTokens(t0); err != nil || n != 2 {
 		t.Fatalf("PruneEnrollTokens = %d, %v, want 2 (spent and expired)", n, err)
 	}
-	if ok, _ := s.UseEnrollToken([]byte("live"), t0); !ok {
+	if ok, _ := s.UseEnrollToken([]byte("live"), EnrollPasskey, t0); !ok {
 		t.Fatal("the live token was pruned")
 	}
 }

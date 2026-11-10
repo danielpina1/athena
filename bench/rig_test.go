@@ -626,7 +626,7 @@ func (d *dashboard) signIn() string {
 	}
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
-	token, err := web.IssueEnrollToken(st, 0)
+	token, err := web.IssueEnrollToken(st, store.EnrollPasskey, 0)
 	slog.SetDefault(prev)
 	st.Close()
 	if err != nil {

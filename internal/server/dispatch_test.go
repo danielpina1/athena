@@ -165,7 +165,7 @@ func (w *webServer) login() *browser {
 	w.t.Helper()
 	if w.authn == nil {
 		w.authn = webauthntest.New(w.t, w.origin, webHost)
-		token, err := web.IssueEnrollToken(w.d.st, 0)
+		token, err := web.IssueEnrollToken(w.d.st, store.EnrollPasskey, 0)
 		if err != nil {
 			w.t.Fatal(err)
 		}
@@ -716,7 +716,7 @@ func TestPruneDropsExpiredSessionsAndTokens(t *testing.T) {
 	if err := w.d.st.PutPushSubscription(store.PushSubscription{SessionHash: []byte("stale"), Endpoint: "https://push.test/stale", P256dh: "k", Auth: "a", CreatedAt: old}); err != nil {
 		t.Fatal(err)
 	}
-	if err := w.d.st.PutEnrollToken([]byte("expired"), old); err != nil {
+	if err := w.d.st.PutEnrollToken([]byte("expired"), store.EnrollPasskey, old); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
