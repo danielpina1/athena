@@ -739,13 +739,17 @@ func (e *Engine) RetryElsewhere(ticketID string) error {
 		if t.Ended != nil || latest == nil || latest.NodeOffline == nil || latest.State == AssignmentEnded {
 			return userErrorf("this Ticket's node is not offline")
 		}
-		replaced, node := latest.ID, latest.Node
+		replaced, node, role := latest.ID, latest.Node, latest.Role
 		t.Stats.Retries++
 		o.endAssignment(t, latest, ReasonNodeOffline)
 		o.requeueUntaken(t, replaced)
 		assignment := o.newAssignment(t)
+		// A stranded review is retried as a review: t.Review stays, so the Role must too (startReview leaves the
+		// review's runtime unpinned, so there is no pin to carry).
+		next := findAssignment(t, assignment)
+		next.Role = role
 		if node != "" {
-			findAssignment(t, assignment).Avoid = []string{node}
+			next.Avoid = []string{node}
 		}
 		t.UpdatedAt = o.at
 		o.stop(t, replaced, ReasonNodeOffline)

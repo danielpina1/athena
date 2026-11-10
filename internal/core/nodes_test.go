@@ -51,6 +51,15 @@ func TestRetryElsewhereEndsAndAvoids(t *testing.T) {
 	h.must(h.eng.RetryElsewhere(id))
 
 	tk := h.ticket(id)
+	eq(t, "retries", tk.Stats.Retries, 1)
+	calls := h.exec.calls
+	stop, start := calls[len(calls)-2], calls[len(calls)-1]
+	eq(t, "stop method", stop.Method, "stop")
+	eq(t, "stop assignment", stop.AssignmentID, tk.Assignments[0].ID)
+	eq(t, "stop reason", stop.Reason, ReasonNodeOffline)
+	eq(t, "start method", start.Method, "start")
+	eq(t, "start assignment", start.AssignmentID, tk.Assignments[1].ID)
+	eq(t, "start avoid", start.Assignment.Avoid, []string{"n2"})
 	eq(t, "assignments", len(tk.Assignments), 2)
 	eq(t, "old state", tk.Assignments[0].State, AssignmentEnded)
 	eq(t, "old reason", tk.Assignments[0].EndedReason, ReasonNodeOffline)
@@ -76,4 +85,24 @@ func TestPinStoredOnSubmit(t *testing.T) {
 	tk, err := h.eng.SubmitOwnerTask("pinned", TaskOptions{Dir: "/w", Node: "n3"})
 	h.must(err)
 	eq(t, "pin", h.ticket(tk.ID).Execution.Node, "n3")
+}
+
+func TestRetryElsewhereKeepsReviewRole(t *testing.T) {
+	h := newHarnessWith(t, pairedOptions(2))
+	id, impl := h.pairedTicket("", "")
+	h.tick(1)
+	h.ready(id, impl, "done")
+	rv := h.launch(id, "")
+	h.must(h.eng.AssignmentPlaced(id, rv, "n4"))
+	h.must(h.eng.NodeOffline("n4", base))
+	h.must(h.eng.RetryElsewhere(id))
+
+	tk := h.ticket(id)
+	next := tk.LatestAssignment()
+	eq(t, "role", next.Role, RoleReview)
+	eq(t, "state", next.State, AssignmentPending)
+	eq(t, "avoid", next.Avoid, []string{"n4"})
+	if tk.Review == nil {
+		t.Error("review state lost")
+	}
 }
