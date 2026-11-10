@@ -280,7 +280,7 @@ func TestCheckpointEveryTurnEnd(t *testing.T) {
 	defer func(old int64) { bundleCap = old }(bundleCap)
 	bundleCap = int64(full.Len()) / 2
 	var cut bytes.Buffer
-	if _, err := h.n.CheckpointBundle(ctx, tk.ID, "", &cut); !errors.Is(err, ErrCheckpointTooBig) || cut.Len() != 0 {
+	if _, err := h.n.CheckpointBundle(ctx, tk.ID, "", &cut); !errors.Is(err, ErrCheckpointTooBig) || int64(cut.Len()) > bundleCap+1 {
 		t.Fatalf("CheckpointBundle over the cap = %v, %d bytes written", err, cut.Len())
 	}
 }

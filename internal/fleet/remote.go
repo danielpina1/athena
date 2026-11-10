@@ -412,6 +412,8 @@ type nodeLink struct {
 	cmds     []*athenav1.Frame    // commands not yet sent
 	// transfers are the checkpoint bundles the node sends on BLOB, by transfer id (mirror.go).
 	transfers map[string]*transfer
+	tseq      uint64                 // transfers made on the link
+	factWaits map[uint64][]*transfer // CheckpointSent fact seq -> the transfers before it
 	// cmdSender is set once the goroutine sending cmds runs.
 	cmdSender bool
 
@@ -424,7 +426,7 @@ func newNodeLink(f *Fleet, nodeID string, c link.Conn) *nodeLink {
 	ctx, cancel := context.WithCancel(f.ctx)
 	lk := &nodeLink{f: f, nodeID: nodeID, conn: &closeConn{Conn: c}, ctx: ctx, cancel: cancel,
 		hello: make(chan *athenav1.NodeHello, 1), done: make(chan struct{}), applierDone: make(chan struct{}),
-		pending: map[uint64]func(*athenav1.NodeResult){}, subs: map[uint64]*remoteSub{}, advance: make(chan struct{}), transfers: map[string]*transfer{},
+		pending: map[uint64]func(*athenav1.NodeResult){}, subs: map[uint64]*remoteSub{}, advance: make(chan struct{}), transfers: map[string]*transfer{}, factWaits: map[uint64][]*transfer{},
 		factWake: make(chan struct{}, 1), cmdWake: make(chan struct{}, 1), statusWake: make(chan struct{}, 1)}
 	lk.sess = link.New(lk.conn, link.Options{Heartbeat: Heartbeat, DeadAfter: DeadAfter, OnFrame: lk.onFrame})
 	return lk
@@ -498,6 +500,9 @@ func (lk *nodeLink) onCall(call *athenav1.NodeCall) {
 		}
 	case call.GetFactSeq() > 0:
 		lk.mu.Lock()
+		if call.GetMethod() == nodelink.MethodCheckpointSent {
+			lk.factTransfers(call)
+		}
 		lk.facts = append(lk.facts, call)
 		lk.received++
 		lk.mu.Unlock()
@@ -584,16 +589,23 @@ func (lk *nodeLink) applyFacts() {
 // when the link ended first.
 func (lk *nodeLink) applyOne(call *athenav1.NodeCall) (answer error, ok bool) {
 	seq := call.GetFactSeq()
+	var landed []string
 	if call.GetMethod() == nodelink.MethodCheckpointSent {
 		// Its bundle came before it on this link: it must be in the mirror, or dropped, before the fact is applied.
-		var a nodelink.ArgsCheckpointSent
-		if decodeStrict(call.GetArgs(), &a) == nil && !lk.awaitTransfers(a.TicketID) {
+		var ok bool
+		if landed, ok = lk.awaitFact(seq); !ok {
 			return nil, false
 		}
 	}
 	pause := 100 * time.Millisecond
 	for {
-		err := lk.f.fact(lk.nodeID, call)
+		var err error
+		if a, derr := args(call); derr == nil && call.GetMethod() == nodelink.MethodCheckpointSent {
+			cs := a.(*nodelink.ArgsCheckpointSent)
+			err = lk.f.checkpointSent(lk.f.engine(), lk.nodeID, cs.TicketID, cs.Repo, cs.SHA, landed)
+		} else {
+			err = lk.f.fact(lk.nodeID, call)
+		}
 		var ue *core.UserError
 		if err == nil || errors.As(err, &ue) {
 			if err != nil {

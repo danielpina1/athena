@@ -232,7 +232,8 @@ func (n *Node) checkpointWork(s *session, why string) {
 // for the whole ref), and returns the commit the bundle carries. ErrNoCheckpoint: the node keeps none for the Ticket;
 // ErrCheckpointUnchanged: the ref is at since, and nothing is written. A since this repository does not know is an
 // error: send the whole ref instead. git runs with no shell, the pins of gitIn and the Ticket's git directories pinned,
-// bounded by ctx and bundleTimeout; a bundle over MaxCheckpointBundle is stopped as it grows: ErrCheckpointTooBig.
+// bounded by ctx and bundleTimeout; a bundle over MaxCheckpointBundle is stopped as it grows: ErrCheckpointTooBig. The
+// bundle streams straight to w (no copy of it is kept); on an error w may hold part of one, which the caller drops.
 func (n *Node) CheckpointBundle(ctx context.Context, ticketID, since string, w io.Writer) (sha string, err error) {
 	if since != "" && !shaRe.MatchString(since) {
 		return "", fmt.Errorf("checkpoint base %q is not a commit name", since)
@@ -266,49 +267,20 @@ func (n *Node) CheckpointBundle(ctx context.Context, ticketID, since string, w i
 	if head == since {
 		return head, ErrCheckpointUnchanged
 	}
-	tmp, err := os.MkdirTemp("", "athena-bundle-")
-	if err != nil {
-		return "", err
-	}
-	defer os.RemoveAll(tmp)
-	file := filepath.Join(tmp, "checkpoint.bundle")
 	args := []string{"bundle", "create", "-", ref}
 	if since != "" {
 		args = append(args, "^"+since)
 	}
-	if err := bundleTo(ctx, p.repo, env, file, args); err != nil {
-		return "", err
-	}
-	// The commit the bundle carries: the ref may have moved since it was read.
-	heads, err := git("bundle", "list-heads", file, ref)
-	if err != nil {
-		return "", err
-	}
-	sha, _, _ = strings.Cut(heads, " ")
-	if !shaRe.MatchString(sha) {
-		return "", fmt.Errorf("the bundle names no commit for %s", ref)
-	}
-	f, err := os.Open(file)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	if _, err := io.Copy(w, f); err != nil {
-		return "", err
-	}
-	return sha, nil
+	return bundleTo(ctx, p.repo, env, ref, w, args)
 }
 
-// bundleTo runs `git <args>` (a bundle create to stdout) in dir with env and the pins of gitIn, writing its output to
-// file; past bundleCap it kills git and returns ErrCheckpointTooBig, so an oversized bundle is never built whole.
-func bundleTo(ctx context.Context, dir string, env []string, file string, args []string) error {
+// bundleTo runs `git <args>` (a bundle create to stdout) in dir with env and the pins of gitIn, streaming its output
+// to w, and returns the commit the bundle's header names for ref (the ref may have moved since it was read). Past
+// bundleCap it kills git and returns ErrCheckpointTooBig, so an oversized bundle is never built whole. On an error w
+// may hold part of a bundle: the caller drops it.
+func bundleTo(ctx context.Context, dir string, env []string, ref string, w io.Writer, args []string) (string, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	out, err := os.OpenFile(file, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return err
-	}
-	defer out.Close()
 	cmd := exec.CommandContext(ctx, "git", append(append(slices.Clone(gitPins), "-C", dir), args...)...)
 	cmd.WaitDelay = time.Second
 	cmd.Env = append(slices.Clone(env), "GIT_TERMINAL_PROMPT=0")
@@ -316,27 +288,61 @@ func bundleTo(ctx context.Context, dir string, env []string, file string, args [
 	cmd.Stderr = &stderr
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return err
+		return "", err
 	}
 	if err := cmd.Start(); err != nil {
-		return err
+		return "", err
 	}
-	n, cerr := io.Copy(out, io.LimitReader(stdout, bundleCap+1))
+	hdr := &headerTap{w: w}
+	n, cerr := io.Copy(hdr, io.LimitReader(stdout, bundleCap+1))
 	tooBig := n > bundleCap
-	if tooBig {
+	if tooBig || cerr != nil {
 		cancel()
 		_, _ = io.Copy(io.Discard, stdout)
 	}
 	werr := cmd.Wait()
 	switch {
 	case tooBig:
-		return ErrCheckpointTooBig
-	case werr != nil:
-		return fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), werr, strings.TrimSpace(stderr.String()))
+		return "", ErrCheckpointTooBig
 	case cerr != nil:
-		return cerr
+		return "", cerr
+	case werr != nil:
+		return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), werr, strings.TrimSpace(stderr.String()))
 	}
-	return out.Close()
+	sha := hdr.head(ref)
+	if !shaRe.MatchString(sha) {
+		return "", fmt.Errorf("the bundle names no commit for %s", ref)
+	}
+	return sha, nil
+}
+
+// headerTap passes a bundle through to w and keeps its header: the lines before the first empty one.
+type headerTap struct {
+	w    io.Writer
+	buf  []byte
+	done bool
+}
+
+func (h *headerTap) Write(p []byte) (int, error) {
+	if !h.done {
+		h.buf = append(h.buf, p...)
+		if i := strings.Index(string(h.buf), "\n\n"); i >= 0 {
+			h.buf, h.done = h.buf[:i], true
+		} else if len(h.buf) > 1<<20 {
+			h.done = true // no header ends this early: head finds nothing
+		}
+	}
+	return h.w.Write(p)
+}
+
+// head is the commit the header names for ref: a "<sha> <ref>" line (a prerequisite starts with "-").
+func (h *headerTap) head(ref string) string {
+	for _, line := range strings.Split(string(h.buf), "\n") {
+		if sha, name, ok := strings.Cut(line, " "); ok && name == ref && !strings.HasPrefix(sha, "-") {
+			return sha
+		}
+	}
+	return ""
 }
 
 // RunGit runs git in dir with env (the process's, if nil), with no shell and the node's pins (no hook, no fsmonitor),

@@ -638,6 +638,7 @@ func (c *Client) sendCheckpoint(cn *conn, t target, ticketID, repo string) error
 		if err := c.ob.setCheckpointSent(ticketID, next); err != nil {
 			c.log.Error("record the checkpoint sent", "ticket", ticketID, "error", err)
 		}
+		c.checkpointAnswered(ticketID, repo, errMsg == "")
 	})
 }
 
@@ -660,4 +661,37 @@ func (c *Client) sendBlob(cn *conn, chunk *athenav1.BlobChunk) error {
 		case <-time.After(retryPause):
 		}
 	}
+}
+
+// checkpointRetries is how many times a refused checkpoint is sent again, checkpointRetry apart, before it waits for
+// the Ticket's next checkpoint; a variable for tests.
+var (
+	checkpointRetries = 3
+	checkpointRetry   = 5 * time.Second
+)
+
+// checkpointAnswered is the server's answer to a CheckpointSent: a refusal sends the Ticket's checkpoint again (whole)
+// a little later, a few times, so the last one before a failover is not lost; an acceptance resets the count. It never
+// blocks.
+func (c *Client) checkpointAnswered(ticketID, repo string, ok bool) {
+	c.ckMu.Lock()
+	defer c.ckMu.Unlock()
+	if ok {
+		delete(c.ckRetries, ticketID)
+		return
+	}
+	if c.ckRetries[ticketID] >= checkpointRetries {
+		delete(c.ckRetries, ticketID)
+		c.log.Warn("the server refused the checkpoint again; it waits for the next one", "ticket", ticketID)
+		return
+	}
+	c.ckRetries[ticketID]++
+	time.AfterFunc(checkpointRetry, func() {
+		c.ckMu.Lock()
+		if _, queued := c.ckPending[ticketID]; !queued {
+			c.ckPending[ticketID] = repo
+		}
+		c.ckMu.Unlock()
+		signal(c.ckWake)
+	})
 }

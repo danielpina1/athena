@@ -539,7 +539,7 @@ func TestLocalCheckpointOfMovedTicket(t *testing.T) {
 	}
 }
 
-// A node has one transfer per Ticket under way, and a byte budget per hour; past it, its transfers are refused.
+// A node's transfers of one Ticket queue, and it has a byte budget per hour; past it, its transfers are refused.
 func TestTransferLimits(t *testing.T) {
 	e := newEnv(t)
 	e.addNode("n1", "mini")
@@ -553,7 +553,7 @@ func TestTransferLimits(t *testing.T) {
 	w.waitWelcome()
 	lk := f.Remote("n1").link()
 
-	// A second transfer of the same Ticket while one is under way is refused.
+	// A second transfer of the same Ticket while one is under way queues behind it.
 	w.blob(&athenav1.BlobChunk{TransferId: "a", Kind: "checkpoint", TicketId: tk.ID, Data: b[:10]})
 	w.blob(&athenav1.BlobChunk{TransferId: "b", Kind: "checkpoint", TicketId: tk.ID, Data: b[:10]})
 	eventually(t, "both transfers seen", func() bool {
@@ -561,8 +561,8 @@ func TestTransferLimits(t *testing.T) {
 		defer lk.mu.Unlock()
 		return len(lk.transfers) == 2
 	})
-	if n := len(lk.transferFiles()); n != 1 {
-		t.Fatalf("%d transfers hold a file, want 1", n)
+	if n := len(lk.transferFiles()); n != 2 {
+		t.Fatalf("%d transfers hold a file, want 2", n)
 	}
 	w.blob(&athenav1.BlobChunk{TransferId: "a", Kind: "checkpoint", TicketId: tk.ID, Data: b[10:], Last: true})
 	w.blob(&athenav1.BlobChunk{TransferId: "b", Kind: "checkpoint", TicketId: tk.ID, Last: true})
@@ -582,5 +582,47 @@ func TestTransferLimits(t *testing.T) {
 	}
 	if got, _, _ := m.Head("acme/web", tk.ID); got != sha {
 		t.Fatalf("mirror = %s, want %s", got, sha)
+	}
+}
+
+// Two turn ends back to back while the first bundle is still being fetched: both facts are taken, in order, and the
+// mirror and the record end at the second checkpoint.
+func TestBackToBackCheckpoints(t *testing.T) {
+	e := newEnv(t)
+	e.addNode("n1", "mini")
+	m := NewMirror(filepath.Join(e.dir, "checkpoints"))
+	f := e.fleet(func(c *Config) { c.Mirror = m })
+	tk := e.placedRepo("n1", "acme/web")
+	repo := nodeRepo(t)
+	release := make(chan struct{})
+	var once sync.Once
+	receiveHook = func(string) { once.Do(func() { <-release }) } // the first fetch is slow
+	t.Cleanup(func() { receiveHook = nil })
+	w := dialWire(t, f, "n1", hello("n1"))
+	w.waitWelcome()
+	lk := f.Remote("n1").link()
+
+	first := checkpointIn(t, repo, tk.ID, "a.txt", "one\n")
+	w.sendBundle("a", tk.ID, bundleOf(t, repo, tk.ID, ""), 64)
+	w.fact(1, 1, nodelink.MethodCheckpointSent, nodelink.ArgsCheckpointSent{TicketID: tk.ID, Repo: "acme/web", SHA: first})
+	second := checkpointIn(t, repo, tk.ID, "b.txt", "two\n")
+	w.sendBundle("b", tk.ID, bundleOf(t, repo, tk.ID, first), 64)
+	w.fact(2, 2, nodelink.MethodCheckpointSent, nodelink.ArgsCheckpointSent{TicketID: tk.ID, Repo: "acme/web", SHA: second})
+	eventually(t, "both transfers held", func() bool {
+		lk.mu.Lock()
+		defer lk.mu.Unlock()
+		return len(lk.transfers) == 2
+	})
+	close(release)
+	for i := 0; i < 2; i++ {
+		if r := w.result(); r.GetError() != "" {
+			t.Fatalf("fact %d refused: %s", r.GetId(), r.GetError())
+		}
+	}
+	if got, _, _ := m.Head("acme/web", tk.ID); got != second {
+		t.Fatalf("mirror = %s, want the second %s", got, second)
+	}
+	if c, ok, _ := f.Checkpoint(tk.ID); !ok || c.SHA != second {
+		t.Fatalf("record = %+v, want %s", c, second)
 	}
 }

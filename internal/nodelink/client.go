@@ -104,6 +104,7 @@ type Client struct {
 	// The checkpoints waiting to be sent (serve.go): Ticket id -> repo.
 	ckMu      sync.Mutex
 	ckPending map[string]string
+	ckRetries map[string]int // refusals in a row, by Ticket
 	ckWake    chan struct{}
 	// tmpDir holds the bundles being sent: <StateDir>/tmp, emptied when the Client is made.
 	tmpDir string
@@ -177,7 +178,7 @@ func New(id *Identity, opts Options) (*Client, error) {
 	return &Client{id: id, opts: opts, log: opts.Log.With("component", "nodelink"), ob: ob,
 		factWake: make(chan struct{}, 1), statWake: make(chan struct{}, 1), ready: make(chan struct{}),
 		onlineSig: make(chan struct{}), tickets: map[string]cachedTicket{}, answered: map[uint64]func(string){},
-		ckPending: map[string]string{}, ckWake: make(chan struct{}, 1), tmpDir: tmpDir}, nil
+		ckPending: map[string]string{}, ckRetries: map[string]int{}, ckWake: make(chan struct{}, 1), tmpDir: tmpDir}, nil
 }
 
 // Attach gives the Client the node the server's calls are served onto.

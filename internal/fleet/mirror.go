@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,6 +18,7 @@ import (
 	"github.com/danielpina1/athena/internal/core"
 	"github.com/danielpina1/athena/internal/link"
 	"github.com/danielpina1/athena/internal/node"
+	"github.com/danielpina1/athena/internal/nodelink"
 	"github.com/danielpina1/athena/internal/pb/athenav1"
 )
 
@@ -35,9 +37,12 @@ const (
 	mirrorSweepFirst = time.Minute
 	// mirrorTimeout bounds one git call on a mirror.
 	mirrorTimeout = 5 * time.Minute
+	// compactTimeout bounds a repack or prune of one mirror repository, which a large one needs.
+	compactTimeout = 30 * time.Minute
 	// blobKindCheckpoint is BlobChunk.kind of a checkpoint bundle.
 	blobKindCheckpoint = "checkpoint"
-	// maxTransfers bounds the checkpoint transfers one link holds at once; a Ticket has at most one under way.
+	// maxTransfers bounds the checkpoint transfers one link holds at once (a Ticket's queue behind one another), so
+	// with maxBundle it bounds the disk one link takes.
 	maxTransfers = 4
 	// blobWindow is the window of a node's blob budget (blobBudget).
 	blobWindow = time.Hour
@@ -152,9 +157,14 @@ func mirrorEnv(dir string) []string {
 	return env
 }
 
-// git runs git on the repository dir with the mirror's environment and pins, bounded by mirrorTimeout.
+// mirrorGit runs git on the repository dir with the mirror's environment and pins, bounded by mirrorTimeout.
 func mirrorGit(ctx context.Context, dir string, args ...string) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, mirrorTimeout)
+	return mirrorGitFor(ctx, dir, mirrorTimeout, args...)
+}
+
+// mirrorGitFor is mirrorGit bounded by timeout.
+func mirrorGitFor(ctx context.Context, dir string, timeout time.Duration, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	if err := writeConfig(dir); err != nil {
 		return "", err
@@ -236,6 +246,9 @@ func (m *Mirror) ReceiveContext(ctx context.Context, repo, ticketID string, bund
 	}
 	return m.receivePath(ctx, dir, ref, f.Name())
 }
+
+// receiveHook, when set (tests), runs before a node's bundle goes into the mirror.
+var receiveHook func(ticketID string)
 
 // receiveFile is ReceiveContext from a bundle file already held, at most maxBundle long.
 func (m *Mirror) receiveFile(ctx context.Context, repo, ticketID, file string) error {
@@ -419,10 +432,10 @@ func (m *Mirror) Compact() error {
 	for _, dir := range dirs {
 		errs = append(errs, func() error {
 			defer m.lock(dir)()
-			if _, err := mirrorGit(context.Background(), dir, "repack", "-a", "-d", "-q"); err != nil {
+			if _, err := mirrorGitFor(context.Background(), dir, compactTimeout, "repack", "-a", "-d", "-q"); err != nil {
 				return err
 			}
-			_, err := mirrorGit(context.Background(), dir, "prune", "--expire=now")
+			_, err := mirrorGitFor(context.Background(), dir, compactTimeout, "prune", "--expire=now")
 			return err
 		}())
 	}
@@ -461,7 +474,10 @@ func (f *Fleet) recordCheckpoint(c Checkpoint) error {
 // checkpointSent applies a node's CheckpointSent: the Ticket is placed on the node and works in repo, and its bundle,
 // which came before the fact, put the mirror's ref at sha. Anything else is refused (a UserError: the same fact would be
 // refused again), and the node sends the whole ref next time.
-func (f *Fleet) checkpointSent(eng *core.Engine, nodeID, ticketID, repo, sha string) error {
+//
+// landed are the commits this link's bundles of the Ticket put in the mirror before the fact: a later bundle of the
+// Ticket may already have moved the ref past sha, which still counts as received.
+func (f *Fleet) checkpointSent(eng *core.Engine, nodeID, ticketID, repo, sha string, landed []string) error {
 	t, _, err := eng.Ticket(ticketID)
 	if err != nil {
 		return err
@@ -479,7 +495,7 @@ func (f *Fleet) checkpointSent(eng *core.Engine, nodeID, ticketID, repo, sha str
 	if err != nil {
 		return &core.UserError{Msg: "read the mirror: " + err.Error(), Err: err}
 	}
-	if !ok || got != sha {
+	if !ok || got != sha && !slices.Contains(landed, sha) {
 		return &core.UserError{Msg: "the checkpoint's bundle did not reach the server"}
 	}
 	return f.recordCheckpoint(Checkpoint{TicketID: t.ID, Repo: t.Repo, SHA: sha, Node: nodeID, At: f.now()})
@@ -715,6 +731,11 @@ type transfer struct {
 	refused  bool          // its chunks are dropped until its last
 	running  bool          // the last chunk came: the bundle goes into the mirror
 	done     chan struct{} // closed once it is in the mirror, refused or dropped
+	// after is the done of the Ticket's transfer that came before it on the link: the fetches go in order.
+	after chan struct{}
+	// landed is the commit the mirror's ref was at once this bundle went in ("" if it did not); set before done.
+	landed string
+	seq    uint64 // order of arrival on the link
 }
 
 // onChunk takes one BlobChunk, on the link's reader goroutine: it only appends to the transfer's file. A transfer of a
@@ -733,15 +754,21 @@ func (lk *nodeLink) onChunk(c *athenav1.BlobChunk) {
 			lk.f.log.Warn("node blob dropped", "node", lk.nodeID, "transfer", id, "ticket", c.GetTicketId())
 			return
 		}
-		tr = &transfer{ticketID: c.GetTicketId(), done: make(chan struct{})}
-		busy := false
+		lk.tseq++
+		tr = &transfer{ticketID: c.GetTicketId(), done: make(chan struct{}), seq: lk.tseq}
+		// A Ticket's transfers queue behind one another: a turn end's checkpoint may come while the last is fetched.
+		var prev *transfer
 		for _, o := range lk.transfers {
-			busy = busy || strings.EqualFold(o.ticketID, tr.ticketID)
+			if strings.EqualFold(o.ticketID, tr.ticketID) && (prev == nil || o.seq > prev.seq) {
+				prev = o
+			}
 		}
-		if c.GetKind() != blobKindCheckpoint || lk.f.cfg.Mirror == nil || busy {
+		if prev != nil {
+			tr.after = prev.done
+		}
+		if c.GetKind() != blobKindCheckpoint || lk.f.cfg.Mirror == nil {
 			tr.refused = true
-			lk.f.log.Warn("node blob refused", "node", lk.nodeID, "kind", c.GetKind(), "ticket", tr.ticketID,
-				"another under way", busy)
+			lk.f.log.Warn("node blob refused", "node", lk.nodeID, "kind", c.GetKind(), "ticket", tr.ticketID)
 		} else if f, err := lk.f.cfg.Mirror.tempFile("athena-node-checkpoint-*.bundle"); err != nil {
 			tr.refused = true
 			lk.f.log.Error("hold a node's checkpoint", "node", lk.nodeID, "error", err)
@@ -810,6 +837,16 @@ func (lk *nodeLink) receive(id string, tr *transfer) {
 		lk.mu.Unlock()
 	}()
 	log := lk.f.log.With("node", lk.nodeID, "ticket", tr.ticketID)
+	if tr.after != nil {
+		select {
+		case <-tr.after:
+		case <-lk.ctx.Done():
+			return
+		}
+	}
+	if receiveHook != nil {
+		receiveHook(tr.ticketID)
+	}
 	t, _, err := lk.f.engine().Ticket(tr.ticketID)
 	switch {
 	case err != nil:
@@ -832,6 +869,11 @@ func (lk *nodeLink) receive(id string, tr *transfer) {
 		}
 		return
 	}
+	if sha, ok, err := lk.f.cfg.Mirror.Head(t.Repo, t.ID); err == nil && ok {
+		lk.mu.Lock()
+		tr.landed = sha
+		lk.mu.Unlock()
+	}
 	log.Debug("node checkpoint in the mirror", "bytes", tr.size)
 }
 
@@ -849,25 +891,42 @@ func (lk *nodeLink) dropTransfers() {
 	}
 }
 
-// awaitTransfers waits until no transfer of the Ticket is under way on the link; false when the link ended first.
-func (lk *nodeLink) awaitTransfers(ticketID string) bool {
-	for {
-		var wait chan struct{}
-		lk.mu.Lock()
-		for _, tr := range lk.transfers {
-			if tr.ticketID == ticketID {
-				wait = tr.done
-				break
-			}
-		}
-		lk.mu.Unlock()
-		if wait == nil {
-			return true
-		}
-		select {
-		case <-wait:
-		case <-lk.ctx.Done():
-			return false
+// factTransfers notes, as a CheckpointSent fact arrives on the reader goroutine, the Ticket's transfers that came
+// before it on the link: its own bundle is among them.
+func (lk *nodeLink) factTransfers(call *athenav1.NodeCall) {
+	var a nodelink.ArgsCheckpointSent
+	if decodeStrict(call.GetArgs(), &a) != nil {
+		return
+	}
+	var trs []*transfer
+	for _, tr := range lk.transfers { // the caller holds lk.mu
+		if strings.EqualFold(tr.ticketID, a.TicketID) {
+			trs = append(trs, tr)
 		}
 	}
+	if len(trs) > 0 {
+		lk.factWaits[call.GetFactSeq()] = trs
+	}
+}
+
+// awaitFact waits for the transfers that came before the fact seq, and returns the commits they put in the mirror;
+// ok is false when the link ended first.
+func (lk *nodeLink) awaitFact(seq uint64) (landed []string, ok bool) {
+	lk.mu.Lock()
+	trs := lk.factWaits[seq]
+	delete(lk.factWaits, seq)
+	lk.mu.Unlock()
+	for _, tr := range trs {
+		select {
+		case <-tr.done:
+		case <-lk.ctx.Done():
+			return nil, false
+		}
+		lk.mu.Lock()
+		if tr.landed != "" {
+			landed = append(landed, tr.landed)
+		}
+		lk.mu.Unlock()
+	}
+	return landed, true
 }

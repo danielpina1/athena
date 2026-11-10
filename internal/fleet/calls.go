@@ -126,7 +126,7 @@ func (f *Fleet) fact(nodeID string, call *athenav1.NodeCall) error {
 		}
 		return eng.ExpireApproval(a.ID)
 	case *nodelink.ArgsCheckpointSent:
-		return f.checkpointSent(eng, nodeID, a.TicketID, a.Repo, a.SHA)
+		return f.checkpointSent(eng, nodeID, a.TicketID, a.Repo, a.SHA, nil)
 	case *nodelink.ArgsSettleProposal:
 		if err := proposalOnNode(eng, nodeID, a.ID); err != nil {
 			return err

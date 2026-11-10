@@ -92,17 +92,25 @@ func TestCheckpointChunksThenFact(t *testing.T) {
 	if b := tgt.bases(); b[0] != "" || b[1] != sha1 || b[2] != sha2 {
 		t.Fatalf("bases %q", b)
 	}
-	// A refusal forgets the base: the next bundle is whole.
+	// A refusal forgets the base and sends the checkpoint again, whole, a few times.
+	defer func(old time.Duration) { checkpointRetry = old }(checkpointRetry)
+	checkpointRetry = 10 * time.Millisecond
 	close(refuse)
 	sha3 := strings.Repeat("c", 40)
 	tgt.setCheckpoint([]byte("refused"), sha3)
 	c.Checkpointed("T-0001", "o/r", "refs/athena/t-0001/checkpoint", sha3)
-	eventually(t, "the base is forgotten", func() bool {
+	eventually(t, "the base is forgotten and the retries are done", func() bool {
 		b, _, _ := c.ob.checkpointSent("T-0001")
-		return len(fs.checkpointFacts()) == 3 && b == ""
+		return len(fs.checkpointFacts()) == 3+checkpointRetries && b == ""
 	})
-	if n := len(fs.checkpointFacts()); n != 3 {
-		t.Fatalf("%d facts, want 3", n)
+	time.Sleep(100 * time.Millisecond)
+	if n := len(fs.checkpointFacts()); n != 3+checkpointRetries {
+		t.Fatalf("%d facts, want %d: the retries stop", n, 3+checkpointRetries)
+	}
+	for _, b := range tgt.bases()[4:] { // [3] is the refused one, on its base
+		if b != "" {
+			t.Fatalf("a retry after a refusal was built on base %q, want whole", b)
+		}
 	}
 }
 
