@@ -139,4 +139,19 @@ describe("selectors", () => {
     expect(selectTickets(s, { stage: "open" })).toBe(selectTickets(useAthena.getState(), { stage: "open" }));
     expect(selectCounts(s, NOW)).toBe(selectCounts(useAthena.getState(), NOW));
   });
+  test("a Ticket whose node is offline is a Needs you item of kind offline, among the stalled ones", () => {
+    const s = load([
+      ticket("T-answer", { stage: "person", action: "answer", updatedAt: at(5) }),
+      ticket("T-offline", { stage: "person", action: "offline", nodeId: "n2", nodeName: "mini", updatedAt: at(30) }),
+      ticket("T-failed", { stage: "person", action: "failed", updatedAt: at(10) }),
+    ]);
+    const items = selectNeedsYou(s);
+    expect(items.map((i) => [i.ticket.id, i.kind])).toEqual([
+      ["T-answer", "answer"],
+      ["T-offline", "offline"],
+      ["T-failed", "failed"],
+    ]);
+    expect(selectCounts(s, NOW).needsYou).toBe(3);
+    expect(selectTickets(s, { stage: "needsYou" }).map((t) => t.id)).toContain("T-offline");
+  });
 });

@@ -12,6 +12,8 @@ export function runtimeLabel(name: string): string {
 export const RUNTIMES = ["claude", "codex"] as const;
 
 const clock = new Intl.DateTimeFormat("en-GB", { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+/** "14:02": a time of day, local, 24-hour (when a node was last seen). */
+export const clockTime = (at: number) => clock.format(at);
 const dated = new Intl.DateTimeFormat("en-GB", { weekday: "short", day: "numeric", month: "short" });
 const startOfDay = (ms: number) => new Date(ms).setHours(0, 0, 0, 0);
 

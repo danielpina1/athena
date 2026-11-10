@@ -48,7 +48,7 @@ function Row({ node, edges }: { node: GNode; edges: GEdge[] }) {
       </Link>
       <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
         <Mono tone="default">{node.id}</Mono>
-        <StageBadge stage={t.stage} action={t.action} outcome={t.outcome} />
+        <StageBadge stage={t.stage} action={t.action} outcome={t.outcome} node={t.nodeName} />
       </span>
       <ul className="grid gap-0.5 text-sm text-muted">
         {edges.length === 0 ? (

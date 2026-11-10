@@ -37,7 +37,7 @@ export const TASK_KEY: ReadonlyArray<{ look: NodeLook; label: string }> = [
 export const LINK_KEY: readonly EdgeKind[] = ["thread", "follow-up", "hand_off", "wait_for", "ask_agent", "overlap"];
 
 export const stageOf = (n: GNode) =>
-  stageLabel({ stage: n.ticket.stage, action: n.ticket.action, outcome: n.ticket.outcome });
+  stageLabel({ stage: n.ticket.stage, action: n.ticket.action, outcome: n.ticket.outcome, node: n.ticket.nodeName });
 
 export function Box({ look, x, y, w, h }: { look: NodeLook; x: number; y: number; w: number; h: number }) {
   const s = LOOK[look];

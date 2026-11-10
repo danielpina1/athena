@@ -5,7 +5,8 @@ import { timestampMs, type Timestamp } from "@bufbuild/protobuf/wkt";
 import type { ApprovalView, ProposalView, TicketSummary } from "@/gen/athena/v1/state_pb";
 import type { AthenaData } from "./state";
 
-export type NeedsYouKind = "approval" | "proposal" | "answer" | "review" | "delivery" | "blocked" | "failed";
+/** offline: the Ticket's node is offline (plan 6); the owner may Retry elsewhere or wait. */
+export type NeedsYouKind = "approval" | "proposal" | "answer" | "review" | "delivery" | "blocked" | "failed" | "offline";
 
 export type NeedsYouItem = { kind: NeedsYouKind; ticket: TicketSummary; approval?: ApprovalView; proposal?: ProposalView };
 
@@ -24,7 +25,7 @@ export type Counts = { needsYou: number; open: number; working: number; endedTod
 type Slice = Pick<AthenaData, "tickets" | "approvals"> & Partial<Pick<AthenaData, "answering" | "proposals">>;
 type TicketsSlice = Pick<AthenaData, "tickets"> & Partial<Pick<AthenaData, "answering">>;
 
-const KINDS = new Set<string>(["approval", "proposal", "answer", "review", "delivery", "blocked", "failed"]);
+const KINDS = new Set<string>(["approval", "proposal", "answer", "review", "delivery", "blocked", "failed", "offline"]);
 
 const NOTHING_ANSWERED: Answering = new Map();
 
@@ -45,7 +46,16 @@ export const needsYouKindOf = (t: TicketSummary): NeedsYouKind | undefined => ne
 const ms = (ts: Timestamp | undefined) => (ts ? timestampMs(ts) : 0);
 
 /** Approvals first, then answers, then the rest, each oldest first. */
-const RANK: Record<NeedsYouKind, number> = { approval: 0, proposal: 1, answer: 2, review: 3, delivery: 3, blocked: 3, failed: 3 };
+const RANK: Record<NeedsYouKind, number> = {
+  approval: 0,
+  proposal: 1,
+  answer: 2,
+  review: 3,
+  delivery: 3,
+  blocked: 3,
+  failed: 3,
+  offline: 3,
+};
 
 /** When the item started waiting: an approval or Proposal when it was made, anything else when its Ticket last changed. */
 const since = (i: NeedsYouItem) =>

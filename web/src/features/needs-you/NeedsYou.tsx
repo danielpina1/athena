@@ -1,12 +1,13 @@
-// The Needs you page: every approval, question, review and stuck Ticket that waits on the owner, approvals first, then
-// answers, then the rest, each oldest first (selectNeedsYou). On the desktop j and k move between the cards and a, d
+// The Needs you page: every approval, question, review, stuck Ticket and Ticket whose node is offline that waits on the
+// owner, approvals first, then answers, then the rest, each oldest first (selectNeedsYou). An offline card the owner
+// chose to wait on is left out until the page reloads (OfflineCard). On the desktop j and k move between the cards and a, d
 // and r act on the one in focus (each card registers its own keys).
 //
 // An approval the owner has just answered is not waiting on anyone, so the header and the sidebar count drop at once
 // (R30), but its card stays, saying "Approved" or "Denied", until the server's Delta lands (R40).
 import { timestampMs, type Timestamp } from "@bufbuild/protobuf/wkt";
 import { useMemo, useRef, useState } from "react";
-import type { ApprovalView, TicketSummary } from "@/gen/athena/v1/state_pb";
+import type { ApprovalView, NodeStatus, TicketSummary } from "@/gen/athena/v1/state_pb";
 import { selectCounts, selectNeedsYou, selectSynced, type NeedsYouItem } from "@/lib/store/selectors";
 import { useAthena } from "@/lib/store/state";
 import { useLayout } from "@/app/Panes";
@@ -19,6 +20,7 @@ import { AnswerCard } from "./AnswerCard";
 import { BrakeNotice } from "./BrakeNotice";
 import { ApprovalCard } from "./ApprovalCard";
 import { OfferCard } from "./OfferCard";
+import { OfflineCard, useWaited } from "./OfflineCard";
 import { ProposalCard } from "./ProposalCard";
 import { ReviewCard } from "./ReviewCard";
 import { StalledCard } from "./StalledCard";
@@ -38,6 +40,8 @@ function ItemCard({ item }: { item: NeedsYouItem }) {
       return <AnswerCard key={item.ticket.attentionQuestion} ticket={item.ticket} />;
     case "review":
       return <ReviewCard ticket={item.ticket} />;
+    case "offline":
+      return <OfflineCard ticket={item.ticket} />;
     default:
       return <StalledCard ticket={item.ticket} />;
   }
@@ -63,13 +67,26 @@ function withAnswered(
   return [...merged, ...live.filter((i) => i.kind !== "approval")];
 }
 
+/** The header's node and load: the one node's name, or how many nodes are up, then the sessions running of the slots. */
+function load(nodes: readonly NodeStatus[]): string[] {
+  if (nodes.length === 0) return [];
+  if (nodes.length === 1) {
+    const n = nodes[0];
+    return [n.name || "this machine", `${n.slotsInUse} of ${n.slots} running`];
+  }
+  const up = nodes.filter((n) => n.state === "online" || n.state === "draining" || n.state === "");
+  const used = up.reduce((a, n) => a + n.slotsInUse, 0);
+  const slots = up.reduce((a, n) => a + n.slots, 0);
+  return [`${up.length} of ${nodes.filter((n) => n.state !== "revoked").length} nodes up`, `${used} of ${slots} running`];
+}
+
 export function NeedsYou() {
   const live = useAthena((s) => selectNeedsYou(s));
   const answering = useAthena((s) => s.answering);
   const approvals = useAthena((s) => s.approvals);
   const tickets = useAthena((s) => s.tickets);
   const counts = useAthena((s) => selectCounts(s));
-  const node = useAthena((s) => s.nodes[0]);
+  const nodes = useAthena((s) => s.nodes);
   const repos = useAthena((s) => s.repos);
   const offers = useAthena((s) => s.offers);
   const synced = useAthena(selectSynced);
@@ -78,7 +95,9 @@ export function NeedsYou() {
   const phone = useLayout() === "phone";
   const list = useRef<HTMLUListElement>(null);
 
-  const items = useMemo(() => withAnswered(live, answering, approvals, tickets), [live, answering, approvals, tickets]);
+  const waited = useWaited();
+  const all = useMemo(() => withAnswered(live, answering, approvals, tickets), [live, answering, approvals, tickets]);
+  const items = all.filter((i) => i.kind !== "offline" || !waited(i.ticket));
 
   const move = (by: 1 | -1) => {
     const cards = [...(list.current?.querySelectorAll<HTMLElement>("[data-needs-you-card]") ?? [])];
@@ -90,10 +109,7 @@ export function NeedsYou() {
   useShortcut("j", () => move(1));
   useShortcut("k", () => move(-1));
 
-  const header = [
-    `${counts.needsYou} need you`,
-    ...(node ? [node.name || "this machine", `${node.slotsInUse} of ${node.slots} running`] : []),
-  ].join(" · ");
+  const header = [`${counts.needsYou} need you`, ...load(nodes)].join(" · ");
 
   return (
     <section className="grid min-w-0 content-start gap-4 p-4 lg:max-w-3xl lg:p-6">

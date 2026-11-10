@@ -4,8 +4,8 @@
 // task, "Review each ready report" pairs the task with a review: it starts at the Policy's default and is sent only
 // once the owner flips it, so an untouched switch leaves the choice to the Policy. The model is picked from the chosen
 // runtime's list (ModelPicker), Claude Code's under Auto, where a model applies on Claude Code only; a choice the next
-// runtime does not list goes back to Default. Other…'s suggestions are the recent models of the chosen runtime. A node
-// picker waits for a second node (plan 6).
+// runtime does not list goes back to Default. Other…'s suggestions are the recent models of the chosen runtime. With
+// two nodes or more the task can be pinned to one (NodePicker); the runtimes offered are then that node's.
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { useNavigate } from "react-router";
 import { modKeyLabel } from "@/app/shortcuts";
@@ -17,11 +17,14 @@ import { Button } from "@/ui/primitives/button";
 import { Switch } from "@/ui/primitives/switch";
 import { Textarea } from "@/ui/primitives/textarea";
 import { ModelPicker, OTHER, modelsFor, offered } from "./ModelPicker";
+import { NodePicker, chosenNode } from "./NodePicker";
 import { RepoPicker, resolveRepo } from "./RepoPicker";
 import { RuntimePicker, unavailable } from "./RuntimePicker";
 
 /** How many of the latest Tickets the model suggestions come from. */
 const RECENT = 20;
+
+const NO_RUNTIMES: never[] = [];
 
 export function NewTask() {
   const navigate = useNavigate();
@@ -39,7 +42,12 @@ export function NewTask() {
   const field = useRef<HTMLTextAreaElement>(null);
   const reviewHint = useId();
   const repos = useAthena((s) => s.repos);
-  const runtimes = useAthena((s) => s.nodes[0]?.runtimes) ?? [];
+  /** The node select's value: "" (any node) or a node id. */
+  const [pickedNode, setPickedNode] = useState("");
+  const nodes = useAthena((s) => s.nodes);
+  // A node that went offline, draining or away under the form is not sent: the picker shows, and the task gets, any.
+  const node = chosenNode(pickedNode, nodes);
+  const runtimes = (node ? nodes.find((n) => n.id === node) : nodes[0])?.runtimes ?? NO_RUNTIMES;
   const settingsJson = useAthena((s) => s.policy?.settingsJson);
   const policyReview = useMemo(() => reviewByDefault(settingsJson), [settingsJson]);
   // A runtime that stopped being ready is not sent: the picker shows, and the task gets, Auto.
@@ -89,13 +97,15 @@ export function NewTask() {
     if (repo.kind === "dir") arg.dir = repo.dir;
     if (sent !== "") arg.model = sent;
     arg.runtime = runtime;
+    if (node !== "") arg.node = node;
     if (pairable && review !== undefined) arg.review = review;
     const r = await submitTask(arg).finally(() => {
       busy.current = false;
       setSending(false);
     });
     if (!r.ok) {
-      setError(errorMessage(r.code));
+      // A refusal (`invalid`) carries the server's own sentence: an unknown node, a repository GitHub cannot serve.
+      setError((r.code === "invalid" && r.message) || errorMessage(r.code));
       return;
     }
     navigate(r.result.case === "ticketId" ? `/tickets/${r.result.value}` : "/tickets");
@@ -145,6 +155,7 @@ export function NewTask() {
         <span>Runtime</span>
         <RuntimePicker value={runtime} onChange={pickRuntime} runtimes={runtimes} />
       </div>
+      <NodePicker value={node} onChange={setPickedNode} nodes={nodes} />
       {pairable && (
         <div className="grid gap-1">
           <label className="flex min-h-11 items-center gap-3 text-sm lg:min-h-0">

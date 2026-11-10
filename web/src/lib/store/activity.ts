@@ -39,6 +39,7 @@ const NEEDS_YOU: Record<NeedsYouKind, [string, Tone]> = {
   delivery: ["Delivery failed", "danger"],
   blocked: ["Blocked", "warn"],
   failed: ["Failed", "danger"],
+  offline: ["Its node went offline", "attention"],
 };
 
 const ENDED: Record<string, [string, Tone]> = {

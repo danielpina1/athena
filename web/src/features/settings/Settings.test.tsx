@@ -130,6 +130,27 @@ test("execution lists each runtime's version", () => {
   expect(codex?.querySelector("span")?.className).not.toMatch(/\bml-/);
 });
 
+test("execution has one section per node, this machine marked, and says where each is changed", () => {
+  load({
+    policy: { revision: 1, settingsJson: JSON.stringify(settings) },
+    nodes: [
+      { id: "local", name: "studio", local: true, state: "online", slots: 4, runtimes: [{ name: "claude", version: "2.1.3", ready: true, tested: true }] },
+      { id: "n-mini", name: "mini", state: "offline", slots: 2, os: "linux", arch: "amd64", version: "0.6.0" },
+    ],
+  });
+  renderSettings("/settings/execution", "desktop");
+  const facts = screen.getByRole("region", { name: "Execution" });
+  const studio = within(facts).getByRole("region", { name: "studio · this machine" });
+  expect(within(studio).getByText("4")).toBeTruthy();
+  expect(within(studio).getByText("2.1.3")).toBeTruthy();
+  const mini = within(facts).getByRole("region", { name: "mini" });
+  expect(within(mini).getByText("2")).toBeTruthy();
+  expect(within(mini).getByText("Offline")).toBeTruthy();
+  expect(within(mini).getByText("linux/amd64 · 0.6.0")).toBeTruthy();
+  expect(within(facts).getByText(/athena node run --slots/)).toBeTruthy();
+  expect(within(facts).queryByRole("textbox")).toBeNull();
+});
+
 test("system links to Routing and Nodes and switches the theme", async () => {
   const user = userEvent.setup();
   renderSettings("/settings/system", "desktop");

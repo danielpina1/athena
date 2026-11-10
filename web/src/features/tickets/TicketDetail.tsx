@@ -16,7 +16,7 @@ import { useShortcut } from "@/app/shortcuts";
 import { Composer, interruptSession } from "@/features/session/Composer";
 import { PinToggle } from "@/features/session/PinnedSessions";
 import { LazySessionView } from "@/features/session/SessionFrame";
-import { errorMessage, retry } from "@/lib/commands/actions";
+import { errorMessage, retry, retryElsewhere } from "@/lib/commands/actions";
 import { type Artifact, isFilePath, type TicketFiles, useArtifact } from "@/lib/artifacts/api";
 import { useWatch } from "@/lib/commands/useWatch";
 import { selectSynced } from "@/lib/store/selectors";
@@ -87,13 +87,18 @@ function useApprovalOf(ticket: TicketSummary | undefined): ApprovalView | undefi
 
 function Header({ ticket, back, onReply }: { ticket: TicketSummary; back: string; onReply(): void }) {
   const stopping = useAthena((s) => s.stopping.has(ticket.id));
+  // With one node there is nothing to tell apart: the chip shows from the second.
+  const nodes = useAthena((s) => s.nodes.length);
   const ended = ticket.stage === "ended";
   const working = ticket.stage === "working";
 
-  const run = async (done: string, failed: string, send: Promise<{ ok: boolean; code: string }>) => {
+  // Its node is offline and its work is in a repository: it can start again elsewhere (a folder Ticket waits).
+  const movable = ticket.stage === "person" && ticket.action === "offline" && ticket.repo !== "";
+  const run = async (done: string, failed: string, send: Promise<{ ok: boolean; code: string; message: string }>) => {
     const r = await send;
     if (r.ok) toast({ title: done });
-    else toast({ title: failed, description: errorMessage(r.code), tone: "danger" });
+    // A refusal (`invalid`) carries the server's own sentence.
+    else toast({ title: failed, description: (r.code === "invalid" && r.message) || errorMessage(r.code), tone: "danger" });
   };
   const doInterrupt = () => void interruptSession(ticket.id);
 
@@ -119,13 +124,25 @@ function Header({ ticket, back, onReply }: { ticket: TicketSummary; back: string
         <Mono tone="default" className="break-all">
           {ticket.id}
         </Mono>
-        <StageBadge stage={ticket.stage} action={ticket.action} outcome={ticket.outcome} stopping={stopping} />
+        <StageBadge
+          stage={ticket.stage}
+          action={ticket.action}
+          outcome={ticket.outcome}
+          stopping={stopping}
+          node={ticket.nodeName}
+        />
         <TrustBadge trust={ticket.trust} ticket />
+        {nodes > 1 && ticket.nodeName && (
+          <span className="inline-flex min-h-5 max-w-full items-center rounded-xs border border-line px-1.5 font-mono text-xs break-all">
+            {`on ${ticket.nodeName}`}
+          </span>
+        )}
+        {ticket.waitingForNode && <span className="text-sm text-muted">{ticket.waitingForNode}</span>}
       </div>
       <div className="flex flex-wrap gap-2">
         {!ended && (
-          // The view's one primary action: Reply, unless the Ticket is stalled and Retry is what it needs.
-          <Button variant={ticket.canRetry ? "outline" : "primary"} onClick={onReply} aria-keyshortcuts="r">
+          // The view's one primary action: Reply, unless the Ticket is stalled and a retry is what it needs.
+          <Button variant={ticket.canRetry || movable ? "outline" : "primary"} onClick={onReply} aria-keyshortcuts="r">
             Reply
           </Button>
         )}
@@ -140,6 +157,14 @@ function Header({ ticket, back, onReply }: { ticket: TicketSummary; back: string
         {ticket.canRetry && (
           <Button variant="primary" onClick={() => void run("Retrying", "Not retried", retry(ticket.id))}>
             Retry
+          </Button>
+        )}
+        {movable && (
+          <Button
+            variant="primary"
+            onClick={() => void run("Retrying elsewhere", "Could not retry", retryElsewhere(ticket.id))}
+          >
+            Retry elsewhere
           </Button>
         )}
         {working && (

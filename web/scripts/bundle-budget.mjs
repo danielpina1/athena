@@ -37,7 +37,12 @@ let failed = false;
 // session view (about 9 KB) would still fit the budget, so a stray static import of it would pass unseen without this.
 // Each sentinel must be in the build (in a lazy chunk), and none in the initial route.
 const SENTINEL = "athena-lazy-chunk:";
-const sentinels = ["athena-lazy-chunk:session-view", "athena-lazy-chunk:diff-view", "athena-lazy-chunk:doc-viewer"];
+const sentinels = [
+  "athena-lazy-chunk:session-view",
+  "athena-lazy-chunk:diff-view",
+  "athena-lazy-chunk:doc-viewer",
+  "athena-lazy-chunk:nodes-view",
+];
 for (const key of seen) {
   const code = readFileSync(join(dist, manifest[key].file), "utf8");
   if (code.includes(SENTINEL)) {

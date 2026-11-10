@@ -26,15 +26,16 @@ What stays where:
 
 ## 2. Enroll a node
 
-On the server's machine:
+On the dashboard, open **Nodes › Add a node** (it asks for your passkey again), or on the server's machine:
 
     athena node token
 
-It prints one line, ready to paste on the new machine:
+Either gives one line, ready to paste on the new machine:
 
     athena node join https://athena.home.arpa:8443 <token> --ca-sha256 3A:F1:...:9C
 
-- The token is good once, for an hour (`--ttl 30m`, up to `24h`). It is printed only here and never logged.
+- The token is good once, for an hour (`--ttl 30m`, up to `24h`). It is shown only there (the dashboard's sheet
+  forgets it when it closes) and never logged.
 - `--ca-sha256` is the dashboard CA's fingerprint. The node checks the server's certificate against it before it
   sends anything. In mode `acme` the flag is left out: the system's roots verify the server.
 

@@ -8,5 +8,5 @@ export const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
  * not pick up a work-in-progress build (ruling R39).
  */
 export const BIN = join(ROOT, "bin", "e2e");
-/** The link `athena web enroll` prints. */
-export const ENROLL_LINK = /http:\/\/localhost:\d+\/enroll#\S+/;
+/** The link `athena web enroll` prints: http with TLS off (the shared server), https with Athena's own CA. */
+export const ENROLL_LINK = /https?:\/\/localhost:\d+\/enroll#\S+/;

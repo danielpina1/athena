@@ -400,3 +400,39 @@ test("a chosen runtime that stops being ready sends auto", async () => {
   await user.click(start());
   expect(submitTask).toHaveBeenLastCalledWith({ text: "x", runtime: "auto" });
 });
+
+test("with two nodes the task can be pinned to one; Any node sends none", async () => {
+  load({
+    nodes: [
+      { id: "local", name: "studio", local: true, state: "online", slots: 2 },
+      { id: "n-mini", name: "mini", state: "online", slots: 2 },
+    ],
+  });
+  const user = setup();
+  // Failures keep the form, so one test can send twice.
+  submitTask.mockResolvedValue(create(CommandResultSchema, { ok: false, code: "unavailable" }));
+  await user.type(task(), "Build it");
+  await user.click(start());
+  expect(submitTask).toHaveBeenLastCalledWith({ text: "Build it", runtime: "auto" });
+  await user.click(screen.getByRole("radio", { name: "mini" }));
+  await user.click(start());
+  expect(submitTask).toHaveBeenLastCalledWith({ text: "Build it", runtime: "auto", node: "n-mini" });
+});
+
+test("one node shows no node picker", () => {
+  load({ nodes: [{ id: "local", name: "studio", local: true, state: "online", slots: 2 }] });
+  setup();
+  expect(screen.queryByRole("radiogroup", { name: "Node" })).toBeNull();
+});
+
+test("a refused task says the server's sentence", async () => {
+  const user = setup();
+  submitTask.mockResolvedValueOnce(
+    create(CommandResultSchema, { ok: false, code: "invalid", message: "github is not running: a task on a repository needs it (see athena status)" }),
+  );
+  await user.type(task(), "Fix the bug");
+  await user.click(start());
+  await waitFor(() =>
+    expect(screen.getByRole("alert").textContent).toBe("github is not running: a task on a repository needs it (see athena status)"),
+  );
+});
