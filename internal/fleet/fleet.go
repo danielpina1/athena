@@ -136,6 +136,7 @@ type Fleet struct {
 	closed        bool
 	remotes       map[string]*Remote
 	subs          []func()
+	waitSubs      []func(ticketID string)
 	localDraining bool
 
 	// Placement: the pending Assignments waiting for a node, by Ticket id (pmu), and the goroutine that places them.
@@ -238,6 +239,23 @@ func (f *Fleet) OnChange(fn func()) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.subs = append(f.subs, fn)
+}
+
+// OnWaitChange registers fn, called with a Ticket's id when why its Assignment waits for a node changes, or when it
+// stops waiting. fn must not block.
+func (f *Fleet) OnWaitChange(fn func(ticketID string)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.waitSubs = append(f.waitSubs, fn)
+}
+
+func (f *Fleet) waitChanged(ticketID string) {
+	f.mu.Lock()
+	subs := append([]func(string){}, f.waitSubs...)
+	f.mu.Unlock()
+	for _, fn := range subs {
+		fn(ticketID)
+	}
 }
 
 func (f *Fleet) changed() {

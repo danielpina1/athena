@@ -125,7 +125,7 @@ func (d *Dispatcher) handleRequest(req Request) (any, error) {
 	case OpPing:
 		return nil, nil
 	case OpSubmit:
-		t, err := d.submit(req.Text, req.Dir, req.Model, req.Repo, req.Runtime, pairingOf(req.Review), "")
+		t, err := d.submit(req.Text, req.Dir, req.Model, req.Repo, req.Runtime, pairingOf(req.Review), "", "")
 		if err != nil {
 			return nil, err
 		}
@@ -372,7 +372,7 @@ func (d *Dispatcher) act(o web.Origin, c *athenav1.Command) *athenav1.CommandRes
 	switch a := c.GetAction().(type) {
 	case *athenav1.Command_SubmitTask:
 		s := a.SubmitTask
-		t, err := d.submit(s.GetText(), s.GetDir(), s.GetModel(), s.GetRepo(), s.GetRuntime(), pairingOf(s.Review), requestID(o, c))
+		t, err := d.submit(s.GetText(), s.GetDir(), s.GetModel(), s.GetRepo(), s.GetRuntime(), pairingOf(s.Review), requestID(o, c), s.GetNode())
 		if err != nil {
 			return d.failure(err)
 		}
@@ -391,6 +391,28 @@ func (d *Dispatcher) act(o web.Origin, c *athenav1.Command) *athenav1.CommandRes
 		}
 	case *athenav1.Command_RetryElsewhere:
 		if err := d.retryElsewhere(a.RetryElsewhere.GetTicketId()); err != nil {
+			return d.failure(err)
+		}
+	case *athenav1.Command_CreateNodeToken:
+		if !o.Sensitive {
+			return proto.Clone(reauthRequired).(*athenav1.CommandResult)
+		}
+		// The name is ignored: the node names itself when it joins (Ruling R25).
+		r, err := d.nodeToken(time.Duration(a.CreateNodeToken.GetTtlSeconds()) * time.Second)
+		if err != nil {
+			return d.failure(err)
+		}
+		return &athenav1.CommandResult{Ok: true, Result: &athenav1.CommandResult_NodeToken{NodeToken: &athenav1.NodeToken{
+			Command: JoinCommand(r.URL, r.Token, r.Fingerprint), ExpiresAt: timestamppb.New(r.Expires)}}}
+	case *athenav1.Command_SetNodeDraining:
+		if _, err := d.drainNode(a.SetNodeDraining.GetNodeId(), a.SetNodeDraining.GetDraining()); err != nil {
+			return d.failure(err)
+		}
+	case *athenav1.Command_RevokeNode:
+		if !o.Sensitive {
+			return proto.Clone(reauthRequired).(*athenav1.CommandResult)
+		}
+		if _, err := d.revokeNode(a.RevokeNode.GetNodeId()); err != nil {
 			return d.failure(err)
 		}
 	case *athenav1.Command_Interrupt:
@@ -571,7 +593,7 @@ func pairingOf(review *bool) string {
 	return core.PairingOff
 }
 
-func (d *Dispatcher) submit(text, dir, model, repo, runtime, pairing, requestID string) (core.Ticket, error) {
+func (d *Dispatcher) submit(text, dir, model, repo, runtime, pairing, requestID, nodeID string) (core.Ticket, error) {
 	if dir != "" {
 		if !filepath.IsAbs(dir) {
 			return core.Ticket{}, userErrorf("directory %s must be an absolute path", dir)
@@ -588,8 +610,13 @@ func (d *Dispatcher) submit(text, dir, model, repo, runtime, pairing, requestID 
 		}
 		repo = name
 	}
+	if nodeID != "" {
+		if err := d.pinnable(nodeID); err != nil {
+			return core.Ticket{}, err
+		}
+	}
 	t, err := d.eng.SubmitOwnerTask(text, core.TaskOptions{Dir: dir, Model: model, Repo: repo, Runtime: runtime, Pairing: pairing,
-		RequestID: requestID})
+		RequestID: requestID, Node: nodeID})
 	if errors.Is(err, core.ErrDuplicate) {
 		return t, nil
 	}

@@ -144,3 +144,40 @@ func TestLocalName(t *testing.T) {
 		}
 	}
 }
+
+// TestWaitChangeSignalled: the fleet says when why a Ticket waits appears and when it goes, for the dashboard.
+func TestWaitChangeSignalled(t *testing.T) {
+	e := newEnv(t)
+	e.addNode(nodeID, "mac-studio")
+	f := e.fleet(func(c *Config) { c.Engine = nil })
+	got := make(chan string, 8)
+	f.OnWaitChange(func(id string) { got <- id })
+	eng := core.NewEngine(e.st.Repos(), f, nil, nil)
+	f.SetEngine(eng)
+	e.eng = eng
+
+	tk, err := eng.SubmitOwnerTask("Fix the typo", core.TaskOptions{Node: nodeID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case id := <-got:
+		if id != tk.ID {
+			t.Fatalf("signalled %s, want %s", id, tk.ID)
+		}
+	case <-time.After(waitTimeout):
+		t.Fatal("no signal when the Ticket began to wait")
+	}
+	h := hello(nodeID)
+	h.Caps.Runtimes = []*athenav1.RuntimeCap{{Name: core.RuntimeClaude, Ready: true}}
+	w := dialWire(t, f, nodeID, h)
+	w.waitWelcome()
+	select {
+	case id := <-got:
+		if id != tk.ID {
+			t.Fatalf("signalled %s, want %s", id, tk.ID)
+		}
+	case <-time.After(waitTimeout):
+		t.Fatal("no signal when the Ticket stopped waiting")
+	}
+}

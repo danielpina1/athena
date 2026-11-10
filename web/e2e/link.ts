@@ -91,6 +91,7 @@ export const timelineEntry = (init: MessageInitShape<typeof TimelineEntrySchema>
 /** A node of fixed name and load, so a screenshot does not depend on what the specs before it left running. */
 export function fixedNode(runtimes: RuntimeStatus[]): (n: NodeStatus) => void {
   return (n) => {
+    if (n.id !== "local") return; // the embedded node only: another node keeps its own name and load
     n.name = "studio";
     n.slots = 4;
     n.slotsInUse = 1;

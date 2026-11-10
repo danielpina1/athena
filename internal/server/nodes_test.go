@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -24,6 +25,7 @@ import (
 	"github.com/danielpina1/athena/internal/link"
 	"github.com/danielpina1/athena/internal/node"
 	"github.com/danielpina1/athena/internal/nodelink"
+	"github.com/danielpina1/athena/internal/pb/athenav1"
 	"github.com/danielpina1/athena/internal/policy"
 	"github.com/danielpina1/athena/internal/store"
 	"github.com/danielpina1/athena/internal/web"
@@ -341,5 +343,89 @@ func TestHoldDropsTokensOnEveryNode(t *testing.T) {
 	}
 	if len(d.repos) != 1 || d.repos[0] != "o/r" {
 		t.Fatalf("dropped %v, want [o/r]", d.repos)
+	}
+}
+
+func doCommand(w *webServer, sensitive bool, id string, c *athenav1.Command) *athenav1.CommandResult {
+	c.Id = id
+	return w.d.Do(context.Background(), web.Origin{ClientID: "phone", Sensitive: sensitive}, c)
+}
+
+// A join token made from the dashboard needs a fresh passkey confirmation, and is good for an hour.
+func TestCreateNodeTokenNeedsReauth(t *testing.T) {
+	newFakeEnv(t, openTurnFixture(t))
+	w := startWebWith(t, newStateDir(t), nil)
+	mk := func() *athenav1.Command {
+		return &athenav1.Command{Action: &athenav1.Command_CreateNodeToken{CreateNodeToken: &athenav1.CreateNodeToken{Name: "ignored"}}}
+	}
+	if r := doCommand(w, false, "t1", mk()); r.GetCode() != web.CodeReauthRequired || r.GetNodeToken() != nil {
+		t.Fatalf("without reauth = %v", r)
+	}
+	before := time.Now()
+	r := doCommand(w, true, "t1", mk())
+	nt := r.GetNodeToken()
+	if !r.GetOk() || nt == nil || !strings.HasPrefix(nt.GetCommand(), "athena node join "+w.origin+" ") {
+		t.Fatalf("with reauth = %v", r)
+	}
+	if exp := nt.GetExpiresAt().AsTime(); exp.Before(before.Add(59*time.Minute)) || exp.After(before.Add(61*time.Minute)) {
+		t.Errorf("expires %v, want in an hour", exp)
+	}
+	// Dashboard commands for nodes: draining needs no reauth, revoking does.
+	rn := joinRemote(t, w, "mini")
+	drain := &athenav1.Command{Action: &athenav1.Command_SetNodeDraining{SetNodeDraining: &athenav1.SetNodeDraining{NodeId: rn.id, Draining: true}}}
+	if r := doCommand(w, false, "d1", drain); !r.GetOk() || !w.d.fleet.Draining(rn.id) {
+		t.Fatalf("drain = %v", r)
+	}
+	revoke := func() *athenav1.Command {
+		return &athenav1.Command{Action: &athenav1.Command_RevokeNode{RevokeNode: &athenav1.RevokeNode{NodeId: rn.id}}}
+	}
+	if r := doCommand(w, false, "v1", revoke()); r.GetCode() != web.CodeReauthRequired {
+		t.Fatalf("revoke without reauth = %v", r)
+	}
+	if r := doCommand(w, true, "v1", revoke()); !r.GetOk() {
+		t.Fatalf("revoke = %v", r)
+	}
+	for _, v := range w.d.fleet.Nodes() {
+		if v.ID == rn.id && v.State != fleet.StateRevoked {
+			t.Errorf("state = %s", v.State)
+		}
+	}
+}
+
+func submitOn(w *webServer, id, nodeID string) *athenav1.CommandResult {
+	return doCommand(w, false, id, &athenav1.Command{Action: &athenav1.Command_SubmitTask{SubmitTask: &athenav1.SubmitTask{
+		Text: "Pinned task", Node: nodeID}}})
+}
+
+func TestSubmitPinsNode(t *testing.T) {
+	newFakeEnv(t, openTurnFixture(t))
+	w := startWebWith(t, newStateDir(t), nil)
+	rn := joinRemote(t, w, "mini")
+	r := submitOn(w, "s1", rn.id)
+	if !r.GetOk() || r.GetTicketId() == "" {
+		t.Fatalf("submit = %v", r)
+	}
+	tk, _, err := w.d.eng.Ticket(r.GetTicketId())
+	if err != nil || tk.Execution == nil || tk.Execution.Node != rn.id {
+		t.Fatalf("pin = %+v, %v", tk.Execution, err)
+	}
+}
+
+func TestSubmitUnknownNodeRefused(t *testing.T) {
+	newFakeEnv(t, openTurnFixture(t))
+	w := startWebWith(t, newStateDir(t), nil)
+	r := submitOn(w, "s1", "nope")
+	if r.GetOk() || r.GetCode() != web.CodeInvalid || !strings.Contains(r.GetMessage(), "No node has the id nope") {
+		t.Fatalf("unknown = %v", r)
+	}
+	rn := joinRemote(t, w, "mini")
+	if err := w.d.fleet.Revoke(rn.id); err != nil {
+		t.Fatal(err)
+	}
+	if r := submitOn(w, "s2", rn.id); r.GetOk() || !strings.Contains(r.GetMessage(), "revoked") {
+		t.Fatalf("revoked = %v", r)
+	}
+	if ts, _ := w.d.eng.Tickets(false); len(ts) != 0 {
+		t.Errorf("%d Tickets were made", len(ts))
 	}
 }

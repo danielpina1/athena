@@ -82,7 +82,10 @@ func (*connSource) Decision(string) (core.Decision, error) {
 }
 func (*connSource) Health() []hub.HealthItem             { return nil }
 func (*connSource) Policy() (int, string, string, error) { return 0, "v", "{}", nil }
-func (*connSource) NodeStatus() node.Status              { return node.Status{} }
+func (*connSource) Nodes() []hub.NodeInfo {
+	return []hub.NodeInfo{{ID: "local", Local: true, State: "online"}}
+}
+func (*connSource) Placement(*core.Ticket) (string, string, bool) { return "local", "", false }
 
 // recordingCommander answers ok and remembers the Origin of each Command.
 type recordingCommander struct {

@@ -453,9 +453,14 @@ func (f *Fleet) enqueue(ticketID, assignmentID string) {
 
 func (f *Fleet) unqueue(ticketID, assignmentID string) {
 	f.pmu.Lock()
-	defer f.pmu.Unlock()
+	gone := false
 	if w := f.waiting[ticketID]; w != nil && w.assignment == assignmentID {
+		gone = w.reason != ""
 		delete(f.waiting, ticketID)
+	}
+	f.pmu.Unlock()
+	if gone {
+		f.waitChanged(ticketID) // it showed a wait reason, and no longer does
 	}
 }
 
@@ -522,10 +527,15 @@ func (f *Fleet) placeWaiting() (retry bool) {
 		id, why := choose(*t, *a, nodes)
 		if id == "" {
 			f.pmu.Lock()
+			changed := false
 			if w := f.waiting[it.ticket]; w != nil && w.assignment == a.ID {
+				changed = w.reason != why
 				w.reason = why
 			}
 			f.pmu.Unlock()
+			if changed {
+				f.waitChanged(it.ticket)
+			}
 			continue
 		}
 		if err := eng.AssignmentPlaced(t.ID, a.ID, id); err != nil {

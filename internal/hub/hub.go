@@ -21,7 +21,6 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/danielpina1/athena/internal/core"
-	"github.com/danielpina1/athena/internal/node"
 	"github.com/danielpina1/athena/internal/pause"
 	"github.com/danielpina1/athena/internal/pb/athenav1"
 	"github.com/danielpina1/athena/internal/store"
@@ -82,7 +81,12 @@ type Source interface {
 	Health() []HealthItem
 	// Policy returns the current Policy revision (0 while nobody saved settings), its version and canonical JSON.
 	Policy() (revision int, version string, settingsJSON string, err error)
-	NodeStatus() node.Status
+	// Nodes returns every node, the local one first, then the others by name, revoked ones included. It must not
+	// block: the hub reads it on its loop.
+	Nodes() []NodeInfo
+	// Placement tells where a Ticket's latest Assignment runs (the node's id and name; the local node's when none is
+	// placed yet) and whether the Ticket waits for a node (the fleet's wait reason is set).
+	Placement(t *core.Ticket) (id, name string, waiting bool)
 	// Repos returns the known repositories and folders, the last used first, then the local git repositories found on
 	// disk. It must not block on I/O beyond the store: the hub reads it on its loop.
 	Repos() ([]*athenav1.RepoView, error)
@@ -123,6 +127,7 @@ type Hub struct {
 	overflowed atomic.Bool
 	wake       chan struct{}
 	nodeWake   chan struct{}
+	waitWake   chan struct{}
 	reposWake  chan struct{}
 	healthTick time.Duration
 
@@ -136,19 +141,21 @@ type Hub struct {
 	// What the loop last published, to publish a change only.
 	health      *athenav1.Health
 	healthSince map[string]healthState
-	node        *athenav1.NodeStatus
-	// quotaAt is when a node delta last went out because only a quota reading differed; quotaEvery is the least time
-	// between two such deltas (the const quotaEvery, which a test may set before Start); quotaLater says a timer will
-	// publish the node again.
-	quotaAt    time.Time
+	nodes       map[string]*athenav1.NodeStatus // by node id
+	// quotaAt is when a node's delta last went out because only a quota reading differed; quotaEvery is the least time
+	// between two such deltas of one node (the const quotaEvery, which a test may set before Start); quotaLater says a
+	// timer will publish the node again. Each is per node id: one node's readings never hold back another's change.
+	quotaAt    map[string]time.Time
 	quotaEvery time.Duration
-	quotaLater bool
+	quotaLater map[string]bool
 	repos      *athenav1.RepoList
 	notifs     *athenav1.NotificationPrefsView
 	offers     *athenav1.OfferList
 	closed     bool // the hub has stopped: Subscribe returns closed feeds
 	// folders are the placement folders whose facts changed since the loop last republished their Tickets.
 	folders map[string]bool
+	// waits are the Tickets whose wait for a node changed since the loop last republished them.
+	waits map[string]bool
 
 	// actors caches the GitHub login of a reply's Trigger, by Trigger id (replyActors); "" for none.
 	actorMu sync.Mutex
@@ -173,9 +180,10 @@ func New(src Source, log *slog.Logger) *Hub {
 	_, _ = rand.Read(b[:])
 	return &Hub{
 		src: src, log: log, epoch: hex.EncodeToString(b[:]), now: time.Now,
-		in: make(chan store.Changes, changeBuffer), wake: make(chan struct{}, 1), nodeWake: make(chan struct{}, 1),
+		in: make(chan store.Changes, changeBuffer), wake: make(chan struct{}, 1), nodeWake: make(chan struct{}, 1), waitWake: make(chan struct{}, 1),
+		nodes: map[string]*athenav1.NodeStatus{}, quotaAt: map[string]time.Time{}, quotaLater: map[string]bool{},
 		reposWake: make(chan struct{}, 1), healthTick: healthEvery, subs: map[*Sub]struct{}{}, healthSince: map[string]healthState{}, owing: map[string]bool{},
-		folders: map[string]bool{}, actors: map[string]string{}, quotaEvery: quotaEvery,
+		folders: map[string]bool{}, waits: map[string]bool{}, actors: map[string]string{}, quotaEvery: quotaEvery,
 	}
 }
 
@@ -195,7 +203,16 @@ func (h *Hub) OnCommit(c store.Changes) {
 	}
 }
 
-// NodeChanged tells the hub the node's slots, live Tickets or queue changed (wire it to node.Config.OnStatus).
+// WaitChanged tells the hub why a Ticket waits for a node changed (or that it stopped waiting): the loop publishes
+// the Ticket's summary again.
+func (h *Hub) WaitChanged(ticketID string) {
+	h.mu.Lock()
+	h.waits[ticketID] = true
+	h.mu.Unlock()
+	h.signal(h.waitWake)
+}
+
+// NodeChanged tells the hub a node's slots, live Tickets or queue changed (wire it to node.Config.OnStatus).
 func (h *Hub) NodeChanged() { h.signal(h.nodeWake) }
 
 // ReposChanged tells the hub the Source's repositories may have changed outside a commit (a scan of the local
@@ -223,7 +240,7 @@ func (h *Hub) signal(ch chan struct{}) {
 
 // Start runs the hub until ctx is done. It takes the first health reading before it returns.
 func (h *Hub) Start(ctx context.Context) {
-	health, n := h.probeHealth(), nodeStatus(h.src.NodeStatus())
+	health, nodes := h.probeHealth(), h.nodeViews()
 	// The first reads of the repos and the notification prefs only seed "what was last published"; a failure leaves it
 	// empty, and the first change publishes.
 	var repos *athenav1.RepoList
@@ -241,7 +258,10 @@ func (h *Hub) Start(ctx context.Context) {
 		}
 	}
 	h.mu.Lock()
-	h.health, h.node, h.repos, h.notifs, h.offers = health, n, repos, notifs, offers
+	h.health, h.repos, h.notifs, h.offers = health, repos, notifs, offers
+	for _, n := range nodes {
+		h.nodes[n.Id] = n
+	}
 	h.owing = owing
 	h.mu.Unlock()
 	h.running.Add(2) // the loop and its probe
@@ -271,7 +291,9 @@ func (h *Hub) run(ctx context.Context) {
 			h.apply(c)
 		case <-h.wake:
 		case <-h.nodeWake:
-			h.publishNode()
+			h.publishNodes()
+		case <-h.waitWake:
+			h.publishWaits()
 		case <-h.reposWake:
 			if h.publishRepos() {
 				h.publishFolders()
@@ -341,7 +363,7 @@ func (h *Hub) apply(c store.Changes) {
 			return
 		}
 		reposStale = h.owedMoved(&t, st) || reposStale || h.placementNew(&t)
-		h.publish(&athenav1.Delta{Change: &athenav1.Delta_Ticket{Ticket: ticketSummary(&t, st, h.src.GitFolder)}})
+		h.publish(&athenav1.Delta{Change: &athenav1.Delta_Ticket{Ticket: h.summary(&t, st)}})
 		if h.watched(id) {
 			h.sendDetail(id, h.detail(&t, st))
 		}
@@ -523,7 +545,7 @@ func (h *Hub) publishFolders() {
 			continue
 		}
 		st := core.TicketStage(&t)
-		h.publish(&athenav1.Delta{Change: &athenav1.Delta_Ticket{Ticket: ticketSummary(&t, st, h.src.GitFolder)}})
+		h.publish(&athenav1.Delta{Change: &athenav1.Delta_Ticket{Ticket: h.summary(&t, st)}})
 		if h.watched(t.ID) {
 			h.sendDetail(t.ID, h.detail(&t, st))
 		}
@@ -597,20 +619,40 @@ func quotaOnly(a, b *athenav1.NodeStatus) bool {
 	return proto.Equal(strip(a), strip(b))
 }
 
-func (h *Hub) publishNode() {
-	n := nodeStatus(h.src.NodeStatus())
+// nodeViews maps every node the Source lists, in its order.
+func (h *Hub) nodeViews() []*athenav1.NodeStatus {
+	infos := h.src.Nodes()
+	out := make([]*athenav1.NodeStatus, 0, len(infos))
+	for _, i := range infos {
+		out = append(out, nodeStatus(i))
+	}
+	return out
+}
+
+// publishNodes publishes each node that differs from the last published: a delta per node. A node whose change is only
+// a quota reading again, too soon after its last, waits for its second to be over; that never delays another node.
+// A node revoked stays listed (state revoked), so node_removed is not sent.
+func (h *Hub) publishNodes() {
+	for _, n := range h.nodeViews() {
+		h.publishNodeStatus(n)
+	}
+}
+
+func (h *Hub) publishNodeStatus(n *athenav1.NodeStatus) {
+	id := n.Id
 	h.mu.Lock()
-	if h.node != nil && proto.Equal(h.node, n) {
+	prev := h.nodes[id]
+	if prev != nil && proto.Equal(prev, n) {
 		h.mu.Unlock()
 		return
 	}
-	if wait := h.quotaEvery - time.Since(h.quotaAt); h.node != nil && quotaOnly(h.node, n) && wait > 0 {
+	if wait := h.quotaEvery - time.Since(h.quotaAt[id]); prev != nil && quotaOnly(prev, n) && wait > 0 {
 		// A quota reading again, too soon after the last: say it once, when the second is over, with what is then known.
-		if !h.quotaLater {
-			h.quotaLater = true
+		if !h.quotaLater[id] {
+			h.quotaLater[id] = true
 			time.AfterFunc(wait, func() {
 				h.mu.Lock()
-				h.quotaLater = false
+				delete(h.quotaLater, id)
 				h.mu.Unlock()
 				h.NodeChanged()
 			})
@@ -618,12 +660,41 @@ func (h *Hub) publishNode() {
 		h.mu.Unlock()
 		return
 	}
-	if h.node != nil && quotaOnly(h.node, n) {
-		h.quotaAt = time.Now()
+	if prev != nil && quotaOnly(prev, n) {
+		h.quotaAt[id] = time.Now()
 	}
-	h.node = n
+	h.nodes[id] = n
 	h.mu.Unlock()
 	h.publish(&athenav1.Delta{Change: &athenav1.Delta_Node{Node: n}})
+}
+
+// publishWaits publishes the summary (and the detail, to its watchers) of each Ticket whose wait for a node changed
+// since the last call.
+func (h *Hub) publishWaits() {
+	h.mu.Lock()
+	ids := h.waits
+	if len(ids) > 0 {
+		h.waits = map[string]bool{}
+	}
+	h.mu.Unlock()
+	for id := range ids {
+		t, st, err := h.src.Ticket(id)
+		if err != nil {
+			h.lost("read ticket", "id", id, "error", err)
+			continue
+		}
+		h.publish(&athenav1.Delta{Change: &athenav1.Delta_Ticket{Ticket: h.summary(&t, st)}})
+		if h.watched(id) {
+			h.sendDetail(id, h.detail(&t, st))
+		}
+	}
+}
+
+// summary is a Ticket's summary, with the node it is placed on.
+func (h *Hub) summary(t *core.Ticket, st core.Stage) *athenav1.TicketSummary {
+	v := ticketSummary(t, st, h.src.GitFolder)
+	v.NodeId, v.NodeName, v.WaitingForNode = h.src.Placement(t)
+	return v
 }
 
 // probeHealth reads the Source's health (without the lock: it may do I/O) and stamps each item with when its state
@@ -815,7 +886,7 @@ func (h *Hub) Snapshot() (*athenav1.Snapshot, error) {
 		return nil, err
 	}
 	for _, t := range boundTickets(tickets) {
-		s.Tickets = append(s.Tickets, ticketSummary(&t, core.TicketStage(&t), h.src.GitFolder))
+		s.Tickets = append(s.Tickets, h.summary(&t, core.TicketStage(&t)))
 	}
 
 	pending, err := h.src.PendingApprovals()
@@ -862,7 +933,7 @@ func (h *Hub) Snapshot() (*athenav1.Snapshot, error) {
 		s.Decisions = append(s.Decisions, decisionView(&d))
 	}
 
-	s.Nodes = []*athenav1.NodeStatus{nodeStatus(h.src.NodeStatus())}
+	s.Nodes = h.nodeViews()
 	if health == nil {
 		health = h.probeHealth() // before Start
 	}
@@ -938,7 +1009,9 @@ func (h *Hub) detail(t *core.Ticket, st core.Stage) *athenav1.TicketDetail {
 	if err != nil {
 		h.log.Warn("hub: detail: answered approvals", "ticket", t.ID, "error", err)
 	}
-	return ticketDetail(t, st, h.src.GitFolder, origin, pending, answered, h.replyActors(t))
+	d := ticketDetail(t, st, h.src.GitFolder, origin, pending, answered, h.replyActors(t))
+	d.Summary = h.summary(t, st)
+	return d
 }
 
 // replyActorsMax bounds the Trigger reads one detail makes to name who replied; actorCacheMax bounds the logins the

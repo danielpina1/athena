@@ -785,6 +785,9 @@ func (w *webEndpoint) start(d *Dispatcher, flt *fleet.Fleet, fx *effects.Runner,
 	w.cancel = cancel
 	w.st.OnCommit(w.hub.OnCommit)
 	hubRef.Store(w.hub)
+	// A node that connects, leaves, reports, drains or is revoked, and why a Ticket waits for a node, reach the dashboards.
+	flt.OnChange(w.hub.NodeChanged)
+	flt.OnWaitChange(w.hub.WaitChanged)
 	w.hub.Start(ctx)
 	d.SetAuth(auth)
 	w.dash = web.NewDashboard(web.DashboardConfig{Auth: auth, Hub: w.hub, Commander: d, Streams: flt, Presence: w.presence,

@@ -93,11 +93,7 @@ func (c *command) node(ctx context.Context, args []string) int {
 // joinCommand is the line `athena node token` prints, to paste on the new machine. fingerprint is the dashboard CA's;
 // with ACME ("") the system roots verify the server and the flag is left out.
 func joinCommand(url, token, fingerprint string) string {
-	line := "athena node join " + url + " " + token
-	if fingerprint != "" {
-		line += " --ca-sha256 " + fingerprint
-	}
-	return line
+	return server.JoinCommand(url, token, fingerprint)
 }
 
 func (c *command) nodeToken(args []string) int {

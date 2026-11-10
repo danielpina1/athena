@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"encoding/json"
 	"fmt"
+	goruntime "runtime"
 	"slices"
 	"strings"
 	"time"
@@ -11,8 +12,8 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/danielpina1/athena/internal/core"
+	"github.com/danielpina1/athena/internal/fleet"
 	"github.com/danielpina1/athena/internal/hub"
-	"github.com/danielpina1/athena/internal/node"
 	"github.com/danielpina1/athena/internal/pause"
 	"github.com/danielpina1/athena/internal/pb/athenav1"
 	"github.com/danielpina1/athena/internal/policy"
@@ -204,11 +205,50 @@ func (s hubSource) Policy() (int, string, string, error) {
 	return rev, policy.Version(cur), string(raw), nil
 }
 
-func (s hubSource) NodeStatus() node.Status {
-	if s.d.node == nil {
-		return node.Status{}
+// Nodes lists the nodes: the Fleet's (the server's own first, then the others by name, revoked ones too), or, with no
+// Fleet, the embedded node alone.
+func (s hubSource) Nodes() []hub.NodeInfo {
+	if s.d.fleet == nil {
+		if s.d.node == nil {
+			return []hub.NodeInfo{{ID: fleet.LocalID, Local: true, State: fleet.StateOnline, OS: goruntime.GOOS, Arch: goruntime.GOARCH}}
+		}
+		st := s.d.node.Status()
+		return []hub.NodeInfo{{ID: fleet.LocalID, Name: st.Name, Local: true, State: fleet.StateOnline,
+			OS: goruntime.GOOS, Arch: goruntime.GOARCH, Status: st}}
 	}
-	return s.d.node.Status()
+	views := s.d.fleet.Nodes()
+	out := make([]hub.NodeInfo, 0, len(views))
+	for _, v := range views {
+		i := hub.NodeInfo{ID: v.ID, Name: v.Name, Local: v.Local, State: v.State, LastSeen: v.LastSeen, Version: v.Version,
+			Status: v.Status, Caps: v.Caps}
+		if v.Local {
+			i.OS, i.Arch, i.LastSeen = goruntime.GOOS, goruntime.GOARCH, time.Time{}
+		}
+		out = append(out, i)
+	}
+	// The local node first, then by name (the Fleet says so; the order is the dashboard's, so it is kept here).
+	slices.SortStableFunc(out, func(a, b hub.NodeInfo) int {
+		switch {
+		case a.Local != b.Local:
+			if a.Local {
+				return -1
+			}
+			return 1
+		}
+		return strings.Compare(a.Name, b.Name)
+	})
+	return out
+}
+
+// Placement is the node the Ticket's latest Assignment runs on (the server's own when none is placed) and whether the
+// Fleet holds it waiting for a node.
+func (s hubSource) Placement(t *core.Ticket) (string, string, bool) {
+	id := fleet.LocalID
+	if a := t.LatestAssignment(); a != nil && a.Node != "" {
+		id = a.Node
+	}
+	waiting := s.d.fleet != nil && s.d.fleet.WaitReason(t.ID) != ""
+	return id, s.d.nodeName(id), waiting
 }
 
 // GitFolder reports whether dir has a .git entry, as the placeFacts pass last found it (see Repos).

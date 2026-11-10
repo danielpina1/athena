@@ -155,3 +155,33 @@ func (d *Dispatcher) revokeNode(arg string) (NodeRow, error) {
 	}
 	return NodeRow{ID: v.ID, Name: v.Name, Local: v.Local, State: fleet.StateRevoked}, nil
 }
+
+// JoinCommand is the line a new machine runs to join: what `athena node token` prints and the dashboard shows.
+// fingerprint is the dashboard CA's; with ACME ("") the system roots verify the server and the flag is left out.
+func JoinCommand(url, token, fingerprint string) string {
+	line := "athena node join " + url + " " + token
+	if fingerprint != "" {
+		line += " --ca-sha256 " + fingerprint
+	}
+	return line
+}
+
+// pinnable checks that a task may be pinned to the node with this id: it is known and not revoked.
+func (d *Dispatcher) pinnable(id string) error {
+	if d.fleet == nil {
+		if id == fleet.LocalID {
+			return nil
+		}
+		return userErrorf("No node has the id %s.", id)
+	}
+	for _, v := range d.fleet.Nodes() {
+		if v.ID != id {
+			continue
+		}
+		if v.State == fleet.StateRevoked {
+			return userErrorf("%s is revoked; it must join again before it takes a task.", v.Name)
+		}
+		return nil
+	}
+	return userErrorf("No node has the id %s; pick one from the node list.", id)
+}
