@@ -56,7 +56,8 @@ Its flags are those of `athena server` that concern sessions: `--slots N` (defau
 `--approval-timeout D`, `--claude PATH`, `--codex PATH`.
 
 - It waits for the server, fetches the prompts, and only then serves sessions.
-- Its socket, its logs (`logs/athena.log`) and its worktrees (`work/`) live under its state directory.
+- Its socket, its logs (`logs/athena.log`) and its worktrees (`work/`) live under its state directory. One
+  `athena node run` uses a state directory at a time; a second is refused.
 - An optional `config.json` there sets the node's own `runtimes` and `sandbox`, in the server's format. Its `github`
   and `web` parts belong to the server and are ignored.
 - If the server is unreachable, the node keeps trying. What its sessions do meanwhile is kept and sent once the link
@@ -89,7 +90,8 @@ On the server's machine, name a node by its name or its id:
 
 - Drain before you take a machine down for a while.
 - Revoke when a machine is lost or retired: its certificate no longer counts and its link closes at once. `--yes`
-  skips the question.
+  skips the question. The revoked machine's `athena node run` stops with "This node was revoked; run athena node join
+  again."
 - To bring a revoked machine back, make a new token and join again, with a fresh `--state` directory (or remove the
   old one). The old name stays with the revoked node, so pick a new `--name`.
 - The server's own node can be drained, but never revoked.

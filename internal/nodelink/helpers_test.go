@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -244,8 +245,10 @@ func run(t *testing.T, c *Client) {
 
 // fakeTarget records what serve asks of the node.
 type fakeTarget struct {
-	mu       sync.Mutex
-	starts   []core.Ticket
+	mu     sync.Mutex
+	starts []core.Ticket
+	// events are the mailbox calls in order: "start T1/A1", "deliver T1/A1", "stop T1/A1", "paused true".
+	events   []string
 	dropped  []string
 	dir      string
 	backfill []node.Line
@@ -291,12 +294,27 @@ func (f *fakeTarget) Start(t core.Ticket, a core.Assignment) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.starts = append(f.starts, t)
+	f.events = append(f.events, "start "+t.ID+"/"+a.ID)
 }
-func (f *fakeTarget) Seed(node.Seed) error                      { return nil }
-func (f *fakeTarget) Deliver(core.Ticket, core.Assignment)      {}
-func (f *fakeTarget) Stop(core.Ticket, core.Assignment, string) {}
-func (f *fakeTarget) Interrupt(string) error                    { return node.ErrNoSession }
-func (f *fakeTarget) SetPaused(bool)                            {}
+func (f *fakeTarget) event(e string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.events = append(f.events, e)
+}
+func (f *fakeTarget) seen() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.events...)
+}
+func (f *fakeTarget) Seed(node.Seed) error { return nil }
+func (f *fakeTarget) Deliver(t core.Ticket, a core.Assignment) {
+	f.event("deliver " + t.ID + "/" + a.ID)
+}
+func (f *fakeTarget) Stop(t core.Ticket, a core.Assignment, _ string) {
+	f.event("stop " + t.ID + "/" + a.ID)
+}
+func (f *fakeTarget) Interrupt(string) error { return node.ErrNoSession }
+func (f *fakeTarget) SetPaused(p bool)       { f.event(fmt.Sprintf("paused %v", p)) }
 func (f *fakeTarget) DropTokens(repo string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

@@ -46,6 +46,13 @@ const (
 // ErrOffline is a request made while the node has no link to the server.
 var ErrOffline = errors.New("the control server is unreachable; wait a minute and try again")
 
+// refusalsFatal is how many handshakes in a row the server must refuse the node's certificate before Run gives up.
+const refusalsFatal = 3
+
+// ErrRevoked ends Run: the server closed the link because the owner revoked this node, or keeps refusing its
+// certificate at the handshake. Only a new join brings it back.
+var ErrRevoked = errors.New("This node was revoked; run athena node join again.")
+
 // errLinkLost is a request whose link ended before its answer came; it is ErrOffline to the caller.
 var errLinkLost = fmt.Errorf("%w", ErrOffline)
 
@@ -65,6 +72,9 @@ type Options struct {
 	RequestTimeout time.Duration
 	// Log receives the link's log lines (default slog.Default()). No args, token or key is ever logged.
 	Log *slog.Logger
+	// HoldUntilServing holds the server's start and deliver calls until Serving is called (`athena node run` calls it
+	// once the node's socket serves): a session launched before would find no socket for its hooks and MCP server.
+	HoldUntilServing bool
 }
 
 // Client is a node's link to the control server: it dials and redials, sends the node's facts from its outbox once
@@ -108,6 +118,11 @@ type Client struct {
 	ckWake    chan struct{}
 	// tmpDir holds the bundles being sent: <StateDir>/tmp, emptied when the Client is made.
 	tmpDir string
+
+	// The calls held until Serving (Options.HoldUntilServing), in arrival order (hold.go).
+	holdMu  sync.Mutex
+	serving bool
+	held    []heldCall
 }
 
 type cachedTicket struct {
@@ -179,7 +194,8 @@ func New(id *Identity, opts Options) (*Client, error) {
 	return &Client{id: id, opts: opts, log: opts.Log.With("component", "nodelink"), ob: ob,
 		factWake: make(chan struct{}, 1), statWake: make(chan struct{}, 1), ready: make(chan struct{}),
 		onlineSig: make(chan struct{}), tickets: map[string]cachedTicket{}, answered: map[uint64]func(string){},
-		ckPending: map[string]string{}, ckRetries: map[string]int{}, ckWake: make(chan struct{}, 1), tmpDir: tmpDir}, nil
+		ckPending: map[string]string{}, ckRetries: map[string]int{}, ckWake: make(chan struct{}, 1), tmpDir: tmpDir,
+		serving: !opts.HoldUntilServing}, nil
 }
 
 // Attach gives the Client the node the server's calls are served onto.
@@ -258,10 +274,22 @@ func (c *Client) waitOnline(ctx context.Context) bool {
 func (c *Client) Run(ctx context.Context) error {
 	c.runCtx.Store(&ctx)
 	backoff := c.opts.MinBackoff
+	refused := 0
 	for {
 		welcomed, err := c.connect(ctx)
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+		if revoked(err) {
+			c.log.Error("the server revoked this node", "error", err)
+			return ErrRevoked
+		}
+		// A refusal of the certificate at the handshake, again and again (not a passing failure to read the node's row).
+		if refused = refused + 1; !certRefused(err) {
+			refused = 0
+		} else if refused >= refusalsFatal {
+			c.log.Error("the server keeps refusing this node's certificate", "error", err)
+			return ErrRevoked
 		}
 		if welcomed {
 			backoff = c.opts.MinBackoff

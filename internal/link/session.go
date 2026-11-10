@@ -286,7 +286,9 @@ func (s *Session) Run(ctx context.Context) error {
 		_ = s.conn.Close(CloseProtocol, "resume gap")
 		return s.initErr
 	}
-	rctx, cancel := context.WithCancel(ctx)
+	// The loops do not end with ctx itself: the Close below must come first, so the peer reads its code and reason (a
+	// WebSocket read cancelled under it drops the connection without them).
+	rctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	defer cancel()
 	s.mu.Lock()
 	s.lastRecv = s.now()

@@ -55,13 +55,16 @@ func RunNode(ctx context.Context, cfg NodeRunConfig) (err error) {
 	if err := ensurePrivateDir(stateDir); err != nil {
 		return err
 	}
-	sock := filepath.Join(stateDir, NodeSocket)
-	if err := claimSocket(sock); err != nil {
-		if errors.Is(err, ErrAlreadyRunning) {
-			return fmt.Errorf("athena node run already runs on %s", stateDir)
+	// One node per state directory: its outbox, its socket and its worktrees are its own.
+	unlock, err := lockStateDir(filepath.Join(stateDir, nodeLockFile))
+	if err != nil {
+		if errors.Is(err, errLocked) {
+			return fmt.Errorf("Another athena node run already uses %s; stop it first.", stateDir)
 		}
 		return err
 	}
+	defer unlock()
+	sock := filepath.Join(stateDir, NodeSocket)
 	stderr := cfg.Stderr
 	if stderr == nil {
 		stderr = os.Stderr
@@ -128,7 +131,8 @@ func RunNode(ctx context.Context, cfg NodeRunConfig) (err error) {
 		ncfg.Chooser = fileCfg.Runtimes.chooser()
 	}
 
-	client, err := nodelink.New(id, nodelink.Options{StateDir: stateDir, Version: version, Log: logger})
+	// The server's starts wait until the socket serves (Serving below): a session needs it for its hooks.
+	client, err := nodelink.New(id, nodelink.Options{StateDir: stateDir, Version: version, Log: logger, HoldUntilServing: true})
 	if err != nil {
 		return err
 	}
@@ -155,10 +159,20 @@ func RunNode(ctx context.Context, cfg NodeRunConfig) (err error) {
 	// The link outlives the node: the facts of its sessions' last moments go to the outbox, and out while it lasts.
 	linkCtx, linkCancel := context.WithCancel(context.Background())
 	linked := make(chan struct{})
+	var linkErr error // set before linked closes
 	go func() {
 		defer close(linked)
-		_ = client.Run(linkCtx)
+		linkErr = client.Run(linkCtx)
 	}()
+	// linkFailed is the link's end while the node still wants it: revoked, or anything else Run gives up on.
+	linkFailed := func() error {
+		if errors.Is(linkErr, nodelink.ErrRevoked) {
+			logger.Error("this node was revoked; run athena node join again")
+			return linkErr
+		}
+		logger.Error("the link to the server stopped", "error", linkErr)
+		return fmt.Errorf("node: the link to the server stopped: %v", linkErr)
+	}
 	defer func() {
 		linkCancel()
 		<-linked
@@ -180,6 +194,8 @@ func RunNode(ctx context.Context, cfg NodeRunConfig) (err error) {
 
 	select {
 	case <-client.Ready():
+	case <-linked:
+		return linkFailed()
 	case <-ctx.Done():
 		logger.Info("athena node stopping before it reached the server")
 		return nil
@@ -200,13 +216,23 @@ func RunNode(ctx context.Context, cfg NodeRunConfig) (err error) {
 	if err := waitNodeSocket(sock, served, &nodeDone); err != nil {
 		return err
 	}
+	// Only now do the server's starts reach the node: the socket its sessions need serves.
+	client.Serving()
 	logger.Info("athena node running", "node", id.Name)
 	select {
 	case <-ctx.Done():
 		logger.Info("athena node stopping")
 		return nil
+	case <-linked:
+		return linkFailed()
 	case serr := <-served:
 		nodeDone = true
 		return fmt.Errorf("node: socket stopped: %v", serr)
 	}
 }
+
+// nodeLockFile is the lock one `athena node run` holds in its state directory.
+const nodeLockFile = "node.lock"
+
+// errLocked is a state directory another process holds.
+var errLocked = errors.New("locked")

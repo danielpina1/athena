@@ -103,3 +103,8 @@ func offers(r *http.Request, proto string) bool {
 	}
 	return false
 }
+
+// CloseCode is the close code the peer sent, if err is the end of a WebSocket it closed; -1 otherwise.
+func CloseCode(err error) int {
+	return int(websocket.CloseStatus(err))
+}

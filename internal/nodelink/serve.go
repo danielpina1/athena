@@ -152,7 +152,7 @@ func (c *Client) serve(cn *conn, call *athenav1.NodeCall) {
 			return
 		}
 		c.cacheTicket(a.Ticket)
-		t.Start(a.Ticket, a.Assignment)
+		c.whenServing(a.Ticket.ID, a.Assignment.ID, func(t target) { t.Start(a.Ticket, a.Assignment) })
 		c.reply(cn, id, nil, nil)
 	case ServeDeliver:
 		var a ArgsDeliver
@@ -161,7 +161,7 @@ func (c *Client) serve(cn *conn, call *athenav1.NodeCall) {
 			return
 		}
 		c.cacheTicket(a.Ticket)
-		t.Deliver(a.Ticket, a.Assignment)
+		c.whenServing(a.Ticket.ID, a.Assignment.ID, func(t target) { t.Deliver(a.Ticket, a.Assignment) })
 		c.reply(cn, id, nil, nil)
 	case ServeStop:
 		var a ArgsStop
@@ -170,6 +170,7 @@ func (c *Client) serve(cn *conn, call *athenav1.NodeCall) {
 			return
 		}
 		c.cacheTicket(a.Ticket)
+		c.dropHeld(a.Ticket.ID, a.Assignment.ID)
 		t.Stop(a.Ticket, a.Assignment, a.Reason)
 		c.reply(cn, id, nil, nil)
 	case ServeSetPaused:

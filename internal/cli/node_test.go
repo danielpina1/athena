@@ -409,30 +409,7 @@ func TestNodeJoinAndRun(t *testing.T) {
 		t.Fatalf("second join: exit %d, stderr %q", code, errOut)
 	}
 
-	runCtx, cancel := context.WithCancel(ctx)
-	done := make(chan int, 1)
-	var nodeErr bytes.Buffer
-	go func() {
-		done <- Run(runCtx, "node", []string{"run", "--state", nodeDir, "--claude", fakeClaude(t), "--codex", noCodex, "--slots", "3"},
-			io.Discard, &lockedWriter{w: &nodeErr})
-	}()
-	stopped := false
-	stop := func() {
-		if stopped {
-			return
-		}
-		stopped = true
-		cancel()
-		select {
-		case code := <-done:
-			if code != 0 {
-				t.Errorf("athena node run exit code = %d", code)
-			}
-		case <-time.After(waitTimeout):
-			t.Error("athena node run did not stop")
-		}
-	}
-	t.Cleanup(stop)
+	n := startNode(t, nodeDir)
 	boxRow := func() string {
 		_, out, _ := athena(ctx, "node", "list", "--state-dir", dir)
 		for _, l := range strings.Split(out, "\n") {
@@ -451,6 +428,89 @@ func TestNodeJoinAndRun(t *testing.T) {
 		_, err := os.Stat(filepath.Join(nodeDir, server.NodeSocket))
 		return err == nil
 	})
-	stop()
+	// A second node on the same state directory is refused at once.
+	if code, _, errOut := athena(ctx, "node", "run", "--state", nodeDir, "--claude", fakeClaude(t), "--codex", noCodex); code != 1 ||
+		errOut != "Another athena node run already uses "+nodeDir+"; stop it first.\n" {
+		t.Fatalf("second node run: exit %d, stderr %q", code, errOut)
+	}
+	if code := n.stop(); code != 0 {
+		t.Fatalf("athena node run exit code = %d", code)
+	}
 	eventually(t, "box offline", func() bool { return strings.Contains(boxRow(), " offline ") })
+
+	// Revoked while it runs: it stops, says so, and exits non-zero.
+	n = startNode(t, nodeDir)
+	eventually(t, "box online again", func() bool { return strings.Contains(boxRow(), " online ") })
+	if code, _, errOut := athena(ctx, "node", "revoke", "box", "--yes", "--state-dir", dir); code != 0 {
+		t.Fatalf("revoke: %d %q", code, errOut)
+	}
+	const revokedLine = "This node was revoked; run athena node join again.\n"
+	// The server closed the link as revoked (not a refused handshake later).
+	if code := n.wait(); code != 1 || !strings.HasSuffix(n.stderr(), revokedLine) || !strings.Contains(n.stderr(), "the server revoked this node") {
+		t.Fatalf("revoked node run: exit %d, stderr %s", code, n.stderr())
+	}
+	// Started again, the server refuses its certificate at every handshake: it gives up the same way.
+	n = startNode(t, nodeDir)
+	if code := n.wait(); code != 1 || !strings.HasSuffix(n.stderr(), revokedLine) {
+		t.Fatalf("node run after revoke: exit %d, stderr ends %q", code, tail(n.stderr()))
+	}
+}
+
+func tail(s string) string {
+	if len(s) > 300 {
+		return s[len(s)-300:]
+	}
+	return s
+}
+
+// runningNode is an `athena node run` in this process.
+type runningNode struct {
+	t      *testing.T
+	cancel context.CancelFunc
+	done   chan int
+	code   *int
+	errb   *lockedWriter
+	buf    *bytes.Buffer
+}
+
+// startNode runs `athena node run` on stateDir (fakeclaude, no codex, 3 slots) until the test ends or stop.
+func startNode(t *testing.T, stateDir string) *runningNode {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	buf := &bytes.Buffer{}
+	n := &runningNode{t: t, cancel: cancel, done: make(chan int, 1), buf: buf, errb: &lockedWriter{w: buf}}
+	go func() {
+		n.done <- Run(ctx, "node", []string{"run", "--state", stateDir, "--claude", fakeClaude(t), "--codex", noCodex, "--slots", "3"},
+			io.Discard, n.errb)
+	}()
+	t.Cleanup(func() { n.stop() })
+	return n
+}
+
+// wait waits for the node to end on its own and returns its exit code.
+func (n *runningNode) wait() int {
+	n.t.Helper()
+	if n.code != nil {
+		return *n.code
+	}
+	select {
+	case code := <-n.done:
+		n.code = &code
+		return code
+	case <-time.After(waitTimeout):
+		n.t.Fatalf("athena node run did not end; stderr ends %q", tail(n.stderr()))
+		return -1
+	}
+}
+
+// stop stops the node and returns its exit code.
+func (n *runningNode) stop() int {
+	n.cancel()
+	return n.wait()
+}
+
+func (n *runningNode) stderr() string {
+	n.errb.mu.Lock()
+	defer n.errb.mu.Unlock()
+	return n.buf.String()
 }
