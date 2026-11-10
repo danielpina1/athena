@@ -289,3 +289,6 @@ func (e *Engine) AllowedByRule(ticketID, tool, rule, repo string) error {
 		return nil
 	})
 }
+
+// Approval reads an Approval; one that is not stored is a UserError.
+func (e *Engine) Approval(id string) (Approval, error) { return e.approval(id) }

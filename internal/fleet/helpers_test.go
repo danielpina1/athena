@@ -129,7 +129,18 @@ func (e *env) addNode(id, name string) {
 // placed submits a task in a temporary folder and places its Assignment on the node.
 func (e *env) placed(nodeID string) core.Ticket {
 	e.t.Helper()
-	tk, err := e.eng.SubmitOwnerTask("Fix the typo", core.TaskOptions{Dir: e.t.TempDir()})
+	return e.placedWith(nodeID, core.TaskOptions{Dir: e.t.TempDir()})
+}
+
+// placedRepo is placed for a task on a repository.
+func (e *env) placedRepo(nodeID, repo string) core.Ticket {
+	e.t.Helper()
+	return e.placedWith(nodeID, core.TaskOptions{Repo: repo})
+}
+
+func (e *env) placedWith(nodeID string, opts core.TaskOptions) core.Ticket {
+	e.t.Helper()
+	tk, err := e.eng.SubmitOwnerTask("Fix the typo", opts)
 	if err != nil {
 		e.t.Fatal(err)
 	}

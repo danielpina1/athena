@@ -42,6 +42,9 @@ const (
 	retryPause = 20 * time.Millisecond
 )
 
+// replaceWait bounds the wait for a replaced link's fact applier; a variable for tests.
+var replaceWait = 5 * time.Second
+
 // Close codes and reasons of a node link the fleet ends.
 const (
 	// CloseRevoked closes the link of a node the owner revoked.
@@ -398,9 +401,16 @@ func (f *Fleet) welcome(lk *nodeLink, h *athenav1.NodeHello) bool {
 	r.connMu.Lock()
 	defer r.connMu.Unlock()
 	if old := r.link(); old != nil {
-		// The node came back before its old link was seen dead. That link's applier must stop before the mark is read.
+		// The node came back before its old link was seen dead. That link's applier must stop before the mark is read;
+		// it stops at its context's end, after at most the fact in hand, whatever state the old socket is in.
 		old.end(1000, "replaced by a new link")
-		<-old.done
+		select {
+		case <-old.applierDone:
+		case <-time.After(replaceWait):
+			f.log.Warn("node's previous link still applies a fact; refusing the new one", "node", id)
+			lk.end(closeTryLater, "the previous link is still ending; try again")
+			return false
+		}
 	}
 	n, err := f.cfg.Store.GetNode(id)
 	switch {

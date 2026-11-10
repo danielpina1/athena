@@ -272,3 +272,19 @@ func TestApprovalTakesTheTicketsRepoAndAllowedCallsCountNothing(t *testing.T) {
 	eq(t, "event", ev.Type, EventApprovalAllowed)
 	eq(t, "event text", ev.Data["text"], any("Allowed by your standing rule: Bash · bash-escalate:npm in acme/web"))
 }
+
+func TestApprovalAndProposalGetters(t *testing.T) {
+	h := newHarness(t)
+	id := h.accepted()
+	a := h.request(id)
+	got, err := h.eng.Approval(a.ID)
+	h.must(err)
+	eq(t, "approval", got, a)
+	var ue *UserError
+	if _, err := h.eng.Approval("nope"); !errors.As(err, &ue) {
+		t.Fatalf("missing approval = %v, want a UserError", err)
+	}
+	if _, err := h.eng.Proposal("nope"); !errors.As(err, &ue) {
+		t.Fatalf("missing proposal = %v, want a UserError", err)
+	}
+}

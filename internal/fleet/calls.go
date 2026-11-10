@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/danielpina1/athena/internal/core"
@@ -119,8 +121,14 @@ func (f *Fleet) fact(nodeID string, call *athenav1.NodeCall) error {
 		}
 		return eng.AllowedByRule(a.TicketID, a.Tool, a.Rule, a.Repo)
 	case *nodelink.ArgsExpireApproval:
+		if err := approvalOnNode(eng, nodeID, a.ID); err != nil {
+			return err
+		}
 		return eng.ExpireApproval(a.ID)
 	case *nodelink.ArgsSettleProposal:
+		if err := proposalOnNode(eng, nodeID, a.ID); err != nil {
+			return err
+		}
 		var applyErr error
 		if a.Error != "" {
 			applyErr = errors.New(a.Error)
@@ -178,8 +186,14 @@ func (f *Fleet) answer(ctx context.Context, nodeID string, a any) (any, error) {
 		}
 		return eng.RequestApproval(a.Approval)
 	case *nodelink.ArgsWaitApproval:
+		if err := approvalOnNode(eng, nodeID, a.ID); err != nil {
+			return nil, err
+		}
 		return waitApproval(ctx, eng, a.ID, time.Duration(a.WaitMs)*time.Millisecond)
 	case *nodelink.ArgsTrigger:
+		if err := triggerOnNode(eng, nodeID, a.ID); err != nil {
+			return nil, err
+		}
 		return eng.Trigger(a.ID)
 	case *nodelink.ArgsReplyOnce:
 		if err := guard(a.Request.TicketID); err != nil {
@@ -212,17 +226,19 @@ func (f *Fleet) answer(ctx context.Context, nodeID string, a any) (any, error) {
 		}
 		return eng.Propose(a.Proposal)
 	case *nodelink.ArgsPendingProposals:
-		ps, err := eng.PendingProposals()
-		if ps == nil {
-			ps = []core.Proposal{}
-		}
-		return ps, err
+		return pendingProposalsOn(eng, nodeID)
 	case *nodelink.ArgsStartProposal:
+		if err := proposalOnNode(eng, nodeID, a.ID); err != nil {
+			return nil, err
+		}
 		return eng.StartProposal(a.ID)
 
 	case *nodelink.ArgsToken:
 		if f.cfg.Creds == nil {
 			return nil, &core.UserError{Msg: "the server has no GitHub credentials"}
+		}
+		if err := repoOnNode(eng, nodeID, a.Repo); err != nil {
+			return nil, err
 		}
 		tctx, cancel := context.WithTimeout(ctx, RequestTimeout)
 		defer cancel()
@@ -312,4 +328,81 @@ func waitApproval(ctx context.Context, eng *core.Engine, id string, wait time.Du
 	lctx, cancel := context.WithTimeout(ctx, time.Second)
 	defer cancel()
 	return eng.WaitApproval(lctx, id)
+}
+
+// approvalOnNode checks that the Approval belongs to a Ticket placed on the node.
+func approvalOnNode(eng *core.Engine, nodeID, id string) error {
+	a, err := eng.Approval(id)
+	if err != nil {
+		return err
+	}
+	return onNode(eng, nodeID, a.TicketID)
+}
+
+// proposalOnNode checks that the Proposal belongs to a Ticket placed on the node.
+func proposalOnNode(eng *core.Engine, nodeID, id string) error {
+	p, err := eng.Proposal(id)
+	if err != nil {
+		return err
+	}
+	return onNode(eng, nodeID, p.TicketID)
+}
+
+// pendingProposalsOn lists the pending Proposals of the Tickets placed on the node.
+func pendingProposalsOn(eng *core.Engine, nodeID string) ([]core.Proposal, error) {
+	all, err := eng.PendingProposals()
+	if err != nil {
+		return nil, err
+	}
+	out := []core.Proposal{}
+	on := map[string]bool{}
+	for _, p := range all {
+		ok, seen := on[p.TicketID]
+		if !seen {
+			ok = onNode(eng, nodeID, p.TicketID) == nil
+			on[p.TicketID] = ok
+		}
+		if ok {
+			out = append(out, p)
+		}
+	}
+	return out, nil
+}
+
+// triggerOnNode checks that the Trigger started, or reached as an Input, an open Ticket placed on the node.
+func triggerOnNode(eng *core.Engine, nodeID, id string) error {
+	tickets, err := eng.Tickets(false)
+	if err != nil {
+		return err
+	}
+	for _, t := range tickets {
+		if !placedOn(t, nodeID) {
+			continue
+		}
+		if t.Origin.TriggerID == id || slices.Contains(t.Origin.TriggerIDs, id) {
+			return nil
+		}
+		for _, in := range t.Inputs {
+			if in.TriggerID == id {
+				return nil
+			}
+		}
+	}
+	return &core.UserError{Msg: "trigger " + id + " is not on this node"}
+}
+
+// repoOnNode checks that the node runs work in the repository: an open Ticket of that Repo whose latest Assignment is
+// placed on the node and not ended. A node gets installation tokens only for its own Assignments.
+func repoOnNode(eng *core.Engine, nodeID, repo string) error {
+	tickets, err := eng.Tickets(false)
+	if err != nil {
+		return err
+	}
+	for _, t := range tickets {
+		a := t.LatestAssignment()
+		if a != nil && a.Node == nodeID && a.State != core.AssignmentEnded && t.Repo != "" && strings.EqualFold(t.Repo, repo) {
+			return nil
+		}
+	}
+	return &core.UserError{Msg: "this node has no work in " + repo}
 }

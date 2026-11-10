@@ -145,6 +145,7 @@ func TestRequestsRunConcurrently(t *testing.T) {
 	e := newEnv(t)
 	e.addNode(nodeID, "mini")
 	tk := e.placed(nodeID)
+	e.placedRepo(nodeID, "o/r")
 	f := e.fleet(func(c *Config) { c.Creds = fakeCreds{} })
 	cn := newClient(t, f, nodeID)
 	cn.run()
@@ -316,5 +317,189 @@ func TestRemoteOffline(t *testing.T) {
 	}
 	if f.Target("local") != Target(nil) {
 		t.Fatal("no local node configured, yet a local target")
+	}
+}
+
+// TestTokenScopedToNodesWork: a node gets a token only for a repository its live Assignments work in.
+func TestTokenScopedToNodesWork(t *testing.T) {
+	e := newEnv(t)
+	e.addNode(nodeID, "mini")
+	e.addNode(otherID, "studio")
+	e.placedRepo(nodeID, "o/r")
+	e.placedRepo(otherID, "x/y")
+	f := e.fleet(func(c *Config) { c.Creds = fakeCreds{} })
+	cn := newClient(t, f, nodeID)
+	cn.run()
+	creds := cn.c.Credentials()
+	if tok, _, err := creds.Token(context.Background(), "O/R", true); err != nil || tok != "tok-O/R" {
+		t.Fatalf("own repo: %q, %v", tok, err)
+	}
+	for _, repo := range []string{"x/y", "z/z"} {
+		tok, _, err := creds.Token(context.Background(), repo, true)
+		if err == nil || tok != "" || !strings.Contains(err.Error(), "this node has no work in "+repo) {
+			t.Fatalf("%s: %q, %v, want refused", repo, tok, err)
+		}
+	}
+}
+
+const otherID = "n9876543210"
+
+// TestIDCallsScopedToNode: a node cannot expire, wait on, settle, start or list another node's Approvals and
+// Proposals, nor read a Trigger of a Ticket not on it.
+func TestIDCallsScopedToNode(t *testing.T) {
+	e := newEnv(t)
+	e.addNode(nodeID, "mini")
+	e.addNode(otherID, "studio")
+	mine, theirs := e.placed(nodeID), e.placed(otherID)
+	theirApproval, err := e.eng.RequestApproval(core.Approval{TicketID: theirs.ID, Tool: "Bash", Summary: "push"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pr := func(tk core.Ticket) core.Proposal {
+		p, err := e.eng.Propose(core.Proposal{TicketID: tk.ID, Kind: core.ProposalPull, Summary: "pr"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	myProposal, theirProposal := pr(mine), pr(theirs)
+	f := e.fleet(nil)
+	cn := newClient(t, f, nodeID)
+	cn.run()
+	eng := cn.c.Engine()
+
+	// Facts: refused, yet answered (the mark moves).
+	if err := eng.ExpireApproval(theirApproval.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.SettleProposal(theirProposal.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+	// Requests: refused. Each runs after the facts before it (R12), so the checks below see them applied or refused.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, err := eng.WaitApproval(ctx, theirApproval.ID); err == nil || !strings.Contains(err.Error(), "not on this node") {
+		t.Fatalf("wait = %v", err)
+	}
+	if _, err := eng.StartProposal(theirProposal.ID); err == nil || !strings.Contains(err.Error(), "not on this node") {
+		t.Fatalf("start proposal = %v", err)
+	}
+	if _, err := eng.Trigger(theirs.Origin.TriggerID); err == nil || !strings.Contains(err.Error(), "not on this node") {
+		t.Fatalf("their trigger = %v", err)
+	}
+	if tr, err := eng.Trigger(mine.Origin.TriggerID); err != nil || tr.ID != mine.Origin.TriggerID {
+		t.Fatalf("my trigger = %+v, %v", tr, err)
+	}
+	ps, err := eng.PendingProposals()
+	if err != nil || len(ps) != 1 || ps[0].ID != myProposal.ID {
+		t.Fatalf("pending proposals = %+v, %v; want only mine", ps, err)
+	}
+	if a, _ := e.eng.Approval(theirApproval.ID); a.State != core.ApprovalPending {
+		t.Fatalf("their approval = %s, want still pending", a.State)
+	}
+	if p, _ := e.eng.Proposal(theirProposal.ID); p.State != core.ProposalPending {
+		t.Fatalf("their proposal = %s, want still pending", p.State)
+	}
+	if n, _ := e.st.GetNode(nodeID); n.AppliedFactSeq != 2 {
+		t.Fatalf("mark = %d, want 2 (refused facts still move it)", n.AppliedFactSeq)
+	}
+}
+
+// TestSecondLinkReplacesFirst: the node connects again while facts are in flight on its first link. The first link
+// closes with 1000, the second is welcomed with the mark the first reached, no fact applies twice or is lost, and the
+// node is online once the first link is gone.
+func TestSecondLinkReplacesFirst(t *testing.T) {
+	e := newEnv(t)
+	e.addNode(nodeID, "mini")
+	tk := e.placed(nodeID)
+	f := e.fleet(nil)
+	const total = 200
+	one := func(uint64) nodelink.ArgsRecordUsage {
+		return nodelink.ArgsRecordUsage{TicketID: tk.ID, Usage: core.UsageDelta{ToolCalls: 1}}
+	}
+	w1 := dialWire(t, f, nodeID, hello(nodeID))
+	w1.waitWelcome()
+	for seq := uint64(1); seq <= total; seq++ {
+		w1.fact(seq, seq, nodelink.MethodRecordUsage, one(seq))
+	}
+	w2 := dialWire(t, f, nodeID, hello(nodeID))
+	mark := w2.waitWelcome().GetAppliedFactSeq()
+	if code, reason := w1.conn.closedWith(t); code != 1000 || reason != "replaced by a new link" {
+		t.Fatalf("first link closed %d %q", code, reason)
+	}
+	select {
+	case <-w1.served:
+	case <-time.After(waitTimeout):
+		t.Fatal("the first link's ServeNode did not return")
+	}
+	if got := e.ticket(tk.ID).Stats.ToolCalls; uint64(got) != mark {
+		t.Fatalf("tool calls = %d at the welcome, mark %d", got, mark)
+	}
+	// The second link replays what its outbox still holds: everything above some answered seq, here from 1.
+	for seq := uint64(1); seq <= total; seq++ {
+		w2.fact(1000+seq, seq, nodelink.MethodRecordUsage, one(seq))
+	}
+	for seq := uint64(1); seq <= total; seq++ {
+		if r := w2.result(); r.GetId() != 1000+seq {
+			t.Fatalf("result %d = %v", seq, r)
+		}
+	}
+	if got := e.ticket(tk.ID).Stats.ToolCalls; got != total {
+		t.Fatalf("tool calls = %d, want %d: each fact once", got, total)
+	}
+	if v := view(t, f, nodeID); v.State != StateOnline {
+		t.Fatalf("state = %s after the first link left, want online", v.State)
+	}
+}
+
+// TestReplacementBoundedByStuckApplier: a replaced link whose applier does not stop refuses the new link after
+// replaceWait instead of stalling it, and Revoke meanwhile is not held up.
+func TestReplacementBoundedByStuckApplier(t *testing.T) {
+	old := replaceWait
+	replaceWait = 100 * time.Millisecond
+	t.Cleanup(func() { replaceWait = old })
+	e := newEnv(t)
+	e.addNode(nodeID, "mini")
+	f := e.fleet(nil)
+	// A link that is attached but whose applier never ends (as one stuck in a fact would be).
+	_, sc := pipePair() // never run: only the applier's state matters
+	stuck := newNodeLink(f, nodeID, sc)
+	r := f.Remote(nodeID)
+	r.attach(stuck, "mini", hello(nodeID), time.Now())
+
+	start := time.Now()
+	w := dialWire(t, f, nodeID, hello(nodeID))
+	if code, _ := w.conn.closedWith(t); code != closeTryLater {
+		t.Fatalf("new link closed %d, want %d", code, closeTryLater)
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("refusal took %s", d)
+	}
+	if stuck.ctx.Err() == nil {
+		t.Fatal("the old link was not ended")
+	}
+	done := make(chan error, 1)
+	go func() { done <- f.Revoke(nodeID) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Revoke stalled behind the stuck link")
+	}
+}
+
+// TestSubGapBeforeClose: lines a slow reader had no room for end as a gap before the feed closes.
+func TestSubGapBeforeClose(t *testing.T) {
+	s := &remoteSub{ch: make(chan node.Line, 3), gapFrom: -1} // room for two lines and the last gap
+	s.push([]node.Line{{Offset: 0, Data: []byte("a")}, {Offset: 2, Data: []byte("b")}, {Offset: 4, Data: []byte("c")},
+		{Offset: 6, Data: []byte("dd")}}, true)
+	var got []node.Line
+	for l := range s.ch {
+		got = append(got, l)
+	}
+	if len(got) != 3 || got[0].Offset != 0 || got[1].Offset != 2 || got[2].Offset != 4 || got[2].GapTo != 9 {
+		t.Fatalf("lines = %+v, want a, b, then a gap 4..9", got)
 	}
 }

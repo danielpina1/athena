@@ -471,3 +471,19 @@ func (o *op) holdReply(t *Ticket, rc *Receipt) error {
 	_, err = o.propose(t, Proposal{TicketID: t.ID, Kind: ProposalReply, Summary: summary, Payload: payload})
 	return err
 }
+
+// Proposal reads a Proposal; one that is not stored is a UserError.
+func (e *Engine) Proposal(id string) (Proposal, error) {
+	var p *Proposal
+	err := e.repos.Tx(func(tx Tx) (err error) {
+		p, err = tx.GetProposal(id)
+		return err
+	})
+	if err != nil {
+		return Proposal{}, err
+	}
+	if p == nil {
+		return Proposal{}, &UserError{Msg: fmt.Sprintf("proposal %s not found", id), Err: ErrNotFound}
+	}
+	return *p, nil
+}

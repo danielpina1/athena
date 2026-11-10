@@ -200,7 +200,7 @@ func (r *Remote) Subscribe(ticketID string, from int64) ([]node.Line, <-chan nod
 		return nil, nil, nil, offline(r.nodeName())
 	}
 	id := lk.nextID.Add(1)
-	s := &remoteSub{ch: make(chan node.Line, subBuffer), gapFrom: -1}
+	s := &remoteSub{ch: make(chan node.Line, subBuffer+1), gapFrom: -1}
 	lk.mu.Lock()
 	if lk.ended {
 		lk.mu.Unlock()
@@ -293,33 +293,51 @@ type remoteSub struct {
 	ch      chan node.Line
 	done    bool
 	gapFrom int64 // the offset lines were dropped from, -1 when none were
+	gapTo   int64 // the end of the last line dropped
 }
 
-// push hands lines to the reader without blocking; what does not fit becomes a gap before the next line that does.
+// push hands lines to the reader without blocking; what does not fit becomes a gap before the next line that does,
+// or before the end. The channel keeps one slot free for that last gap, so the end never loses it.
 func (s *remoteSub) push(lines []node.Line, closed bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.done {
 		return
 	}
+	room := func(n int) bool { return len(s.ch)+n <= cap(s.ch)-1 }
 	for _, l := range lines {
 		if s.gapFrom >= 0 {
-			select {
-			case s.ch <- node.Line{Offset: s.gapFrom, GapTo: l.Offset}:
-				s.gapFrom = -1
-			default:
+			if !room(2) {
+				s.dropped(l)
 				continue
 			}
+			s.ch <- node.Line{Offset: s.gapFrom, GapTo: l.Offset}
+			s.gapFrom = -1
 		}
-		select {
-		case s.ch <- l:
-		default:
-			s.gapFrom = l.Offset
+		if !room(1) {
+			s.dropped(l)
+			continue
 		}
+		s.ch <- l
 	}
 	if closed {
+		if s.gapFrom >= 0 {
+			s.ch <- node.Line{Offset: s.gapFrom, GapTo: s.gapTo} // the reserved slot
+			s.gapFrom = -1
+		}
 		s.done = true
 		close(s.ch)
+	}
+}
+
+// dropped notes a line the reader had no room for.
+func (s *remoteSub) dropped(l node.Line) {
+	if s.gapFrom < 0 {
+		s.gapFrom = l.Offset
+	}
+	s.gapTo = l.Offset + int64(len(l.Data)) + 1
+	if l.GapTo != 0 {
+		s.gapTo = l.GapTo
 	}
 }
 
@@ -343,9 +361,11 @@ type nodeLink struct {
 	cancel context.CancelFunc
 	hello  chan *athenav1.NodeHello
 	done   chan struct{} // closed once every goroutine of the link has returned
-	wg     sync.WaitGroup
-	nextID atomic.Uint64
-	mark   uint64 // the applied-fact mark; the applier's alone once welcomed
+	// applierDone is closed when the fact applier returned: no fact of this link is applied after it.
+	applierDone chan struct{}
+	wg          sync.WaitGroup
+	nextID      atomic.Uint64
+	mark        uint64 // the applied-fact mark; the applier's alone once welcomed
 	// welcomed is set, with r, before the Welcome is sent: the node's calls may come right after it.
 	welcomed atomic.Bool
 
@@ -369,7 +389,7 @@ type nodeLink struct {
 func newNodeLink(f *Fleet, nodeID string, c link.Conn) *nodeLink {
 	ctx, cancel := context.WithCancel(f.ctx)
 	lk := &nodeLink{f: f, nodeID: nodeID, conn: &closeConn{Conn: c}, ctx: ctx, cancel: cancel,
-		hello: make(chan *athenav1.NodeHello, 1), done: make(chan struct{}),
+		hello: make(chan *athenav1.NodeHello, 1), done: make(chan struct{}), applierDone: make(chan struct{}),
 		pending: map[uint64]func(*athenav1.NodeResult){}, subs: map[uint64]*remoteSub{}, advance: make(chan struct{}),
 		factWake: make(chan struct{}, 1), cmdWake: make(chan struct{}, 1), statusWake: make(chan struct{}, 1)}
 	lk.sess = link.New(lk.conn, link.Options{Heartbeat: Heartbeat, DeadAfter: DeadAfter, OnFrame: lk.onFrame})
@@ -484,7 +504,11 @@ func (lk *nodeLink) waitApplied(n uint64) bool {
 // before the ones ahead of it.
 func (lk *nodeLink) applyFacts() {
 	defer lk.wg.Done()
+	defer close(lk.applierDone)
 	for {
+		if lk.ctx.Err() != nil {
+			return // an ended link applies nothing more, even what it already received
+		}
 		lk.mu.Lock()
 		var call *athenav1.NodeCall
 		if len(lk.facts) > 0 {
