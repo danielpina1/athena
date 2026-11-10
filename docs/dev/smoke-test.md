@@ -204,3 +204,36 @@ the GitHub Source. How Autopilot works is in [autonomy.md](autonomy.md) section 
 Clean up: turn the entry off or remove it in Settings > Autopilot, set the mode back to `observe`, and delete the
 throwaway repository's branch.
 
+
+## Second machine (needs your second computer on the VPN)
+
+This part checks plan 6 with the Ryzen box as a node of the server on the Mac. How nodes work is in
+[nodes.md](nodes.md). Both machines are on the UniFi VPN, the server runs the dashboard with TLS (`athena web setup`),
+and the Ryzen box has `athena`, `git` and a logged-in `claude`. On the Mac, `$S` is the server's state dir, as above.
+
+1. **Join.** On the Mac, run `athena node token --state-dir $S` and copy the line it prints. On the Ryzen box, paste it
+   and add `--name ryzen`:
+   `athena node join https://<server host>:8443 <token> --ca-sha256 <fingerprint> --name ryzen`. Then run
+   `athena node run`, and leave it running. On the Mac, `athena node list --state-dir $S` shows `ryzen` online with
+   its slots and `claude`, and the dashboard's Nodes screen shows it too.
+2. **Pin one task, leave one free.** In the dashboard, start two tasks that need no repository's history (a sandbox
+   repository is fine), each asking for a short file such as `note-a.txt`, `note-b.txt` with a line of text. Pick
+   `ryzen` in the node picker for the first and leave the second on "Any node". The first Ticket shows `ryzen` on its
+   card and runs on the Ryzen box (its worktree is under `~/.athena-node/work`). The second goes to whichever node has
+   the lower load. Both end with a Report.
+3. **Cut the cable.** Start a longer task pinned to `ryzen` (ask it to write a file, then wait for your reply). Pull
+   the Ryzen box's network cable (or switch off its VPN) for 30 seconds, then plug it back in. Within about 10
+   seconds the Nodes screen shows `ryzen` offline. After you plug it back in, it is online again with no action from
+   you, and the Ticket carries on. Do not wait past 2 minutes with the cable out, or the Ticket shows "ryzen is
+   offline" and you would need Retry elsewhere (try that once if you like: the dashboard's action on the Ticket, or
+   `athena retry-elsewhere <ticket> --state-dir $S`; a repository task restarts on another node from its last
+   checkpoint, and a task in a folder says it stays on `ryzen`).
+4. **Nothing lost or doubled.** Open the Ticket from step 3 and the one from step 2. Each has its Reports exactly
+   once, in order, and the node's own log (`~/.athena-node/logs/athena.log`) shows no error about a refused fact. A
+   Report the session wrote while the cable was out appears after it came back, once.
+5. **Drain and revoke.** `athena node drain ryzen --state-dir $S`: a new task left on "Any node" goes to the Mac, and
+   `ryzen` shows draining. `athena node undrain ryzen`, then `athena node revoke ryzen --yes --state-dir $S`. On the
+   Ryzen box, `athena node run` stops with "This node was revoked; run athena node join again." and exits 1. The Nodes
+   screen shows `ryzen` revoked.
+
+Clean up: `rm -rf ~/.athena-node` on the Ryzen box.

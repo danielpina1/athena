@@ -125,7 +125,7 @@ func (d *Dispatcher) handleRequest(req Request) (any, error) {
 	case OpPing:
 		return nil, nil
 	case OpSubmit:
-		t, err := d.submit(req.Text, req.Dir, req.Model, req.Repo, req.Runtime, pairingOf(req.Review), "", "")
+		t, err := d.submit(req.Text, req.Dir, req.Model, req.Repo, req.Runtime, pairingOf(req.Review), "", req.Node)
 		if err != nil {
 			return nil, err
 		}

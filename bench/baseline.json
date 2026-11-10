@@ -68,6 +68,24 @@
       "budget": 104857600
     },
     {
+      "name": "node_idle_rss",
+      "unit": "bytes",
+      "value": 29949952,
+      "floor": 2097152,
+      "budget": 31457280
+    },
+    {
+      "name": "dispatch_remote_p99",
+      "unit": "ns",
+      "samples": 40,
+      "p50": 30776000,
+      "p99": 39869000,
+      "best": 36935000,
+      "max": 64913000,
+      "floor": 1000000,
+      "budget": 100000000
+    },
+    {
       "name": "link_delta_p95_ms",
       "unit": "ns",
       "samples": 200,

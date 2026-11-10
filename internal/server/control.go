@@ -94,6 +94,9 @@ type Request struct {
 	Review *bool `json:"review,omitempty"`
 	// Policy is the settings document policy.set saves.
 	Policy json.RawMessage `json:"policy,omitempty"`
+	// Node pins a submitted task to a node by id; empty leaves the placement to the fleet (the dashboard's node
+	// picker does the same over its link).
+	Node string `json:"node,omitempty"`
 	// TTL is how long a node-token's join token is good; 0 is fleet.JoinTokenTTL.
 	TTL time.Duration `json:"ttl,omitempty"`
 }
