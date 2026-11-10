@@ -1,7 +1,7 @@
 package core
 
 // Stage is a Ticket's high-level execution stage: waiting on a person (Action: delivery, answer, review,
-// blocked or failed), working (Action: queued, or empty), idle between turns, or ended.
+// blocked, failed or offline), working (Action: queued, or empty), idle between turns, or ended.
 type Stage struct {
 	Stage  string `json:"stage"`
 	Action string `json:"action,omitempty"`
@@ -12,6 +12,9 @@ type Stage struct {
 func TicketStage(t *Ticket) Stage {
 	if t.Ended != nil {
 		return Stage{Stage: "ended"}
+	}
+	if a := t.LatestAssignment(); a != nil && a.NodeOffline != nil && a.State != AssignmentEnded {
+		return Stage{"person", "offline"}
 	}
 	if t.Delivery != nil {
 		return Stage{"person", "delivery"}
