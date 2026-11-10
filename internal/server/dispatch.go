@@ -231,6 +231,14 @@ func (d *Dispatcher) handleRequest(req Request) (any, error) {
 			return WebStatusResult{}, nil
 		}
 		return d.web.status(), nil
+	case OpNodeToken:
+		return d.nodeToken(req.TTL)
+	case OpNodes:
+		return d.nodeRows()
+	case OpNodeDrain, OpNodeUndrain:
+		return d.drainNode(req.ID, req.Op == OpNodeDrain)
+	case OpNodeRevoke:
+		return d.revokeNode(req.ID)
 	default:
 		return nil, userErrorf("unknown op %q", req.Op)
 	}

@@ -57,6 +57,15 @@ const (
 	OpWebRevoke = "web.revoke"
 	// OpWebStatus reports the dashboard's endpoint: its URL, its certificate and the open connections.
 	OpWebStatus = "web.status"
+	// OpNodeToken issues a join token for a new node (TTL, 0 for fleet.JoinTokenTTL) and answers what its join command
+	// needs (NodeTokenResult).
+	OpNodeToken = "node-token"
+	// OpNodes lists the nodes (NodeRow); OpNodeDrain, OpNodeUndrain and OpNodeRevoke act on the node ID names, by its
+	// name or its id.
+	OpNodes       = "nodes"
+	OpNodeDrain   = "node-drain"
+	OpNodeUndrain = "node-undrain"
+	OpNodeRevoke  = "node-revoke"
 )
 
 // Request is one control request; Op says which of its fields count.
@@ -85,6 +94,8 @@ type Request struct {
 	Review *bool `json:"review,omitempty"`
 	// Policy is the settings document policy.set saves.
 	Policy json.RawMessage `json:"policy,omitempty"`
+	// TTL is how long a node-token's join token is good; 0 is fleet.JoinTokenTTL.
+	TTL time.Duration `json:"ttl,omitempty"`
 }
 
 // Response answers a request: OK with its Data, or the Error that refused it.

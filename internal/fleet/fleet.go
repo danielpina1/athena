@@ -36,6 +36,10 @@ const (
 	// Heartbeat and DeadAfter are every node link's: a dropped node is noticed in under 10 s.
 	Heartbeat = 3 * time.Second
 	DeadAfter = 9 * time.Second
+	// JoinTokenTTL is how long a join token is good unless the owner names another time, and MaxJoinTokenTTL the
+	// longest one may be.
+	JoinTokenTTL    = time.Hour
+	MaxJoinTokenTTL = 24 * time.Hour
 	// helloTimeout bounds the wait for a node's Hello.
 	helloTimeout = 15 * time.Second
 	// retryPause is the pause before a Send refused with backpressure is tried again.

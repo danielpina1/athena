@@ -1,8 +1,10 @@
 // Package cli implements the owner's commands: `athena server`, `athena github setup|check` (which read and write the
 // configuration and talk to GitHub directly), and the commands that talk to the server over the control socket (task,
-// status, logs, reply, stop, retry, approvals, approve, deny, metrics, policy, triggers, threads, decisions,
-// reevaluate, dismiss, unsubscribe), `athena web setup|status|ca|enroll|passkeys|revoke`, which work on the
-// configuration, the CA and the store directly, and `athena codex login|status`, which work on Athena's own CODEX_HOME.
+// status, logs, reply, stop, retry, retry-elsewhere, approvals, approve, deny, metrics, policy, triggers, threads,
+// decisions, reevaluate, dismiss, unsubscribe, and node token|list|drain|undrain|revoke),
+// `athena web setup|status|ca|enroll|passkeys|revoke`, which work on the configuration, the CA and the store directly,
+// `athena codex login|status`, which work on Athena's own CODEX_HOME, and `athena node join|run`, which make another
+// machine a node of the server.
 package cli
 
 import (
@@ -36,32 +38,34 @@ const dialTimeout = 2 * time.Second
 
 // usage is each command's usage line, without the --state-dir flag every command takes.
 var usage = map[string]string{
-	"server":      "athena server [--slots N] [--model M] [--blocked a,b] [--approval-timeout D] [--claude PATH] [--codex PATH] [--node-name NAME]",
-	"task":        `athena task "<text>" [--dir D | --repo owner/name] [--model M] [--runtime claude|codex|auto] [--review[=false]]`,
-	"github":      "athena github setup --app-id N --slug S --key FILE --installation N --repo owner/name [--repo ...] [--receive-all owner/name ...] | athena github check",
-	"policy":      "athena policy show | athena policy set FILE",
-	"triggers":    "athena triggers [--thread K]",
-	"threads":     "athena threads",
-	"decisions":   "athena decisions [--thread K]",
-	"reevaluate":  "athena reevaluate <trigger>",
-	"dismiss":     "athena dismiss <decision>",
-	"unsubscribe": "athena unsubscribe <thread>",
-	"pause":       "athena pause",
-	"resume":      "athena resume",
-	"proposals":   "athena proposals",
-	"apply":       "athena apply <id>",
-	"discard":     "athena discard <id>",
-	"status":      "athena status [<id>] [--all]",
-	"logs":        "athena logs <id> [-f]",
-	"reply":       `athena reply <id> "<text>"`,
-	"stop":        "athena stop <id> [--reason R]",
-	"retry":       "athena retry <id>",
-	"approvals":   "athena approvals",
-	"approve":     "athena approve <id> [--note N]",
-	"deny":        "athena deny <id> [--note N]",
-	"metrics":     "athena metrics [--window 1h|24h|start]",
-	"codex":       "athena codex login [--with-api-key] | athena codex status",
-	"web":         "athena web setup --host H [--ip IP ...] [--listen ADDR] [--tls ca|acme|off] [--acme-email E --acme-provider P --acme-agree-tos] | athena web status | athena web ca | athena web enroll [--ttl D] | athena web passkeys | athena web revoke <id>",
+	"server":          "athena server [--slots N] [--model M] [--blocked a,b] [--approval-timeout D] [--claude PATH] [--codex PATH] [--node-name NAME]",
+	"task":            `athena task "<text>" [--dir D | --repo owner/name] [--model M] [--runtime claude|codex|auto] [--review[=false]]`,
+	"github":          "athena github setup --app-id N --slug S --key FILE --installation N --repo owner/name [--repo ...] [--receive-all owner/name ...] | athena github check",
+	"policy":          "athena policy show | athena policy set FILE",
+	"triggers":        "athena triggers [--thread K]",
+	"threads":         "athena threads",
+	"decisions":       "athena decisions [--thread K]",
+	"reevaluate":      "athena reevaluate <trigger>",
+	"dismiss":         "athena dismiss <decision>",
+	"unsubscribe":     "athena unsubscribe <thread>",
+	"pause":           "athena pause",
+	"resume":          "athena resume",
+	"proposals":       "athena proposals",
+	"apply":           "athena apply <id>",
+	"discard":         "athena discard <id>",
+	"status":          "athena status [<id>] [--all]",
+	"logs":            "athena logs <id> [-f]",
+	"reply":           `athena reply <id> "<text>"`,
+	"stop":            "athena stop <id> [--reason R]",
+	"retry":           "athena retry <id>",
+	"retry-elsewhere": "athena retry-elsewhere <id>",
+	"approvals":       "athena approvals",
+	"approve":         "athena approve <id> [--note N]",
+	"deny":            "athena deny <id> [--note N]",
+	"metrics":         "athena metrics [--window 1h|24h|start]",
+	"codex":           "athena codex login [--with-api-key] | athena codex status",
+	"node":            "athena node token|list|drain|undrain|revoke|join|run (athena node <subcommand> --help for each)",
+	"web":             "athena web setup --host H [--ip IP ...] [--listen ADDR] [--tls ca|acme|off] [--acme-email E --acme-provider P --acme-agree-tos] | athena web status | athena web ca | athena web enroll [--ttl D] | athena web passkeys | athena web revoke <id>",
 }
 
 // Run runs one command and returns its exit code: 0 on success, 1 when it failed, 2 on a usage error.
@@ -89,6 +93,10 @@ func Run(ctx context.Context, cmd string, args []string, stdout, stderr io.Write
 		return c.stop(args)
 	case "retry":
 		return c.retry(args)
+	case "retry-elsewhere":
+		return c.retryElsewhere(args)
+	case "node":
+		return c.node(ctx, args)
 	case "approvals":
 		return c.approvals(args)
 	case "metrics":
