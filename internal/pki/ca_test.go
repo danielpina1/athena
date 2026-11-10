@@ -4,6 +4,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
@@ -390,5 +391,77 @@ func TestLoadCAIsReadOnly(t *testing.T) {
 	}
 	if CertPath(dir) != filepath.Join(dir, "ca.pem") {
 		t.Fatal(CertPath(dir))
+	}
+}
+
+func csrFor(t *testing.T, key any, cn string) []byte {
+	t.Helper()
+	der, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
+		Subject:  pkix.Name{CommonName: cn, Organization: []string{"Evil"}},
+		DNSNames: []string{"evil.example", cn},
+	}, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return der
+}
+
+func TestSignClientCSR(t *testing.T) {
+	ca, err := LoadOrCreateCA(NodeCADir(t.TempDir()), NodeCAHost, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := "n0123456789." + NodeCAHost
+	der, serial, err := ca.SignClientCSR(csrFor(t, key, "whatever"), name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cert.Verify(x509.VerifyOptions{Roots: pool(ca), KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}); err != nil {
+		t.Fatalf("does not verify for client auth: %v", err)
+	}
+	if _, err := cert.Verify(x509.VerifyOptions{Roots: pool(ca), KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}); err == nil {
+		t.Fatal("verifies for server auth")
+	}
+	if cert.Subject.CommonName != name || len(cert.DNSNames) != 1 || cert.DNSNames[0] != name || len(cert.Subject.Organization) != 0 {
+		t.Fatalf("subject %v, DNS %v: want only %s", cert.Subject, cert.DNSNames, name)
+	}
+	if pub, ok := cert.PublicKey.(*ecdsa.PublicKey); !ok || !pub.Equal(&key.PublicKey) {
+		t.Fatal("the certificate is not for the CSR's key")
+	}
+	if serial == "" || serial != cert.SerialNumber.Text(16) {
+		t.Fatalf("serial %q, certificate's %s", serial, cert.SerialNumber.Text(16))
+	}
+	if life := cert.NotAfter.Sub(cert.NotBefore); life < leafValidity || life > leafValidity+clockSkew {
+		t.Fatalf("life %s", life)
+	}
+
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := ca.SignClientCSR(csrFor(t, rsaKey, name), name); err == nil {
+		t.Fatal("an RSA CSR was signed")
+	}
+	p384, _ := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	if _, _, err := ca.SignClientCSR(csrFor(t, p384, name), name); err == nil {
+		t.Fatal("a P-384 CSR was signed")
+	}
+	bad := csrFor(t, key, name)
+	bad[len(bad)-3] ^= 0xff // the signature
+	if _, _, err := ca.SignClientCSR(bad, name); err == nil {
+		t.Fatal("a CSR with a broken signature was signed")
+	}
+	for _, n := range []string{NodeCAHost, "a.b." + NodeCAHost, "evil.example", "*." + NodeCAHost, "x" + NodeCAHost} {
+		if _, _, err := ca.SignClientCSR(csrFor(t, key, n), n); err == nil {
+			t.Errorf("name %q was signed", n)
+		}
 	}
 }

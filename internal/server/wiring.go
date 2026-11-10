@@ -19,9 +19,11 @@ import (
 	"github.com/danielpina1/athena/internal/core"
 	"github.com/danielpina1/athena/internal/effects"
 	"github.com/danielpina1/athena/internal/hub"
+	"github.com/danielpina1/athena/internal/link"
 	"github.com/danielpina1/athena/internal/metrics"
 	"github.com/danielpina1/athena/internal/node"
 	"github.com/danielpina1/athena/internal/outbox"
+	"github.com/danielpina1/athena/internal/pki"
 	"github.com/danielpina1/athena/internal/policy"
 	"github.com/danielpina1/athena/internal/runtime/codex"
 	"github.com/danielpina1/athena/internal/sources"
@@ -650,7 +652,8 @@ const webShutdown = 2 * time.Second
 
 // webEndpoint is the dashboard's HTTPS endpoint and what feeds it. newWebEndpoint (before the effects runner starts)
 // binds the listener, so a busy port fails the start, prepares the certificate and the push key, and registers the
-// Pusher; start (once the Dispatcher exists) runs the hub, the login, the Notifier and the listener.
+// Pusher; start (once the Dispatcher exists) runs the hub, the login, the Notifier and the listener. With TLS on it
+// also binds the node listener (web.nodeListen) and loads the node CA; with TLS off nodes are not served.
 type webEndpoint struct {
 	cfg    WebConfig
 	origin string
@@ -663,14 +666,21 @@ type webEndpoint struct {
 	vapid    *web.VAPID // nil without an https origin: no push
 	pusher   *web.Pusher
 	presence *web.Presence
+	// The node endpoint: nil and "" with TLS off.
+	nodeCA  *pki.CA
+	nodeL   net.Listener
+	nodeURL string
+	// nodeLinks serves a node's link once its certificate is checked (default notServingNodes, until the fleet).
+	nodeLinks web.NodeLinkHandler
 
 	// set by start
-	hub    *hub.Hub
-	auth   *web.Auth
-	dash   *web.Dashboard
-	srv    *web.Server
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
+	nodeSrv *http.Server
+	hub     *hub.Hub
+	auth    *web.Auth
+	dash    *web.Dashboard
+	srv     *web.Server
+	cancel  context.CancelFunc
+	wg      sync.WaitGroup
 
 	stopOnce sync.Once
 }
@@ -694,9 +704,13 @@ func newWebEndpoint(stateDir string, cfg WebConfig, st *store.Store, eng *core.E
 	if err != nil {
 		return nil, fmt.Errorf("server: web listen %s: %w", cfg.Listen, err)
 	}
+	var nodeL net.Listener
 	defer func() {
 		if err != nil {
 			l.Close()
+			if nodeL != nil {
+				nodeL.Close()
+			}
 		}
 	}()
 	// The origin names the bound port: the configured one, or the one the system chose for port 0.
@@ -714,6 +728,21 @@ func newWebEndpoint(stateDir string, cfg WebConfig, st *store.Store, eng *core.E
 	}
 	if w.tls, err = web.NewTLSManager(stateDir, cfg.tlsConfig(), obt, log, time.Now); err != nil {
 		return nil, err
+	}
+	w.nodeLinks = notServingNodes{}
+	if w.tls.Mode() == "off" {
+		log.Info("nodes are not served: nodes need web.tls \"ca\" or \"acme\"")
+	} else {
+		if w.nodeCA, err = pki.LoadOrCreateCA(pki.NodeCADir(stateDir), pki.NodeCAHost, nil); err != nil {
+			return nil, err
+		}
+		addr := cfg.NodeListenAddr()
+		if nodeL, err = net.Listen("tcp", addr); err != nil {
+			return nil, fmt.Errorf("server: web node listen %s: %w", addr, err)
+		}
+		w.nodeL = nodeL
+		_, nodePort, _ := net.SplitHostPort(nodeL.Addr().String())
+		w.nodeURL = "wss://" + net.JoinHostPort(cfg.Host, nodePort) + "/node"
 	}
 	if strings.HasPrefix(w.origin, "https://") {
 		// The tokens' subject is the dashboard's own origin (ruling R27).
@@ -742,6 +771,13 @@ func (w *webEndpoint) start(d *Dispatcher, n *node.Node, fx *effects.Runner, ver
 		return err
 	}
 	w.auth = auth
+	if w.nodeL != nil {
+		// Made before anything runs, so a failure leaves nothing to stop.
+		if w.nodeSrv, err = web.NodeListener(web.NodeListenerConfig{Store: w.st, CA: w.nodeCA,
+			GetCertificate: w.tls.Config().GetCertificate, Handler: w.nodeLinks, Log: w.log}); err != nil {
+			return err
+		}
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	w.cancel = cancel
 	w.st.OnCommit(w.hub.OnCommit)
@@ -781,7 +817,18 @@ func (w *webEndpoint) start(d *Dispatcher, n *node.Node, fx *effects.Runner, ver
 			notifier.Run(ctx, nil)
 		}()
 	}
-	w.srv = web.NewServer(web.ServerConfig{Auth: auth, Dashboard: w.dash, VAPID: w.vapid, CA: w.tls.CA(), TLS: w.tls.Config(), UI: ui.FS(), Artifacts: n, Log: w.log})
+	w.srv = web.NewServer(web.ServerConfig{Auth: auth, Dashboard: w.dash, VAPID: w.vapid, CA: w.tls.CA(), TLS: w.tls.Config(), UI: ui.FS(), Artifacts: n, Log: w.log,
+		NodeJoin: web.NodeJoin(w.st, w.nodeCA, w.now, w.nodeURL)})
+	if w.nodeSrv != nil {
+		w.wg.Add(1)
+		go func() {
+			defer w.wg.Done()
+			if err := w.nodeSrv.ServeTLS(w.nodeL, "", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				w.log.Error("web: node listener stopped", "error", err)
+			}
+		}()
+		w.log.Info("node endpoint serving", "url", w.nodeURL, "listen", w.nodeL.Addr().String())
+	}
 	w.wg.Add(1)
 	go func() {
 		defer w.wg.Done()
@@ -802,9 +849,19 @@ func (w *webEndpoint) stop() {
 	w.stopOnce.Do(func() {
 		if w.srv == nil {
 			w.l.Close()
+			if w.nodeL != nil {
+				w.nodeL.Close()
+			}
 			return
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), webShutdown)
+		if w.nodeSrv != nil {
+			if err := w.nodeSrv.Shutdown(ctx); err != nil {
+				_ = w.nodeSrv.Close()
+			}
+		} else if w.nodeL != nil {
+			w.nodeL.Close()
+		}
 		if err := w.srv.Shutdown(ctx); err != nil {
 			w.log.Warn("web: shutdown", "error", err)
 		}
@@ -815,6 +872,13 @@ func (w *webEndpoint) stop() {
 		// Last, with every connection and the Notifier gone: no read of the store is in flight after this.
 		w.hub.Wait()
 	})
+}
+
+// notServingNodes is the node link handler until the fleet serves nodes: it closes every link at once.
+type notServingNodes struct{}
+
+func (notServingNodes) ServeNode(_ string, c link.Conn) {
+	_ = c.Close(link.CloseProtocol, "nodes are not served yet")
 }
 
 // status is web.status: the URL, the certificate's health and the open connections.

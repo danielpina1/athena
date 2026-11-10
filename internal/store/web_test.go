@@ -484,3 +484,26 @@ func TestPruneCascadesAndEnrollTokens(t *testing.T) {
 		t.Fatal("the live token was pruned")
 	}
 }
+
+func TestEnrollTokenState(t *testing.T) {
+	s, _ := openTemp(t)
+	h := []byte("node-tok")
+	if err := s.PutEnrollToken(h, EnrollNode, t0.Add(10*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	check := func(hash []byte, kind string, at time.Time, want string) {
+		t.Helper()
+		if got, err := s.EnrollTokenState(hash, kind, at); err != nil || got != want {
+			t.Fatalf("state = %q, %v; want %q", got, err, want)
+		}
+	}
+	check(h, EnrollNode, t0, EnrollTokenValid)
+	check(h, EnrollPasskey, t0, EnrollTokenUnknown)
+	check([]byte("other"), EnrollNode, t0, EnrollTokenUnknown)
+	check(h, EnrollNode, t0.Add(10*time.Minute), EnrollTokenExpired)
+	if ok, err := s.UseEnrollToken(h, EnrollNode, t0); err != nil || !ok {
+		t.Fatalf("use: %v %v", ok, err)
+	}
+	check(h, EnrollNode, t0, EnrollTokenUsed)
+	check(h, EnrollNode, t0.Add(time.Hour), EnrollTokenUsed)
+}

@@ -306,6 +306,34 @@ func (s *Store) UseEnrollToken(hash []byte, kind string, now time.Time) (bool, e
 	return n > 0, err
 }
 
+// The states EnrollTokenState reports.
+const (
+	EnrollTokenValid   = "valid"
+	EnrollTokenUsed    = "used"
+	EnrollTokenExpired = "expired"
+	EnrollTokenUnknown = "unknown" // no token of that kind with that hash
+)
+
+// EnrollTokenState says what the token of kind with hash is at now, for a refusal that names the reason. It only
+// reads: spending stays UseEnrollToken's one statement. A spent token is used even when it has also expired since.
+func (s *Store) EnrollTokenState(hash []byte, kind string, now time.Time) (string, error) {
+	var expires, used string
+	err := s.db.QueryRow(`SELECT expires_at, used_at FROM enroll_tokens WHERE hash = ? AND kind = ?`, hash, kind).Scan(&expires, &used)
+	if errors.Is(err, sql.ErrNoRows) {
+		return EnrollTokenUnknown, nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("store: enroll token state: %w", err)
+	}
+	switch {
+	case used != "":
+		return EnrollTokenUsed, nil
+	case expires <= formatTime(now):
+		return EnrollTokenExpired, nil
+	}
+	return EnrollTokenValid, nil
+}
+
 // PutCommandResult records the result of a command under (clientID, commandID) and returns the result now stored. A
 // key that already has one keeps it, and its result is returned: a command resent by a client acts once.
 func (s *Store) PutCommandResult(clientID, commandID string, result []byte, at time.Time) ([]byte, error) {

@@ -49,6 +49,8 @@ type ServerConfig struct {
 	Log *slog.Logger
 	// Artifacts serves /api/tickets/{id}/diff and /files; nil leaves the routes out (they answer 404).
 	Artifacts Artifacts
+	// NodeJoin serves POST /node/join (web.NodeJoin), reachable without a client certificate; nil leaves it out.
+	NodeJoin http.Handler
 	// UI is the built dashboard (ui.FS()); tests inject a fstest.MapFS. Without an index.html in it every page is the
 	// "not built" fallback.
 	UI fs.FS
@@ -69,6 +71,7 @@ type Server struct {
 //	GET /push/key             the VAPID public key
 //	POST /push/renew          a rotated push subscription, from the service worker (Auth.RenewPush)
 //	GET /ca.pem, /ca.mobileconfig   the CA and its Apple profile (mode ca only)
+//	POST /node/join           a node's enrollment (NodeJoin)
 //	GET /healthz              "ok", for a monitor: nothing else, no session needed
 //	GET /                     everything else: the built single-page app (serveUI)
 func NewServer(cfg ServerConfig) *Server {
@@ -104,6 +107,9 @@ func NewServer(cfg ServerConfig) *Server {
 			w.Header().Set("Content-Disposition", `attachment; filename="athena-ca.mobileconfig"`)
 			_, _ = w.Write(profile)
 		})
+	}
+	if cfg.NodeJoin != nil {
+		mux.Handle("POST /node/join", cfg.NodeJoin)
 	}
 	mux.Handle("GET /", uiHandler(cfg.UI))
 	h := securityHeaders(mux, cfg.TLS != nil)
@@ -172,7 +178,7 @@ func uiHandler(fsys fs.FS) http.Handler {
 }
 
 // apiRoots are the first path segments the server's own routes use; the single-page fallback never answers them.
-var apiRoots = map[string]bool{"auth": true, "push": true, "api": true, "ws": true, "healthz": true, "ca.pem": true, "ca.mobileconfig": true}
+var apiRoots = map[string]bool{"auth": true, "push": true, "api": true, "ws": true, "healthz": true, "ca.pem": true, "ca.mobileconfig": true, "node": true}
 
 // uiTypes are the content types of the build's files, fixed so the host's mime database cannot change them.
 var uiTypes = map[string]string{
