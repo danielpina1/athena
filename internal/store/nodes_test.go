@@ -112,3 +112,20 @@ func TestRevokedNodeKeepsRow(t *testing.T) {
 		t.Fatalf("Nodes = %d", len(all))
 	}
 }
+
+func TestSetNodeCapsKeepsMark(t *testing.T) {
+	s, _ := openTemp(t)
+	if err := s.PutNode(Node{ID: "n1", Name: "box", CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AdvanceFactSeq("n1", 7); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetNodeCaps("n1", []byte("caps")); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetNode("n1")
+	if err != nil || got == nil || string(got.Caps) != "caps" || got.AppliedFactSeq != 7 {
+		t.Fatalf("node = %+v, %v", got, err)
+	}
+}

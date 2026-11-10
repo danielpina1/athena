@@ -128,3 +128,13 @@ func (s *Store) AdvanceFactSeq(id string, seq uint64) (bool, error) {
 	n, err := rowsAffected(res, err, "advance fact seq")
 	return n > 0, err
 }
+
+// SetNodeCaps records the capabilities the node last said it has. It leaves the rest of the row, the applied-fact mark
+// included, as it is (PutNode would overwrite it).
+func (s *Store) SetNodeCaps(id string, caps []byte) error {
+	_, err := s.db.Exec(`UPDATE nodes SET caps = ? WHERE id = ?`, caps, id)
+	if err != nil {
+		return fmt.Errorf("store: set node caps: %w", err)
+	}
+	return nil
+}
