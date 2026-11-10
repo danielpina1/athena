@@ -54,6 +54,13 @@ func openOutbox(dir string) (*outbox, error) {
 		db.Close()
 		return nil, fmt.Errorf("nodelink: migrate %s: %w", dbFile, err)
 	}
+	// The checkpoint of each Ticket the server last took: the next bundle goes after it.
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS checkpoints (
+		ticket_id TEXT PRIMARY KEY,
+		sha TEXT NOT NULL)`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("nodelink: migrate %s: %w", dbFile, err)
+	}
 	return &outbox{db: db}, nil
 }
 
@@ -119,4 +126,25 @@ func (o *outbox) after(seq uint64, limit int) ([]factRow, error) {
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// checkpointSent is the Ticket's checkpoint the server last took, or "".
+func (o *outbox) checkpointSent(ticketID string) (string, error) {
+	var sha string
+	err := o.db.QueryRow(`SELECT sha FROM checkpoints WHERE ticket_id = ?`, ticketID).Scan(&sha)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return sha, err
+}
+
+// setCheckpointSent records the Ticket's checkpoint the server took; "" forgets it, so the next bundle is whole.
+func (o *outbox) setCheckpointSent(ticketID, sha string) error {
+	if sha == "" {
+		_, err := o.db.Exec(`DELETE FROM checkpoints WHERE ticket_id = ?`, ticketID)
+		return err
+	}
+	_, err := o.db.Exec(`INSERT INTO checkpoints (ticket_id, sha) VALUES (?, ?)
+		ON CONFLICT (ticket_id) DO UPDATE SET sha = excluded.sha`, ticketID, sha)
+	return err
 }

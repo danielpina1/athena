@@ -393,6 +393,8 @@ type nodeLink struct {
 	applied  uint64               // facts the applier is through with
 	advance  chan struct{}        // closed and replaced whenever applied grows
 	cmds     []*athenav1.Frame    // commands not yet sent
+	// transfers are the checkpoint bundles the node sends on BLOB, by transfer id (mirror.go).
+	transfers map[string]*transfer
 	// cmdSender is set once the goroutine sending cmds runs.
 	cmdSender bool
 
@@ -405,7 +407,7 @@ func newNodeLink(f *Fleet, nodeID string, c link.Conn) *nodeLink {
 	ctx, cancel := context.WithCancel(f.ctx)
 	lk := &nodeLink{f: f, nodeID: nodeID, conn: &closeConn{Conn: c}, ctx: ctx, cancel: cancel,
 		hello: make(chan *athenav1.NodeHello, 1), done: make(chan struct{}), applierDone: make(chan struct{}),
-		pending: map[uint64]func(*athenav1.NodeResult){}, subs: map[uint64]*remoteSub{}, advance: make(chan struct{}),
+		pending: map[uint64]func(*athenav1.NodeResult){}, subs: map[uint64]*remoteSub{}, advance: make(chan struct{}), transfers: map[string]*transfer{},
 		factWake: make(chan struct{}, 1), cmdWake: make(chan struct{}, 1), statusWake: make(chan struct{}, 1)}
 	lk.sess = link.New(lk.conn, link.Options{Heartbeat: Heartbeat, DeadAfter: DeadAfter, OnFrame: lk.onFrame})
 	return lk
@@ -449,6 +451,8 @@ func (lk *nodeLink) onFrame(fr *athenav1.Frame) {
 		}
 	case *athenav1.Frame_NodeStatusReport:
 		signal(lk.statusWake)
+	case *athenav1.Frame_BlobChunk:
+		lk.onChunk(b.BlobChunk)
 	case *athenav1.Frame_Error:
 		lk.f.log.Warn("node reported an error", "node", lk.nodeID, "code", b.Error.GetCode(), "message", b.Error.GetMessage())
 	}
@@ -563,6 +567,13 @@ func (lk *nodeLink) applyFacts() {
 // when the link ended first.
 func (lk *nodeLink) applyOne(call *athenav1.NodeCall) (answer error, ok bool) {
 	seq := call.GetFactSeq()
+	if call.GetMethod() == nodelink.MethodCheckpointSent {
+		// Its bundle came before it on this link: it must be in the mirror, or dropped, before the fact is applied.
+		var a nodelink.ArgsCheckpointSent
+		if decodeStrict(call.GetArgs(), &a) == nil && !lk.awaitTransfers(a.TicketID) {
+			return nil, false
+		}
+	}
 	pause := 100 * time.Millisecond
 	for {
 		err := lk.f.fact(lk.nodeID, call)

@@ -237,6 +237,15 @@ func (s *Session) Credit(ch athenav1.Channel) uint32 {
 	return s.credit[ch]
 }
 
+// Queued is how many frames ch's queue holds that the writer has not taken yet. The writer takes one frame at a time
+// and writes it before it takes the next: a frame sent on any channel once Queued(ch) is 0 is written after every frame
+// sent on ch before. After Run returns it is 0.
+func (s *Session) Queued(ch athenav1.Channel) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.queues[ch])
+}
+
 // Unacked is the durable frames sent and not yet acked, in seq order. After Run returns it also holds the durable
 // frames that were still queued, numbered, so nothing accepted by Send is lost.
 func (s *Session) Unacked() []*athenav1.Frame {

@@ -30,6 +30,8 @@ const (
 	MethodAllowedByRule         = "allowedByRule"
 	MethodExpireApproval        = "expireApproval"
 	MethodSettleProposal        = "settleProposal"
+	// MethodCheckpointSent follows the BlobChunks of a checkpoint bundle: the server has the Ticket's checkpoint at SHA.
+	MethodCheckpointSent = "checkpointSent"
 
 	// Requests of EngineCallbacks.
 	MethodFileReport       = "fileReport"
@@ -80,6 +82,7 @@ var methods = map[string]struct {
 	MethodAllowedByRule:         {true, func() any { return new(ArgsAllowedByRule) }},
 	MethodExpireApproval:        {true, func() any { return new(ArgsExpireApproval) }},
 	MethodSettleProposal:        {true, func() any { return new(ArgsSettleProposal) }},
+	MethodCheckpointSent:        {true, func() any { return new(ArgsCheckpointSent) }},
 	MethodFileReport:            {false, func() any { return new(ArgsFileReport) }},
 	MethodFileReview:            {false, func() any { return new(ArgsFileReview) }},
 	MethodTicket:                {false, func() any { return new(ArgsTicket) }},
@@ -157,6 +160,8 @@ type (
 	ArgsExpireApproval struct{ ID string }
 	// ArgsSettleProposal carries applyErr as its message; "" is nil.
 	ArgsSettleProposal struct{ ID, Error string }
+	// ArgsCheckpointSent says the bundle of the Ticket's checkpoint at SHA went before it, on BLOB (checkpoint.go).
+	ArgsCheckpointSent struct{ TicketID, Repo, SHA string }
 )
 
 // Args and results of the requests.

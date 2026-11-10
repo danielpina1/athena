@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"sync"
@@ -105,8 +106,10 @@ type Config struct {
 	Creds   node.Credentials
 	Policy  node.Policy
 	Prompts func() (worker, reviewer string)
-	Now     func() time.Time
-	Log     *slog.Logger
+	// Mirror keeps the nodes' checkpoints (mirror.go); nil keeps none, and the nodes' CheckpointSent facts are refused.
+	Mirror *Mirror
+	Now    func() time.Time
+	Log    *slog.Logger
 }
 
 // Fleet is the registry of the server's nodes.
@@ -139,6 +142,14 @@ type Fleet struct {
 	pubMu   sync.Mutex
 	paused  bool
 	dropped map[string]time.Time // repo -> when its write tokens were dropped
+
+	// The embedded node's checkpoints waiting for the mirror (mirror.go): Ticket id -> repo.
+	ckMu    sync.Mutex
+	ckLocal map[string]string
+	ckWake  chan struct{}
+	// localBundle is the embedded node's CheckpointBundle.
+	localBundle func(ctx context.Context, ticketID, since string, w io.Writer) (string, error)
+	bg          sync.WaitGroup // the mirror's goroutines
 }
 
 // New returns a Fleet; it serves nodes once its Engine is set.
@@ -154,9 +165,17 @@ func New(cfg Config) *Fleet {
 	ctx, cancel := context.WithCancel(context.Background())
 	f := &Fleet{cfg: cfg, log: cfg.Log.With("component", "fleet"), now: cfg.Now, epoch: hex.EncodeToString(b),
 		ctx: ctx, cancel: cancel, remotes: map[string]*Remote{}, waiting: map[string]*waitEntry{}, dropped: map[string]time.Time{},
-		placeWake: make(chan struct{}, 1), placeDone: make(chan struct{})}
+		placeWake: make(chan struct{}, 1), placeDone: make(chan struct{}), ckLocal: map[string]string{}, ckWake: make(chan struct{}, 1)}
 	if cfg.Engine != nil {
 		f.eng.Store(cfg.Engine)
+	}
+	if cfg.Local != nil {
+		f.localBundle = cfg.Local.CheckpointBundle
+	}
+	if cfg.Mirror != nil {
+		f.bg.Add(2)
+		go f.localCheckpoints()
+		go f.sweepLoop()
 	}
 	// A node that connects, reports a status or is undrained may take what waits.
 	f.subs = []func(){func() { signal(f.placeWake) }}
@@ -181,6 +200,7 @@ func (f *Fleet) Close() {
 	f.cancel()
 	f.wg.Wait()
 	<-f.placeDone
+	f.bg.Wait()
 }
 
 // OnChange registers fn, called whenever a node connects, leaves, changes status, or is drained or revoked. fn must
@@ -368,6 +388,7 @@ func (f *Fleet) ServeNode(nodeID string, c link.Conn) {
 		err := <-runErr
 		lk.cancel()
 		lk.closeSubs()
+		lk.dropTransfers() // the reader is done: no chunk comes after this
 		lk.wg.Wait()
 		close(lk.done)
 		if r := lk.r; r != nil && r.detach(lk) {

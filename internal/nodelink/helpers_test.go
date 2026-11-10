@@ -77,9 +77,12 @@ type fakeServer struct {
 	hello   *athenav1.NodeHello
 	calls   []*athenav1.NodeCall
 	results []*athenav1.NodeResult
-	sess    *link.Session
-	done    chan struct{}
-	stop    context.CancelFunc
+	// order is what came, in order: "blob <transfer> <bytes> <last>" or the call's method.
+	order []string
+	blobs []*athenav1.BlobChunk
+	sess  *link.Session
+	done  chan struct{}
+	stop  context.CancelFunc
 }
 
 // servers hands a fresh fakeServer to each dial of the client, in order.
@@ -134,10 +137,16 @@ func (fs *fakeServer) onFrame(f *athenav1.Frame) {
 		fs.mu.Lock()
 		fs.results = append(fs.results, b.NodeResult)
 		fs.mu.Unlock()
+	case *athenav1.Frame_BlobChunk:
+		fs.mu.Lock()
+		fs.blobs = append(fs.blobs, b.BlobChunk)
+		fs.order = append(fs.order, "blob")
+		fs.mu.Unlock()
 	case *athenav1.Frame_NodeCall:
 		call := b.NodeCall
 		fs.mu.Lock()
 		fs.calls = append(fs.calls, call)
+		fs.order = append(fs.order, call.GetMethod())
 		fs.mu.Unlock()
 		if call.GetMethod() == MethodLines || fs.silentFacts && call.GetFactSeq() > 0 {
 			return
@@ -241,6 +250,37 @@ type fakeTarget struct {
 	dir      string
 	backfill []node.Line
 	live     chan node.Line
+	// bundle is what CheckpointBundle writes, sha its commit; sinces records the bases it was asked for.
+	bundle []byte
+	sha    string
+	sinces []string
+}
+
+func (f *fakeTarget) CheckpointBundle(_ context.Context, _ string, since string, w io.Writer) (string, error) {
+	f.mu.Lock()
+	f.sinces = append(f.sinces, since)
+	b, sha := f.bundle, f.sha
+	f.mu.Unlock()
+	if sha == "" {
+		return "", node.ErrNoCheckpoint
+	}
+	if since == sha {
+		return sha, node.ErrCheckpointUnchanged
+	}
+	_, err := w.Write(b)
+	return sha, err
+}
+
+func (f *fakeTarget) setCheckpoint(b []byte, sha string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.bundle, f.sha = b, sha
+}
+
+func (f *fakeTarget) bases() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.sinces...)
 }
 
 func (f *fakeTarget) Start(t core.Ticket, a core.Assignment) {

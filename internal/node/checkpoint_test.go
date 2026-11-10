@@ -1,10 +1,16 @@
 package node
 
 import (
+	"bytes"
+	"context"
+	"errors"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/danielpina1/athena/internal/core"
@@ -61,7 +67,7 @@ func TestCheckpointKeepsBranchIndexAndFiles(t *testing.T) {
 	status, staged := git(t, dir, "status", "--porcelain", "--untracked-files=all"), git(t, dir, "diff", "--cached", "--name-status")
 	before := files(t, dir)
 
-	sha, err := checkpoint(dir, "T-1", nil)
+	sha, err := checkpoint(dir, "T-1", nil, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +107,7 @@ func TestCheckpointRefPointsAtWIP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sha, err := checkpoint(dir, "T-1", worktreeGitEnv(nodeGitBaseEnv(), admin, common, dir))
+	sha, err := checkpoint(dir, "T-1", worktreeGitEnv(nodeGitBaseEnv(), admin, common, dir), "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,12 +132,12 @@ func TestCheckpointRefPointsAtWIP(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "more.txt"), []byte("more\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	again, err := checkpoint(dir, "T-1", nil)
+	again, err := checkpoint(dir, "T-1", nil, "test")
 	if err != nil || again == sha || git(t, repo, "rev-parse", "refs/athena/t-1/checkpoint") != again {
 		t.Fatalf("second checkpoint %s (%v), ref %s", again, err, git(t, repo, "rev-parse", "refs/athena/t-1/checkpoint"))
 	}
 	// Not a git directory: an error, nothing written.
-	if _, err := checkpoint(t.TempDir(), "T-2", nil); err == nil {
+	if _, err := checkpoint(t.TempDir(), "T-2", nil, "test"); err == nil {
 		t.Fatal("a checkpoint of a plain directory succeeded")
 	}
 }
@@ -155,7 +161,7 @@ func TestCleanupRemovesTheCheckpointRef(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		if _, err := checkpoint(dir, c.id, nil); err != nil {
+		if _, err := checkpoint(dir, c.id, nil, "test"); err != nil {
 			t.Fatal(err)
 		}
 		cleanupWorktree(placement{workDir: dir, repo: repo, common: filepath.Join(repo, ".git")}, tk, root, log)
@@ -185,5 +191,102 @@ func TestReviewSessionIsNotCheckpointed(t *testing.T) {
 	h.n.checkpointSession(h.n.newSession(tk, core.Assignment{ID: "a1"}, p))
 	if refs := git(t, repo, "for-each-ref", ref); refs == "" {
 		t.Fatal("the worker was not checkpointed")
+	}
+}
+
+// checkpointCall is one OnCheckpoint call.
+type checkpointCall struct{ ticketID, repo, ref, sha string }
+
+// Every turn of a Ticket with a Repo that ends well checkpoints its work in progress and tells OnCheckpoint: two turns,
+// two calls (at least: a turn that files no Report is nudged into one more). The branch never moves, and the latest
+// checkpoint holds what the worktree held at the second turn's end. CheckpointBundle then bundles it, whole or after
+// a base.
+func TestCheckpointEveryTurnEnd(t *testing.T) {
+	var mu sync.Mutex
+	var calls []checkpointCall
+	got := func() []checkpointCall {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(calls)
+	}
+	h := newGHHarness(t, &fakeCreds{}, func(c *Config) {
+		c.OnCheckpoint = func(ticketID, repo, ref, sha string) {
+			mu.Lock()
+			calls = append(calls, checkpointCall{ticketID, repo, ref, sha})
+			mu.Unlock()
+		}
+	})
+	t.Setenv("ATHENA_FAKE_LATER_FIXTURE", claudeFixture(t, "simple-turn.jsonl"))
+	tk, _ := h.accept("github:issuecomment:1", "o/r", 12, "")
+	h.eventually("the first turn's checkpoint", func() bool { return len(got()) >= 1 })
+	wd, err := WorkingDir(h.cfg.WorkRoot, tk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	branch := git(t, wd, "rev-parse", "refs/heads/"+branchName(tk))
+	first := len(got())
+	if err := os.WriteFile(filepath.Join(wd, "wip.txt"), []byte("half done\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.eng.AddPersonInput(tk.ID, "keep going"); err != nil {
+		t.Fatal(err)
+	}
+	h.eventually("the second turn's checkpoint", func() bool {
+		cs := got()
+		if len(cs) <= first {
+			return false
+		}
+		return strings.Contains(git(t, wd, "ls-tree", "--name-only", cs[len(cs)-1].sha), "wip.txt")
+	})
+	cs := got()
+	ref := "refs/athena/" + strings.ToLower(tk.ID) + "/checkpoint"
+	for _, c := range cs {
+		if c.ticketID != tk.ID || c.repo != "o/r" || c.ref != ref || c.sha == "" {
+			t.Fatalf("call %+v", c)
+		}
+		if parent := git(t, wd, "rev-parse", c.sha+"^"); parent != branch {
+			t.Fatalf("checkpoint %s is on %s, not the branch's head %s", c.sha, parent, branch)
+		}
+	}
+	if now := git(t, wd, "rev-parse", "refs/heads/"+branchName(tk)); now != branch {
+		t.Fatalf("the branch moved: %s, was %s", now, branch)
+	}
+	if got := git(t, wd, "rev-parse", "HEAD"); got != branch {
+		t.Fatalf("HEAD moved to %s", got)
+	}
+	last := cs[len(cs)-1].sha
+	if git(t, wd, "rev-parse", ref) != last {
+		t.Fatal("the ref is not at the last checkpoint")
+	}
+
+	// The whole bundle, then one after a base; the same sha again is unchanged.
+	ctx := context.Background()
+	var full bytes.Buffer
+	sha, err := h.n.CheckpointBundle(ctx, tk.ID, "", &full)
+	if err != nil || sha != last || full.Len() == 0 {
+		t.Fatalf("CheckpointBundle = %s, %v (%d bytes); want %s", sha, err, full.Len(), last)
+	}
+	var incr bytes.Buffer
+	if sha, err := h.n.CheckpointBundle(ctx, tk.ID, cs[0].sha, &incr); err != nil || sha != last || incr.Len() == 0 {
+		t.Fatalf("incremental CheckpointBundle = %s, %v", sha, err)
+	}
+	if _, err := h.n.CheckpointBundle(ctx, tk.ID, last, io.Discard); !errors.Is(err, ErrCheckpointUnchanged) {
+		t.Fatalf("CheckpointBundle at the base = %v, want ErrCheckpointUnchanged", err)
+	}
+	if _, err := h.n.CheckpointBundle(ctx, "T-9999", "", io.Discard); !errors.Is(err, ErrNoCheckpoint) {
+		t.Fatalf("CheckpointBundle of an unknown Ticket = %v, want ErrNoCheckpoint", err)
+	}
+}
+
+// A checkpoint of an unchanged worktree is the one already made: its ref does not move.
+func TestCheckpointUnchangedReused(t *testing.T) {
+	_, dir := wipWorktree(t)
+	first, err := checkpoint(dir, "T-1", nil, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := checkpoint(dir, "T-1", nil, "test")
+	if err != nil || again != first {
+		t.Fatalf("second checkpoint = %s, %v; want %s", again, err, first)
 	}
 }

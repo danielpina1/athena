@@ -68,8 +68,8 @@ type Options struct {
 // Client is a node's link to the control server: it dials and redials, sends the node's facts from its outbox once
 // each and in order, makes its requests, and serves the server's calls onto the attached node.
 //
-// Wiring order: New, then the proxies (Engine, Credentials, Policy, WorkerPrompt, ReviewerPrompt, StatusChanged) go
-// into node.Config and node.New, then Attach(n), then Run. The Client is made before the Node because the Node's
+// Wiring order: New, then the proxies (Engine, Credentials, Policy, WorkerPrompt, ReviewerPrompt, StatusChanged,
+// Checkpointed) go into node.Config and node.New, then Attach(n), then Run. The Client is made before the Node because the Node's
 // Config needs the proxies; the Node is attached after because serving needs the Node.
 type Client struct {
 	id   *Identity
@@ -94,6 +94,15 @@ type Client struct {
 	identity  ResultIdentity
 	prompt    ResultPrompts
 	hasPrompt bool
+
+	// answered are called with the server's answer to a fact ("" when applied), by fact seq (under ansMu).
+	ansMu    sync.Mutex
+	answered map[uint64]func(errMsg string)
+
+	// The checkpoints waiting to be sent (serve.go): Ticket id -> repo.
+	ckMu      sync.Mutex
+	ckPending map[string]string
+	ckWake    chan struct{}
 }
 
 type cachedTicket struct {
@@ -153,7 +162,8 @@ func New(id *Identity, opts Options) (*Client, error) {
 	}
 	return &Client{id: id, opts: opts, log: opts.Log.With("component", "nodelink"), ob: ob,
 		factWake: make(chan struct{}, 1), statWake: make(chan struct{}, 1), ready: make(chan struct{}),
-		onlineSig: make(chan struct{}), tickets: map[string]cachedTicket{}}, nil
+		onlineSig: make(chan struct{}), tickets: map[string]cachedTicket{}, answered: map[uint64]func(string){},
+		ckPending: map[string]string{}, ckWake: make(chan struct{}, 1)}, nil
 }
 
 // Attach gives the Client the node the server's calls are served onto.
@@ -328,6 +338,7 @@ func (c *Client) connect(ctx context.Context) (welcomed bool, err error) {
 	c.setCurrent(cn, true)
 	c.log.Info("linked to the server", "node", c.id.NodeID, "name", w.GetNodeName(), "applied", w.GetAppliedFactSeq())
 	go c.pump(cn)
+	go c.sendCheckpoints(cn)
 	go c.reportStatus(cn)
 	go c.awaitPrompts(cn)
 	return true, <-errc
@@ -409,6 +420,13 @@ func (c *Client) onFrame(cn *conn, f *athenav1.Frame) {
 			// The server keeps its mark moving past a fact it refuses: it would refuse it again.
 			c.log.Warn("the server refused a fact", "seq", seq, "error", r.GetError())
 		}
+		c.ansMu.Lock()
+		then := c.answered[seq]
+		delete(c.answered, seq)
+		c.ansMu.Unlock()
+		if then != nil {
+			then(r.GetError()) // in seq order, on this goroutine: it only records
+		}
 		for {
 			old := cn.answered.Load()
 			if seq <= old || cn.answered.CompareAndSwap(old, seq) {
@@ -424,12 +442,27 @@ func (c *Client) onFrame(cn *conn, f *athenav1.Frame) {
 }
 
 // fact commits one fact to the outbox and wakes the sender. It never waits on the network.
-func (c *Client) fact(method string, args any) error {
+func (c *Client) fact(method string, args any) error { return c.factThen(method, args, nil) }
+
+// factThen is fact, with then called with the server's answer when it comes on a link of this Client ("" when the
+// fact was applied). It must not block.
+func (c *Client) factThen(method string, args any, then func(errMsg string)) error {
 	b, err := json.Marshal(args)
 	if err != nil {
 		return fmt.Errorf("nodelink: %s: %w", method, err)
 	}
-	if _, err := c.ob.append(method, b, time.Now()); err != nil {
+	var seq uint64
+	if then == nil {
+		_, err = c.ob.append(method, b, time.Now())
+	} else {
+		// Under ansMu, so the answer cannot be looked for before then is in place.
+		c.ansMu.Lock()
+		if seq, err = c.ob.append(method, b, time.Now()); err == nil {
+			c.answered[seq] = then
+		}
+		c.ansMu.Unlock()
+	}
+	if err != nil {
 		c.log.Error("fact not recorded", "method", method, "error", err)
 		return err
 	}

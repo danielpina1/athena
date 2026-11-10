@@ -123,6 +123,10 @@ type Config struct {
 	// OnStatus is called, from the node's loop goroutine, whenever the sessions in use, the launches queued, a
 	// runtime's readiness or its quota change (see Status). It must not block or call back into the node.
 	OnStatus func()
+	// OnCheckpoint is called after each checkpoint of a Ticket with a Repo (checkpoint.go): at the end of every turn
+	// that ended well and before a failover at a usage limit, with the Ticket's id, its Repo (owner/name), the ref and
+	// the commit. It is called from the session's goroutine: it must not block or call back into the node.
+	OnCheckpoint func(ticketID, repo, ref, sha string)
 	// CloseGrace is how long a session's process gets to end after its stdin closes before it is killed (default
 	// 10 s).
 	CloseGrace time.Duration
@@ -1841,6 +1845,8 @@ func (r *runner) onEvent(ev rt.Event) {
 			r.fail(turnFailure(e))
 			return
 		}
+		// The turn's work in progress goes into the Ticket's checkpoint, which the server keeps (checkpoint.go).
+		r.n.turnCheckpoint(r.s)
 		// The turn that took in everything sent before its end is over.
 		r.markRead(-1)
 		r.idle = true

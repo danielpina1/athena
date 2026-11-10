@@ -3,6 +3,8 @@ package nodelink
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -105,6 +107,7 @@ type target interface {
 	OpenTicketFile(ctx context.Context, ticketID, rel string) (*os.File, error)
 	Subscribe(ticketID string, from int64) ([]node.Line, <-chan node.Line, func(), error)
 	Status() node.Status
+	CheckpointBundle(ctx context.Context, ticketID, since string, w io.Writer) (string, error)
 }
 
 var _ target = (*node.Node)(nil)
@@ -504,4 +507,152 @@ func tsp(t *time.Time) *timestamppb.Timestamp {
 		return nil
 	}
 	return timestamppb.New(*t)
+}
+
+// blobChunk is the most data one BlobChunk carries.
+const blobChunk = 512 << 10
+
+// Checkpointed is the node's node.Config.OnCheckpoint: the Ticket's checkpoint goes to the server's mirror, from the
+// link's checkpoint sender. It never blocks; a burst sends the Ticket's latest once.
+func (c *Client) Checkpointed(ticketID, repo, ref, sha string) {
+	c.ckMu.Lock()
+	c.ckPending[ticketID] = repo
+	c.ckMu.Unlock()
+	signal(c.ckWake)
+}
+
+// sendCheckpoints sends the pending checkpoints while the link lasts; one the link's end cut short waits for the next.
+func (c *Client) sendCheckpoints(cn *conn) {
+	for {
+		c.ckMu.Lock()
+		var ticketID, repo string
+		for id, r := range c.ckPending {
+			ticketID, repo = id, r
+			break
+		}
+		if ticketID != "" {
+			delete(c.ckPending, ticketID)
+		}
+		c.ckMu.Unlock()
+		if ticketID == "" {
+			select {
+			case <-cn.ctx.Done():
+				return
+			case <-c.ckWake:
+			}
+			continue
+		}
+		if t := c.target(); t != nil {
+			if err := c.sendCheckpoint(cn, t, ticketID, repo); err != nil {
+				if cn.ctx.Err() != nil {
+					c.ckMu.Lock()
+					if _, newer := c.ckPending[ticketID]; !newer {
+						c.ckPending[ticketID] = repo
+					}
+					c.ckMu.Unlock()
+					return
+				}
+				c.log.Warn("checkpoint not sent", "ticket", ticketID, "error", err)
+			}
+		}
+	}
+}
+
+// sendCheckpoint sends the Ticket's checkpoint as a bundle after the one the server last took (whole, the first time
+// or when that base is unknown here): its BlobChunks on BLOB, then, once the link's writer has taken the last of them,
+// the CheckpointSent fact, which the server applies only with the bundle in its mirror. The server's answer moves the
+// base in node.db, or forgets it so the next bundle is whole.
+func (c *Client) sendCheckpoint(cn *conn, t target, ticketID, repo string) error {
+	base, err := c.ob.checkpointSent(ticketID)
+	if err != nil {
+		return err
+	}
+	f, err := os.CreateTemp("", "athena-checkpoint-*.bundle")
+	if err != nil {
+		return err
+	}
+	defer func() {
+		f.Close()
+		os.Remove(f.Name())
+	}()
+	sha, err := t.CheckpointBundle(cn.ctx, ticketID, base, f)
+	if err != nil && base != "" && !errors.Is(err, node.ErrCheckpointUnchanged) && !errors.Is(err, node.ErrNoCheckpoint) && cn.ctx.Err() == nil {
+		// The base is unknown here (a repository made again): the whole ref.
+		if err := f.Truncate(0); err != nil {
+			return err
+		}
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			return err
+		}
+		base = ""
+		sha, err = t.CheckpointBundle(cn.ctx, ticketID, "", f)
+	}
+	if errors.Is(err, node.ErrCheckpointUnchanged) {
+		return nil // the server has it
+	}
+	if err != nil {
+		return err
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	idb := make([]byte, 8)
+	_, _ = rand.Read(idb)
+	id := hex.EncodeToString(idb)
+	buf := make([]byte, blobChunk)
+	for {
+		n, rerr := io.ReadFull(f, buf)
+		last := rerr == io.EOF || rerr == io.ErrUnexpectedEOF
+		if rerr != nil && !last {
+			return rerr
+		}
+		chunk := &athenav1.BlobChunk{TransferId: id, Kind: "checkpoint", TicketId: ticketID, Data: bytes.Clone(buf[:n]), Last: last}
+		if err := c.sendBlob(cn, chunk); err != nil {
+			return err
+		}
+		if last {
+			break
+		}
+	}
+	// The fact must not overtake the chunks: CONTROL is written before BLOB, so it waits for the writer to take them.
+	for cn.sess.Queued(athenav1.Channel_BLOB) > 0 {
+		select {
+		case <-cn.ctx.Done():
+			return errLinkLost
+		case <-time.After(retryPause):
+		}
+	}
+	if cn.ctx.Err() != nil {
+		return errLinkLost
+	}
+	return c.factThen(MethodCheckpointSent, ArgsCheckpointSent{TicketID: ticketID, Repo: repo, SHA: sha}, func(errMsg string) {
+		next := sha
+		if errMsg != "" {
+			next = "" // the server does not have it: the next bundle is whole
+		}
+		if err := c.ob.setCheckpointSent(ticketID, next); err != nil {
+			c.log.Error("record the checkpoint sent", "ticket", ticketID, "error", err)
+		}
+	})
+}
+
+// sendBlob queues one durable BlobChunk, waiting out backpressure while the link lasts.
+func (c *Client) sendBlob(cn *conn, chunk *athenav1.BlobChunk) error {
+	for {
+		err := cn.sess.Send(athenav1.Channel_BLOB, true, &athenav1.Frame{Body: &athenav1.Frame_BlobChunk{BlobChunk: chunk}})
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, link.ErrBackpressure) {
+			if errors.Is(err, link.ErrClosed) {
+				return errLinkLost
+			}
+			return err
+		}
+		select {
+		case <-cn.ctx.Done():
+			return errLinkLost
+		case <-time.After(retryPause):
+		}
+	}
 }

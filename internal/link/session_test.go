@@ -811,3 +811,37 @@ func TestFailedResumeClosesSession(t *testing.T) {
 		t.Fatalf("Send after failed resume: %v", err)
 	}
 }
+
+// Queued counts a channel's frames not yet taken by the writer: a frame sent after it reaches 0 is written after them.
+func TestQueuedDrains(t *testing.T) {
+	ca, cb := memPair()
+	gate := make(chan struct{})
+	slow := &gatedConn{memConn: ca, gate: gate}
+	a, _ := start(t, slow, Options{})
+	var got collector
+	_, _ = start(t, cb, Options{OnFrame: got.add})
+	if err := a.Send(athenav1.Channel_BLOB, true, delta(1)); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "writer in Write", func() bool { return slow.blocked() })
+	for i := uint64(2); i <= 4; i++ {
+		if err := a.Send(athenav1.Channel_BLOB, true, delta(i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := a.Queued(athenav1.Channel_BLOB); n != 3 {
+		t.Fatalf("Queued(BLOB) = %d, want 3", n)
+	}
+	if n := a.Queued(athenav1.Channel_CONTROL); n != 0 {
+		t.Fatalf("Queued(CONTROL) = %d, want 0", n)
+	}
+	close(gate)
+	eventually(t, "the blob queue drained", func() bool { return a.Queued(athenav1.Channel_BLOB) == 0 })
+	if err := a.Send(athenav1.Channel_CONTROL, true, delta(100)); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "all delivered", func() bool { return got.len() == 5 })
+	if c := got.cursors(); c[3] != 4 || c[4] != 100 {
+		t.Fatalf("order %v, want 1 2 3 4 100", c)
+	}
+}

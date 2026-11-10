@@ -256,6 +256,18 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	}
 	// The Engine's Executor is the fleet, which places each Assignment on the embedded node or a remote one; the node
 	// and the fleet need the Engine, and the Engine its Executor: both are made first and given the Engine after.
+	// The embedded node's checkpoints go straight into the server's mirror, where a remote node's arrive over its link;
+	// the fleet that keeps it is made after the node.
+	var fltRef atomic.Pointer[fleet.Fleet]
+	onCheckpoint := ncfg.OnCheckpoint
+	ncfg.OnCheckpoint = func(ticketID, repo, ref, sha string) {
+		if onCheckpoint != nil {
+			onCheckpoint(ticketID, repo, ref, sha)
+		}
+		if f := fltRef.Load(); f != nil {
+			f.LocalCheckpoint(ticketID, repo, ref, sha)
+		}
+	}
 	n := node.New(ncfg, nil)
 	nodeClosed := false
 	closeNode := func() {
@@ -267,7 +279,8 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	defer closeNode()
 	flt := fleet.New(fleet.Config{Local: n, LocalID: fleet.LocalID, LocalName: ncfg.Name, Store: st, Creds: ncfg.Credentials,
 		Policy: ncfg.Policy, Prompts: func() (string, string) { return ncfg.WorkerPrompt(), ncfg.ReviewerPrompt() },
-		Log: logger})
+		Mirror: fleet.NewMirror(filepath.Join(stateDir, "mirrors")), Log: logger})
+	fltRef.Store(flt)
 	// Before the store closes and after the node does (deferred later, so it runs first): node links can outlive the
 	// web server's stop, and placement records into the Engine.
 	defer flt.Close()
