@@ -69,7 +69,8 @@ func (o *op) draft(ticketID string, revision int) (*Ticket, error) {
 }
 
 // PlanDrafted is the planner's breakdown b of the plan-first Ticket. It applies only while the Ticket is planning, and
-// is a no-op otherwise, as for a late effect. The breakdown becomes the draft at revision 1, with its overlaps; one of
+// is a no-op otherwise, as for a late effect. The breakdown, with no Base (the planner names none), becomes the draft at
+// the revision after the last one (1 for the first), with its overlaps; one of
 // fewer than 2 sub-tasks runs the Ticket as one (R18), and one the Policy auto-approves splits it at once (R20).
 func (e *Engine) PlanDrafted(ticketID string, b Breakdown) error {
 	return e.command(cmdPlanDrafted, func(o *op) error {
@@ -82,10 +83,12 @@ func (e *Engine) PlanDrafted(ticketID string, b Breakdown) error {
 			if b.Tasks[i].Key == "" {
 				b.Tasks[i].Key = "s" + strconv.Itoa(i+1)
 			}
+			// Only a worker's hand_off branches a child from a commit of its own; an up-front child starts late.
+			b.Tasks[i].Base = ""
 		}
-		b.Revision = 1
+		b.Revision = t.Plan.Revision + 1
 		b.Overlaps = Overlaps(b.Tasks)
-		t.Plan = &PlanState{State: PlanDraft, Breakdown: &b, At: o.at}
+		t.Plan = &PlanState{State: PlanDraft, Breakdown: &b, At: o.at, Revision: b.Revision}
 		if len(b.Tasks) < 2 {
 			b.Note = noteSplitOne
 			o.runAsOne(t)
@@ -113,7 +116,7 @@ func (e *Engine) PlanFailed(ticketID, why string) error {
 			return err
 		}
 		why = truncateRunes(strings.TrimSpace(why), planErrorMax)
-		t.Plan = &PlanState{State: PlanFailed, Error: why, At: o.at}
+		t.Plan = &PlanState{State: PlanFailed, Error: why, At: o.at, Revision: t.Plan.Revision}
 		o.recordEvent(t, EventSplitFailed, "", "", why)
 		return o.tx.PutTicket(t)
 	})
@@ -137,6 +140,7 @@ func (e *Engine) UpdateBreakdown(ticketID string, revision int, tasks []ChildSpe
 		b.Overlaps = Overlaps(checked)
 		b.Revision++
 		t.Plan.Breakdown = &b
+		t.Plan.Revision = b.Revision
 		t.Plan.At = o.at
 		t.UpdatedAt = o.at
 		out = b
@@ -211,7 +215,7 @@ func (e *Engine) Replan(ticketID string) error {
 		if err != nil {
 			return err
 		}
-		t.Plan = &PlanState{State: PlanPlanning, At: o.at}
+		t.Plan = &PlanState{State: PlanPlanning, At: o.at, Revision: t.Plan.Revision}
 		t.UpdatedAt = o.at
 		if err := o.enqueuePlan(t); err != nil {
 			return err

@@ -1707,14 +1707,14 @@ func (r *runner) seedUnread() {
 	}
 }
 
-// pending returns the Ticket's waiting Inputs not yet sent to this Assignment, in order; none to a review, whose
+// pending returns the Ticket's waiting Inputs that may go now (Deliverable) not yet sent to this Assignment, in order; none to a review, whose
 // Inputs wait for the implementer.
 func (r *runner) pending(t core.Ticket) []string {
 	if r.s.reviewing() {
 		return nil
 	}
 	var ids []string
-	for _, id := range t.Undelivered {
+	for _, id := range t.Deliverable() {
 		if !r.sent[id] {
 			ids = append(ids, id)
 		}
@@ -1929,7 +1929,7 @@ func (r *runner) interruptBusy() {
 	}
 	// A turn end the Engine knows (the CLI's Stop hook) that this runner has not read yet: the session is idle.
 	if t, _, err := r.eng.Ticket(r.s.t.ID); err == nil {
-		if l := t.LatestAssignment(); l != nil && l.ID == r.s.a.ID && pausedAt(*l) && len(t.Undelivered) == 0 {
+		if l := t.LatestAssignment(); l != nil && l.ID == r.s.a.ID && pausedAt(*l) && len(t.Deliverable()) == 0 {
 			return
 		}
 	}

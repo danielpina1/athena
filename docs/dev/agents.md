@@ -62,7 +62,10 @@ Plan first holds a task for a planner, which drafts a split for you to edit and 
 - **Auto-approve** (R20). Policy `split.autoApprove` is 0 (off) by default. With a number N, a draft of 2 to N
   sub-tasks that flags no overlap starts at once. A refused auto-approve leaves the draft for you.
 - **Stale drafts.** An edit or an approve names the draft's revision. If the draft changed meanwhile, it is refused
-  with "The split changed meanwhile; reload it and try again."
+  with "The split changed meanwhile; reload it and try again." Revisions keep counting across **Try again**, so an
+  old draft's revision never matches a new one.
+- The planner cannot choose the commit a child branches from: a `base` in its output is cleared. Up-front children
+  branch as when no base is given; only a worker's `hand_off` names a base.
 - The lead of a plan-first Ticket starts only when all its children have ended. Dropping a child of a plan-first lead
   removes it from the lead's deps; the lead is never stopped by it.
 
@@ -118,6 +121,9 @@ Refused when:
 - it has ended: "T-n has ended; agents() lists the live ones.";
 - it is not visible: "T-n is not one your ticket can reach: agents() lists those it can." Visible means open and
   one of: the lead, a child, a sibling, or an open Ticket of the same repository;
+- it is held (no Assignment yet) until the sender's own Ticket ends, as a plan-first lead waits for its children or a
+  sibling for its deps: "T-n starts only after your ticket ends, so it cannot answer; finish your sub-task or report
+  blocked with a question.";
 - the text is empty or over the limit: "a message needs 1 to N characters; this one has M";
 - the chain is too long: "This message would be hop H of a chain of agent messages, past the limit of N. Answer
   from what you know, or report waiting with a question for the owner.";
@@ -132,7 +138,10 @@ The receiver answers with `reply {message_id, text}`. A child may do this althou
 answer; it needs none"), or a second answer to the same message.
 
 **Messages grant nothing.** An agent message is shown to the receiver as data from another agent, quoted. It is an
-`automatic` Input: it never answers a person's question, clears an Attention, or lifts a blocked or failed report.
+`automatic` Input: it never answers a person's question, clears an Attention, or lifts a blocked or failed report. While
+the receiver waits for a person (its last report is blocked or failed), the message stays undelivered and starts
+nothing; it is delivered once the person answers or retries. The same holds for a child's end (InputChild) and for
+Athena's split notes (InputTask).
 
 ### `wait_for {target}`
 
@@ -140,8 +149,9 @@ Waits at most `WaitForMax` (20 seconds, R12), below the 30 second request timeou
 id (it waits for it to end) or a message id `m-…` (it waits for the answer). If it is not done, the answer is: "Not
 yet. End your turn with report waiting; Athena delivers the result to you as a message when it arrives." Results
 arrive as Inputs anyway, so a worker can end its turn. Refused: a target that is neither id ("... is not a ticket id
-or a message id"), an unknown Ticket ("ticket T-n not found") or one not visible ("T-n is not one your ticket can
-reach: agents() lists those it can.").
+or a message id"), a message that is unknown or does not involve the caller ("no message m-x of your ticket"), or a
+Ticket that is unknown or not visible, which get the same answer ("T-n is not one your ticket can reach: agents()
+lists those it can.").
 
 ### `agents {}`
 
@@ -170,14 +180,20 @@ Fixed: `WaitForMax` 20 seconds and `PlanTimeout` 2 minutes.
 
 ## 5. When a child fails (R8)
 
-- A child's `failed` or `blocked` report sets `Attention{Child}` on the lead. The lead's stage is `person/child`, and
-  Needs you shows one card, on the lead: "Child T-n (title) failed: ... Retry it, drop it, or continue without it."
+- A child's `failed` report, or a `blocked` one without a question, sets `Attention{Child}` on the lead. The lead's
+  stage is `person/child`, and Needs you shows one card, on the lead: "Child T-n (title) failed: ... Retry it, drop
+  it, or continue without it."
+- A child `blocked` with a question keeps its own answer card in Needs you, as any Ticket does; the lead gets no card
+  about it, and one it had about that child clears.
+- When the lead has a question of its own pending, a child's failure leaves it in place: the lead is told with an
+  Input ("T-n (title) failed: ..."), and the child's own failed card shows in Needs you, with Retry and Stop there.
+- A person's message to the child, from its own page, also clears the lead's card about it.
 - **Retry** is `RetryTicket` on the child.
 - **Drop** is `StopTicket` on the child. It also stops, transitively, the children of the same lead that depend on it
   and never started. It never stops the lead. A plan-first lead removes the dropped child from its deps and starts
   when the rest have ended.
 - **Continue without it** is `ContinueWithout(child)`. It stops only that child, and its dependents start.
-- Each one clears the lead's Attention. A child's failure replaces whatever Attention the lead had.
+- Each one clears the lead's Attention about the child. A child's failure replaces only an Attention about a child.
 - The lead is told how each child ended, as an Input (`child/ended` on the timeline). The outcome is `ready` (its
   branch and head, and the `git merge` command), `dropped` (found nothing to do), `stopped` (the child was dropped by
   the owner, or stopped, or the lead ended), or `continued` (you chose to continue without it). The timeline of a

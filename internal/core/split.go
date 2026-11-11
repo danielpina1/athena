@@ -69,6 +69,8 @@ type PlanState struct {
 	Breakdown *Breakdown `json:"breakdown,omitempty"`
 	Error     string     `json:"error,omitempty"`
 	At        time.Time  `json:"at,omitzero"`
+	// Revision is the latest draft revision, kept across Replan so a new draft never reuses an old one's revision.
+	Revision int `json:"revision,omitempty"`
 }
 
 // SplitLimits are the limits of splitting and of agent messages; a zero field takes its default.

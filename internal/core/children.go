@@ -314,7 +314,9 @@ func (o *op) refuseOpenChildren(t *Ticket) error {
 		t.ID, strings.Join(open, ", "))
 }
 
-// childFailed raises the open lead's Attention on a child's failed or blocked report r (R8).
+// childFailed records a child's failed or blocked report r on its open lead and raises the lead's Attention about it
+// (R8), except when the child asks a question of its own, which its own card answers, or when the lead has a question
+// of its own pending, which stays: the lead is then told with an InputChild, and the child's own card shows instead.
 func (o *op) childFailed(t *Ticket, r ReportInput) error {
 	if t.Lead == "" {
 		return nil
@@ -327,10 +329,21 @@ func (o *op) childFailed(t *Ticket, r ReportInput) error {
 	if r.State == ReportBlocked {
 		how = "is blocked"
 	}
-	o.settleAttention(lead)
-	lead.Attention = &Attention{ID: newID(), Child: t.ID, At: o.at,
-		Question: fmt.Sprintf("Child %s (%s) %s: %s. Retry it, drop it, or continue without it.", t.ID, t.Title, how, r.Summary)}
 	o.recordEvent(lead, EventChildFailed, t.ID, string(r.State), r.Summary)
+	switch {
+	case r.State == ReportBlocked && r.Question != "":
+		if lead.Attention != nil && lead.Attention.Child == t.ID {
+			o.settleAttention(lead)
+			lead.Attention = nil
+		}
+	case lead.Attention != nil && lead.Attention.Child == "":
+		o.addInput(lead, Input{ID: newID(), Kind: InputChild, At: o.at, From: t.ID,
+			Text: fmt.Sprintf("%s (%s) %s: %s.", t.ID, t.Title, how, r.Summary)})
+	default:
+		o.settleAttention(lead)
+		lead.Attention = &Attention{ID: newID(), Child: t.ID, At: o.at,
+			Question: fmt.Sprintf("Child %s (%s) %s: %s. Retry it, drop it, or continue without it.", t.ID, t.Title, how, r.Summary)}
+	}
 	return o.tx.PutTicket(lead)
 }
 

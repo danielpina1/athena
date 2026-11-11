@@ -359,7 +359,7 @@ func (e *Engine) AssignmentStarted(ticketID, assignmentID, sessionID, model, run
 			open.ResumedAt = o.timestamp()
 		}
 		t.UpdatedAt = o.at
-		if t.Ended == nil && len(t.Undelivered) > 0 {
+		if t.Ended == nil && len(t.Deliverable()) > 0 {
 			o.deliver(t, a.ID)
 		}
 		o.event(EventAssignmentStarted, t, a.ID, map[string]any{"sessionId": sessionID})
@@ -564,7 +564,12 @@ func (e *Engine) FileReport(ticketID string, r ReportInput) error {
 		}
 		t.UpdatedAt = o.at
 		if r.State == ReportBlocked || r.State == ReportFailed {
-			t.Undelivered = slices.DeleteFunc(t.Undelivered, func(id string) bool { return automatic(findInput(t, id)) })
+			// A message of another Ticket or of Athena stays for after the wait (KeptWhileWaiting); other automatic
+			// Inputs, such as notes, are dropped.
+			t.Undelivered = slices.DeleteFunc(t.Undelivered, func(id string) bool {
+				in := findInput(t, id)
+				return automatic(in) && !KeptWhileWaiting(in)
+			})
 			if len(t.Undelivered) == 0 {
 				t.Undelivered = nil
 			}
@@ -658,6 +663,10 @@ func (e *Engine) AddPersonInputWithID(ticketID, inputID, text string) error {
 		o.addInput(t, input)
 		o.event(EventInputAdded, t, "", map[string]any{"inputId": input.ID})
 		if err := o.wake(t); err != nil {
+			return err
+		}
+		// The owner answered a child here rather than from its lead's card: the lead no longer waits on it.
+		if err := o.clearChildAttention(t); err != nil {
 			return err
 		}
 		return o.tx.PutTicket(t)
@@ -1089,7 +1098,8 @@ func (o *op) endAssignment(t *Ticket, a *Assignment, reason string) {
 }
 
 // addInput adds an Input once and asks the Executor to deliver it, or to launch again a pending Assignment whose
-// launch failed once no person is waited for. Automatic Inputs are held back while the worker waits for a person.
+// launch failed once no person is waited for. Automatic Inputs are held back while the worker waits for a person:
+// dropped, or, for one KeptWhileWaiting, kept undelivered and delivered once the wait clears.
 func (o *op) addInput(t *Ticket, in Input) {
 	if findInput(t, in.ID) != nil {
 		return
@@ -1098,7 +1108,7 @@ func (o *op) addInput(t *Ticket, in Input) {
 	t.UpdatedAt = o.at
 	live := t.Ended == nil
 	held := live && automatic(&in) && t.WaitsForPerson()
-	if !held {
+	if !held || KeptWhileWaiting(&in) {
 		t.Undelivered = append(t.Undelivered, in.ID)
 	}
 	if !live || held {

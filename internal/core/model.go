@@ -645,3 +645,26 @@ const (
 	// ReasonContinuedWithout is why a failed child is stopped so its dependents can start.
 	ReasonContinuedWithout = "continued without it"
 )
+
+// Deliverable returns the Inputs of Undelivered that may go to the worker now, in order: while it waits for a person
+// (WaitsForPerson), the messages of other Tickets and of Athena (KeptWhileWaiting) stay undelivered until the wait
+// clears.
+func (t *Ticket) Deliverable() []string {
+	if len(t.Undelivered) == 0 || !t.WaitsForPerson() {
+		return t.Undelivered
+	}
+	var out []string
+	for _, id := range t.Undelivered {
+		if in := findInput(t, id); in == nil || !KeptWhileWaiting(in) {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// KeptWhileWaiting reports whether an Input is a message from another Ticket's worker, a child's end or Athena's
+// word on a split (InputAgent, InputChild, InputTask): automatic, so it never lifts a blocked or failed report, but
+// kept undelivered while the worker waits for a person rather than dropped, so it is delivered once the wait clears.
+func KeptWhileWaiting(in *Input) bool {
+	return in != nil && (in.Kind == InputAgent || in.Kind == InputChild || in.Kind == InputTask)
+}

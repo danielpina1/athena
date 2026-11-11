@@ -38,7 +38,7 @@ const (
 
 // AskAgent sends text from the Ticket fromID to the Ticket target and returns the stored message. Refusals are
 // UserErrors, checked in order: the text's length, a target that is not a Ticket id, the sender itself, a target that
-// has ended, one the sender cannot reach (R11), the hop limit and the rate limit. A hop or rate refusal also raises an
+// has ended, one the sender cannot reach (R11), a held one that waits for the sender, the hop limit and the rate limit. A hop or rate refusal also raises an
 // Attention on the sender (unless it has one), which commits although the command returns the refusal.
 func (e *Engine) AskAgent(fromID, target, text string) (AgentMessage, error) {
 	var msg AgentMessage
@@ -75,6 +75,10 @@ func (e *Engine) AskAgent(fromID, target, text string) (AgentMessage, error) {
 		}
 		if relationOf(from, to) == "" {
 			return userErrorf("%s is not one your ticket can reach: agents() lists those it can.", toID)
+		}
+		if len(to.Assignments) == 0 && (slices.Contains(to.Waiting, from.ID) || slices.Contains(to.Deps, from.ID)) {
+			// A held Ticket starts only after the sender ends: the question would wait on its own asker.
+			return userErrorf("%s starts only after your ticket ends, so it cannot answer; finish your sub-task or report blocked with a question.", toID)
 		}
 		lim := o.splitLimits()
 		hops, err := o.hops(from.ID, lim.MessageWindow)

@@ -420,3 +420,94 @@ func TestChildReadyTellsLead(t *testing.T) {
 	eq(t, "undelivered", l.Undelivered, []string{in[0].ID})
 	eq(t, "delivered", h.exec.last("deliver").AssignmentID, running)
 }
+
+func TestChildReadyHeldWhileLeadWaitsForOwner(t *testing.T) {
+	h := splitHarness(t)
+	lead := repoLead(h)
+	ids := spawn(h, lead, sub("a", "Part A"))
+	h.settle(true)
+	h.must(h.eng.FileReport(lead, ReportInput{State: ReportBlocked, Summary: "need a choice", Question: "Which database?"}))
+	before := h.callsFor("deliver", lead)
+	ready(h, ids[0], "All wired", "abc1234def")
+	l := h.ticket(lead)
+	in := childInputs(l)
+	eq(t, "one input", len(in), 1)
+	eq(t, "kept undelivered", slices.Contains(l.Undelivered, in[0].ID), true)
+	eq(t, "not deliverable yet", slices.Contains(l.Deliverable(), in[0].ID), false)
+	eq(t, "no delivery while waiting", h.callsFor("deliver", lead), before)
+
+	h.tick(1)
+	h.must(h.eng.AddPersonInput(lead, "Use Postgres."))
+	l = h.ticket(lead)
+	eq(t, "deliverable after answer", slices.Contains(l.Deliverable(), in[0].ID), true)
+	eq(t, "delivered after answer", h.callsFor("deliver", lead), before+1)
+	h.settle(true)
+	eq(t, "all delivered", len(h.ticket(lead).Undelivered), 0)
+	if !slices.Contains(h.delivered, [2]string{lead, in[0].ID}) {
+		t.Errorf("child input never delivered: %v", h.delivered)
+	}
+}
+
+func TestChildBlockedWithQuestionKeepsItsOwnCard(t *testing.T) {
+	h := splitHarness(t)
+	lead := repoLead(h)
+	ids := spawn(h, lead, sub("a", "Part A"))
+	h.settle(true)
+	h.must(h.eng.FileReport(ids[0], ReportInput{State: ReportBlocked, Summary: "need a key", Question: "Which API key?"}))
+	l := h.ticket(lead)
+	eq(t, "lead attention", l.Attention, (*Attention)(nil))
+	eq(t, "lead stage", stageOf(l).Stage == "person", false)
+	c := h.ticket(ids[0])
+	if c.Attention == nil || c.Attention.Question != "Which API key?" {
+		t.Fatalf("child attention: %+v", c.Attention)
+	}
+	eq(t, "event", eventTypes(l)[len(l.Events)-1], EventChildFailed)
+}
+
+func TestAnsweringChildClearsLeadAttention(t *testing.T) {
+	h := splitHarness(t)
+	lead := repoLead(h)
+	ids := spawn(h, lead, sub("a", "Part A"))
+	h.settle(true)
+	h.must(h.eng.FileReport(ids[0], ReportInput{State: ReportBlocked, Summary: "no access"}))
+	eq(t, "stage", stageOf(h.ticket(lead)), Stage{"person", "child"})
+	h.must(h.eng.AddPersonInput(ids[0], "You have access now."))
+	l := h.ticket(lead)
+	eq(t, "cleared", l.Attention, (*Attention)(nil))
+	if s := stageOf(l); s == (Stage{"person", "child"}) {
+		t.Errorf("lead still person/child")
+	}
+}
+
+func TestChildFailureKeepsLeadsOwnQuestion(t *testing.T) {
+	h := splitHarness(t)
+	lead := repoLead(h)
+	ids := spawn(h, lead, sub("a", "Part A"))
+	h.settle(true)
+	h.must(h.eng.FileReport(lead, ReportInput{State: ReportWaiting, Summary: "asking", Question: "Which colour?"}))
+	own := h.ticket(lead).Attention
+	if own == nil {
+		t.Fatal("lead has no question")
+	}
+	h.must(h.eng.FileReport(ids[0], ReportInput{State: ReportFailed, Summary: "tests fail"}))
+	l := h.ticket(lead)
+	eq(t, "own question kept", l.Attention, own)
+	eq(t, "event", eventTypes(l)[len(l.Events)-1], EventChildFailed)
+	in := childInputs(l)
+	if len(in) != 1 {
+		t.Fatalf("lead told: %+v", in)
+	}
+	eq(t, "text", in[0].Text, "T-0002 (Part A) failed: tests fail.")
+}
+
+func TestChildAskingClearsLeadsCardAboutIt(t *testing.T) {
+	h := splitHarness(t)
+	lead := repoLead(h)
+	ids := spawn(h, lead, sub("a", "Part A"))
+	h.settle(true)
+	h.must(h.eng.FileReport(ids[0], ReportInput{State: ReportBlocked, Summary: "no access"}))
+	eq(t, "stage", stageOf(h.ticket(lead)), Stage{"person", "child"})
+	h.must(h.eng.FileReport(ids[0], ReportInput{State: ReportBlocked, Summary: "no access", Question: "Which API key?"}))
+	eq(t, "lead card gone", h.ticket(lead).Attention, (*Attention)(nil))
+	eq(t, "child card", stageOf(h.ticket(ids[0])), Stage{"person", "answer"})
+}

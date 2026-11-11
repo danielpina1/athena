@@ -253,3 +253,39 @@ func TestLatePlanEffectIgnored(t *testing.T) {
 	h.must(h.eng.PlanFailed(id, "late"))
 	eq(t, "unchanged", h.ticket(id), before)
 }
+
+func TestReplanContinuesRevision(t *testing.T) {
+	h := splitHarness(t)
+	id := planLead(h)
+	drafted(h, id, sub("a", "Part A"), sub("b", "Part B"))
+	_, err := h.eng.UpdateBreakdown(id, 1, []ChildSpec{sub("a", "Part A"), sub("c", "Part C")})
+	h.must(err)
+	eq(t, "edited", h.ticket(id).Plan.Breakdown.Revision, 2)
+	h.must(h.eng.Replan(id))
+	h.must(h.eng.PlanFailed(id, "no answer"))
+	h.must(h.eng.Replan(id))
+	drafted(h, id, sub("x", "Part X"), sub("y", "Part Y"))
+	eq(t, "after replan", h.ticket(id).Plan.Breakdown.Revision, 3)
+	_, err = h.eng.ApproveBreakdown(id, 1)
+	wantRefusal(t, "old revision 1", err, msgSplitStale)
+	_, err = h.eng.ApproveBreakdown(id, 2)
+	wantRefusal(t, "old revision 2", err, msgSplitStale)
+}
+
+func TestPlannerCannotSetBase(t *testing.T) {
+	h := splitHarness(t)
+	id := planLead(h)
+	a, b := sub("a", "Part A"), sub("b", "Part B")
+	a.Base, b.Base = "deadbeef", "cafef00d"
+	drafted(h, id, a, b)
+	for _, s := range h.ticket(id).Plan.Breakdown.Tasks {
+		eq(t, s.Key+" base", s.Base, "")
+	}
+	ids, err := h.eng.ApproveBreakdown(id, 1)
+	h.must(err)
+	for _, c := range ids {
+		if strings.Contains(h.ticket(c).Inputs[0].Text, "deadbeef") {
+			t.Errorf("%s brief names the planner's base", c)
+		}
+	}
+}

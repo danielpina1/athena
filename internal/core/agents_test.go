@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -318,4 +319,43 @@ func TestWaitForRepoTicketThatEnds(t *testing.T) {
 	// A wait that starts after the end finds it out of reach.
 	_, err := h.eng.WaitFor(context.Background(), a, b)
 	wantRefusal(t, "ended repo ticket", err, "is not one your ticket can reach")
+}
+
+func TestAgentQuestionHeldWhileRecipientWaitsForOwner(t *testing.T) {
+	h := splitHarness(t)
+	a, b := repoTask(h, "A", "o/r"), repoTask(h, "B", "o/r")
+	h.must(h.eng.FileReport(b, ReportInput{State: ReportBlocked, Summary: "stuck", Question: "Which colour?"}))
+	before := h.callsFor("deliver", b)
+	ask(h, a, b, "What schema do you use?")
+	bt := h.ticket(b)
+	ins := agentInputs(bt)
+	if len(ins) != 1 {
+		t.Fatalf("agent inputs: %+v", ins)
+	}
+	eq(t, "kept undelivered", slices.Contains(bt.Undelivered, ins[0].ID), true)
+	eq(t, "not deliverable yet", slices.Contains(bt.Deliverable(), ins[0].ID), false)
+	eq(t, "no delivery while waiting", h.callsFor("deliver", b), before)
+
+	h.tick(1)
+	h.must(h.eng.AddPersonInput(b, "Blue."))
+	eq(t, "deliverable after answer", slices.Contains(h.ticket(b).Deliverable(), ins[0].ID), true)
+	h.settle(true)
+	if !slices.Contains(h.delivered, [2]string{b, ins[0].ID}) {
+		t.Errorf("agent input never delivered: %v", h.delivered)
+	}
+}
+
+func TestAskHeldTicketWaitingOnSenderRefused(t *testing.T) {
+	h := splitHarness(t)
+	lead := repoLead(h)
+	ids := spawn(h, lead, sub("a", "A"), sub("b", "B", "a"))
+	a, b := ids[0], ids[1]
+	// As ApproveBreakdown leaves a plan-first lead: no Assignment, waiting on every child.
+	edit(h, lead, func(t *Ticket) { t.Assignments = nil; t.Deps = []string{a, b}; t.Waiting = []string{a, b} })
+	h.settle(true)
+	_, err := h.eng.AskAgent(a, lead, "Which schema?")
+	wantRefusal(t, "held lead", err, lead+" starts only after your ticket ends, so it cannot answer; finish your sub-task or report blocked with a question.")
+	_, err = h.eng.AskAgent(a, b, "Ready soon?")
+	wantRefusal(t, "held dependent sibling", err, b+" starts only after your ticket ends")
+	eq(t, "no inputs", len(agentInputs(h.ticket(lead))), 0)
 }

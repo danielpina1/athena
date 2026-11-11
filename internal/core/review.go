@@ -288,7 +288,7 @@ func (o *op) applyHeld(t *Ticket, held ReviewState) error {
 	if err := o.settleReport(t, n, nil); err != nil {
 		return err
 	}
-	if t.Ended == nil && len(t.Undelivered) > 0 {
+	if t.Ended == nil && len(t.Deliverable()) > 0 {
 		o.start(t, n.ID)
 	}
 	return nil

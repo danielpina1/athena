@@ -665,7 +665,7 @@ func (h *harness) settle(launch bool) {
 		if t.Ended != nil || a == nil {
 			continue
 		}
-		for _, id := range t.Undelivered {
+		for _, id := range t.Deliverable() {
 			h.delivered = append(h.delivered, [2]string{ticketID, id})
 			h.must(h.eng.InputsDelivered(ticketID, a.ID, []string{id}))
 		}

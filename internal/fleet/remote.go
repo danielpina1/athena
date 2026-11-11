@@ -774,7 +774,7 @@ func (lk *nodeLink) reconcile() {
 		}
 		// After the branches the Ticket needs here: what was shipped before this link is not known to be there.
 		lk.f.send(t, *a, lk.nodeID, false)
-		if len(t.Undelivered) > 0 && a.State == core.AssignmentRunning {
+		if len(t.Deliverable()) > 0 && a.State == core.AssignmentRunning {
 			lk.f.send(t, *a, lk.nodeID, true)
 		}
 	}
