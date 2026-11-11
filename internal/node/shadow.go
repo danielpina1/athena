@@ -122,9 +122,10 @@ type pushPayload struct {
 // proposeBranch proposes the session's worktree branch as a push, for a session held for the owner (heldForOwner): when
 // the branch has commits no remote branch has (the clone's remote-tracking branches, which the node moves when it
 // pushes), and no pending push of the Ticket names its commit already. A newer push supersedes the older one (Propose).
+// A child Ticket's branch is never proposed: its lead merges it.
 func (n *Node) proposeBranch(s *session) error {
 	p := s.place
-	if p.github == "" || s.reviewing() || !n.heldForOwner(s) {
+	if p.github == "" || s.reviewing() || s.t.Lead != "" || !n.heldForOwner(s) {
 		return nil
 	}
 	if _, err := os.Stat(p.workDir); err != nil {

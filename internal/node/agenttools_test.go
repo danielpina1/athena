@@ -286,3 +286,23 @@ func TestRenderAgentInputs(t *testing.T) {
 		t.Fatalf("got:\n%s\nwant:\n%s", got, want)
 	}
 }
+
+// A child of a GitHub lead in a repository in shadow mode delivers to its lead: its ready report proposes no push of
+// its branch, which only the lead's work would (R6).
+func TestChildReadyProposesNoPushInShadow(t *testing.T) {
+	h := newGHHarness(t, &fakeCreds{}, func(c *Config) { c.Policy = newShadowPolicy("o/r") })
+	t.Setenv("ATHENA_FAKE_FIXTURE", openTurnFixture(t))
+	lead, a := h.accept("github:issuecomment:1", "o/r", 12, "")
+	_, child, ca := handOff(h.harness, lead, a, map[string]any{"task": "Child work"})
+	dir := h.workDir(child.ID, ca.ID)
+	git(t, dir, "commit", "-q", "--allow-empty", "-m", "child work")
+	if r := h.report(child.ID, ca.ID, core.ReportReady, "done"); !r.OK {
+		t.Fatalf("child ready = %+v", r)
+	}
+	if ps := h.proposalsOf(child.ID); len(ps) != 0 {
+		t.Fatalf("child proposals = %+v, want none", ps)
+	}
+	if ps, err := h.eng.PendingProposals(); err != nil || len(ps) != 0 {
+		t.Fatalf("pending proposals = %+v %v, want none", ps, err)
+	}
+}
