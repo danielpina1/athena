@@ -382,6 +382,19 @@ type Ticket struct {
 	Plan *PlanState `json:"plan,omitempty"`
 	// SplitKey is the sub-task key the child was made from.
 	SplitKey string `json:"splitKey,omitempty"`
+	// Events are what the Engine recorded on the Ticket's timeline that no other field keeps, oldest first.
+	Events []TicketEvent `json:"events,omitempty"`
+}
+
+// TicketEvent is something the Engine recorded on a Ticket's timeline, such as a child's spawn ("child/spawned"), end
+// ("child/ended", with its Outcome: ready, dropped, stopped or continued) or failure ("child/failed"). Ref is the
+// Ticket or item it is about.
+type TicketEvent struct {
+	Type    string    `json:"type"`
+	At      time.Time `json:"at"`
+	Ref     string    `json:"ref,omitempty"`
+	Outcome string    `json:"outcome,omitempty"`
+	Text    string    `json:"text,omitempty"`
 }
 
 // Follow is a Thread a Ticket follows: Own when the Ticket opened it, Closed once the Thread closed.

@@ -137,6 +137,8 @@ const (
 	EventPolicyChanged      = "policy.changed"
 	EventProposalCreated    = "proposal.created"
 	EventProposalSettled    = "proposal.settled"
+	// EventChildrenSpawned is emitted on a lead whose worker split off child Tickets.
+	EventChildrenSpawned = "children.spawned"
 )
 
 // Event is what the Engine reports after a committed change.

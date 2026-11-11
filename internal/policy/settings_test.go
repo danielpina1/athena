@@ -396,3 +396,60 @@ func TestValidateReservesAutopilotRuleNamespace(t *testing.T) {
 		t.Fatalf("Validate(autopilotx) = %v", err)
 	}
 }
+
+func TestSplitSettingsValidate(t *testing.T) {
+	bad := map[string]SplitSettings{
+		"children high": {MaxChildren: 21},
+		"children low":  {MaxChildren: -1},
+		"hops high":     {MaxHops: 6},
+		"hops low":      {MaxHops: -1},
+		"messages high": {MessageLimit: 101},
+		"messages low":  {MessageLimit: -1},
+		"window high":   {MessageWindowMinutes: 121},
+		"window low":    {MessageWindowMinutes: -1},
+		"auto high":     {AutoApprove: 21},
+		"auto low":      {AutoApprove: -1},
+	}
+	for name, sp := range bad {
+		s := Defaults(nil)
+		s.Split = sp
+		if Validate(s) == nil {
+			t.Errorf("%s: Validate accepted %+v", name, sp)
+		}
+	}
+	for _, sp := range []SplitSettings{{}, {MaxChildren: 1, MaxHops: 1, MessageLimit: 1, MessageWindowMinutes: 1},
+		{MaxChildren: 20, MaxHops: 5, MessageLimit: 100, MessageWindowMinutes: 120, AutoApprove: 20}} {
+		s := Defaults(nil)
+		s.Split = sp
+		if err := Validate(s); err != nil {
+			t.Errorf("%+v: %v", sp, err)
+		}
+	}
+	if got, want := Defaults(nil).SplitLimits(), (core.SplitLimits{MaxChildren: core.DefaultMaxChildren,
+		MaxHops: core.DefaultMaxHops, MessageLimit: core.DefaultMessageLimit, MessageWindow: core.DefaultMessageWindow}); got != want {
+		t.Errorf("default limits = %+v, want %+v", got, want)
+	}
+	s := Defaults(nil)
+	s.Split = SplitSettings{MaxChildren: 8, MaxHops: 2, MessageLimit: 4, MessageWindowMinutes: 30, AutoApprove: 3}
+	if got, want := s.SplitLimits(), (core.SplitLimits{MaxChildren: 8, MaxHops: 2, MessageLimit: 4, AutoApprove: 3,
+		MessageWindow: 30 * time.Minute}); got != want {
+		t.Errorf("limits = %+v, want %+v", got, want)
+	}
+	// The split settings survive a save.
+	st := openStore(t)
+	cur, rev, err := st.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cur.Split = s.Split
+	if _, err := st.Save(cur, rev, "cli"); err != nil {
+		t.Fatal(err)
+	}
+	if got, _, _ := st.Current(); got.Split != s.Split {
+		t.Errorf("saved split = %+v", got.Split)
+	}
+	raw, _ := json.Marshal(s)
+	if !strings.Contains(string(raw), `"split":{"maxChildren":8`) {
+		t.Errorf("json: %s", raw)
+	}
+}

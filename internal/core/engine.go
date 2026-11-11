@@ -119,6 +119,9 @@ type Engine struct {
 	defaultRuntime string
 	// pairing is Options.Pairing, nil without one.
 	pairing func() PairingDefaults
+	// split and nodes are Options.Split and Options.Nodes; each may be nil.
+	split func() SplitLimits
+	nodes NodeDirectory
 }
 
 // Options configure an Engine beyond its Repositories and Executor. Every field may be left zero.
@@ -144,6 +147,11 @@ type Options struct {
 	// every Ticket the router accepts) and the rounds a review may take. Without it no Ticket is paired unless its task
 	// asks, and a review takes at most 2 rounds. Like Policy, it runs inside a command's transaction.
 	Pairing func() PairingDefaults
+	// Split returns the limits of splitting and of agent messages; without it, or for its zero fields, the defaults
+	// (split.go). Like Policy, it runs inside a command's transaction.
+	Split func() SplitLimits
+	// Nodes resolves a child's node hint (children.go). Without it, a node hint is refused.
+	Nodes NodeDirectory
 }
 
 // NewEngine returns an Engine with the plan 1 options: a clock and an event sink (see Options).
@@ -167,7 +175,8 @@ func NewEngineWith(repos Repositories, exec Executor, opts Options) *Engine {
 		def = RuntimeClaude // empty, or not a runtime: never a Ticket on a runtime nobody has
 	}
 	return &Engine{repos: repos, exec: exec, now: now, emit: emit, waiters: map[string]chan struct{}{},
-		policy: opts.Policy, scope: opts.Scope, wake: opts.Wake, relays: opts.Relays, defaultRuntime: def, pairing: opts.Pairing}
+		policy: opts.Policy, scope: opts.Scope, wake: opts.Wake, relays: opts.Relays, defaultRuntime: def, pairing: opts.Pairing,
+		split: opts.Split, nodes: opts.Nodes}
 }
 
 // ValidRuntime reports whether name is a runtime a Ticket may run on: RuntimeClaude, RuntimeCodex or RuntimeAuto.
@@ -496,6 +505,11 @@ func (e *Engine) FileReport(ticketID string, r ReportInput) error {
 		if t.PendingApproval != "" && (r.State == ReportReady || r.State == ReportDropped) {
 			return userErrorf("an action of ticket %s waits for the owner's approval; report %s after it is answered", ticketID, r.State)
 		}
+		if r.State == ReportReady {
+			if err := o.refuseOpenChildren(t); err != nil {
+				return err
+			}
+		}
 		attention := t.Attention
 		var raised *Attention
 		if r.Question != "" && (attention == nil || attention.Question != r.Question) {
@@ -517,11 +531,17 @@ func (e *Engine) FileReport(ticketID string, r ReportInput) error {
 			t.Stats.TimeToFirstReport = nonNegative(o.at.Sub(t.CreatedAt))
 		}
 		a.Report = &Report{State: r.State, Summary: r.Summary, Question: r.Question, Pull: r.Pull, At: o.at}
+		if t.Lead != "" && r.State == ReportReady {
+			a.Report.Head = r.Head
+		}
 		t.UpdatedAt = o.at
 		if r.State == ReportBlocked || r.State == ReportFailed {
 			t.Undelivered = slices.DeleteFunc(t.Undelivered, func(id string) bool { return automatic(findInput(t, id)) })
 			if len(t.Undelivered) == 0 {
 				t.Undelivered = nil
+			}
+			if err := o.childFailed(t, r); err != nil {
+				return err
 			}
 		}
 		if r.State == ReportReady && o.holdsForReview(t, a) {
@@ -652,6 +672,9 @@ func (e *Engine) RetryTicket(ticketID string) error {
 		t.UpdatedAt = o.at
 		o.stop(t, replaced, reasonRetried)
 		o.start(t, assignment)
+		if err := o.clearChildAttention(t); err != nil {
+			return err
+		}
 		return o.tx.PutTicket(t)
 	})
 }
@@ -850,6 +873,11 @@ type op struct {
 	defaultRuntime string
 	// pairing is the Engine's Options.Pairing (pairingDefaults).
 	pairing func() PairingDefaults
+	// split and nodes are the Engine's Options.Split and Options.Nodes.
+	split func() SplitLimits
+	nodes NodeDirectory
+	// endingChildren is set while a child's end ends the dependents it stops (childEnded), whose own ends it handles.
+	endingChildren bool
 }
 
 // observe queues a metrics observation that runs once the command committed. Callers check o.reg first, so that no
@@ -876,7 +904,7 @@ func (e *Engine) run(fn func(o *op) error) error {
 	err := e.repos.Tx(func(tx Tx) error {
 		// A fresh op per attempt, so nothing collected by a failed attempt leaks.
 		o = &op{tx: tx, at: e.now(), reg: e.reg, policy: e.policy, relays: e.relays, defaultRuntime: e.defaultRuntime,
-			pairing: e.pairing}
+			pairing: e.pairing, split: e.split, nodes: e.nodes}
 		return fn(o)
 	})
 	if err != nil {
@@ -1157,7 +1185,10 @@ func (o *op) endAt(t *Ticket, by TicketEndBy, outcome TicketOutcome, reason stri
 	for _, id := range stopping {
 		o.stop(t, id, stopReason)
 	}
-	return nil
+	if err := o.endChildren(t); err != nil {
+		return err
+	}
+	return o.childEnded(t)
 }
 
 // --- Helpers ---
@@ -1316,6 +1347,10 @@ func cloneTicket(t *Ticket) Ticket {
 	c.SessionCosts = maps.Clone(t.SessionCosts)
 	c.Stats.ByRuntime = maps.Clone(t.Stats.ByRuntime)
 	c.Review = clonePtr(t.Review)
+	c.Children = slices.Clone(t.Children)
+	c.Deps = slices.Clone(t.Deps)
+	c.Waiting = slices.Clone(t.Waiting)
+	c.Events = slices.Clone(t.Events)
 	return c
 }
 
