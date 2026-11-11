@@ -116,9 +116,70 @@ func ticketSummary(t *core.Ticket, st core.Stage, gitFolder func(dir string) boo
 		v.EndedAt, v.Outcome = ts(t.Ended.At), string(t.Ended.Outcome)
 	}
 	if t.Attention != nil {
-		v.AttentionQuestion = t.Attention.Question
+		v.AttentionQuestion, v.AttentionChild = t.Attention.Question, t.Attention.Child
+	}
+	v.Lead, v.SplitKey = t.Lead, t.SplitKey
+	v.Children, v.Deps, v.Waiting = slices.Clone(t.Children), slices.Clone(t.Deps), slices.Clone(t.Waiting)
+	if t.Plan != nil {
+		v.PlanState = t.Plan.State
 	}
 	return v
+}
+
+// breakdownView maps a plan-first Ticket's split plan, nil for a Ticket not planned first; maxChildren is the
+// current cap on its sub-tasks.
+func breakdownView(p *core.PlanState, maxChildren int) *athenav1.BreakdownView {
+	if p == nil {
+		return nil
+	}
+	v := &athenav1.BreakdownView{State: p.State, Error: p.Error, MaxChildren: uint32(max(maxChildren, 0))}
+	b := p.Breakdown
+	if b == nil {
+		return v
+	}
+	v.Revision, v.Note = uint32(max(b.Revision, 0)), b.Note
+	for _, s := range b.Tasks {
+		v.Tasks = append(v.Tasks, &athenav1.SubTaskView{Key: s.Key, Title: s.Title, Instructions: s.Instructions,
+			Areas: slices.Clone(s.Areas), Deps: slices.Clone(s.Deps), Runtime: s.Runtime, Node: s.Node, Model: s.Model})
+	}
+	for _, o := range b.Overlaps {
+		v.Overlaps = append(v.Overlaps, &athenav1.OverlapView{A: o.A, B: o.B, Areas: slices.Clone(o.Areas)})
+	}
+	return v
+}
+
+// agentEntry is an agent message as t's timeline tells it: asked or answered when t sent it, received or answer when
+// t got it; its subject is the other Ticket.
+func agentEntry(t *core.Ticket, m *core.AgentMessage) *athenav1.TimelineEntry {
+	sub, other := "received", m.From
+	switch {
+	case m.From == t.ID && m.ReplyTo != "":
+		sub, other = "answered", m.To
+	case m.From == t.ID:
+		sub, other = "asked", m.To
+	case m.ReplyTo != "":
+		sub = "answer"
+	}
+	return timelineEntry(m.At, "agent", sub, other, m.Text, m.ID)
+}
+
+// eventEntry is a TicketEvent the Engine recorded as a timeline entry: a split/* one about the plan, a child/* one
+// about the child it names (its subject). ok is false for an event of a type it does not know.
+func eventEntry(ev *core.TicketEvent) (e *athenav1.TimelineEntry, ok bool) {
+	switch ev.Type {
+	case core.EventSplitDrafted, core.EventSplitApproved, core.EventSplitRejected, core.EventSplitFailed:
+		return timelineEntry(ev.At, "split", strings.TrimPrefix(ev.Type, "split/"), "", ev.Text, ""), true
+	case core.EventSplitOne:
+		return timelineEntry(ev.At, "split", "single", "", ev.Text, ""), true
+	case core.EventChildSpawned:
+		return timelineEntry(ev.At, "child", "spawned", ev.Ref, ev.Text, ev.Ref), true
+	case core.EventChildFailed:
+		return timelineEntry(ev.At, "child", "failed", ev.Ref, ev.Text, ev.Ref), true
+	case core.EventChildEnded:
+		// The outcome is ready, dropped, continued or stopped, each its own subkind.
+		return timelineEntry(ev.At, "child", ev.Outcome, ev.Ref, ev.Text, ev.Ref), true
+	}
+	return nil, false
 }
 
 func approvalView(a *core.Approval) *athenav1.ApprovalView {
@@ -453,8 +514,10 @@ func originEcho(t *core.Ticket, origin *core.Trigger) int {
 	return -1
 }
 
-// ticketTimeline lists what happened to a Ticket, oldest first, from the Ticket itself plus its origin Trigger and
-// its Approvals (the reads the caller makes: the pending one and the answered ones). A person's message that reached
+// ticketTimeline lists what happened to a Ticket, oldest first, from the Ticket itself (its recorded split and child
+// events too) plus its origin Trigger, its Approvals (the reads the caller makes: the pending one and the answered
+// ones) and the agent messages it sent or got. An Input that carried one of those messages is told by the message's
+// entry alone. A person's message that reached
 // the Ticket (the owner's reply or a person's on a Channel) is a reply; any other Input is an input. actors names the
 // GitHub login of a reply's Trigger, by Trigger id, where the caller knows it.
 //
@@ -464,7 +527,7 @@ func originEcho(t *core.Ticket, origin *core.Trigger) int {
 // holds reads only once applied, on the Assignment that continues the implementer's session, whose start is when an
 // Input first reached it (none before).
 func ticketTimeline(t *core.Ticket, origin *core.Trigger, pending *core.Approval, answered []core.Approval,
-	actors map[string]string) []*athenav1.TimelineEntry {
+	actors map[string]string, messages []core.AgentMessage) []*athenav1.TimelineEntry {
 	var out []*athenav1.TimelineEntry
 	if origin != nil {
 		out = append(out, timelineEntry(origin.At, "trigger", triggerSource(origin), "", origin.Text, origin.ID))
@@ -517,9 +580,19 @@ func ticketTimeline(t *core.Ticket, origin *core.Trigger, pending *core.Approval
 			out = append(out, withRuntime(timelineEntry(*a.EndedAt, "assignment", sub, subject, text, a.ID), a.Runtime))
 		}
 	}
+	told := make(map[string]bool, len(messages))
+	for i := range messages {
+		told[messages[i].ID] = true
+		out = append(out, agentEntry(t, &messages[i]))
+	}
+	for i := range t.Events {
+		if e, ok := eventEntry(&t.Events[i]); ok {
+			out = append(out, e)
+		}
+	}
 	echo := originEcho(t, origin)
 	for i, in := range t.Inputs {
-		if i == echo {
+		if i == echo || (in.Kind == core.InputAgent && told[in.MessageID]) {
 			continue
 		}
 		text := in.Text
@@ -609,10 +682,12 @@ func ticketReports(t *core.Ticket) []*athenav1.ReportView {
 	return out
 }
 
+// ticketDetail maps a Ticket in full; messages are its agent messages and maxChildren the current cap on a split.
 func ticketDetail(t *core.Ticket, st core.Stage, gitFolder func(string) bool, origin *core.Trigger, pending *core.Approval,
-	answered []core.Approval, actors map[string]string) *athenav1.TicketDetail {
-	d := &athenav1.TicketDetail{Summary: ticketSummary(t, st, gitFolder), Timeline: ticketTimeline(t, origin, pending, answered, actors),
-		Reports: ticketReports(t)}
+	answered []core.Approval, actors map[string]string, messages []core.AgentMessage, maxChildren int) *athenav1.TicketDetail {
+	d := &athenav1.TicketDetail{Summary: ticketSummary(t, st, gitFolder),
+		Timeline: ticketTimeline(t, origin, pending, answered, actors, messages), Reports: ticketReports(t),
+		Breakdown: breakdownView(t.Plan, maxChildren)}
 	for _, f := range t.Follows {
 		d.Threads = append(d.Threads, f.Thread)
 	}

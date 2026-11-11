@@ -262,6 +262,32 @@ func (s hubSource) Placement(t *core.Ticket) (string, string, string) {
 }
 
 // GitFolder reports whether dir has a .git entry, as the placeFacts pass last found it (see Repos).
+// AgentMessages returns the agent messages sent from or to a Ticket, oldest first.
+func (s hubSource) AgentMessages(ticketID string) ([]core.AgentMessage, error) {
+	var out []core.AgentMessage
+	err := s.d.st.Tx(func(tx *store.Tx) error {
+		list, err := tx.AgentMessagesOf(ticketID)
+		if err != nil {
+			return err
+		}
+		out = make([]core.AgentMessage, 0, len(list))
+		for _, m := range list {
+			out = append(out, *m)
+		}
+		return nil
+	})
+	return out, err
+}
+
+// SplitLimits are the current settings' limits of splitting, defaults applied; the defaults without a Policy cache.
+func (s hubSource) SplitLimits() core.SplitLimits {
+	if s.d.policy == nil {
+		return core.SplitLimits{}.WithDefaults()
+	}
+	cur, _ := s.d.policy.current()
+	return cur.SplitLimits()
+}
+
 func (s hubSource) GitFolder(dir string) bool { return s.d.facts.lookup(dir).git }
 
 // Trust classifies a Trigger's sender under the current Policy; there is none until settings are saved or checked.

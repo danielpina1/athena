@@ -2,6 +2,7 @@ syntax = "proto3";
 
 package athena.v1;
 
+import "athena/v1/state.proto";
 import "google/protobuf/timestamp.proto";
 
 option go_package = "github.com/danielpina1/athena/internal/pb/athenav1;athenav1";
@@ -42,6 +43,11 @@ message Command {
     CreateNodeToken create_node_token = 38;
     SetNodeDraining set_node_draining = 39;
     RevokeNode revoke_node = 40;
+    UpdateBreakdown update_breakdown = 41;
+    ApproveBreakdown approve_breakdown = 42;
+    RejectBreakdown reject_breakdown = 43;
+    Replan replan = 44;
+    ContinueWithout continue_without = 45;
   }
 }
 
@@ -57,6 +63,40 @@ message SubmitTask {
   optional bool review = 6;
   // node is a node id to run the task on; empty means any.
   string node = 7;
+  // plan_first holds the task while a planner drafts its split into child tickets, which the owner edits and approves
+  // (or runs it as one ticket). It needs a repository or a folder that is a git repository.
+  bool plan_first = 8;
+}
+
+// UpdateBreakdown replaces the sub-tasks of a plan-first Ticket's draft, when the draft is still at revision (the
+// BreakdownView revision the owner edited); a draft that changed meanwhile is refused.
+message UpdateBreakdown {
+  string ticket_id = 1;
+  uint32 revision = 2;
+  repeated SubTaskView tasks = 3;
+}
+
+// ApproveBreakdown splits a plan-first Ticket into its draft's sub-tasks, when the draft is still at revision. It is not
+// Sensitive: the children get the lead's Mandate and nothing more.
+message ApproveBreakdown {
+  string ticket_id = 1;
+  uint32 revision = 2;
+}
+
+// RejectBreakdown runs a plan-first Ticket as one ticket, from a draft or a failed plan.
+message RejectBreakdown {
+  string ticket_id = 1;
+}
+
+// Replan asks the planner again for a plan-first Ticket's split, from a draft or a failed plan.
+message Replan {
+  string ticket_id = 1;
+}
+
+// ContinueWithout ends an open child ticket (ticket_id is the child) so its lead and the dependents that waited for it
+// go on without it.
+message ContinueWithout {
+  string ticket_id = 1;
 }
 
 // RetryElsewhere retries a Ticket on a different node than the one it ran on.

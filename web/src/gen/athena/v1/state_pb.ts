@@ -12,7 +12,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file athena/v1/state.proto.
  */
 export const file_athena_v1_state: GenFile = /*@__PURE__*/
-  fileDesc("ChVhdGhlbmEvdjEvc3RhdGUucHJvdG8SCWF0aGVuYS52MSLoBAoIU25hcHNob3QSDgoGY3Vyc29yGAEgASgEEikKB3RpY2tldHMYAiADKAsyGC5hdGhlbmEudjEuVGlja2V0U3VtbWFyeRIqCglhcHByb3ZhbHMYAyADKAsyFy5hdGhlbmEudjEuQXBwcm92YWxWaWV3EigKCHRyaWdnZXJzGAQgAygLMhYuYXRoZW5hLnYxLlRyaWdnZXJWaWV3EiYKB3RocmVhZHMYBSADKAsyFS5hdGhlbmEudjEuVGhyZWFkVmlldxIqCglkZWNpc2lvbnMYBiADKAsyFy5hdGhlbmEudjEuRGVjaXNpb25WaWV3EiEKBmhlYWx0aBgIIAEoCzIRLmF0aGVuYS52MS5IZWFsdGgSJQoGcG9saWN5GAkgASgLMhUuYXRoZW5hLnYxLlBvbGljeVZpZXcSIgoFcmVwb3MYCiADKAsyEy5hdGhlbmEudjEuUmVwb1ZpZXcSNwoNbm90aWZpY2F0aW9ucxgLIAEoCzIgLmF0aGVuYS52MS5Ob3RpZmljYXRpb25QcmVmc1ZpZXcSJwoHcHJvbXB0cxgMIAEoCzIWLmF0aGVuYS52MS5Qcm9tcHRzVmlldxIjCgdjb250cm9sGA0gASgLMhIuYXRoZW5hLnYxLkNvbnRyb2wSJAoGb2ZmZXJzGA4gASgLMhQuYXRoZW5hLnYxLk9mZmVyTGlzdBIqCglwcm9wb3NhbHMYDyADKAsyFy5hdGhlbmEudjEuUHJvcG9zYWxWaWV3EiQKBW5vZGVzGBAgAygLMhUuYXRoZW5hLnYxLk5vZGVTdGF0dXNKBAgHEAhSBG5vZGUivwUKBURlbHRhEgsKA3NlcRgBIAEoBBIqCgZ0aWNrZXQYCiABKAsyGC5hdGhlbmEudjEuVGlja2V0U3VtbWFyeUgAEjAKDXRpY2tldF9kZXRhaWwYCyABKAsyFy5hdGhlbmEudjEuVGlja2V0RGV0YWlsSAASKwoIYXBwcm92YWwYDCABKAsyFy5hdGhlbmEudjEuQXBwcm92YWxWaWV3SAASKQoHdHJpZ2dlchgNIAEoCzIWLmF0aGVuYS52MS5UcmlnZ2VyVmlld0gAEicKBnRocmVhZBgOIAEoCzIVLmF0aGVuYS52MS5UaHJlYWRWaWV3SAASKwoIZGVjaXNpb24YDyABKAsyFy5hdGhlbmEudjEuRGVjaXNpb25WaWV3SAASJQoEbm9kZRgQIAEoCzIVLmF0aGVuYS52MS5Ob2RlU3RhdHVzSAASIwoGaGVhbHRoGBEgASgLMhEuYXRoZW5hLnYxLkhlYWx0aEgAEicKBnBvbGljeRgSIAEoCzIVLmF0aGVuYS52MS5Qb2xpY3lWaWV3SAASJAoFcmVwb3MYEyABKAsyEy5hdGhlbmEudjEuUmVwb0xpc3RIABI5Cg1ub3RpZmljYXRpb25zGBQgASgLMiAuYXRoZW5hLnYxLk5vdGlmaWNhdGlvblByZWZzVmlld0gAEikKB3Byb21wdHMYFSABKAsyFi5hdGhlbmEudjEuUHJvbXB0c1ZpZXdIABIlCgdjb250cm9sGBYgASgLMhIuYXRoZW5hLnYxLkNvbnRyb2xIABImCgZvZmZlcnMYFyABKAsyFC5hdGhlbmEudjEuT2ZmZXJMaXN0SAASKwoIcHJvcG9zYWwYGCABKAsyFy5hdGhlbmEudjEuUHJvcG9zYWxWaWV3SAASFgoMbm9kZV9yZW1vdmVkGBkgASgJSABCCAoGY2hhbmdlIlAKB0NvbnRyb2wSDgoGcGF1c2VkGAEgASgIEikKBXNpbmNlGAIgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIKCgJieRgDIAEoCSJbCg5Qcm9tb3Rpb25PZmZlchINCgVjbGFzcxgBIAEoCRIMCgR0b29sGAIgASgJEgwKBHJ1bGUYAyABKAkSDAoEcmVwbxgEIAEoCRIQCghhcHByb3ZlZBgFIAEoDSI2CglPZmZlckxpc3QSKQoGb2ZmZXJzGAEgAygLMhkuYXRoZW5hLnYxLlByb21vdGlvbk9mZmVyIq8ECg1UaWNrZXRTdW1tYXJ5EgoKAmlkGAEgASgJEg0KBXRpdGxlGAIgASgJEg0KBXN0YWdlGAMgASgJEg4KBmFjdGlvbhgEIAEoCRIMCgRyZXBvGAUgASgJEgsKA2RpchgGIAEoCRINCgVtb2RlbBgHIAEoCRIuCgpjcmVhdGVkX2F0GAggASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIuCgp1cGRhdGVkX2F0GAkgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIsCghlbmRlZF9hdBgKIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASDwoHb3V0Y29tZRgLIAEoCRIRCgluZWVkc195b3UYDCABKAgSEQoJY2FuX3JldHJ5GA0gASgIEhsKE3BlbmRpbmdfYXBwcm92YWxfaWQYDiABKAkSDgoGcHJfdXJsGA8gASgJEhoKEmF0dGVudGlvbl9xdWVzdGlvbhgQIAEoCRIOCgZicmFuY2gYESABKAkSDwoHcnVudGltZRgSIAEoCRIWCg5ydW50aW1lX2Nob2ljZRgTIAEoCRIPCgdwYWlyaW5nGBQgASgJEhUKDXJldmlld19yb3VuZHMYFSABKA0SDQoFdHJ1c3QYFiABKAkSDwoHbm9kZV9pZBgXIAEoCRIRCglub2RlX25hbWUYGCABKAkSGAoQd2FpdGluZ19mb3Jfbm9kZRgZIAEoCSK4AQoMVGlja2V0RGV0YWlsEikKB3N1bW1hcnkYASABKAsyGC5hdGhlbmEudjEuVGlja2V0U3VtbWFyeRIqCgh0aW1lbGluZRgCIAMoCzIYLmF0aGVuYS52MS5UaW1lbGluZUVudHJ5Eg8KB3RocmVhZHMYAyADKAkSGAoQdGltZWxpbmVfdHJpbW1lZBgEIAEoCBImCgdyZXBvcnRzGAUgAygLMhUuYXRoZW5hLnYxLlJlcG9ydFZpZXcilgEKDVRpbWVsaW5lRW50cnkSJgoCYXQYASABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEgwKBGtpbmQYAiABKAkSDAoEdGV4dBgDIAEoCRIOCgZyZWZfaWQYBCABKAkSDwoHc3Via2luZBgFIAEoCRIPCgdzdWJqZWN0GAYgASgJEg8KB3J1bnRpbWUYByABKAkiiwEKClJlcG9ydFZpZXcSFQoNYXNzaWdubWVudF9pZBgBIAEoCRINCgVzdGF0ZRgCIAEoCRIPCgdzdW1tYXJ5GAMgASgJEgwKBHB1bGwYBCABKA0SEAoIcXVlc3Rpb24YBSABKAkSJgoCYXQYBiABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wIuIBCgxBcHByb3ZhbFZpZXcSCgoCaWQYASABKAkSEQoJdGlja2V0X2lkGAIgASgJEgwKBHRvb2wYAyABKAkSDwoHc3VtbWFyeRgEIAEoCRIMCgRydWxlGAUgASgJEhYKDmlucHV0X3JlZGFjdGVkGAYgASgJEg0KBXN0YXRlGAcgASgJEi4KCmNyZWF0ZWRfYXQYCCABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEi8KC2Fuc3dlcmVkX2F0GAkgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcCK/AQoLVHJpZ2dlclZpZXcSCgoCaWQYASABKAkSJgoCYXQYAiABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEg4KBnNvdXJjZRgDIAEoCRINCgVhY3RvchgEIAEoCRIMCgRraW5kGAUgASgJEhEKCWFkZHJlc3NlZBgGIAEoCRIOCgZ0aHJlYWQYByABKAkSDAoEdGV4dBgIIAEoCRIPCgdvdXRjb21lGAkgASgJEg0KBXRydXN0GAogASgJIoABCgpUaHJlYWRWaWV3EgsKA2tleRgBIAEoCRIOCgZxdWV1ZWQYAiABKA0SIQoEZXZhbBgDIAEoCzITLmF0aGVuYS52MS5FdmFsVmlldxIPCgd0aWNrZXRzGAQgAygJEhEKCWRlY2lzaW9ucxgFIAEoDRIOCgZjbG9zZWQYBiABKAkiigEKCEV2YWxWaWV3EgoKAmlkGAEgASgJEhAKCHN0cmVuZ3RoGAIgASgJEi4KCnN0YXJ0ZWRfYXQYAyABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEjAKDGRlbGl2ZXJlZF9hdBgEIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXAi8QEKDERlY2lzaW9uVmlldxIKCgJpZBgBIAEoCRImCgJhdBgCIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASDAoEa2luZBgDIAEoCRIOCgZ0aHJlYWQYBCABKAkSEQoJdGlja2V0X2lkGAUgASgJEhAKCHRyaWdnZXJzGAYgAygJEiIKB3JlYXNvbnMYByADKAsyES5hdGhlbmEudjEuUmVhc29uEhQKDHdvdWxkX2FjY2VwdBgIIAEoCBIwCgxkaXNtaXNzZWRfYXQYCSABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wInQKBlJlYXNvbhIMCgRjb2RlGAEgASgJEi0KBnZhbHVlcxgCIAMoCzIdLmF0aGVuYS52MS5SZWFzb24uVmFsdWVzRW50cnkaLQoLVmFsdWVzRW50cnkSCwoDa2V5GAEgASgJEg0KBXZhbHVlGAIgASgJOgI4ASKwAgoKTm9kZVN0YXR1cxIMCgRuYW1lGAEgASgJEg0KBXNsb3RzGAIgASgNEhQKDHNsb3RzX2luX3VzZRgDIAEoDRIXCg9saXZlX3RpY2tldF9pZHMYBCADKAkSDgoGcXVldWVkGAUgASgNEhYKDmNsYXVkZV92ZXJzaW9uGAYgASgJEioKCHJ1bnRpbWVzGAcgAygLMhguYXRoZW5hLnYxLlJ1bnRpbWVTdGF0dXMSCgoCaWQYCCABKAkSDQoFc3RhdGUYCSABKAkSLQoJbGFzdF9zZWVuGAogASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIKCgJvcxgLIAEoCRIMCgRhcmNoGAwgASgJEg0KBWxvY2FsGA0gASgIEg8KB3ZlcnNpb24YDiABKAkiZwoLUXVvdGFXaW5kb3cSDAoEbmFtZRgBIAEoCRIMCgR1c2VkGAIgASgCEi0KCXJlc2V0c19hdBgDIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASDQoFc3RhbGUYBCABKAgirAIKDVJ1bnRpbWVTdGF0dXMSDAoEbmFtZRgBIAEoCRIPCgd2ZXJzaW9uGAIgASgJEg0KBXJlYWR5GAMgASgIEg4KBnRlc3RlZBgEIAEoCBILCgN3aHkYBSABKAkSJwoHd2luZG93cxgGIAMoCzIWLmF0aGVuYS52MS5RdW90YVdpbmRvdxIxCg1saW1pdGVkX3VudGlsGAcgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIrCgdyZWFkX2F0GAggASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIQCghtZWFzdXJlZBgJIAEoCBIMCgRsaXZlGAogASgNEicKBm1vZGVscxgLIAMoCzIXLmF0aGVuYS52MS5SdW50aW1lTW9kZWwiOQoMUnVudGltZU1vZGVsEgoKAmlkGAEgASgJEgwKBG5hbWUYAiABKAkSDwoHZGVmYXVsdBgDIAEoCCIuCgZIZWFsdGgSJAoFaXRlbXMYASADKAsyFS5hdGhlbmEudjEuSGVhbHRoSXRlbSJiCgpIZWFsdGhJdGVtEgwKBG5hbWUYASABKAkSCgoCb2sYAiABKAgSDwoHbWVzc2FnZRgDIAEoCRIpCgVzaW5jZRgEIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXAiRgoKUG9saWN5VmlldxIQCghyZXZpc2lvbhgBIAEoDRIPCgd2ZXJzaW9uGAIgASgJEhUKDXNldHRpbmdzX2pzb24YAyABKAkilQEKCFJlcG9WaWV3EgwKBG5hbWUYASABKAkSDAoEa2luZBgCIAEoCRIwCgxsYXN0X3VzZWRfYXQYAyABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEgwKBG93ZWQYBCABKAUSDwoHY2VpbGluZxgFIAEoBRIOCgZicmFrZWQYBiABKAUSDAoEbW9kZRgHIAEoCSK4AQoMUHJvcG9zYWxWaWV3EgoKAmlkGAEgASgJEhEKCXRpY2tldF9pZBgCIAEoCRIMCgRyZXBvGAMgASgJEgwKBGtpbmQYBCABKAkSDQoFc3RhdGUYBSABKAkSDwoHc3VtbWFyeRgGIAEoCRIOCgZkZXRhaWwYByABKAkSLgoKY3JlYXRlZF9hdBgIIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASDQoFZXJyb3IYCSABKAkiLgoIUmVwb0xpc3QSIgoFcmVwb3MYASADKAsyEy5hdGhlbmEudjEuUmVwb1ZpZXciNQoVTm90aWZpY2F0aW9uUHJlZnNWaWV3Eg0KBWtpbmRzGAEgAygJEg0KBW11dGVkGAIgAygJIkkKC1Byb21wdHNWaWV3EhAKCHJldmlzaW9uGAEgASgNEigKBXBhcnRzGAIgAygLMhkuYXRoZW5hLnYxLlByb21wdFBhcnRWaWV3IksKDlByb21wdFBhcnRWaWV3EgwKBG5hbWUYASABKAkSEgoKb3ZlcnJpZGRlbhgCIAEoCBIXCg9kZWZhdWx0X3VwZGF0ZWQYAyABKAhCPVo7Z2l0aHViLmNvbS9kYW5pZWxwaW5hMS9hdGhlbmEvaW50ZXJuYWwvcGIvYXRoZW5hdjE7YXRoZW5hdjFiBnByb3RvMw", [file_google_protobuf_timestamp]);
+  fileDesc("ChVhdGhlbmEvdjEvc3RhdGUucHJvdG8SCWF0aGVuYS52MSLoBAoIU25hcHNob3QSDgoGY3Vyc29yGAEgASgEEikKB3RpY2tldHMYAiADKAsyGC5hdGhlbmEudjEuVGlja2V0U3VtbWFyeRIqCglhcHByb3ZhbHMYAyADKAsyFy5hdGhlbmEudjEuQXBwcm92YWxWaWV3EigKCHRyaWdnZXJzGAQgAygLMhYuYXRoZW5hLnYxLlRyaWdnZXJWaWV3EiYKB3RocmVhZHMYBSADKAsyFS5hdGhlbmEudjEuVGhyZWFkVmlldxIqCglkZWNpc2lvbnMYBiADKAsyFy5hdGhlbmEudjEuRGVjaXNpb25WaWV3EiEKBmhlYWx0aBgIIAEoCzIRLmF0aGVuYS52MS5IZWFsdGgSJQoGcG9saWN5GAkgASgLMhUuYXRoZW5hLnYxLlBvbGljeVZpZXcSIgoFcmVwb3MYCiADKAsyEy5hdGhlbmEudjEuUmVwb1ZpZXcSNwoNbm90aWZpY2F0aW9ucxgLIAEoCzIgLmF0aGVuYS52MS5Ob3RpZmljYXRpb25QcmVmc1ZpZXcSJwoHcHJvbXB0cxgMIAEoCzIWLmF0aGVuYS52MS5Qcm9tcHRzVmlldxIjCgdjb250cm9sGA0gASgLMhIuYXRoZW5hLnYxLkNvbnRyb2wSJAoGb2ZmZXJzGA4gASgLMhQuYXRoZW5hLnYxLk9mZmVyTGlzdBIqCglwcm9wb3NhbHMYDyADKAsyFy5hdGhlbmEudjEuUHJvcG9zYWxWaWV3EiQKBW5vZGVzGBAgAygLMhUuYXRoZW5hLnYxLk5vZGVTdGF0dXNKBAgHEAhSBG5vZGUivwUKBURlbHRhEgsKA3NlcRgBIAEoBBIqCgZ0aWNrZXQYCiABKAsyGC5hdGhlbmEudjEuVGlja2V0U3VtbWFyeUgAEjAKDXRpY2tldF9kZXRhaWwYCyABKAsyFy5hdGhlbmEudjEuVGlja2V0RGV0YWlsSAASKwoIYXBwcm92YWwYDCABKAsyFy5hdGhlbmEudjEuQXBwcm92YWxWaWV3SAASKQoHdHJpZ2dlchgNIAEoCzIWLmF0aGVuYS52MS5UcmlnZ2VyVmlld0gAEicKBnRocmVhZBgOIAEoCzIVLmF0aGVuYS52MS5UaHJlYWRWaWV3SAASKwoIZGVjaXNpb24YDyABKAsyFy5hdGhlbmEudjEuRGVjaXNpb25WaWV3SAASJQoEbm9kZRgQIAEoCzIVLmF0aGVuYS52MS5Ob2RlU3RhdHVzSAASIwoGaGVhbHRoGBEgASgLMhEuYXRoZW5hLnYxLkhlYWx0aEgAEicKBnBvbGljeRgSIAEoCzIVLmF0aGVuYS52MS5Qb2xpY3lWaWV3SAASJAoFcmVwb3MYEyABKAsyEy5hdGhlbmEudjEuUmVwb0xpc3RIABI5Cg1ub3RpZmljYXRpb25zGBQgASgLMiAuYXRoZW5hLnYxLk5vdGlmaWNhdGlvblByZWZzVmlld0gAEikKB3Byb21wdHMYFSABKAsyFi5hdGhlbmEudjEuUHJvbXB0c1ZpZXdIABIlCgdjb250cm9sGBYgASgLMhIuYXRoZW5hLnYxLkNvbnRyb2xIABImCgZvZmZlcnMYFyABKAsyFC5hdGhlbmEudjEuT2ZmZXJMaXN0SAASKwoIcHJvcG9zYWwYGCABKAsyFy5hdGhlbmEudjEuUHJvcG9zYWxWaWV3SAASFgoMbm9kZV9yZW1vdmVkGBkgASgJSABCCAoGY2hhbmdlIlAKB0NvbnRyb2wSDgoGcGF1c2VkGAEgASgIEikKBXNpbmNlGAIgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIKCgJieRgDIAEoCSJbCg5Qcm9tb3Rpb25PZmZlchINCgVjbGFzcxgBIAEoCRIMCgR0b29sGAIgASgJEgwKBHJ1bGUYAyABKAkSDAoEcmVwbxgEIAEoCRIQCghhcHByb3ZlZBgFIAEoDSI2CglPZmZlckxpc3QSKQoGb2ZmZXJzGAEgAygLMhkuYXRoZW5hLnYxLlByb21vdGlvbk9mZmVyIq4FCg1UaWNrZXRTdW1tYXJ5EgoKAmlkGAEgASgJEg0KBXRpdGxlGAIgASgJEg0KBXN0YWdlGAMgASgJEg4KBmFjdGlvbhgEIAEoCRIMCgRyZXBvGAUgASgJEgsKA2RpchgGIAEoCRINCgVtb2RlbBgHIAEoCRIuCgpjcmVhdGVkX2F0GAggASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIuCgp1cGRhdGVkX2F0GAkgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIsCghlbmRlZF9hdBgKIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASDwoHb3V0Y29tZRgLIAEoCRIRCgluZWVkc195b3UYDCABKAgSEQoJY2FuX3JldHJ5GA0gASgIEhsKE3BlbmRpbmdfYXBwcm92YWxfaWQYDiABKAkSDgoGcHJfdXJsGA8gASgJEhoKEmF0dGVudGlvbl9xdWVzdGlvbhgQIAEoCRIOCgZicmFuY2gYESABKAkSDwoHcnVudGltZRgSIAEoCRIWCg5ydW50aW1lX2Nob2ljZRgTIAEoCRIPCgdwYWlyaW5nGBQgASgJEhUKDXJldmlld19yb3VuZHMYFSABKA0SDQoFdHJ1c3QYFiABKAkSDwoHbm9kZV9pZBgXIAEoCRIRCglub2RlX25hbWUYGCABKAkSGAoQd2FpdGluZ19mb3Jfbm9kZRgZIAEoCRIMCgRsZWFkGBogASgJEhAKCGNoaWxkcmVuGBsgAygJEgwKBGRlcHMYHCADKAkSDwoHd2FpdGluZxgdIAMoCRISCgpwbGFuX3N0YXRlGB4gASgJEhcKD2F0dGVudGlvbl9jaGlsZBgfIAEoCRIRCglzcGxpdF9rZXkYICABKAki5QEKDFRpY2tldERldGFpbBIpCgdzdW1tYXJ5GAEgASgLMhguYXRoZW5hLnYxLlRpY2tldFN1bW1hcnkSKgoIdGltZWxpbmUYAiADKAsyGC5hdGhlbmEudjEuVGltZWxpbmVFbnRyeRIPCgd0aHJlYWRzGAMgAygJEhgKEHRpbWVsaW5lX3RyaW1tZWQYBCABKAgSJgoHcmVwb3J0cxgFIAMoCzIVLmF0aGVuYS52MS5SZXBvcnRWaWV3EisKCWJyZWFrZG93bhgGIAEoCzIYLmF0aGVuYS52MS5CcmVha2Rvd25WaWV3IooBCgtTdWJUYXNrVmlldxILCgNrZXkYASABKAkSDQoFdGl0bGUYAiABKAkSFAoMaW5zdHJ1Y3Rpb25zGAMgASgJEg0KBWFyZWFzGAQgAygJEgwKBGRlcHMYBSADKAkSDwoHcnVudGltZRgGIAEoCRIMCgRub2RlGAcgASgJEg0KBW1vZGVsGAggASgJIjIKC092ZXJsYXBWaWV3EgkKAWEYASABKAkSCQoBYhgCIAEoCRINCgVhcmVhcxgDIAMoCSK0AQoNQnJlYWtkb3duVmlldxIQCghyZXZpc2lvbhgBIAEoDRIlCgV0YXNrcxgCIAMoCzIWLmF0aGVuYS52MS5TdWJUYXNrVmlldxIoCghvdmVybGFwcxgDIAMoCzIWLmF0aGVuYS52MS5PdmVybGFwVmlldxIMCgRub3RlGAQgASgJEg0KBXN0YXRlGAUgASgJEg0KBWVycm9yGAYgASgJEhQKDG1heF9jaGlsZHJlbhgHIAEoDSKWAQoNVGltZWxpbmVFbnRyeRImCgJhdBgBIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASDAoEa2luZBgCIAEoCRIMCgR0ZXh0GAMgASgJEg4KBnJlZl9pZBgEIAEoCRIPCgdzdWJraW5kGAUgASgJEg8KB3N1YmplY3QYBiABKAkSDwoHcnVudGltZRgHIAEoCSKLAQoKUmVwb3J0VmlldxIVCg1hc3NpZ25tZW50X2lkGAEgASgJEg0KBXN0YXRlGAIgASgJEg8KB3N1bW1hcnkYAyABKAkSDAoEcHVsbBgEIAEoDRIQCghxdWVzdGlvbhgFIAEoCRImCgJhdBgGIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXAi4gEKDEFwcHJvdmFsVmlldxIKCgJpZBgBIAEoCRIRCgl0aWNrZXRfaWQYAiABKAkSDAoEdG9vbBgDIAEoCRIPCgdzdW1tYXJ5GAQgASgJEgwKBHJ1bGUYBSABKAkSFgoOaW5wdXRfcmVkYWN0ZWQYBiABKAkSDQoFc3RhdGUYByABKAkSLgoKY3JlYXRlZF9hdBgIIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASLwoLYW5zd2VyZWRfYXQYCSABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wIr8BCgtUcmlnZ2VyVmlldxIKCgJpZBgBIAEoCRImCgJhdBgCIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASDgoGc291cmNlGAMgASgJEg0KBWFjdG9yGAQgASgJEgwKBGtpbmQYBSABKAkSEQoJYWRkcmVzc2VkGAYgASgJEg4KBnRocmVhZBgHIAEoCRIMCgR0ZXh0GAggASgJEg8KB291dGNvbWUYCSABKAkSDQoFdHJ1c3QYCiABKAkigAEKClRocmVhZFZpZXcSCwoDa2V5GAEgASgJEg4KBnF1ZXVlZBgCIAEoDRIhCgRldmFsGAMgASgLMhMuYXRoZW5hLnYxLkV2YWxWaWV3Eg8KB3RpY2tldHMYBCADKAkSEQoJZGVjaXNpb25zGAUgASgNEg4KBmNsb3NlZBgGIAEoCSKKAQoIRXZhbFZpZXcSCgoCaWQYASABKAkSEAoIc3RyZW5ndGgYAiABKAkSLgoKc3RhcnRlZF9hdBgDIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASMAoMZGVsaXZlcmVkX2F0GAQgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcCLxAQoMRGVjaXNpb25WaWV3EgoKAmlkGAEgASgJEiYKAmF0GAIgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIMCgRraW5kGAMgASgJEg4KBnRocmVhZBgEIAEoCRIRCgl0aWNrZXRfaWQYBSABKAkSEAoIdHJpZ2dlcnMYBiADKAkSIgoHcmVhc29ucxgHIAMoCzIRLmF0aGVuYS52MS5SZWFzb24SFAoMd291bGRfYWNjZXB0GAggASgIEjAKDGRpc21pc3NlZF9hdBgJIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXAidAoGUmVhc29uEgwKBGNvZGUYASABKAkSLQoGdmFsdWVzGAIgAygLMh0uYXRoZW5hLnYxLlJlYXNvbi5WYWx1ZXNFbnRyeRotCgtWYWx1ZXNFbnRyeRILCgNrZXkYASABKAkSDQoFdmFsdWUYAiABKAk6AjgBIrACCgpOb2RlU3RhdHVzEgwKBG5hbWUYASABKAkSDQoFc2xvdHMYAiABKA0SFAoMc2xvdHNfaW5fdXNlGAMgASgNEhcKD2xpdmVfdGlja2V0X2lkcxgEIAMoCRIOCgZxdWV1ZWQYBSABKA0SFgoOY2xhdWRlX3ZlcnNpb24YBiABKAkSKgoIcnVudGltZXMYByADKAsyGC5hdGhlbmEudjEuUnVudGltZVN0YXR1cxIKCgJpZBgIIAEoCRINCgVzdGF0ZRgJIAEoCRItCglsYXN0X3NlZW4YCiABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEgoKAm9zGAsgASgJEgwKBGFyY2gYDCABKAkSDQoFbG9jYWwYDSABKAgSDwoHdmVyc2lvbhgOIAEoCSJnCgtRdW90YVdpbmRvdxIMCgRuYW1lGAEgASgJEgwKBHVzZWQYAiABKAISLQoJcmVzZXRzX2F0GAMgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBINCgVzdGFsZRgEIAEoCCKsAgoNUnVudGltZVN0YXR1cxIMCgRuYW1lGAEgASgJEg8KB3ZlcnNpb24YAiABKAkSDQoFcmVhZHkYAyABKAgSDgoGdGVzdGVkGAQgASgIEgsKA3doeRgFIAEoCRInCgd3aW5kb3dzGAYgAygLMhYuYXRoZW5hLnYxLlF1b3RhV2luZG93EjEKDWxpbWl0ZWRfdW50aWwYByABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEisKB3JlYWRfYXQYCCABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEhAKCG1lYXN1cmVkGAkgASgIEgwKBGxpdmUYCiABKA0SJwoGbW9kZWxzGAsgAygLMhcuYXRoZW5hLnYxLlJ1bnRpbWVNb2RlbCI5CgxSdW50aW1lTW9kZWwSCgoCaWQYASABKAkSDAoEbmFtZRgCIAEoCRIPCgdkZWZhdWx0GAMgASgIIi4KBkhlYWx0aBIkCgVpdGVtcxgBIAMoCzIVLmF0aGVuYS52MS5IZWFsdGhJdGVtImIKCkhlYWx0aEl0ZW0SDAoEbmFtZRgBIAEoCRIKCgJvaxgCIAEoCBIPCgdtZXNzYWdlGAMgASgJEikKBXNpbmNlGAQgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcCJGCgpQb2xpY3lWaWV3EhAKCHJldmlzaW9uGAEgASgNEg8KB3ZlcnNpb24YAiABKAkSFQoNc2V0dGluZ3NfanNvbhgDIAEoCSKVAQoIUmVwb1ZpZXcSDAoEbmFtZRgBIAEoCRIMCgRraW5kGAIgASgJEjAKDGxhc3RfdXNlZF9hdBgDIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASDAoEb3dlZBgEIAEoBRIPCgdjZWlsaW5nGAUgASgFEg4KBmJyYWtlZBgGIAEoBRIMCgRtb2RlGAcgASgJIrgBCgxQcm9wb3NhbFZpZXcSCgoCaWQYASABKAkSEQoJdGlja2V0X2lkGAIgASgJEgwKBHJlcG8YAyABKAkSDAoEa2luZBgEIAEoCRINCgVzdGF0ZRgFIAEoCRIPCgdzdW1tYXJ5GAYgASgJEg4KBmRldGFpbBgHIAEoCRIuCgpjcmVhdGVkX2F0GAggASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBINCgVlcnJvchgJIAEoCSIuCghSZXBvTGlzdBIiCgVyZXBvcxgBIAMoCzITLmF0aGVuYS52MS5SZXBvVmlldyI1ChVOb3RpZmljYXRpb25QcmVmc1ZpZXcSDQoFa2luZHMYASADKAkSDQoFbXV0ZWQYAiADKAkiSQoLUHJvbXB0c1ZpZXcSEAoIcmV2aXNpb24YASABKA0SKAoFcGFydHMYAiADKAsyGS5hdGhlbmEudjEuUHJvbXB0UGFydFZpZXciSwoOUHJvbXB0UGFydFZpZXcSDAoEbmFtZRgBIAEoCRISCgpvdmVycmlkZGVuGAIgASgIEhcKD2RlZmF1bHRfdXBkYXRlZBgDIAEoCEI9WjtnaXRodWIuY29tL2RhbmllbHBpbmExL2F0aGVuYS9pbnRlcm5hbC9wYi9hdGhlbmF2MTthdGhlbmF2MWIGcHJvdG8z", [file_google_protobuf_timestamp]);
 
 /**
  * @generated from message athena.v1.Snapshot
@@ -474,6 +474,57 @@ export type TicketSummary = Message<"athena.v1.TicketSummary"> & {
    * @generated from field: string waiting_for_node = 25;
    */
   waitingForNode: string;
+
+  /**
+   * lead is the Ticket this one is a child of; empty for a Ticket that is not a child.
+   *
+   * @generated from field: string lead = 26;
+   */
+  lead: string;
+
+  /**
+   * children are the ids of every child ticket split off this one, ended ones included.
+   *
+   * @generated from field: repeated string children = 27;
+   */
+  children: string[];
+
+  /**
+   * deps are the ids of the sibling tickets (or, for a lead, the children) that must end before this one starts.
+   *
+   * @generated from field: repeated string deps = 28;
+   */
+  deps: string[];
+
+  /**
+   * waiting are the deps not yet ended; while any is, the Ticket has not started.
+   *
+   * @generated from field: repeated string waiting = 29;
+   */
+  waiting: string[];
+
+  /**
+   * plan_state is where a plan-first Ticket's split stands: planning, draft, failed, approved or rejected; empty for a
+   * Ticket not planned first.
+   *
+   * @generated from field: string plan_state = 30;
+   */
+  planState: string;
+
+  /**
+   * attention_child is the child ticket whose failure needs the owner, on its lead; empty when none does.
+   *
+   * @generated from field: string attention_child = 31;
+   */
+  attentionChild: string;
+
+  /**
+   * split_key is the sub-task key a child was made from (the key its siblings' deps name); empty for a Ticket that is
+   * not a child.
+   *
+   * @generated from field: string split_key = 32;
+   */
+  splitKey: string;
 };
 
 /**
@@ -515,6 +566,13 @@ export type TicketDetail = Message<"athena.v1.TicketDetail"> & {
    * @generated from field: repeated athena.v1.ReportView reports = 5;
    */
   reports: ReportView[];
+
+  /**
+   * breakdown is a plan-first Ticket's split plan; unset for a Ticket not planned first.
+   *
+   * @generated from field: athena.v1.BreakdownView breakdown = 6;
+   */
+  breakdown?: BreakdownView | undefined;
 };
 
 /**
@@ -523,6 +581,154 @@ export type TicketDetail = Message<"athena.v1.TicketDetail"> & {
  */
 export const TicketDetailSchema: GenMessage<TicketDetail> = /*@__PURE__*/
   messageDesc(file_athena_v1_state, 6);
+
+/**
+ * SubTaskView is one sub-task of a split: a child ticket to be.
+ *
+ * @generated from message athena.v1.SubTaskView
+ */
+export type SubTaskView = Message<"athena.v1.SubTaskView"> & {
+  /**
+   * key names the sub-task within its split (a-z, 0-9 and -); deps name other sub-tasks by key.
+   *
+   * @generated from field: string key = 1;
+   */
+  key: string;
+
+  /**
+   * @generated from field: string title = 2;
+   */
+  title: string;
+
+  /**
+   * @generated from field: string instructions = 3;
+   */
+  instructions: string;
+
+  /**
+   * areas are the paths the sub-task expects to touch.
+   *
+   * @generated from field: repeated string areas = 4;
+   */
+  areas: string[];
+
+  /**
+   * @generated from field: repeated string deps = 5;
+   */
+  deps: string[];
+
+  /**
+   * runtime, node and model are optional hints: claude, codex or auto; a node's name or id; a model.
+   *
+   * @generated from field: string runtime = 6;
+   */
+  runtime: string;
+
+  /**
+   * @generated from field: string node = 7;
+   */
+  node: string;
+
+  /**
+   * @generated from field: string model = 8;
+   */
+  model: string;
+};
+
+/**
+ * Describes the message athena.v1.SubTaskView.
+ * Use `create(SubTaskViewSchema)` to create a new message.
+ */
+export const SubTaskViewSchema: GenMessage<SubTaskView> = /*@__PURE__*/
+  messageDesc(file_athena_v1_state, 7);
+
+/**
+ * OverlapView names two sub-tasks, by key, whose areas overlap, and the areas they share.
+ *
+ * @generated from message athena.v1.OverlapView
+ */
+export type OverlapView = Message<"athena.v1.OverlapView"> & {
+  /**
+   * @generated from field: string a = 1;
+   */
+  a: string;
+
+  /**
+   * @generated from field: string b = 2;
+   */
+  b: string;
+
+  /**
+   * @generated from field: repeated string areas = 3;
+   */
+  areas: string[];
+};
+
+/**
+ * Describes the message athena.v1.OverlapView.
+ * Use `create(OverlapViewSchema)` to create a new message.
+ */
+export const OverlapViewSchema: GenMessage<OverlapView> = /*@__PURE__*/
+  messageDesc(file_athena_v1_state, 8);
+
+/**
+ * BreakdownView is a plan-first Ticket's split plan.
+ *
+ * @generated from message athena.v1.BreakdownView
+ */
+export type BreakdownView = Message<"athena.v1.BreakdownView"> & {
+  /**
+   * revision is the draft's; an UpdateBreakdown or ApproveBreakdown names it, and is refused when it changed meanwhile.
+   *
+   * @generated from field: uint32 revision = 1;
+   */
+  revision: number;
+
+  /**
+   * @generated from field: repeated athena.v1.SubTaskView tasks = 2;
+   */
+  tasks: SubTaskView[];
+
+  /**
+   * @generated from field: repeated athena.v1.OverlapView overlaps = 3;
+   */
+  overlaps: OverlapView[];
+
+  /**
+   * note is the planner's, or why the plan runs as one ticket.
+   *
+   * @generated from field: string note = 4;
+   */
+  note: string;
+
+  /**
+   * state is planning, draft, failed, approved or rejected.
+   *
+   * @generated from field: string state = 5;
+   */
+  state: string;
+
+  /**
+   * error is why the plan failed, set when state is failed.
+   *
+   * @generated from field: string error = 6;
+   */
+  error: string;
+
+  /**
+   * max_children is how many sub-tasks a split may have, from the current Policy.
+   *
+   * @generated from field: uint32 max_children = 7;
+   */
+  maxChildren: number;
+};
+
+/**
+ * Describes the message athena.v1.BreakdownView.
+ * Use `create(BreakdownViewSchema)` to create a new message.
+ */
+export const BreakdownViewSchema: GenMessage<BreakdownView> = /*@__PURE__*/
+  messageDesc(file_athena_v1_state, 9);
 
 /**
  * @generated from message athena.v1.TimelineEntry
@@ -534,7 +740,7 @@ export type TimelineEntry = Message<"athena.v1.TimelineEntry"> & {
   at?: Timestamp | undefined;
 
   /**
-   * kind is trigger, decision, input, report, assignment, review, approval or reply.
+   * kind is trigger, decision, input, report, assignment, review, approval, reply, agent, child or split.
    *
    * @generated from field: string kind = 2;
    */
@@ -567,7 +773,13 @@ export type TimelineEntry = Message<"athena.v1.TimelineEntry"> & {
    *   input: trigger (a message from no person), text, note, resumed, context (seen on a Thread the Ticket only
    *     follows) or receipt (Athena's own acknowledgement on GitHub);
    *   reply: owner (from the dashboard) or github;
-   *   approval: pending, approved, denied or expired.
+   *   approval: pending, approved, denied or expired;
+   *   agent: a message between agents, subject the other Ticket: asked (this Ticket asked it), received (it was
+   *     asked), answered (this Ticket answered) or answer (it got an answer);
+   *   child: about a child ticket, subject the child: spawned (text its title), ready, failed (text why), dropped (it
+   *     found nothing to do), continued (the owner went on without it) or stopped;
+   *   split: about the Ticket's split plan: drafted, approved (text the children), rejected (run as one ticket), failed
+   *     (text why) or single (the planner found nothing to split; text the note).
    * Empty from an older server.
    *
    * @generated from field: string subkind = 5;
@@ -576,7 +788,8 @@ export type TimelineEntry = Message<"athena.v1.TimelineEntry"> & {
 
   /**
    * subject is what the entry is about, short: an Approval's tool and command (Bash: npm test), an Assignment's
-   * model, a Report's pull request (PR #12), or the GitHub login of a reply.
+   * model, a Report's pull request (PR #12), the GitHub login of a reply, or the other Ticket of an agent or child
+   * entry.
    *
    * @generated from field: string subject = 6;
    */
@@ -597,7 +810,7 @@ export type TimelineEntry = Message<"athena.v1.TimelineEntry"> & {
  * Use `create(TimelineEntrySchema)` to create a new message.
  */
 export const TimelineEntrySchema: GenMessage<TimelineEntry> = /*@__PURE__*/
-  messageDesc(file_athena_v1_state, 7);
+  messageDesc(file_athena_v1_state, 10);
 
 /**
  * ReportView is one Report in full.
@@ -649,7 +862,7 @@ export type ReportView = Message<"athena.v1.ReportView"> & {
  * Use `create(ReportViewSchema)` to create a new message.
  */
 export const ReportViewSchema: GenMessage<ReportView> = /*@__PURE__*/
-  messageDesc(file_athena_v1_state, 8);
+  messageDesc(file_athena_v1_state, 11);
 
 /**
  * @generated from message athena.v1.ApprovalView
@@ -706,7 +919,7 @@ export type ApprovalView = Message<"athena.v1.ApprovalView"> & {
  * Use `create(ApprovalViewSchema)` to create a new message.
  */
 export const ApprovalViewSchema: GenMessage<ApprovalView> = /*@__PURE__*/
-  messageDesc(file_athena_v1_state, 9);
+  messageDesc(file_athena_v1_state, 12);
 
 /**
  * TriggerView is a Trigger in a list: no Meta, no Channel address, its text cut to one short line.
@@ -775,7 +988,7 @@ export type TriggerView = Message<"athena.v1.TriggerView"> & {
  * Use `create(TriggerViewSchema)` to create a new message.
  */
 export const TriggerViewSchema: GenMessage<TriggerView> = /*@__PURE__*/
-  messageDesc(file_athena_v1_state, 10);
+  messageDesc(file_athena_v1_state, 13);
 
 /**
  * @generated from message athena.v1.ThreadView
@@ -821,7 +1034,7 @@ export type ThreadView = Message<"athena.v1.ThreadView"> & {
  * Use `create(ThreadViewSchema)` to create a new message.
  */
 export const ThreadViewSchema: GenMessage<ThreadView> = /*@__PURE__*/
-  messageDesc(file_athena_v1_state, 11);
+  messageDesc(file_athena_v1_state, 14);
 
 /**
  * @generated from message athena.v1.EvalView
@@ -853,7 +1066,7 @@ export type EvalView = Message<"athena.v1.EvalView"> & {
  * Use `create(EvalViewSchema)` to create a new message.
  */
 export const EvalViewSchema: GenMessage<EvalView> = /*@__PURE__*/
-  messageDesc(file_athena_v1_state, 12);
+  messageDesc(file_athena_v1_state, 15);
 
 /**
  * DecisionView is a Decision in the routing records.
@@ -914,7 +1127,7 @@ export type DecisionView = Message<"athena.v1.DecisionView"> & {
  * Use `create(DecisionViewSchema)` to create a new message.
  */
 export const DecisionViewSchema: GenMessage<DecisionView> = /*@__PURE__*/
-  messageDesc(file_athena_v1_state, 13);
+  messageDesc(file_athena_v1_state, 16);
 
 /**
  * @generated from message athena.v1.Reason
@@ -936,7 +1149,7 @@ export type Reason = Message<"athena.v1.Reason"> & {
  * Use `create(ReasonSchema)` to create a new message.
  */
 export const ReasonSchema: GenMessage<Reason> = /*@__PURE__*/
-  messageDesc(file_athena_v1_state, 14);
+  messageDesc(file_athena_v1_state, 17);
 
 /**
  * @generated from message athena.v1.NodeStatus
@@ -1028,7 +1241,7 @@ export type NodeStatus = Message<"athena.v1.NodeStatus"> & {
  * Use `create(NodeStatusSchema)` to create a new message.
  */
 export const NodeStatusSchema: GenMessage<NodeStatus> = /*@__PURE__*/
-  messageDesc(file_athena_v1_state, 15);
+  messageDesc(file_athena_v1_state, 18);
 
 /**
  * QuotaWindow is one usage-limit window of a runtime.
@@ -1068,7 +1281,7 @@ export type QuotaWindow = Message<"athena.v1.QuotaWindow"> & {
  * Use `create(QuotaWindowSchema)` to create a new message.
  */
 export const QuotaWindowSchema: GenMessage<QuotaWindow> = /*@__PURE__*/
-  messageDesc(file_athena_v1_state, 16);
+  messageDesc(file_athena_v1_state, 19);
 
 /**
  * RuntimeStatus is one runtime of the node.
@@ -1154,7 +1367,7 @@ export type RuntimeStatus = Message<"athena.v1.RuntimeStatus"> & {
  * Use `create(RuntimeStatusSchema)` to create a new message.
  */
 export const RuntimeStatusSchema: GenMessage<RuntimeStatus> = /*@__PURE__*/
-  messageDesc(file_athena_v1_state, 17);
+  messageDesc(file_athena_v1_state, 20);
 
 /**
  * RuntimeModel is one model a runtime offers.
@@ -1189,7 +1402,7 @@ export type RuntimeModel = Message<"athena.v1.RuntimeModel"> & {
  * Use `create(RuntimeModelSchema)` to create a new message.
  */
 export const RuntimeModelSchema: GenMessage<RuntimeModel> = /*@__PURE__*/
-  messageDesc(file_athena_v1_state, 18);
+  messageDesc(file_athena_v1_state, 21);
 
 /**
  * @generated from message athena.v1.Health
@@ -1206,7 +1419,7 @@ export type Health = Message<"athena.v1.Health"> & {
  * Use `create(HealthSchema)` to create a new message.
  */
 export const HealthSchema: GenMessage<Health> = /*@__PURE__*/
-  messageDesc(file_athena_v1_state, 19);
+  messageDesc(file_athena_v1_state, 22);
 
 /**
  * HealthItem covers the Sources, the router, effects kinds, tls and push.
@@ -1240,7 +1453,7 @@ export type HealthItem = Message<"athena.v1.HealthItem"> & {
  * Use `create(HealthItemSchema)` to create a new message.
  */
 export const HealthItemSchema: GenMessage<HealthItem> = /*@__PURE__*/
-  messageDesc(file_athena_v1_state, 20);
+  messageDesc(file_athena_v1_state, 23);
 
 /**
  * PolicyView carries the Policy as its canonical JSON; internal/policy stays its only schema.
@@ -1269,7 +1482,7 @@ export type PolicyView = Message<"athena.v1.PolicyView"> & {
  * Use `create(PolicyViewSchema)` to create a new message.
  */
 export const PolicyViewSchema: GenMessage<PolicyView> = /*@__PURE__*/
-  messageDesc(file_athena_v1_state, 21);
+  messageDesc(file_athena_v1_state, 24);
 
 /**
  * RepoView is a place a task can run: a GitHub repository, a local git repository or a plain folder.
@@ -1333,7 +1546,7 @@ export type RepoView = Message<"athena.v1.RepoView"> & {
  * Use `create(RepoViewSchema)` to create a new message.
  */
 export const RepoViewSchema: GenMessage<RepoView> = /*@__PURE__*/
-  messageDesc(file_athena_v1_state, 22);
+  messageDesc(file_athena_v1_state, 25);
 
 /**
  * ProposalView is a reply, push or pull request held for the owner.
@@ -1398,7 +1611,7 @@ export type ProposalView = Message<"athena.v1.ProposalView"> & {
  * Use `create(ProposalViewSchema)` to create a new message.
  */
 export const ProposalViewSchema: GenMessage<ProposalView> = /*@__PURE__*/
-  messageDesc(file_athena_v1_state, 23);
+  messageDesc(file_athena_v1_state, 26);
 
 /**
  * @generated from message athena.v1.RepoList
@@ -1415,7 +1628,7 @@ export type RepoList = Message<"athena.v1.RepoList"> & {
  * Use `create(RepoListSchema)` to create a new message.
  */
 export const RepoListSchema: GenMessage<RepoList> = /*@__PURE__*/
-  messageDesc(file_athena_v1_state, 24);
+  messageDesc(file_athena_v1_state, 27);
 
 /**
  * NotificationPrefsView says which push notification kinds exist and which the owner muted.
@@ -1439,7 +1652,7 @@ export type NotificationPrefsView = Message<"athena.v1.NotificationPrefsView"> &
  * Use `create(NotificationPrefsViewSchema)` to create a new message.
  */
 export const NotificationPrefsViewSchema: GenMessage<NotificationPrefsView> = /*@__PURE__*/
-  messageDesc(file_athena_v1_state, 25);
+  messageDesc(file_athena_v1_state, 28);
 
 /**
  * PromptsView says which prompt parts the owner overrode. Its revision is the base for SetPrompt and ResetPrompt.
@@ -1463,7 +1676,7 @@ export type PromptsView = Message<"athena.v1.PromptsView"> & {
  * Use `create(PromptsViewSchema)` to create a new message.
  */
 export const PromptsViewSchema: GenMessage<PromptsView> = /*@__PURE__*/
-  messageDesc(file_athena_v1_state, 26);
+  messageDesc(file_athena_v1_state, 29);
 
 /**
  * @generated from message athena.v1.PromptPartView
@@ -1492,5 +1705,5 @@ export type PromptPartView = Message<"athena.v1.PromptPartView"> & {
  * Use `create(PromptPartViewSchema)` to create a new message.
  */
 export const PromptPartViewSchema: GenMessage<PromptPartView> = /*@__PURE__*/
-  messageDesc(file_athena_v1_state, 27);
+  messageDesc(file_athena_v1_state, 30);
 

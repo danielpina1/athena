@@ -808,3 +808,102 @@ func TestTicketSummaryNeedsYouForProposal(t *testing.T) {
 		t.Errorf("summary = %v, want needs_you with stage person and action proposal", v)
 	}
 }
+
+// A lead and a child carry their split: relatives, deps still waited for, the plan's state, the child that needs the
+// owner and the sub-task key the child was made from.
+func TestSummaryCarriesSplitFields(t *testing.T) {
+	lead := ticket("T-1")
+	lead.Children = []string{"T-2", "T-3"}
+	lead.Deps = []string{"T-2", "T-3"}
+	lead.Waiting = []string{"T-3"}
+	lead.Plan = &core.PlanState{State: core.PlanApproved}
+	lead.Attention = &core.Attention{ID: "q", Question: "T-3 failed", Child: "T-3"}
+	v := ticketSummary(&lead, core.TicketStage(&lead), nil)
+	if strings.Join(v.Children, ",") != "T-2,T-3" || strings.Join(v.Deps, ",") != "T-2,T-3" ||
+		strings.Join(v.Waiting, ",") != "T-3" || v.PlanState != core.PlanApproved || v.AttentionChild != "T-3" || v.Lead != "" {
+		t.Errorf("lead summary = %v", v)
+	}
+	child := ticket("T-3")
+	child.Lead, child.SplitKey, child.Deps = "T-1", "api", []string{"T-2"}
+	v = ticketSummary(&child, core.TicketStage(&child), nil)
+	if v.Lead != "T-1" || v.SplitKey != "api" || strings.Join(v.Deps, ",") != "T-2" || v.PlanState != "" || v.AttentionChild != "" {
+		t.Errorf("child summary = %v", v)
+	}
+}
+
+// The detail of a plan-first lead carries its draft and the split's limit; its timeline tells the agent messages it
+// sent and got (redacted, the Input that carried one not again) and what it recorded of its split and its children.
+func TestDetailBreakdownAndAgentTimeline(t *testing.T) {
+	f := newFake()
+	at := func(m int) time.Time { return epoch0.Add(time.Duration(m) * time.Minute) }
+	lead := ticket("T-1")
+	lead.Plan = &core.PlanState{State: core.PlanDraft, At: at(1), Breakdown: &core.Breakdown{Revision: 2, Note: "two parts",
+		Tasks: []core.ChildSpec{
+			{Key: "api", Title: "API", Instructions: "Build it", Areas: []string{"internal/api"}, Runtime: "codex", Model: "o3"},
+			{Key: "ui", Title: "UI", Instructions: "Draw it", Areas: []string{"internal/api/ui"}, Deps: []string{"api"}, Node: "mini"},
+		},
+		Overlaps: []core.Overlap{{A: "api", B: "ui", Areas: []string{"internal/api"}}}}}
+	lead.Inputs = []core.Input{{ID: "i1", Kind: core.InputAgent, At: at(3), From: "T-2", MessageID: "m2", Answer: true, Text: "port 8080"}}
+	lead.Events = []core.TicketEvent{
+		{Type: core.EventSplitDrafted, At: at(4)},
+		{Type: core.EventSplitFailed, At: at(5), Text: "the planner timed out"},
+		{Type: core.EventSplitRejected, At: at(6)},
+		{Type: core.EventSplitOne, At: at(7), Text: "nothing to split"},
+		{Type: core.EventSplitApproved, At: at(8), Text: "T-2, T-3"},
+		{Type: core.EventChildSpawned, At: at(9), Ref: "T-2", Text: "API"},
+		{Type: core.EventChildEnded, At: at(10), Ref: "T-2", Outcome: "ready"},
+		{Type: core.EventChildFailed, At: at(11), Ref: "T-3", Outcome: "failed", Text: "tests broke"},
+		{Type: core.EventChildEnded, At: at(12), Ref: "T-4", Outcome: "dropped"},
+		{Type: core.EventChildEnded, At: at(13), Ref: "T-5", Outcome: "continued"},
+		{Type: core.EventChildEnded, At: at(14), Ref: "T-6", Outcome: "stopped"},
+	}
+	f.put(lead)
+	f.messages = map[string][]core.AgentMessage{"T-1": {
+		{ID: "m1", From: "T-1", To: "T-2", Text: "which port? ghs_abcdef123456", At: at(2)},
+		{ID: "m2", From: "T-2", To: "T-1", ReplyTo: "m1", Text: "port 8080", At: at(3)},
+	}}
+	f.limits = core.SplitLimits{MaxChildren: 7}
+	d, err := New(f, quiet()).Detail("T-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "agent/asked T-2 · which port? ***|agent/answer T-2 · port 8080|split/drafted  · |" +
+		"split/failed  · the planner timed out|split/rejected  · |split/single  · nothing to split|split/approved  · T-2, T-3|" +
+		"child/spawned T-2 · API|child/ready T-2 · |child/failed T-3 · tests broke|child/dropped T-4 · |" +
+		"child/continued T-5 · |child/stopped T-6 · "
+	if got := entries(d.Timeline); got != want {
+		t.Errorf("timeline:\n got %q\nwant %q", got, want)
+	}
+	if d.Timeline[0].RefId != "m1" || d.Timeline[7].RefId != "T-2" {
+		t.Errorf("ref ids %q %q", d.Timeline[0].RefId, d.Timeline[7].RefId)
+	}
+	b := d.Breakdown
+	if b == nil || b.Revision != 2 || b.State != core.PlanDraft || b.Note != "two parts" || b.MaxChildren != 7 || len(b.Tasks) != 2 {
+		t.Fatalf("breakdown = %v", b)
+	}
+	if s := b.Tasks[1]; s.Key != "ui" || s.Title != "UI" || s.Instructions != "Draw it" || strings.Join(s.Deps, ",") != "api" ||
+		s.Node != "mini" || strings.Join(s.Areas, ",") != "internal/api/ui" {
+		t.Errorf("sub-task = %v", s)
+	}
+	if s := b.Tasks[0]; s.Runtime != "codex" || s.Model != "o3" {
+		t.Errorf("sub-task = %v", s)
+	}
+	if len(b.Overlaps) != 1 || b.Overlaps[0].A != "api" || b.Overlaps[0].B != "ui" || b.Overlaps[0].Areas[0] != "internal/api" {
+		t.Errorf("overlaps = %v", b.Overlaps)
+	}
+
+	// A failed plan carries its reason; the limit defaults when the Policy sets none; a Ticket not planned first has
+	// no breakdown.
+	lead.Plan = &core.PlanState{State: core.PlanFailed, Error: "no answer"}
+	f.put(lead)
+	f.limits = core.SplitLimits{}
+	d, _ = New(f, quiet()).Detail("T-1")
+	if b := d.Breakdown; b == nil || b.State != core.PlanFailed || b.Error != "no answer" || len(b.Tasks) != 0 ||
+		b.MaxChildren != core.DefaultMaxChildren {
+		t.Errorf("failed breakdown = %v", b)
+	}
+	f.put(ticket("T-9"))
+	if d, _ := New(f, quiet()).Detail("T-9"); d.Breakdown != nil {
+		t.Errorf("breakdown of a plain ticket = %v", d.Breakdown)
+	}
+}

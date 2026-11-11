@@ -725,8 +725,24 @@ type TicketSummary struct {
 	// waiting_for_node is why the Ticket's Assignment is not placed yet ("Waiting for mac-studio", "Waiting for a node
 	// with Codex"); empty when it is not waiting.
 	WaitingForNode string `protobuf:"bytes,25,opt,name=waiting_for_node,json=waitingForNode,proto3" json:"waiting_for_node,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// lead is the Ticket this one is a child of; empty for a Ticket that is not a child.
+	Lead string `protobuf:"bytes,26,opt,name=lead,proto3" json:"lead,omitempty"`
+	// children are the ids of every child ticket split off this one, ended ones included.
+	Children []string `protobuf:"bytes,27,rep,name=children,proto3" json:"children,omitempty"`
+	// deps are the ids of the sibling tickets (or, for a lead, the children) that must end before this one starts.
+	Deps []string `protobuf:"bytes,28,rep,name=deps,proto3" json:"deps,omitempty"`
+	// waiting are the deps not yet ended; while any is, the Ticket has not started.
+	Waiting []string `protobuf:"bytes,29,rep,name=waiting,proto3" json:"waiting,omitempty"`
+	// plan_state is where a plan-first Ticket's split stands: planning, draft, failed, approved or rejected; empty for a
+	// Ticket not planned first.
+	PlanState string `protobuf:"bytes,30,opt,name=plan_state,json=planState,proto3" json:"plan_state,omitempty"`
+	// attention_child is the child ticket whose failure needs the owner, on its lead; empty when none does.
+	AttentionChild string `protobuf:"bytes,31,opt,name=attention_child,json=attentionChild,proto3" json:"attention_child,omitempty"`
+	// split_key is the sub-task key a child was made from (the key its siblings' deps name); empty for a Ticket that is
+	// not a child.
+	SplitKey      string `protobuf:"bytes,32,opt,name=split_key,json=splitKey,proto3" json:"split_key,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *TicketSummary) Reset() {
@@ -934,6 +950,55 @@ func (x *TicketSummary) GetWaitingForNode() string {
 	return ""
 }
 
+func (x *TicketSummary) GetLead() string {
+	if x != nil {
+		return x.Lead
+	}
+	return ""
+}
+
+func (x *TicketSummary) GetChildren() []string {
+	if x != nil {
+		return x.Children
+	}
+	return nil
+}
+
+func (x *TicketSummary) GetDeps() []string {
+	if x != nil {
+		return x.Deps
+	}
+	return nil
+}
+
+func (x *TicketSummary) GetWaiting() []string {
+	if x != nil {
+		return x.Waiting
+	}
+	return nil
+}
+
+func (x *TicketSummary) GetPlanState() string {
+	if x != nil {
+		return x.PlanState
+	}
+	return ""
+}
+
+func (x *TicketSummary) GetAttentionChild() string {
+	if x != nil {
+		return x.AttentionChild
+	}
+	return ""
+}
+
+func (x *TicketSummary) GetSplitKey() string {
+	if x != nil {
+		return x.SplitKey
+	}
+	return ""
+}
+
 type TicketDetail struct {
 	state    protoimpl.MessageState `protogen:"open.v1"`
 	Summary  *TicketSummary         `protobuf:"bytes,1,opt,name=summary,proto3" json:"summary,omitempty"`
@@ -942,7 +1007,9 @@ type TicketDetail struct {
 	// timeline_trimmed is set when the oldest timeline entries were dropped to fit one frame.
 	TimelineTrimmed bool `protobuf:"varint,4,opt,name=timeline_trimmed,json=timelineTrimmed,proto3" json:"timeline_trimmed,omitempty"`
 	// reports are the Ticket's Reports in full, one per Assignment that filed one, newest last: at most the last 5.
-	Reports       []*ReportView `protobuf:"bytes,5,rep,name=reports,proto3" json:"reports,omitempty"`
+	Reports []*ReportView `protobuf:"bytes,5,rep,name=reports,proto3" json:"reports,omitempty"`
+	// breakdown is a plan-first Ticket's split plan; unset for a Ticket not planned first.
+	Breakdown     *BreakdownView `protobuf:"bytes,6,opt,name=breakdown,proto3" json:"breakdown,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1012,10 +1079,280 @@ func (x *TicketDetail) GetReports() []*ReportView {
 	return nil
 }
 
+func (x *TicketDetail) GetBreakdown() *BreakdownView {
+	if x != nil {
+		return x.Breakdown
+	}
+	return nil
+}
+
+// SubTaskView is one sub-task of a split: a child ticket to be.
+type SubTaskView struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// key names the sub-task within its split (a-z, 0-9 and -); deps name other sub-tasks by key.
+	Key          string `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`
+	Title        string `protobuf:"bytes,2,opt,name=title,proto3" json:"title,omitempty"`
+	Instructions string `protobuf:"bytes,3,opt,name=instructions,proto3" json:"instructions,omitempty"`
+	// areas are the paths the sub-task expects to touch.
+	Areas []string `protobuf:"bytes,4,rep,name=areas,proto3" json:"areas,omitempty"`
+	Deps  []string `protobuf:"bytes,5,rep,name=deps,proto3" json:"deps,omitempty"`
+	// runtime, node and model are optional hints: claude, codex or auto; a node's name or id; a model.
+	Runtime       string `protobuf:"bytes,6,opt,name=runtime,proto3" json:"runtime,omitempty"`
+	Node          string `protobuf:"bytes,7,opt,name=node,proto3" json:"node,omitempty"`
+	Model         string `protobuf:"bytes,8,opt,name=model,proto3" json:"model,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SubTaskView) Reset() {
+	*x = SubTaskView{}
+	mi := &file_athena_v1_state_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SubTaskView) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SubTaskView) ProtoMessage() {}
+
+func (x *SubTaskView) ProtoReflect() protoreflect.Message {
+	mi := &file_athena_v1_state_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SubTaskView.ProtoReflect.Descriptor instead.
+func (*SubTaskView) Descriptor() ([]byte, []int) {
+	return file_athena_v1_state_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *SubTaskView) GetKey() string {
+	if x != nil {
+		return x.Key
+	}
+	return ""
+}
+
+func (x *SubTaskView) GetTitle() string {
+	if x != nil {
+		return x.Title
+	}
+	return ""
+}
+
+func (x *SubTaskView) GetInstructions() string {
+	if x != nil {
+		return x.Instructions
+	}
+	return ""
+}
+
+func (x *SubTaskView) GetAreas() []string {
+	if x != nil {
+		return x.Areas
+	}
+	return nil
+}
+
+func (x *SubTaskView) GetDeps() []string {
+	if x != nil {
+		return x.Deps
+	}
+	return nil
+}
+
+func (x *SubTaskView) GetRuntime() string {
+	if x != nil {
+		return x.Runtime
+	}
+	return ""
+}
+
+func (x *SubTaskView) GetNode() string {
+	if x != nil {
+		return x.Node
+	}
+	return ""
+}
+
+func (x *SubTaskView) GetModel() string {
+	if x != nil {
+		return x.Model
+	}
+	return ""
+}
+
+// OverlapView names two sub-tasks, by key, whose areas overlap, and the areas they share.
+type OverlapView struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	A             string                 `protobuf:"bytes,1,opt,name=a,proto3" json:"a,omitempty"`
+	B             string                 `protobuf:"bytes,2,opt,name=b,proto3" json:"b,omitempty"`
+	Areas         []string               `protobuf:"bytes,3,rep,name=areas,proto3" json:"areas,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *OverlapView) Reset() {
+	*x = OverlapView{}
+	mi := &file_athena_v1_state_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *OverlapView) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*OverlapView) ProtoMessage() {}
+
+func (x *OverlapView) ProtoReflect() protoreflect.Message {
+	mi := &file_athena_v1_state_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use OverlapView.ProtoReflect.Descriptor instead.
+func (*OverlapView) Descriptor() ([]byte, []int) {
+	return file_athena_v1_state_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *OverlapView) GetA() string {
+	if x != nil {
+		return x.A
+	}
+	return ""
+}
+
+func (x *OverlapView) GetB() string {
+	if x != nil {
+		return x.B
+	}
+	return ""
+}
+
+func (x *OverlapView) GetAreas() []string {
+	if x != nil {
+		return x.Areas
+	}
+	return nil
+}
+
+// BreakdownView is a plan-first Ticket's split plan.
+type BreakdownView struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// revision is the draft's; an UpdateBreakdown or ApproveBreakdown names it, and is refused when it changed meanwhile.
+	Revision uint32         `protobuf:"varint,1,opt,name=revision,proto3" json:"revision,omitempty"`
+	Tasks    []*SubTaskView `protobuf:"bytes,2,rep,name=tasks,proto3" json:"tasks,omitempty"`
+	Overlaps []*OverlapView `protobuf:"bytes,3,rep,name=overlaps,proto3" json:"overlaps,omitempty"`
+	// note is the planner's, or why the plan runs as one ticket.
+	Note string `protobuf:"bytes,4,opt,name=note,proto3" json:"note,omitempty"`
+	// state is planning, draft, failed, approved or rejected.
+	State string `protobuf:"bytes,5,opt,name=state,proto3" json:"state,omitempty"`
+	// error is why the plan failed, set when state is failed.
+	Error string `protobuf:"bytes,6,opt,name=error,proto3" json:"error,omitempty"`
+	// max_children is how many sub-tasks a split may have, from the current Policy.
+	MaxChildren   uint32 `protobuf:"varint,7,opt,name=max_children,json=maxChildren,proto3" json:"max_children,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BreakdownView) Reset() {
+	*x = BreakdownView{}
+	mi := &file_athena_v1_state_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BreakdownView) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BreakdownView) ProtoMessage() {}
+
+func (x *BreakdownView) ProtoReflect() protoreflect.Message {
+	mi := &file_athena_v1_state_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BreakdownView.ProtoReflect.Descriptor instead.
+func (*BreakdownView) Descriptor() ([]byte, []int) {
+	return file_athena_v1_state_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *BreakdownView) GetRevision() uint32 {
+	if x != nil {
+		return x.Revision
+	}
+	return 0
+}
+
+func (x *BreakdownView) GetTasks() []*SubTaskView {
+	if x != nil {
+		return x.Tasks
+	}
+	return nil
+}
+
+func (x *BreakdownView) GetOverlaps() []*OverlapView {
+	if x != nil {
+		return x.Overlaps
+	}
+	return nil
+}
+
+func (x *BreakdownView) GetNote() string {
+	if x != nil {
+		return x.Note
+	}
+	return ""
+}
+
+func (x *BreakdownView) GetState() string {
+	if x != nil {
+		return x.State
+	}
+	return ""
+}
+
+func (x *BreakdownView) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
+func (x *BreakdownView) GetMaxChildren() uint32 {
+	if x != nil {
+		return x.MaxChildren
+	}
+	return 0
+}
+
 type TimelineEntry struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	At    *timestamppb.Timestamp `protobuf:"bytes,1,opt,name=at,proto3" json:"at,omitempty"`
-	// kind is trigger, decision, input, report, assignment, review, approval or reply.
+	// kind is trigger, decision, input, report, assignment, review, approval, reply, agent, child or split.
 	Kind string `protobuf:"bytes,2,opt,name=kind,proto3" json:"kind,omitempty"`
 	// text is redacted, on one line and cut; Athena's hidden markers (<!-- athena:… -->) are removed.
 	Text  string `protobuf:"bytes,3,opt,name=text,proto3" json:"text,omitempty"`
@@ -1034,11 +1371,18 @@ type TimelineEntry struct {
 	//   input: trigger (a message from no person), text, note, resumed, context (seen on a Thread the Ticket only
 	//     follows) or receipt (Athena's own acknowledgement on GitHub);
 	//   reply: owner (from the dashboard) or github;
-	//   approval: pending, approved, denied or expired.
+	//   approval: pending, approved, denied or expired;
+	//   agent: a message between agents, subject the other Ticket: asked (this Ticket asked it), received (it was
+	//     asked), answered (this Ticket answered) or answer (it got an answer);
+	//   child: about a child ticket, subject the child: spawned (text its title), ready, failed (text why), dropped (it
+	//     found nothing to do), continued (the owner went on without it) or stopped;
+	//   split: about the Ticket's split plan: drafted, approved (text the children), rejected (run as one ticket), failed
+	//     (text why) or single (the planner found nothing to split; text the note).
 	// Empty from an older server.
 	Subkind string `protobuf:"bytes,5,opt,name=subkind,proto3" json:"subkind,omitempty"`
 	// subject is what the entry is about, short: an Approval's tool and command (Bash: npm test), an Assignment's
-	// model, a Report's pull request (PR #12), or the GitHub login of a reply.
+	// model, a Report's pull request (PR #12), the GitHub login of a reply, or the other Ticket of an agent or child
+	// entry.
 	Subject string `protobuf:"bytes,6,opt,name=subject,proto3" json:"subject,omitempty"`
 	// runtime is the runtime of the Assignment, set on assignment and review entries (claude or codex): the one it ran
 	// on, or, for a queued Assignment pinned to one, the one it will run on; empty when it names none yet (an unpinned
@@ -1050,7 +1394,7 @@ type TimelineEntry struct {
 
 func (x *TimelineEntry) Reset() {
 	*x = TimelineEntry{}
-	mi := &file_athena_v1_state_proto_msgTypes[7]
+	mi := &file_athena_v1_state_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1062,7 +1406,7 @@ func (x *TimelineEntry) String() string {
 func (*TimelineEntry) ProtoMessage() {}
 
 func (x *TimelineEntry) ProtoReflect() protoreflect.Message {
-	mi := &file_athena_v1_state_proto_msgTypes[7]
+	mi := &file_athena_v1_state_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1075,7 +1419,7 @@ func (x *TimelineEntry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TimelineEntry.ProtoReflect.Descriptor instead.
 func (*TimelineEntry) Descriptor() ([]byte, []int) {
-	return file_athena_v1_state_proto_rawDescGZIP(), []int{7}
+	return file_athena_v1_state_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *TimelineEntry) GetAt() *timestamppb.Timestamp {
@@ -1146,7 +1490,7 @@ type ReportView struct {
 
 func (x *ReportView) Reset() {
 	*x = ReportView{}
-	mi := &file_athena_v1_state_proto_msgTypes[8]
+	mi := &file_athena_v1_state_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1158,7 +1502,7 @@ func (x *ReportView) String() string {
 func (*ReportView) ProtoMessage() {}
 
 func (x *ReportView) ProtoReflect() protoreflect.Message {
-	mi := &file_athena_v1_state_proto_msgTypes[8]
+	mi := &file_athena_v1_state_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1171,7 +1515,7 @@ func (x *ReportView) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReportView.ProtoReflect.Descriptor instead.
 func (*ReportView) Descriptor() ([]byte, []int) {
-	return file_athena_v1_state_proto_rawDescGZIP(), []int{8}
+	return file_athena_v1_state_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *ReportView) GetAssignmentId() string {
@@ -1233,7 +1577,7 @@ type ApprovalView struct {
 
 func (x *ApprovalView) Reset() {
 	*x = ApprovalView{}
-	mi := &file_athena_v1_state_proto_msgTypes[9]
+	mi := &file_athena_v1_state_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1245,7 +1589,7 @@ func (x *ApprovalView) String() string {
 func (*ApprovalView) ProtoMessage() {}
 
 func (x *ApprovalView) ProtoReflect() protoreflect.Message {
-	mi := &file_athena_v1_state_proto_msgTypes[9]
+	mi := &file_athena_v1_state_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1258,7 +1602,7 @@ func (x *ApprovalView) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ApprovalView.ProtoReflect.Descriptor instead.
 func (*ApprovalView) Descriptor() ([]byte, []int) {
-	return file_athena_v1_state_proto_rawDescGZIP(), []int{9}
+	return file_athena_v1_state_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *ApprovalView) GetId() string {
@@ -1346,7 +1690,7 @@ type TriggerView struct {
 
 func (x *TriggerView) Reset() {
 	*x = TriggerView{}
-	mi := &file_athena_v1_state_proto_msgTypes[10]
+	mi := &file_athena_v1_state_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1358,7 +1702,7 @@ func (x *TriggerView) String() string {
 func (*TriggerView) ProtoMessage() {}
 
 func (x *TriggerView) ProtoReflect() protoreflect.Message {
-	mi := &file_athena_v1_state_proto_msgTypes[10]
+	mi := &file_athena_v1_state_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1371,7 +1715,7 @@ func (x *TriggerView) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TriggerView.ProtoReflect.Descriptor instead.
 func (*TriggerView) Descriptor() ([]byte, []int) {
-	return file_athena_v1_state_proto_rawDescGZIP(), []int{10}
+	return file_athena_v1_state_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *TriggerView) GetId() string {
@@ -1460,7 +1804,7 @@ type ThreadView struct {
 
 func (x *ThreadView) Reset() {
 	*x = ThreadView{}
-	mi := &file_athena_v1_state_proto_msgTypes[11]
+	mi := &file_athena_v1_state_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1472,7 +1816,7 @@ func (x *ThreadView) String() string {
 func (*ThreadView) ProtoMessage() {}
 
 func (x *ThreadView) ProtoReflect() protoreflect.Message {
-	mi := &file_athena_v1_state_proto_msgTypes[11]
+	mi := &file_athena_v1_state_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1485,7 +1829,7 @@ func (x *ThreadView) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ThreadView.ProtoReflect.Descriptor instead.
 func (*ThreadView) Descriptor() ([]byte, []int) {
-	return file_athena_v1_state_proto_rawDescGZIP(), []int{11}
+	return file_athena_v1_state_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *ThreadView) GetKey() string {
@@ -1542,7 +1886,7 @@ type EvalView struct {
 
 func (x *EvalView) Reset() {
 	*x = EvalView{}
-	mi := &file_athena_v1_state_proto_msgTypes[12]
+	mi := &file_athena_v1_state_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1554,7 +1898,7 @@ func (x *EvalView) String() string {
 func (*EvalView) ProtoMessage() {}
 
 func (x *EvalView) ProtoReflect() protoreflect.Message {
-	mi := &file_athena_v1_state_proto_msgTypes[12]
+	mi := &file_athena_v1_state_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1567,7 +1911,7 @@ func (x *EvalView) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EvalView.ProtoReflect.Descriptor instead.
 func (*EvalView) Descriptor() ([]byte, []int) {
-	return file_athena_v1_state_proto_rawDescGZIP(), []int{12}
+	return file_athena_v1_state_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *EvalView) GetId() string {
@@ -1617,7 +1961,7 @@ type DecisionView struct {
 
 func (x *DecisionView) Reset() {
 	*x = DecisionView{}
-	mi := &file_athena_v1_state_proto_msgTypes[13]
+	mi := &file_athena_v1_state_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1629,7 +1973,7 @@ func (x *DecisionView) String() string {
 func (*DecisionView) ProtoMessage() {}
 
 func (x *DecisionView) ProtoReflect() protoreflect.Message {
-	mi := &file_athena_v1_state_proto_msgTypes[13]
+	mi := &file_athena_v1_state_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1642,7 +1986,7 @@ func (x *DecisionView) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DecisionView.ProtoReflect.Descriptor instead.
 func (*DecisionView) Descriptor() ([]byte, []int) {
-	return file_athena_v1_state_proto_rawDescGZIP(), []int{13}
+	return file_athena_v1_state_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *DecisionView) GetId() string {
@@ -1718,7 +2062,7 @@ type Reason struct {
 
 func (x *Reason) Reset() {
 	*x = Reason{}
-	mi := &file_athena_v1_state_proto_msgTypes[14]
+	mi := &file_athena_v1_state_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1730,7 +2074,7 @@ func (x *Reason) String() string {
 func (*Reason) ProtoMessage() {}
 
 func (x *Reason) ProtoReflect() protoreflect.Message {
-	mi := &file_athena_v1_state_proto_msgTypes[14]
+	mi := &file_athena_v1_state_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1743,7 +2087,7 @@ func (x *Reason) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Reason.ProtoReflect.Descriptor instead.
 func (*Reason) Descriptor() ([]byte, []int) {
-	return file_athena_v1_state_proto_rawDescGZIP(), []int{14}
+	return file_athena_v1_state_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *Reason) GetCode() string {
@@ -1787,7 +2131,7 @@ type NodeStatus struct {
 
 func (x *NodeStatus) Reset() {
 	*x = NodeStatus{}
-	mi := &file_athena_v1_state_proto_msgTypes[15]
+	mi := &file_athena_v1_state_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1799,7 +2143,7 @@ func (x *NodeStatus) String() string {
 func (*NodeStatus) ProtoMessage() {}
 
 func (x *NodeStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_athena_v1_state_proto_msgTypes[15]
+	mi := &file_athena_v1_state_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1812,7 +2156,7 @@ func (x *NodeStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NodeStatus.ProtoReflect.Descriptor instead.
 func (*NodeStatus) Descriptor() ([]byte, []int) {
-	return file_athena_v1_state_proto_rawDescGZIP(), []int{15}
+	return file_athena_v1_state_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *NodeStatus) GetName() string {
@@ -1929,7 +2273,7 @@ type QuotaWindow struct {
 
 func (x *QuotaWindow) Reset() {
 	*x = QuotaWindow{}
-	mi := &file_athena_v1_state_proto_msgTypes[16]
+	mi := &file_athena_v1_state_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1941,7 +2285,7 @@ func (x *QuotaWindow) String() string {
 func (*QuotaWindow) ProtoMessage() {}
 
 func (x *QuotaWindow) ProtoReflect() protoreflect.Message {
-	mi := &file_athena_v1_state_proto_msgTypes[16]
+	mi := &file_athena_v1_state_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1954,7 +2298,7 @@ func (x *QuotaWindow) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QuotaWindow.ProtoReflect.Descriptor instead.
 func (*QuotaWindow) Descriptor() ([]byte, []int) {
-	return file_athena_v1_state_proto_rawDescGZIP(), []int{16}
+	return file_athena_v1_state_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *QuotaWindow) GetName() string {
@@ -2014,7 +2358,7 @@ type RuntimeStatus struct {
 
 func (x *RuntimeStatus) Reset() {
 	*x = RuntimeStatus{}
-	mi := &file_athena_v1_state_proto_msgTypes[17]
+	mi := &file_athena_v1_state_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2026,7 +2370,7 @@ func (x *RuntimeStatus) String() string {
 func (*RuntimeStatus) ProtoMessage() {}
 
 func (x *RuntimeStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_athena_v1_state_proto_msgTypes[17]
+	mi := &file_athena_v1_state_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2039,7 +2383,7 @@ func (x *RuntimeStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RuntimeStatus.ProtoReflect.Descriptor instead.
 func (*RuntimeStatus) Descriptor() ([]byte, []int) {
-	return file_athena_v1_state_proto_rawDescGZIP(), []int{17}
+	return file_athena_v1_state_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *RuntimeStatus) GetName() string {
@@ -2134,7 +2478,7 @@ type RuntimeModel struct {
 
 func (x *RuntimeModel) Reset() {
 	*x = RuntimeModel{}
-	mi := &file_athena_v1_state_proto_msgTypes[18]
+	mi := &file_athena_v1_state_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2146,7 +2490,7 @@ func (x *RuntimeModel) String() string {
 func (*RuntimeModel) ProtoMessage() {}
 
 func (x *RuntimeModel) ProtoReflect() protoreflect.Message {
-	mi := &file_athena_v1_state_proto_msgTypes[18]
+	mi := &file_athena_v1_state_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2159,7 +2503,7 @@ func (x *RuntimeModel) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RuntimeModel.ProtoReflect.Descriptor instead.
 func (*RuntimeModel) Descriptor() ([]byte, []int) {
-	return file_athena_v1_state_proto_rawDescGZIP(), []int{18}
+	return file_athena_v1_state_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *RuntimeModel) GetId() string {
@@ -2192,7 +2536,7 @@ type Health struct {
 
 func (x *Health) Reset() {
 	*x = Health{}
-	mi := &file_athena_v1_state_proto_msgTypes[19]
+	mi := &file_athena_v1_state_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2204,7 +2548,7 @@ func (x *Health) String() string {
 func (*Health) ProtoMessage() {}
 
 func (x *Health) ProtoReflect() protoreflect.Message {
-	mi := &file_athena_v1_state_proto_msgTypes[19]
+	mi := &file_athena_v1_state_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2217,7 +2561,7 @@ func (x *Health) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Health.ProtoReflect.Descriptor instead.
 func (*Health) Descriptor() ([]byte, []int) {
-	return file_athena_v1_state_proto_rawDescGZIP(), []int{19}
+	return file_athena_v1_state_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *Health) GetItems() []*HealthItem {
@@ -2240,7 +2584,7 @@ type HealthItem struct {
 
 func (x *HealthItem) Reset() {
 	*x = HealthItem{}
-	mi := &file_athena_v1_state_proto_msgTypes[20]
+	mi := &file_athena_v1_state_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2252,7 +2596,7 @@ func (x *HealthItem) String() string {
 func (*HealthItem) ProtoMessage() {}
 
 func (x *HealthItem) ProtoReflect() protoreflect.Message {
-	mi := &file_athena_v1_state_proto_msgTypes[20]
+	mi := &file_athena_v1_state_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2265,7 +2609,7 @@ func (x *HealthItem) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HealthItem.ProtoReflect.Descriptor instead.
 func (*HealthItem) Descriptor() ([]byte, []int) {
-	return file_athena_v1_state_proto_rawDescGZIP(), []int{20}
+	return file_athena_v1_state_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *HealthItem) GetName() string {
@@ -2308,7 +2652,7 @@ type PolicyView struct {
 
 func (x *PolicyView) Reset() {
 	*x = PolicyView{}
-	mi := &file_athena_v1_state_proto_msgTypes[21]
+	mi := &file_athena_v1_state_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2320,7 +2664,7 @@ func (x *PolicyView) String() string {
 func (*PolicyView) ProtoMessage() {}
 
 func (x *PolicyView) ProtoReflect() protoreflect.Message {
-	mi := &file_athena_v1_state_proto_msgTypes[21]
+	mi := &file_athena_v1_state_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2333,7 +2677,7 @@ func (x *PolicyView) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PolicyView.ProtoReflect.Descriptor instead.
 func (*PolicyView) Descriptor() ([]byte, []int) {
-	return file_athena_v1_state_proto_rawDescGZIP(), []int{21}
+	return file_athena_v1_state_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *PolicyView) GetRevision() uint32 {
@@ -2381,7 +2725,7 @@ type RepoView struct {
 
 func (x *RepoView) Reset() {
 	*x = RepoView{}
-	mi := &file_athena_v1_state_proto_msgTypes[22]
+	mi := &file_athena_v1_state_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2393,7 +2737,7 @@ func (x *RepoView) String() string {
 func (*RepoView) ProtoMessage() {}
 
 func (x *RepoView) ProtoReflect() protoreflect.Message {
-	mi := &file_athena_v1_state_proto_msgTypes[22]
+	mi := &file_athena_v1_state_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2406,7 +2750,7 @@ func (x *RepoView) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RepoView.ProtoReflect.Descriptor instead.
 func (*RepoView) Descriptor() ([]byte, []int) {
-	return file_athena_v1_state_proto_rawDescGZIP(), []int{22}
+	return file_athena_v1_state_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *RepoView) GetName() string {
@@ -2479,7 +2823,7 @@ type ProposalView struct {
 
 func (x *ProposalView) Reset() {
 	*x = ProposalView{}
-	mi := &file_athena_v1_state_proto_msgTypes[23]
+	mi := &file_athena_v1_state_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2491,7 +2835,7 @@ func (x *ProposalView) String() string {
 func (*ProposalView) ProtoMessage() {}
 
 func (x *ProposalView) ProtoReflect() protoreflect.Message {
-	mi := &file_athena_v1_state_proto_msgTypes[23]
+	mi := &file_athena_v1_state_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2504,7 +2848,7 @@ func (x *ProposalView) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProposalView.ProtoReflect.Descriptor instead.
 func (*ProposalView) Descriptor() ([]byte, []int) {
-	return file_athena_v1_state_proto_rawDescGZIP(), []int{23}
+	return file_athena_v1_state_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *ProposalView) GetId() string {
@@ -2579,7 +2923,7 @@ type RepoList struct {
 
 func (x *RepoList) Reset() {
 	*x = RepoList{}
-	mi := &file_athena_v1_state_proto_msgTypes[24]
+	mi := &file_athena_v1_state_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2591,7 +2935,7 @@ func (x *RepoList) String() string {
 func (*RepoList) ProtoMessage() {}
 
 func (x *RepoList) ProtoReflect() protoreflect.Message {
-	mi := &file_athena_v1_state_proto_msgTypes[24]
+	mi := &file_athena_v1_state_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2604,7 +2948,7 @@ func (x *RepoList) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RepoList.ProtoReflect.Descriptor instead.
 func (*RepoList) Descriptor() ([]byte, []int) {
-	return file_athena_v1_state_proto_rawDescGZIP(), []int{24}
+	return file_athena_v1_state_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *RepoList) GetRepos() []*RepoView {
@@ -2625,7 +2969,7 @@ type NotificationPrefsView struct {
 
 func (x *NotificationPrefsView) Reset() {
 	*x = NotificationPrefsView{}
-	mi := &file_athena_v1_state_proto_msgTypes[25]
+	mi := &file_athena_v1_state_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2637,7 +2981,7 @@ func (x *NotificationPrefsView) String() string {
 func (*NotificationPrefsView) ProtoMessage() {}
 
 func (x *NotificationPrefsView) ProtoReflect() protoreflect.Message {
-	mi := &file_athena_v1_state_proto_msgTypes[25]
+	mi := &file_athena_v1_state_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2650,7 +2994,7 @@ func (x *NotificationPrefsView) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NotificationPrefsView.ProtoReflect.Descriptor instead.
 func (*NotificationPrefsView) Descriptor() ([]byte, []int) {
-	return file_athena_v1_state_proto_rawDescGZIP(), []int{25}
+	return file_athena_v1_state_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *NotificationPrefsView) GetKinds() []string {
@@ -2678,7 +3022,7 @@ type PromptsView struct {
 
 func (x *PromptsView) Reset() {
 	*x = PromptsView{}
-	mi := &file_athena_v1_state_proto_msgTypes[26]
+	mi := &file_athena_v1_state_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2690,7 +3034,7 @@ func (x *PromptsView) String() string {
 func (*PromptsView) ProtoMessage() {}
 
 func (x *PromptsView) ProtoReflect() protoreflect.Message {
-	mi := &file_athena_v1_state_proto_msgTypes[26]
+	mi := &file_athena_v1_state_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2703,7 +3047,7 @@ func (x *PromptsView) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PromptsView.ProtoReflect.Descriptor instead.
 func (*PromptsView) Descriptor() ([]byte, []int) {
-	return file_athena_v1_state_proto_rawDescGZIP(), []int{26}
+	return file_athena_v1_state_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *PromptsView) GetRevision() uint32 {
@@ -2732,7 +3076,7 @@ type PromptPartView struct {
 
 func (x *PromptPartView) Reset() {
 	*x = PromptPartView{}
-	mi := &file_athena_v1_state_proto_msgTypes[27]
+	mi := &file_athena_v1_state_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2744,7 +3088,7 @@ func (x *PromptPartView) String() string {
 func (*PromptPartView) ProtoMessage() {}
 
 func (x *PromptPartView) ProtoReflect() protoreflect.Message {
-	mi := &file_athena_v1_state_proto_msgTypes[27]
+	mi := &file_athena_v1_state_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2757,7 +3101,7 @@ func (x *PromptPartView) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PromptPartView.ProtoReflect.Descriptor instead.
 func (*PromptPartView) Descriptor() ([]byte, []int) {
-	return file_athena_v1_state_proto_rawDescGZIP(), []int{27}
+	return file_athena_v1_state_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *PromptPartView) GetName() string {
@@ -2834,7 +3178,7 @@ const file_athena_v1_state_proto_rawDesc = "" +
 	"\x04repo\x18\x04 \x01(\tR\x04repo\x12\x1a\n" +
 	"\bapproved\x18\x05 \x01(\rR\bapproved\">\n" +
 	"\tOfferList\x121\n" +
-	"\x06offers\x18\x01 \x03(\v2\x19.athena.v1.PromotionOfferR\x06offers\"\xa4\x06\n" +
+	"\x06offers\x18\x01 \x03(\v2\x19.athena.v1.PromotionOfferR\x06offers\"\xe7\a\n" +
 	"\rTicketSummary\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
 	"\x05title\x18\x02 \x01(\tR\x05title\x12\x14\n" +
@@ -2863,13 +3207,43 @@ const file_athena_v1_state_proto_rawDesc = "" +
 	"\x05trust\x18\x16 \x01(\tR\x05trust\x12\x17\n" +
 	"\anode_id\x18\x17 \x01(\tR\x06nodeId\x12\x1b\n" +
 	"\tnode_name\x18\x18 \x01(\tR\bnodeName\x12(\n" +
-	"\x10waiting_for_node\x18\x19 \x01(\tR\x0ewaitingForNode\"\xee\x01\n" +
+	"\x10waiting_for_node\x18\x19 \x01(\tR\x0ewaitingForNode\x12\x12\n" +
+	"\x04lead\x18\x1a \x01(\tR\x04lead\x12\x1a\n" +
+	"\bchildren\x18\x1b \x03(\tR\bchildren\x12\x12\n" +
+	"\x04deps\x18\x1c \x03(\tR\x04deps\x12\x18\n" +
+	"\awaiting\x18\x1d \x03(\tR\awaiting\x12\x1d\n" +
+	"\n" +
+	"plan_state\x18\x1e \x01(\tR\tplanState\x12'\n" +
+	"\x0fattention_child\x18\x1f \x01(\tR\x0eattentionChild\x12\x1b\n" +
+	"\tsplit_key\x18  \x01(\tR\bsplitKey\"\xa6\x02\n" +
 	"\fTicketDetail\x122\n" +
 	"\asummary\x18\x01 \x01(\v2\x18.athena.v1.TicketSummaryR\asummary\x124\n" +
 	"\btimeline\x18\x02 \x03(\v2\x18.athena.v1.TimelineEntryR\btimeline\x12\x18\n" +
 	"\athreads\x18\x03 \x03(\tR\athreads\x12)\n" +
 	"\x10timeline_trimmed\x18\x04 \x01(\bR\x0ftimelineTrimmed\x12/\n" +
-	"\areports\x18\x05 \x03(\v2\x15.athena.v1.ReportViewR\areports\"\xc8\x01\n" +
+	"\areports\x18\x05 \x03(\v2\x15.athena.v1.ReportViewR\areports\x126\n" +
+	"\tbreakdown\x18\x06 \x01(\v2\x18.athena.v1.BreakdownViewR\tbreakdown\"\xc7\x01\n" +
+	"\vSubTaskView\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05title\x18\x02 \x01(\tR\x05title\x12\"\n" +
+	"\finstructions\x18\x03 \x01(\tR\finstructions\x12\x14\n" +
+	"\x05areas\x18\x04 \x03(\tR\x05areas\x12\x12\n" +
+	"\x04deps\x18\x05 \x03(\tR\x04deps\x12\x18\n" +
+	"\aruntime\x18\x06 \x01(\tR\aruntime\x12\x12\n" +
+	"\x04node\x18\a \x01(\tR\x04node\x12\x14\n" +
+	"\x05model\x18\b \x01(\tR\x05model\"?\n" +
+	"\vOverlapView\x12\f\n" +
+	"\x01a\x18\x01 \x01(\tR\x01a\x12\f\n" +
+	"\x01b\x18\x02 \x01(\tR\x01b\x12\x14\n" +
+	"\x05areas\x18\x03 \x03(\tR\x05areas\"\xf0\x01\n" +
+	"\rBreakdownView\x12\x1a\n" +
+	"\brevision\x18\x01 \x01(\rR\brevision\x12,\n" +
+	"\x05tasks\x18\x02 \x03(\v2\x16.athena.v1.SubTaskViewR\x05tasks\x122\n" +
+	"\boverlaps\x18\x03 \x03(\v2\x16.athena.v1.OverlapViewR\boverlaps\x12\x12\n" +
+	"\x04note\x18\x04 \x01(\tR\x04note\x12\x14\n" +
+	"\x05state\x18\x05 \x01(\tR\x05state\x12\x14\n" +
+	"\x05error\x18\x06 \x01(\tR\x05error\x12!\n" +
+	"\fmax_children\x18\a \x01(\rR\vmaxChildren\"\xc8\x01\n" +
 	"\rTimelineEntry\x12*\n" +
 	"\x02at\x18\x01 \x01(\v2\x1a.google.protobuf.TimestampR\x02at\x12\x12\n" +
 	"\x04kind\x18\x02 \x01(\tR\x04kind\x12\x12\n" +
@@ -3040,7 +3414,7 @@ func file_athena_v1_state_proto_rawDescGZIP() []byte {
 	return file_athena_v1_state_proto_rawDescData
 }
 
-var file_athena_v1_state_proto_msgTypes = make([]protoimpl.MessageInfo, 29)
+var file_athena_v1_state_proto_msgTypes = make([]protoimpl.MessageInfo, 32)
 var file_athena_v1_state_proto_goTypes = []any{
 	(*Snapshot)(nil),              // 0: athena.v1.Snapshot
 	(*Delta)(nil),                 // 1: athena.v1.Delta
@@ -3049,98 +3423,104 @@ var file_athena_v1_state_proto_goTypes = []any{
 	(*OfferList)(nil),             // 4: athena.v1.OfferList
 	(*TicketSummary)(nil),         // 5: athena.v1.TicketSummary
 	(*TicketDetail)(nil),          // 6: athena.v1.TicketDetail
-	(*TimelineEntry)(nil),         // 7: athena.v1.TimelineEntry
-	(*ReportView)(nil),            // 8: athena.v1.ReportView
-	(*ApprovalView)(nil),          // 9: athena.v1.ApprovalView
-	(*TriggerView)(nil),           // 10: athena.v1.TriggerView
-	(*ThreadView)(nil),            // 11: athena.v1.ThreadView
-	(*EvalView)(nil),              // 12: athena.v1.EvalView
-	(*DecisionView)(nil),          // 13: athena.v1.DecisionView
-	(*Reason)(nil),                // 14: athena.v1.Reason
-	(*NodeStatus)(nil),            // 15: athena.v1.NodeStatus
-	(*QuotaWindow)(nil),           // 16: athena.v1.QuotaWindow
-	(*RuntimeStatus)(nil),         // 17: athena.v1.RuntimeStatus
-	(*RuntimeModel)(nil),          // 18: athena.v1.RuntimeModel
-	(*Health)(nil),                // 19: athena.v1.Health
-	(*HealthItem)(nil),            // 20: athena.v1.HealthItem
-	(*PolicyView)(nil),            // 21: athena.v1.PolicyView
-	(*RepoView)(nil),              // 22: athena.v1.RepoView
-	(*ProposalView)(nil),          // 23: athena.v1.ProposalView
-	(*RepoList)(nil),              // 24: athena.v1.RepoList
-	(*NotificationPrefsView)(nil), // 25: athena.v1.NotificationPrefsView
-	(*PromptsView)(nil),           // 26: athena.v1.PromptsView
-	(*PromptPartView)(nil),        // 27: athena.v1.PromptPartView
-	nil,                           // 28: athena.v1.Reason.ValuesEntry
-	(*timestamppb.Timestamp)(nil), // 29: google.protobuf.Timestamp
+	(*SubTaskView)(nil),           // 7: athena.v1.SubTaskView
+	(*OverlapView)(nil),           // 8: athena.v1.OverlapView
+	(*BreakdownView)(nil),         // 9: athena.v1.BreakdownView
+	(*TimelineEntry)(nil),         // 10: athena.v1.TimelineEntry
+	(*ReportView)(nil),            // 11: athena.v1.ReportView
+	(*ApprovalView)(nil),          // 12: athena.v1.ApprovalView
+	(*TriggerView)(nil),           // 13: athena.v1.TriggerView
+	(*ThreadView)(nil),            // 14: athena.v1.ThreadView
+	(*EvalView)(nil),              // 15: athena.v1.EvalView
+	(*DecisionView)(nil),          // 16: athena.v1.DecisionView
+	(*Reason)(nil),                // 17: athena.v1.Reason
+	(*NodeStatus)(nil),            // 18: athena.v1.NodeStatus
+	(*QuotaWindow)(nil),           // 19: athena.v1.QuotaWindow
+	(*RuntimeStatus)(nil),         // 20: athena.v1.RuntimeStatus
+	(*RuntimeModel)(nil),          // 21: athena.v1.RuntimeModel
+	(*Health)(nil),                // 22: athena.v1.Health
+	(*HealthItem)(nil),            // 23: athena.v1.HealthItem
+	(*PolicyView)(nil),            // 24: athena.v1.PolicyView
+	(*RepoView)(nil),              // 25: athena.v1.RepoView
+	(*ProposalView)(nil),          // 26: athena.v1.ProposalView
+	(*RepoList)(nil),              // 27: athena.v1.RepoList
+	(*NotificationPrefsView)(nil), // 28: athena.v1.NotificationPrefsView
+	(*PromptsView)(nil),           // 29: athena.v1.PromptsView
+	(*PromptPartView)(nil),        // 30: athena.v1.PromptPartView
+	nil,                           // 31: athena.v1.Reason.ValuesEntry
+	(*timestamppb.Timestamp)(nil), // 32: google.protobuf.Timestamp
 }
 var file_athena_v1_state_proto_depIdxs = []int32{
 	5,  // 0: athena.v1.Snapshot.tickets:type_name -> athena.v1.TicketSummary
-	9,  // 1: athena.v1.Snapshot.approvals:type_name -> athena.v1.ApprovalView
-	10, // 2: athena.v1.Snapshot.triggers:type_name -> athena.v1.TriggerView
-	11, // 3: athena.v1.Snapshot.threads:type_name -> athena.v1.ThreadView
-	13, // 4: athena.v1.Snapshot.decisions:type_name -> athena.v1.DecisionView
-	19, // 5: athena.v1.Snapshot.health:type_name -> athena.v1.Health
-	21, // 6: athena.v1.Snapshot.policy:type_name -> athena.v1.PolicyView
-	22, // 7: athena.v1.Snapshot.repos:type_name -> athena.v1.RepoView
-	25, // 8: athena.v1.Snapshot.notifications:type_name -> athena.v1.NotificationPrefsView
-	26, // 9: athena.v1.Snapshot.prompts:type_name -> athena.v1.PromptsView
+	12, // 1: athena.v1.Snapshot.approvals:type_name -> athena.v1.ApprovalView
+	13, // 2: athena.v1.Snapshot.triggers:type_name -> athena.v1.TriggerView
+	14, // 3: athena.v1.Snapshot.threads:type_name -> athena.v1.ThreadView
+	16, // 4: athena.v1.Snapshot.decisions:type_name -> athena.v1.DecisionView
+	22, // 5: athena.v1.Snapshot.health:type_name -> athena.v1.Health
+	24, // 6: athena.v1.Snapshot.policy:type_name -> athena.v1.PolicyView
+	25, // 7: athena.v1.Snapshot.repos:type_name -> athena.v1.RepoView
+	28, // 8: athena.v1.Snapshot.notifications:type_name -> athena.v1.NotificationPrefsView
+	29, // 9: athena.v1.Snapshot.prompts:type_name -> athena.v1.PromptsView
 	2,  // 10: athena.v1.Snapshot.control:type_name -> athena.v1.Control
 	4,  // 11: athena.v1.Snapshot.offers:type_name -> athena.v1.OfferList
-	23, // 12: athena.v1.Snapshot.proposals:type_name -> athena.v1.ProposalView
-	15, // 13: athena.v1.Snapshot.nodes:type_name -> athena.v1.NodeStatus
+	26, // 12: athena.v1.Snapshot.proposals:type_name -> athena.v1.ProposalView
+	18, // 13: athena.v1.Snapshot.nodes:type_name -> athena.v1.NodeStatus
 	5,  // 14: athena.v1.Delta.ticket:type_name -> athena.v1.TicketSummary
 	6,  // 15: athena.v1.Delta.ticket_detail:type_name -> athena.v1.TicketDetail
-	9,  // 16: athena.v1.Delta.approval:type_name -> athena.v1.ApprovalView
-	10, // 17: athena.v1.Delta.trigger:type_name -> athena.v1.TriggerView
-	11, // 18: athena.v1.Delta.thread:type_name -> athena.v1.ThreadView
-	13, // 19: athena.v1.Delta.decision:type_name -> athena.v1.DecisionView
-	15, // 20: athena.v1.Delta.node:type_name -> athena.v1.NodeStatus
-	19, // 21: athena.v1.Delta.health:type_name -> athena.v1.Health
-	21, // 22: athena.v1.Delta.policy:type_name -> athena.v1.PolicyView
-	24, // 23: athena.v1.Delta.repos:type_name -> athena.v1.RepoList
-	25, // 24: athena.v1.Delta.notifications:type_name -> athena.v1.NotificationPrefsView
-	26, // 25: athena.v1.Delta.prompts:type_name -> athena.v1.PromptsView
+	12, // 16: athena.v1.Delta.approval:type_name -> athena.v1.ApprovalView
+	13, // 17: athena.v1.Delta.trigger:type_name -> athena.v1.TriggerView
+	14, // 18: athena.v1.Delta.thread:type_name -> athena.v1.ThreadView
+	16, // 19: athena.v1.Delta.decision:type_name -> athena.v1.DecisionView
+	18, // 20: athena.v1.Delta.node:type_name -> athena.v1.NodeStatus
+	22, // 21: athena.v1.Delta.health:type_name -> athena.v1.Health
+	24, // 22: athena.v1.Delta.policy:type_name -> athena.v1.PolicyView
+	27, // 23: athena.v1.Delta.repos:type_name -> athena.v1.RepoList
+	28, // 24: athena.v1.Delta.notifications:type_name -> athena.v1.NotificationPrefsView
+	29, // 25: athena.v1.Delta.prompts:type_name -> athena.v1.PromptsView
 	2,  // 26: athena.v1.Delta.control:type_name -> athena.v1.Control
 	4,  // 27: athena.v1.Delta.offers:type_name -> athena.v1.OfferList
-	23, // 28: athena.v1.Delta.proposal:type_name -> athena.v1.ProposalView
-	29, // 29: athena.v1.Control.since:type_name -> google.protobuf.Timestamp
+	26, // 28: athena.v1.Delta.proposal:type_name -> athena.v1.ProposalView
+	32, // 29: athena.v1.Control.since:type_name -> google.protobuf.Timestamp
 	3,  // 30: athena.v1.OfferList.offers:type_name -> athena.v1.PromotionOffer
-	29, // 31: athena.v1.TicketSummary.created_at:type_name -> google.protobuf.Timestamp
-	29, // 32: athena.v1.TicketSummary.updated_at:type_name -> google.protobuf.Timestamp
-	29, // 33: athena.v1.TicketSummary.ended_at:type_name -> google.protobuf.Timestamp
+	32, // 31: athena.v1.TicketSummary.created_at:type_name -> google.protobuf.Timestamp
+	32, // 32: athena.v1.TicketSummary.updated_at:type_name -> google.protobuf.Timestamp
+	32, // 33: athena.v1.TicketSummary.ended_at:type_name -> google.protobuf.Timestamp
 	5,  // 34: athena.v1.TicketDetail.summary:type_name -> athena.v1.TicketSummary
-	7,  // 35: athena.v1.TicketDetail.timeline:type_name -> athena.v1.TimelineEntry
-	8,  // 36: athena.v1.TicketDetail.reports:type_name -> athena.v1.ReportView
-	29, // 37: athena.v1.TimelineEntry.at:type_name -> google.protobuf.Timestamp
-	29, // 38: athena.v1.ReportView.at:type_name -> google.protobuf.Timestamp
-	29, // 39: athena.v1.ApprovalView.created_at:type_name -> google.protobuf.Timestamp
-	29, // 40: athena.v1.ApprovalView.answered_at:type_name -> google.protobuf.Timestamp
-	29, // 41: athena.v1.TriggerView.at:type_name -> google.protobuf.Timestamp
-	12, // 42: athena.v1.ThreadView.eval:type_name -> athena.v1.EvalView
-	29, // 43: athena.v1.EvalView.started_at:type_name -> google.protobuf.Timestamp
-	29, // 44: athena.v1.EvalView.delivered_at:type_name -> google.protobuf.Timestamp
-	29, // 45: athena.v1.DecisionView.at:type_name -> google.protobuf.Timestamp
-	14, // 46: athena.v1.DecisionView.reasons:type_name -> athena.v1.Reason
-	29, // 47: athena.v1.DecisionView.dismissed_at:type_name -> google.protobuf.Timestamp
-	28, // 48: athena.v1.Reason.values:type_name -> athena.v1.Reason.ValuesEntry
-	17, // 49: athena.v1.NodeStatus.runtimes:type_name -> athena.v1.RuntimeStatus
-	29, // 50: athena.v1.NodeStatus.last_seen:type_name -> google.protobuf.Timestamp
-	29, // 51: athena.v1.QuotaWindow.resets_at:type_name -> google.protobuf.Timestamp
-	16, // 52: athena.v1.RuntimeStatus.windows:type_name -> athena.v1.QuotaWindow
-	29, // 53: athena.v1.RuntimeStatus.limited_until:type_name -> google.protobuf.Timestamp
-	29, // 54: athena.v1.RuntimeStatus.read_at:type_name -> google.protobuf.Timestamp
-	18, // 55: athena.v1.RuntimeStatus.models:type_name -> athena.v1.RuntimeModel
-	20, // 56: athena.v1.Health.items:type_name -> athena.v1.HealthItem
-	29, // 57: athena.v1.HealthItem.since:type_name -> google.protobuf.Timestamp
-	29, // 58: athena.v1.RepoView.last_used_at:type_name -> google.protobuf.Timestamp
-	29, // 59: athena.v1.ProposalView.created_at:type_name -> google.protobuf.Timestamp
-	22, // 60: athena.v1.RepoList.repos:type_name -> athena.v1.RepoView
-	27, // 61: athena.v1.PromptsView.parts:type_name -> athena.v1.PromptPartView
-	62, // [62:62] is the sub-list for method output_type
-	62, // [62:62] is the sub-list for method input_type
-	62, // [62:62] is the sub-list for extension type_name
-	62, // [62:62] is the sub-list for extension extendee
-	0,  // [0:62] is the sub-list for field type_name
+	10, // 35: athena.v1.TicketDetail.timeline:type_name -> athena.v1.TimelineEntry
+	11, // 36: athena.v1.TicketDetail.reports:type_name -> athena.v1.ReportView
+	9,  // 37: athena.v1.TicketDetail.breakdown:type_name -> athena.v1.BreakdownView
+	7,  // 38: athena.v1.BreakdownView.tasks:type_name -> athena.v1.SubTaskView
+	8,  // 39: athena.v1.BreakdownView.overlaps:type_name -> athena.v1.OverlapView
+	32, // 40: athena.v1.TimelineEntry.at:type_name -> google.protobuf.Timestamp
+	32, // 41: athena.v1.ReportView.at:type_name -> google.protobuf.Timestamp
+	32, // 42: athena.v1.ApprovalView.created_at:type_name -> google.protobuf.Timestamp
+	32, // 43: athena.v1.ApprovalView.answered_at:type_name -> google.protobuf.Timestamp
+	32, // 44: athena.v1.TriggerView.at:type_name -> google.protobuf.Timestamp
+	15, // 45: athena.v1.ThreadView.eval:type_name -> athena.v1.EvalView
+	32, // 46: athena.v1.EvalView.started_at:type_name -> google.protobuf.Timestamp
+	32, // 47: athena.v1.EvalView.delivered_at:type_name -> google.protobuf.Timestamp
+	32, // 48: athena.v1.DecisionView.at:type_name -> google.protobuf.Timestamp
+	17, // 49: athena.v1.DecisionView.reasons:type_name -> athena.v1.Reason
+	32, // 50: athena.v1.DecisionView.dismissed_at:type_name -> google.protobuf.Timestamp
+	31, // 51: athena.v1.Reason.values:type_name -> athena.v1.Reason.ValuesEntry
+	20, // 52: athena.v1.NodeStatus.runtimes:type_name -> athena.v1.RuntimeStatus
+	32, // 53: athena.v1.NodeStatus.last_seen:type_name -> google.protobuf.Timestamp
+	32, // 54: athena.v1.QuotaWindow.resets_at:type_name -> google.protobuf.Timestamp
+	19, // 55: athena.v1.RuntimeStatus.windows:type_name -> athena.v1.QuotaWindow
+	32, // 56: athena.v1.RuntimeStatus.limited_until:type_name -> google.protobuf.Timestamp
+	32, // 57: athena.v1.RuntimeStatus.read_at:type_name -> google.protobuf.Timestamp
+	21, // 58: athena.v1.RuntimeStatus.models:type_name -> athena.v1.RuntimeModel
+	23, // 59: athena.v1.Health.items:type_name -> athena.v1.HealthItem
+	32, // 60: athena.v1.HealthItem.since:type_name -> google.protobuf.Timestamp
+	32, // 61: athena.v1.RepoView.last_used_at:type_name -> google.protobuf.Timestamp
+	32, // 62: athena.v1.ProposalView.created_at:type_name -> google.protobuf.Timestamp
+	25, // 63: athena.v1.RepoList.repos:type_name -> athena.v1.RepoView
+	30, // 64: athena.v1.PromptsView.parts:type_name -> athena.v1.PromptPartView
+	65, // [65:65] is the sub-list for method output_type
+	65, // [65:65] is the sub-list for method input_type
+	65, // [65:65] is the sub-list for extension type_name
+	65, // [65:65] is the sub-list for extension extendee
+	0,  // [0:65] is the sub-list for field type_name
 }
 
 func init() { file_athena_v1_state_proto_init() }
@@ -3172,7 +3552,7 @@ func file_athena_v1_state_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_athena_v1_state_proto_rawDesc), len(file_athena_v1_state_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   29,
+			NumMessages:   32,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
