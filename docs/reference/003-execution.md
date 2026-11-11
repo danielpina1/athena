@@ -10,6 +10,10 @@ Each open Ticket has one stage, determined by what it is waiting for. Read the t
 
 | Stage | Condition | Panel label |
 | --- | --- | --- |
+| working / planning | A plan-first Ticket whose breakdown the planner is drafting | Planning |
+| person / plan | A plan-first Ticket whose draft waits for your edit and approval, or whose plan failed | Awaiting plan |
+| person / child | A child of this Ticket failed or is blocked; the lead has an Attention naming it | Child needs you |
+| working / waiting | A child whose deps have not all ended: it has no Assignment yet, and `Waiting` lists them | Waiting for other tickets |
 | person / delivery | Delivering an Input to the Executor Session failed; it is retried after 2 seconds, then after a delay that doubles up to a minute, and a success, a new Assignment or the Ticket's end clears it | Input undelivered |
 | person / answer | It has an Attention | Awaiting answer |
 | person / review | The latest Report is `ready` | Awaiting review |
