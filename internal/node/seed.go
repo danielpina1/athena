@@ -69,6 +69,10 @@ type Seed struct {
 	Offline bool
 	// Unsent, with no Bundle, says the server had a checkpoint it could not send: SeedTooBig or SeedSendFailed.
 	Unsent string
+	// Fork says the Bundle is the lead's checkpoint, for a child placed away from its lead (childgit.go): the child's
+	// branch is made at Base, the lead's commit the bundle holds, and nothing is restored.
+	Fork bool
+	Base string
 }
 
 // seedRecord is a Seed as the node keeps it, <StateDir>/seeds/<lowercased id>.json, its bundle beside it (.bundle).
@@ -84,6 +88,8 @@ type seedRecord struct {
 	Unsent       string    `json:"unsent,omitempty"`
 	Created      time.Time `json:"created,omitzero"`
 	Note         string    `json:"note,omitempty"`
+	Fork         bool      `json:"fork,omitempty"`
+	Base         string    `json:"base,omitempty"`
 }
 
 // seedTicketRe is a Ticket id a seed file is named after.
@@ -111,6 +117,12 @@ func (n *Node) Seed(sd Seed) error {
 	default:
 		return &core.UserError{Msg: "bad seed: unknown reason " + sd.Unsent}
 	}
+	if sd.Fork && (sd.Bundle == "" || !shaRe.MatchString(sd.Base)) {
+		return &core.UserError{Msg: "bad seed: a fork needs the lead's checkpoint and the commit to start at"}
+	}
+	if !sd.Fork {
+		sd.Base = ""
+	}
 	if sd.Bundle != "" {
 		sd.Unsent = ""
 	} else {
@@ -136,6 +148,7 @@ func (n *Node) Seed(sd Seed) error {
 			return fmt.Errorf("keep the seed bundle: %w", err)
 		}
 		rec.Bundle, rec.SHA, rec.At = true, sd.SHA, sd.At
+		rec.Fork, rec.Base = sd.Fork, sd.Base
 	}
 	if err := n.writeSeed(sd.TicketID, rec); err != nil {
 		n.dropSeed(sd.TicketID)
@@ -299,14 +312,15 @@ func (n *Node) sweepSeeds() {
 }
 
 // takeMovedNote is the moved line of the session's first message, once its worktree was built from a seed ("" when
-// it was not); the seed is dropped once it is read.
-func (n *Node) takeMovedNote(s *session) string {
+// it was not), and whether the seed was a fork (the line then says where a new child's branch starts, not that the
+// Ticket moved); the seed is dropped once it is read.
+func (n *Node) takeMovedNote(s *session) (note string, fork bool) {
 	rec, ok := n.seedFor(s.t, s.a.ID)
 	if !ok || rec.Note == "" {
-		return ""
+		return "", false
 	}
 	n.dropSeed(s.t.ID)
-	return rec.Note
+	return rec.Note, rec.Fork
 }
 
 // movedLine says where the moved Ticket's work came from (how): rec's checkpoint, the branch pushed to GitHub, the
@@ -348,14 +362,14 @@ func seedGit(ctx context.Context, clone string, env []string) func(args ...strin
 }
 
 // fetchSeed fetches the seed's bundle into the clone's seed ref of the Ticket and returns the checkpoint's parent.
-// Only the checkpoint ref is taken, with every object checked and no protocol but the bundle file, and it must be the
-// seed's commit.
+// Only the checkpoint ref is taken (the lead's, for a fork), with every object checked and no protocol but the bundle
+// file, and it must be the seed's commit.
 func (n *Node) fetchSeed(t core.Ticket, git func(args ...string) (string, error), rec seedRecord) (parent string, err error) {
-	seedRef := seedRefOf(t)
-	_, err = git("-c", "protocol.allow=never", "-c", "protocol.file.allow=always", "-c", "transfer.fsckObjects=true",
-		"-c", "fetch.fsckObjects=true", "-c", "gc.auto=0", "-c", "maintenance.auto=false", "fetch", "--quiet", "--no-tags",
-		"--no-write-fetch-head", "--no-auto-gc", "--no-recurse-submodules", n.seedPath(t.ID, ".bundle"),
-		"+"+checkpointRef(t.ID)+":"+seedRef)
+	seedRef, src := seedRefOf(t), checkpointRef(t.ID)
+	if rec.Fork {
+		src = checkpointRef(t.Lead)
+	}
+	err = fetchBundle(git, n.seedPath(t.ID, ".bundle"), src, seedRef)
 	var got string
 	if err == nil {
 		got, err = git("rev-parse", "--verify", "--quiet", seedRef+"^{commit}")
@@ -411,6 +425,9 @@ func (n *Node) seedWorktree(s *session, clone, defaultBranch, base string, env [
 	defer cancel()
 	t, p := s.t, s.place
 	git := seedGit(ctx, clone, env)
+	if rec.Fork {
+		return n.forkWorktree(ctx, s, git, clone, env, rec)
+	}
 	branch := branchName(t)
 	from, how := base, seedFromBase
 	if rec.Bundle {
@@ -458,6 +475,11 @@ func (n *Node) seedWorktree(s *session, clone, defaultBranch, base string, env [
 // to a side ref, then the branch and the worktree are reset to the seed's checkpoint (Ruling R22). Without a
 // checkpoint it can restore, the worktree stays as it is. Under the clone's lock.
 func (n *Node) reseedWorktree(s *session, rec seedRecord) error {
+	if rec.Fork {
+		// A fork seed only says where a new child's branch starts: the worktree here has its branch already.
+		n.dropSeed(s.t.ID)
+		return nil
+	}
 	ctx, cancel := context.WithTimeout(n.ctx, seedTimeout)
 	defer cancel()
 	t, p := s.t, s.place
