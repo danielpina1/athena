@@ -3,6 +3,7 @@ package fleet
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -99,10 +100,11 @@ func TestHelloChecked(t *testing.T) {
 		t.Fatalf("close = %d %q", code, reason)
 	}
 	h := hello(nodeID)
-	h.Protocol = 2
+	h.Protocol = nodelink.Protocol + 1
 	w = dialWire(t, f, nodeID, h)
-	if code, reason := w.conn.closedWith(t); code != link.CloseProtocol || reason != "node protocol 2, server protocol 1; update the node" {
-		t.Fatalf("close = %d %q", code, reason)
+	want := fmt.Sprintf("node protocol %d, server protocol %d; update the node", nodelink.Protocol+1, nodelink.Protocol)
+	if code, reason := w.conn.closedWith(t); code != link.CloseProtocol || reason != want {
+		t.Fatalf("close = %d %q, want %q", code, reason, want)
 	}
 }
 

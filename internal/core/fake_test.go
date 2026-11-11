@@ -22,6 +22,7 @@ type memRepos struct {
 	receipts  map[string][]byte
 	brakes    map[string][]byte
 	proposals map[string][]byte
+	agentMsgs map[string][]byte
 	kv        map[string]string
 	effects   map[string]fakeEffect
 	seqs      map[string]int
@@ -34,7 +35,7 @@ type memRepos struct {
 }
 
 func newMemRepos() *memRepos {
-	return &memRepos{tickets: map[string][]byte{}, triggers: map[string][]byte{}, decisions: map[string][]byte{}, approvals: map[string][]byte{}, threads: map[string][]byte{}, receipts: map[string][]byte{}, brakes: map[string][]byte{}, proposals: map[string][]byte{}, kv: map[string]string{}, effects: map[string]fakeEffect{}, seqs: map[string]int{}}
+	return &memRepos{tickets: map[string][]byte{}, triggers: map[string][]byte{}, decisions: map[string][]byte{}, approvals: map[string][]byte{}, threads: map[string][]byte{}, receipts: map[string][]byte{}, brakes: map[string][]byte{}, proposals: map[string][]byte{}, agentMsgs: map[string][]byte{}, kv: map[string]string{}, effects: map[string]fakeEffect{}, seqs: map[string]int{}}
 }
 
 // fakeEffect is a queued effect, as Enqueue leaves it.
@@ -56,6 +57,7 @@ func (r *memRepos) Tx(fn func(Tx) error) error {
 		receipts:  cloneMap(r.receipts),
 		brakes:    cloneMap(r.brakes),
 		proposals: cloneMap(r.proposals),
+		agentMsgs: cloneMap(r.agentMsgs),
 		kv:        map[string]string{},
 		effects:   map[string]fakeEffect{},
 		seqs:      map[string]int{},
@@ -81,7 +83,7 @@ func (r *memRepos) Tx(fn func(Tx) error) error {
 	}
 	r.tickets, r.triggers, r.decisions, r.approvals, r.seqs = tx.tickets, tx.triggers, tx.decisions, tx.approvals, tx.seqs
 	r.threads, r.kv, r.effects, r.receipts, r.brakes = tx.threads, tx.kv, tx.effects, tx.receipts, tx.brakes
-	r.proposals = tx.proposals
+	r.proposals, r.agentMsgs = tx.proposals, tx.agentMsgs
 	return nil
 }
 
@@ -164,7 +166,7 @@ func (r *memRepos) counts() (tickets, triggers, decisions int) {
 
 type memTx struct {
 	tickets, triggers, decisions, approvals, threads map[string][]byte
-	receipts, brakes, proposals                      map[string][]byte
+	receipts, brakes, proposals, agentMsgs           map[string][]byte
 	kv                                               map[string]string
 	effects                                          map[string]fakeEffect
 	seqs                                             map[string]int
@@ -663,7 +665,7 @@ func (h *harness) settle(launch bool) {
 		if t.Ended != nil || a == nil {
 			continue
 		}
-		for _, id := range t.Undelivered {
+		for _, id := range t.Deliverable() {
 			h.delivered = append(h.delivered, [2]string{ticketID, id})
 			h.must(h.eng.InputsDelivered(ticketID, a.ID, []string{id}))
 		}
@@ -787,4 +789,72 @@ func (tx *memTx) PendingProposals() ([]*Proposal, error) { return tx.proposalLis
 
 func (tx *memTx) TicketProposals(ticketID string) ([]*Proposal, error) {
 	return tx.proposalList(ticketID, false)
+}
+
+func (tx *memTx) PutAgentMessage(m *AgentMessage) error {
+	raw, err := json.Marshal(m)
+	if err != nil {
+		return err
+	}
+	tx.agentMsgs[m.ID] = raw
+	return nil
+}
+
+func (tx *memTx) GetAgentMessage(id string) (*AgentMessage, error) {
+	raw, ok := tx.agentMsgs[id]
+	if !ok {
+		return nil, nil
+	}
+	var m AgentMessage
+	mustUnmarshal(raw, &m)
+	return &m, nil
+}
+
+// allAgentMessages returns every message, oldest first (by time, then id).
+func (tx *memTx) allAgentMessages() []*AgentMessage {
+	var out []*AgentMessage
+	for _, raw := range tx.agentMsgs {
+		var m AgentMessage
+		mustUnmarshal(raw, &m)
+		out = append(out, &m)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].At.Equal(out[j].At) {
+			return out[i].At.Before(out[j].At)
+		}
+		return out[i].ID < out[j].ID
+	})
+	return out
+}
+
+func (tx *memTx) AgentMessagesOf(ticketID string) ([]*AgentMessage, error) {
+	var out []*AgentMessage
+	for _, m := range tx.allAgentMessages() {
+		if m.From == ticketID || m.To == ticketID {
+			out = append(out, m)
+		}
+	}
+	return out, nil
+}
+
+func (tx *memTx) CountAgentMessagesFrom(ticketID string, since time.Time) (int, error) {
+	n := 0
+	for _, m := range tx.allAgentMessages() {
+		if m.From == ticketID && !m.At.Before(since) {
+			n++
+		}
+	}
+	return n, nil
+}
+
+func (tx *memTx) AgentAnswer(messageID string) (*AgentMessage, error) {
+	if messageID == "" {
+		return nil, nil
+	}
+	for _, m := range tx.allAgentMessages() {
+		if m.ReplyTo == messageID {
+			return m, nil
+		}
+	}
+	return nil, nil
 }

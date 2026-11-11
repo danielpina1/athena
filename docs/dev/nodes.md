@@ -116,3 +116,19 @@ If it will not come back soon, **Retry elsewhere** (the dashboard's action on th
 - **Work in a folder stays on its machine.** A Ticket started with `--dir` works in a folder only that node has, so it
   cannot move. Retry elsewhere refuses it with "This Ticket works in a folder on <name>; it continues when <name> is
   back."
+
+## 6. Protocol versions
+
+A node says its protocol in `NodeHello.protocol`, and the server refuses a node whose number differs from its own. The
+number is `Protocol` in `internal/nodelink/client.go`.
+
+The bump rule, copied from the comment there:
+
+> Any change to an Args struct (proxies.go, serve.go) or to the fields of a call bumps Protocol. Both ends decode args
+> strictly, and a fact the server cannot decode is refused as a UserError, which still advances the applied-fact mark:
+> without the bump a node and a server of different versions would drop facts silently instead of refusing the link.
+
+- Plan 6 shipped Protocol 1.
+- Plan 7 made it **2**, once, for every Args change in that plan: the agent calls, child Tickets, the fork seed and
+  `importBranch`. Update the node and the server together, or the node is refused.
+- A dashboard client's `Hello.protocol` is a different number and stays 1, since only fields were added to it.

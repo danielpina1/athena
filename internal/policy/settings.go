@@ -110,6 +110,45 @@ type Settings struct {
 	PromoteAfter int `json:"promoteAfter,omitempty"`
 	// Autopilot holds the owner's standing instructions.
 	Autopilot []AutopilotEntry `json:"autopilot,omitempty"`
+	// Split holds the limits of splitting work into child Tickets and of agent messages.
+	Split SplitSettings `json:"split"`
+}
+
+// SplitSettings are the limits of splitting and of agent messages; a 0 is the default (core.SplitLimits). The fan-out
+// cap MaxChildren is 1 to 20, MaxHops 1 to 5, MessageLimit 1 to 100 messages per MessageWindowMinutes (1 to 120), and
+// AutoApprove 0 (off) to 20 sub-tasks.
+type SplitSettings struct {
+	MaxChildren          int `json:"maxChildren,omitempty"`
+	MaxHops              int `json:"maxHops,omitempty"`
+	MessageLimit         int `json:"messageLimit,omitempty"`
+	MessageWindowMinutes int `json:"messageWindowMinutes,omitempty"`
+	AutoApprove          int `json:"autoApprove,omitempty"`
+}
+
+// SplitLimits are the Engine's split limits these settings give (core.Options.Split), defaults applied.
+func (s Settings) SplitLimits() core.SplitLimits {
+	sp := s.Split
+	return core.SplitLimits{MaxChildren: sp.MaxChildren, MaxHops: sp.MaxHops, MessageLimit: sp.MessageLimit,
+		AutoApprove: sp.AutoApprove, MessageWindow: time.Duration(sp.MessageWindowMinutes) * time.Minute}.WithDefaults()
+}
+
+// validateSplit checks each split limit is 0 (its default) or in its range.
+func validateSplit(sp SplitSettings) error {
+	for _, f := range []struct {
+		name         string
+		v, low, high int
+	}{
+		{"maxChildren", sp.MaxChildren, 1, 20},
+		{"maxHops", sp.MaxHops, 1, 5},
+		{"messageLimit", sp.MessageLimit, 1, 100},
+		{"messageWindowMinutes", sp.MessageWindowMinutes, 1, 120},
+		{"autoApprove", sp.AutoApprove, 0, 20},
+	} {
+		if f.v != 0 && (f.v < f.low || f.v > f.high) {
+			return fmt.Errorf("policy: split %s %d is not %d to %d", f.name, f.v, f.low, f.high)
+		}
+	}
+	return nil
 }
 
 // Repository modes.
@@ -218,7 +257,7 @@ func Defaults(allowed []string) Settings {
 // every empty cell set to its default.
 func normalize(s Settings) Settings {
 	out := Settings{Mode: s.Mode, Rules: make([]Rule, len(s.Rules)), Sources: make(map[string]SourcePart, len(s.Sources)),
-		Pairing: s.Pairing, WIPCeiling: s.WIPCeiling, PromoteAfter: s.PromoteAfter}
+		Pairing: s.Pairing, WIPCeiling: s.WIPCeiling, PromoteAfter: s.PromoteAfter, Split: s.Split}
 	if len(s.Repos) > 0 {
 		out.Repos = make(map[string]RepoSettings, len(s.Repos))
 		for k, v := range s.Repos {
@@ -322,6 +361,9 @@ func Validate(s Settings) error {
 		return err
 	}
 	if err := validateAutopilot(s); err != nil {
+		return err
+	}
+	if err := validateSplit(s.Split); err != nil {
 		return err
 	}
 	seen := map[string]bool{}

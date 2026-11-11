@@ -173,6 +173,13 @@ type EngineCallbacks interface {
 	// RecordUsage adds what the node observed to the Ticket's stats. It takes the Engine's lock: never call it while
 	// holding a node lock that Start, Deliver or Stop also take.
 	RecordUsage(ticketID, assignmentID string, u core.UsageDelta) error
+	// The agent tools (agenttools.go): hand_off splits a child off, ask_agent and reply{message_id} message another
+	// agent's Ticket, wait_for waits for a Ticket or a message, and agents lists the Tickets a worker can reach.
+	SpawnChildren(leadID string, specs []core.ChildSpec) ([]string, error)
+	AskAgent(fromID, target, text string) (core.AgentMessage, error)
+	AnswerAgent(fromID, messageID, text string) (core.AgentMessage, error)
+	WaitFor(ctx context.Context, ticketID, target string) (core.WaitResult, error)
+	Agents(ticketID string) ([]core.AgentView, error)
 }
 
 var _ EngineCallbacks = (*core.Engine)(nil)
@@ -202,6 +209,10 @@ type Node struct {
 	runners   sync.WaitGroup
 	// seedSwept is when the seeds were last swept (seed.go), in Unix nanoseconds.
 	seedSwept atomic.Int64
+	// imports are the branches shipped before this node had a clone of their Ticket's repository, by lowercased Ticket
+	// id (childgit.go), under importMu.
+	importMu sync.Mutex
+	imports  map[string][]BranchImport
 
 	mu   sync.Mutex
 	live map[string]*session // by Ticket ID: launched sessions until their runner ends
@@ -1232,9 +1243,14 @@ func (r *runner) run() {
 	// Ticket (retry, resume) continues the Ticket's last session.
 	resumeID, recovering := s.a.SessionID, s.a.SessionID != ""
 	// A Ticket that moved here from another node (its worktree seeded) starts a new session: the last one is there.
-	moved := ""
+	// A child whose branch came from a fork seed starts a new session too, told where its branch starts (forked).
+	moved, forked := "", ""
 	if !recovering {
-		moved = n.takeMovedNote(s)
+		if note, fork := n.takeMovedNote(s); fork {
+			forked = note
+		} else {
+			moved = note
+		}
 	}
 	if resumeID == "" && moved == "" {
 		// Only a session of the same runtime and role continues: another runtime's session id means nothing here.
@@ -1287,6 +1303,9 @@ func (r *runner) run() {
 	failover := false
 	if !recovering {
 		r.handoff, failover = r.handoffFor(rtm.Name(), resumeID, moved)
+		if forked != "" {
+			r.handoff = strings.TrimSpace(forked + "\n" + r.handoff)
+		}
 	}
 	for crashes := 0; ; {
 		if crashes == 0 && r.putOffForPause() {
@@ -1688,14 +1707,14 @@ func (r *runner) seedUnread() {
 	}
 }
 
-// pending returns the Ticket's waiting Inputs not yet sent to this Assignment, in order; none to a review, whose
+// pending returns the Ticket's waiting Inputs that may go now (Deliverable) not yet sent to this Assignment, in order; none to a review, whose
 // Inputs wait for the implementer.
 func (r *runner) pending(t core.Ticket) []string {
 	if r.s.reviewing() {
 		return nil
 	}
 	var ids []string
-	for _, id := range t.Undelivered {
+	for _, id := range t.Deliverable() {
 		if !r.sent[id] {
 			ids = append(ids, id)
 		}
@@ -1910,7 +1929,7 @@ func (r *runner) interruptBusy() {
 	}
 	// A turn end the Engine knows (the CLI's Stop hook) that this runner has not read yet: the session is idle.
 	if t, _, err := r.eng.Ticket(r.s.t.ID); err == nil {
-		if l := t.LatestAssignment(); l != nil && l.ID == r.s.a.ID && pausedAt(*l) && len(t.Undelivered) == 0 {
+		if l := t.LatestAssignment(); l != nil && l.ID == r.s.a.ID && pausedAt(*l) && len(t.Deliverable()) == 0 {
 			return
 		}
 	}
@@ -2178,6 +2197,8 @@ func renderInputs(t core.Ticket, ids []string, trigger func(id string) (core.Tri
 			fmt.Fprintf(&b, "[input %s: note]\nNote: %s\n\n", in.ID, quoteText(in.Text))
 		case core.InputReview:
 			fmt.Fprintf(&b, "[input %s: review]\n%s\n\nAddress the findings, then report ready again.\n\n", in.ID, quoteText(in.Text))
+		case core.InputAgent, core.InputChild, core.InputTask:
+			b.WriteString(agentCard(*in))
 		default:
 			var tr core.Trigger
 			found := false
@@ -2463,7 +2484,7 @@ func (n *Node) prepare(s *session) error {
 		if err := os.MkdirAll(filepath.Dir(p.workDir), 0o700); err != nil {
 			return err
 		}
-		if err := ensureWorktreeIn(p.repo, p.common, p.workDir, branchName(s.t), "HEAD", nil); err != nil {
+		if err := repoWorktree(p, s.t); err != nil {
 			return err
 		}
 		n.recordWorktreeConfig(s.t, s.log)
@@ -2669,8 +2690,9 @@ const keptNote = "its git links were checked against the placement record; its f
 
 // cleanupWorktree removes an ended Ticket's worktree when nothing in it would be lost: no uncommitted or untracked
 // changes (Athena's own .athena directory is ignored) and no commits on its branch that exist nowhere else (no other
-// branch, no remote). Otherwise it keeps it and logs why. The branch itself is kept; the Ticket's checkpoint ref goes
-// with the worktree.
+// branch, no remote; a child's commits are on its branch, which the lead merges, so they never keep it). Otherwise it
+// keeps it and logs why. The branch itself is kept; the Ticket's checkpoint ref goes with the worktree (a child's
+// stays, for the server's mirror), and a lead's children's branches and checkpoint refs in that repository go too.
 func cleanupWorktree(p placement, t core.Ticket, workRoot string, log *slog.Logger) {
 	if err := os.RemoveAll(restrictedTempDir(p.workDir)); err != nil {
 		log.Warn("remove the session's temporary root", "ticket", t.ID, "error", err)
@@ -2717,15 +2739,17 @@ func cleanupWorktree(p placement, t core.Ticket, workRoot string, log *slog.Logg
 		log.Info("kept worktree with uncommitted changes", "dir", p.workDir, "note", keptNote)
 		return
 	}
-	branch := branchName(t)
-	count, err := gitOut(p.repo, "rev-list", "--count", "refs/heads/"+branch, "--not", "--exclude="+branch, "--branches", "--remotes")
-	if err != nil {
-		log.Warn("keeping worktree: cannot tell whether its branch is pushed", "dir", p.workDir, "error", err)
-		return
-	}
-	if count != "0" {
-		log.Info("kept worktree with unpushed commits", "dir", p.workDir, "branch", branch, "commits", count, "note", keptNote)
-		return
+	// A child's branch is what it delivers (the lead merges it), and the branch is kept: its unpushed commits are safe.
+	if branch := branchName(t); t.Lead == "" {
+		count, err := gitOut(p.repo, "rev-list", "--count", "refs/heads/"+branch, "--not", "--exclude="+branch, "--branches", "--remotes")
+		if err != nil {
+			log.Warn("keeping worktree: cannot tell whether its branch is pushed", "dir", p.workDir, "error", err)
+			return
+		}
+		if count != "0" {
+			log.Info("kept worktree with unpushed commits", "dir", p.workDir, "branch", branch, "commits", count, "note", keptNote)
+			return
+		}
 	}
 	// No --force: git itself refuses if anything changed since the check.
 	if _, err := gitOut(p.repo, "worktree", "remove", p.workDir); err != nil {
@@ -2735,16 +2759,22 @@ func cleanupWorktree(p placement, t core.Ticket, workRoot string, log *slog.Logg
 	log.Info("removed worktree", "dir", p.workDir)
 	// Its refs go with it, the checkpoint (checkpoint.go) and any seed or superseded state (seed.go): nothing of the
 	// Ticket's work in progress stays reachable.
+	// A lead's imports of its children's branches are among them; the children's branches and checkpoints go too
+	// (childgit.go). A child keeps its checkpoint, the head it delivers, until the server's mirror may have taken it:
+	// its lead's cleanup deletes it.
 	refs, err := gitOut(p.repo, "for-each-ref", "--format=%(refname)", ticketRefs(t.ID))
 	if err != nil {
 		log.Warn("list the ticket's refs", "error", err)
-		return
 	}
 	for _, ref := range strings.Fields(refs) {
+		if t.Lead != "" && ref == checkpointRef(t.ID) {
+			continue
+		}
 		if _, err := gitOut(p.repo, "update-ref", "-d", ref); err != nil {
 			log.Warn("remove the ticket's ref", "ref", ref, "error", err)
 		}
 	}
+	deleteChildBranches(func(args ...string) (string, error) { return gitOut(p.repo, args...) }, t, log)
 }
 
 // ticketRefs is the directory of a Ticket's refs: refs/athena/<lowercased id>/.

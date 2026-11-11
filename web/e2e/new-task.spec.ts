@@ -3,10 +3,13 @@
 // ready, a task pinned to Codex (fakecodex) and paired with a review, whose Facts say so, and one on a model picked
 // from fakecodex's model/list, and the Other… field. Every Ticket is stopped at the end (R37).
 import type { Page } from "@playwright/test";
+import type { NodeStatus } from "../src/gen/athena/v1/state_pb";
 import { athena, expect, expectAccessible, signedInPage, test, liveFeed } from "./harness";
 import { editLink, fixedNode, runtimeStatus } from "./link";
 
 const modelOptions = (page: Page) => page.getByRole("combobox", { name: "Model", exact: true }).locator("option");
+/** The embedded node named and loaded the same on every run, with the runtimes (and models) the server reports. */
+const sameNode = (n: NodeStatus) => fixedNode(n.runtimes)(n);
 const claudeModels = [
   { id: "opus", name: "Opus" },
   { id: "sonnet", name: "Sonnet", default: true },
@@ -16,6 +19,7 @@ const claudeModels = [
 test("a no-repo task starts from the form and lands on its detail, light and dark", async ({ page }) => {
   await page.clock.setFixedTime(new Date("2026-11-04T10:00:00"));
   await page.emulateMedia({ colorScheme: "light", reducedMotion: "reduce" });
+  await editLink(page, { node: sameNode });
   await signedInPage(page);
   await page.goto("/new");
   const text = page.getByRole("textbox", { name: "What should Athena do?" });
@@ -130,6 +134,7 @@ test("a task pinned to Codex with a review says so in its Facts, light and dark"
 test("a Codex model picked from its list shows in the Facts; Other… takes any model, light and dark", async ({ page }) => {
   await page.clock.setFixedTime(new Date("2026-11-04T10:00:00"));
   await page.emulateMedia({ colorScheme: "light", reducedMotion: "reduce" });
+  await editLink(page, { node: sameNode });
   await signedInPage(page);
   await page.goto("/new");
   await page.getByRole("textbox", { name: "What should Athena do?" }).fill("Trim the lexer's lookahead");

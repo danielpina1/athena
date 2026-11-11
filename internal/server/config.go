@@ -22,6 +22,7 @@ import (
 	"github.com/danielpina1/athena/internal/core"
 	"github.com/danielpina1/athena/internal/node"
 	"github.com/danielpina1/athena/internal/pki"
+	"github.com/danielpina1/athena/internal/planner"
 	"github.com/danielpina1/athena/internal/sources/github"
 	"github.com/danielpina1/athena/internal/web"
 )
@@ -55,6 +56,7 @@ const (
 type FileConfig struct {
 	GitHub             *GitHubConfig `json:"github,omitempty"`
 	Router             RouterConfig  `json:"router"`
+	Planner            PlannerConfig `json:"planner"`
 	EvalTimeoutSeconds int           `json:"evalTimeoutSeconds"`
 	Sandbox            SandboxConfig `json:"sandbox"`
 	// Web is the dashboard's HTTPS endpoint, written by `athena web setup`; nil (left out) is off.
@@ -342,6 +344,14 @@ type RouterConfig struct {
 	Model string `json:"model"`
 }
 
+// PlannerConfig configures the planner that drafts a plan-first task's split.
+type PlannerConfig struct {
+	// Strategy is the planner's strategy: llm (default) or off.
+	Strategy string `json:"strategy"`
+	// Model is the llm strategy's model (default haiku).
+	Model string `json:"model"`
+}
+
 var repoRe = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
 
 // LoadConfig reads <stateDir>/config.json with its defaults filled in; a missing file is the default configuration.
@@ -391,6 +401,12 @@ func LoadConfig(stateDir string) (FileConfig, error) {
 func (c FileConfig) withDefaults() FileConfig {
 	if c.Router.Model == "" {
 		c.Router.Model = DefaultRouterModel
+	}
+	if c.Planner.Strategy == "" {
+		c.Planner.Strategy = planner.DefaultStrategy
+	}
+	if c.Planner.Model == "" {
+		c.Planner.Model = planner.DefaultModel
 	}
 	if c.EvalTimeoutSeconds == 0 {
 		c.EvalTimeoutSeconds = DefaultEvalTimeoutSeconds

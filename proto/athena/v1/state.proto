@@ -120,6 +120,22 @@ message TicketSummary {
   // waiting_for_node is why the Ticket's Assignment is not placed yet ("Waiting for mac-studio", "Waiting for a node
   // with Codex"); empty when it is not waiting.
   string waiting_for_node = 25;
+  // lead is the Ticket this one is a child of; empty for a Ticket that is not a child.
+  string lead = 26;
+  // children are the ids of every child ticket split off this one, ended ones included.
+  repeated string children = 27;
+  // deps are the ids of the sibling tickets (or, for a lead, the children) that must end before this one starts.
+  repeated string deps = 28;
+  // waiting are the deps not yet ended; while any is, the Ticket has not started.
+  repeated string waiting = 29;
+  // plan_state is where a plan-first Ticket's split stands: planning, draft, failed, approved or rejected; empty for a
+  // Ticket not planned first.
+  string plan_state = 30;
+  // attention_child is the child ticket whose failure needs the owner, on its lead; empty when none does.
+  string attention_child = 31;
+  // split_key is the sub-task key a child was made from (the key its siblings' deps name); empty for a Ticket that is
+  // not a child.
+  string split_key = 32;
 }
 
 message TicketDetail {
@@ -130,11 +146,51 @@ message TicketDetail {
   bool timeline_trimmed = 4;
   // reports are the Ticket's Reports in full, one per Assignment that filed one, newest last: at most the last 5.
   repeated ReportView reports = 5;
+  // breakdown is a plan-first Ticket's split plan; unset for a Ticket not planned first.
+  BreakdownView breakdown = 6;
+}
+
+// SubTaskView is one sub-task of a split: a child ticket to be.
+message SubTaskView {
+  // key names the sub-task within its split (a-z, 0-9 and -); deps name other sub-tasks by key.
+  string key = 1;
+  string title = 2;
+  string instructions = 3;
+  // areas are the paths the sub-task expects to touch.
+  repeated string areas = 4;
+  repeated string deps = 5;
+  // runtime, node and model are optional hints: claude, codex or auto; a node's name or id; a model.
+  string runtime = 6;
+  string node = 7;
+  string model = 8;
+}
+
+// OverlapView names two sub-tasks, by key, whose areas overlap, and the areas they share.
+message OverlapView {
+  string a = 1;
+  string b = 2;
+  repeated string areas = 3;
+}
+
+// BreakdownView is a plan-first Ticket's split plan.
+message BreakdownView {
+  // revision is the draft's; an UpdateBreakdown or ApproveBreakdown names it, and is refused when it changed meanwhile.
+  uint32 revision = 1;
+  repeated SubTaskView tasks = 2;
+  repeated OverlapView overlaps = 3;
+  // note is the planner's, or why the plan runs as one ticket.
+  string note = 4;
+  // state is planning, draft, failed, approved or rejected.
+  string state = 5;
+  // error is why the plan failed, set when state is failed.
+  string error = 6;
+  // max_children is how many sub-tasks a split may have, from the current Policy.
+  uint32 max_children = 7;
 }
 
 message TimelineEntry {
   google.protobuf.Timestamp at = 1;
-  // kind is trigger, decision, input, report, assignment, review, approval or reply.
+  // kind is trigger, decision, input, report, assignment, review, approval, reply, agent, child or split.
   string kind = 2;
   // text is redacted, on one line and cut; Athena's hidden markers (<!-- athena:… -->) are removed.
   string text = 3;
@@ -153,11 +209,18 @@ message TimelineEntry {
   //   input: trigger (a message from no person), text, note, resumed, context (seen on a Thread the Ticket only
   //     follows) or receipt (Athena's own acknowledgement on GitHub);
   //   reply: owner (from the dashboard) or github;
-  //   approval: pending, approved, denied or expired.
+  //   approval: pending, approved, denied or expired;
+  //   agent: a message between agents, subject the other Ticket: asked (this Ticket asked it), received (it was
+  //     asked), answered (this Ticket answered) or answer (it got an answer);
+  //   child: about a child ticket, subject the child: spawned (text its title), ready, failed (text why), dropped (it
+  //     found nothing to do), continued (the owner went on without it) or stopped;
+  //   split: about the Ticket's split plan: drafted, approved (text the children), rejected (run as one ticket), failed
+  //     (text why) or single (the planner found nothing to split; text the note).
   // Empty from an older server.
   string subkind = 5;
   // subject is what the entry is about, short: an Approval's tool and command (Bash: npm test), an Assignment's
-  // model, a Report's pull request (PR #12), or the GitHub login of a reply.
+  // model, a Report's pull request (PR #12), the GitHub login of a reply, or the other Ticket of an agent or child
+  // entry.
   string subject = 6;
   // runtime is the runtime of the Assignment, set on assignment and review entries (claude or codex): the one it ran
   // on, or, for a queued Assignment pinned to one, the one it will run on; empty when it names none yet (an unpinned

@@ -213,7 +213,7 @@ func (e *Engine) RequestStatus(ticketID string) (bool, error) {
 // idle reports whether a running Assignment's worker has no turn in progress: its latest turn ended after the latest
 // delivery, and no Input waits to be delivered.
 func idle(t *Ticket, a *Assignment) bool {
-	if a.IdleAt == nil || len(t.Undelivered) > 0 {
+	if a.IdleAt == nil || len(t.Deliverable()) > 0 {
 		return false
 	}
 	return a.DeliveredAt == nil || a.IdleAt.After(*a.DeliveredAt)

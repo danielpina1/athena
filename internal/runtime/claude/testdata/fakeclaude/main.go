@@ -6,6 +6,7 @@
 //
 //	ATHENA_FAKE_VERSION            the version `claude --version` prints (default 2.1.280)
 //	ATHENA_FAKE_FIXTURE            path of a .jsonl file replayed after the first stdin line
+//	ATHENA_FAKE_PLANNER_FIXTURE    replayed instead of ATHENA_FAKE_FIXTURE when ATHENA_ROLE=planner (the planner's turn)
 //	ATHENA_FAKE_REPEAT             replay the fixture this many times (default 1)
 //	ATHENA_FAKE_STDIN_LOG          file every stdin line is appended to (it may name {ticket}, below)
 //	ATHENA_FAKE_ARGS_LOG           file receiving {"args":[...],"env":{ATHENA_*}} as JSON
@@ -189,7 +190,11 @@ func fileExists(p string) bool {
 }
 
 func replay(out *bufio.Writer, exitMidTurn bool) {
-	path := fixture("ATHENA_FAKE_FIXTURE")
+	name := "ATHENA_FAKE_FIXTURE"
+	if os.Getenv("ATHENA_ROLE") == "planner" {
+		name = "ATHENA_FAKE_PLANNER_FIXTURE"
+	}
+	path := fixture(name)
 	if path == "" {
 		return
 	}

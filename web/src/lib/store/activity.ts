@@ -40,6 +40,8 @@ const NEEDS_YOU: Record<NeedsYouKind, [string, Tone]> = {
   blocked: ["Blocked", "warn"],
   failed: ["Failed", "danger"],
   offline: ["Its node went offline", "attention"],
+  plan: ["Its split waits for you", "attention"],
+  child: ["A child ticket needs you", "attention"],
 };
 
 const ENDED: Record<string, [string, Tone]> = {

@@ -154,4 +154,33 @@ describe("selectors", () => {
     expect(selectCounts(s, NOW).needsYou).toBe(3);
     expect(selectTickets(s, { stage: "needsYou" }).map((t) => t.id)).toContain("T-offline");
   });
+  test("a split waiting for the owner is a plan item, and a failed child is a child item on its lead only", () => {
+    const s = load([
+      ticket("T-plan", { stage: "person", action: "plan", planState: "draft", updatedAt: at(20) }),
+      ticket("T-lead", { stage: "person", action: "child", attentionChild: "T-c1", children: ["T-c1", "T-c2"], updatedAt: at(10) }),
+      ticket("T-c1", { stage: "person", action: "failed", lead: "T-lead", updatedAt: at(11) }),
+      // A failed child its lead does not name (another child is the lead's attention) is still listed on its own.
+      ticket("T-c2", { stage: "person", action: "blocked", lead: "T-lead", updatedAt: at(12) }),
+    ]);
+    expect(selectNeedsYou(s).map((i) => [i.ticket.id, i.kind])).toEqual([
+      ["T-plan", "plan"],
+      ["T-c2", "blocked"],
+      ["T-lead", "child"],
+    ]);
+    expect(selectCounts(s, NOW).needsYou).toBe(3);
+    expect(selectTickets(s, { stage: "needsYou" }).map((t) => t.id)).not.toContain("T-c1");
+  });
+
+  test("a child blocked with a question of its own keeps its answer card, even when its lead names it", () => {
+    const s = load([
+      ticket("T-lead", { stage: "person", action: "child", attentionChild: "T-c1", children: ["T-c1"], updatedAt: at(10) }),
+      // Blocked with a question: the server's stage is person/answer, which only the child's own card can answer.
+      ticket("T-c1", { stage: "person", action: "answer", attentionQuestion: "Which API key?", lead: "T-lead", updatedAt: at(11) }),
+    ]);
+    expect(selectNeedsYou(s).map((i) => [i.ticket.id, i.kind])).toEqual([
+      ["T-c1", "answer"],
+      ["T-lead", "child"],
+    ]);
+    expect(selectTickets(s, { stage: "needsYou" }).map((t) => t.id)).toContain("T-c1");
+  });
 });

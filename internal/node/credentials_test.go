@@ -689,7 +689,7 @@ func TestWorkerToolsReachEngine(t *testing.T) {
 		!strings.Contains(out, "file report {status: waiting (or blocked), summary, question}") {
 		t.Fatalf("an attention reply: %s", out)
 	}
-	if out, isErr := call("reply", map[string]any{"text": "Yes."}); !isErr || !strings.Contains(out, "trigger_id is required") {
+	if out, isErr := call("reply", map[string]any{"text": "Yes."}); !isErr || !strings.Contains(out, "name trigger_id for a person's question, or message_id for another agent's") {
 		t.Fatalf("an answer without a trigger_id: %s", out)
 	}
 	// A ready report with a question is refused with what to do instead; the report tool says what Athena does next.

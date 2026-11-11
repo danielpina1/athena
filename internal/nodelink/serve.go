@@ -41,6 +41,7 @@ const (
 	ServeUnsubscribe   = "unsubscribe"   // ArgsUnsubscribe; no value
 	ServeStatus        = "status"        // ArgsStatus; node.Status
 	ServeSeed          = "seed"          // ArgsSeed, after the seed's BlobChunks; no value
+	ServeImportBranch  = "importBranch"  // ArgsImportBranch, after the branch's BlobChunks; no value
 )
 
 // Args of the server's calls. Start, Deliver and Stop carry the Ticket's snapshot, which the node keeps for Ticket
@@ -89,8 +90,19 @@ type (
 		At                     time.Time
 		From                   string
 		Offline                bool
-		// Unsent says why a checkpoint the server had is not sent (node.SeedTooBig, node.SeedSendFailed).
+		// Unsent says why a checkpoint the server had is not sent (node.SeedTooBig, node.SeedSendFailed), or that a
+		// child's lead's commit did not reach the server in time (node.SeedForkLate).
 		Unsent string `json:",omitempty"`
+		// Fork says the bundle is the lead's checkpoint, for a child placed away from its lead: the child's branch is
+		// made at Base, the lead's commit (node.Seed).
+		Fork bool   `json:",omitempty"`
+		Base string `json:",omitempty"`
+	}
+	// ArgsImportBranch sets the branch of Child, a Ticket that ran on another node, to SHA in the repository of
+	// TicketID on this node (node.Node.ImportBranch). It comes after the BlobChunks of kind "branch" of Transfer, a
+	// bundle of Child's checkpoint from the server's mirror.
+	ArgsImportBranch struct {
+		TicketID, Child, SHA, Transfer string
 	}
 )
 
@@ -121,6 +133,7 @@ type target interface {
 	Status() node.Status
 	CheckpointBundle(ctx context.Context, ticketID, since string, w io.Writer) (string, error)
 	Seed(sd node.Seed) error
+	ImportBranch(bi node.BranchImport) error
 }
 
 var _ target = (*node.Node)(nil)
@@ -211,6 +224,22 @@ func (c *Client) serve(cn *conn, call *athenav1.NodeCall) {
 			return
 		}
 		c.reply(cn, id, nil, c.seed(cn, t, a))
+	case ServeImportBranch:
+		// The transfer is taken here, after its chunks; the import, which runs git, on its own goroutine.
+		var a ArgsImportBranch
+		if err := decodeArgs(call.GetArgs(), &a); err != nil {
+			c.reply(cn, id, nil, err)
+			return
+		}
+		path, err := c.takeTransfer(cn, blobKindBranch, a.Transfer, a.Child)
+		if errors.Is(err, errNotWhole) {
+			err = errors.New("the branch's bundle did not arrive whole")
+		}
+		if err != nil {
+			c.reply(cn, id, nil, err)
+			return
+		}
+		go c.importBranch(cn, t, id, a, path)
 	case ServeInterrupt, ServeApplyProposal, ServeDiff, ServeFiles, ServeOpenFile, ServeSubscribe, ServeStatus:
 		go c.serveSlow(cn, t, call)
 	default:

@@ -36,7 +36,9 @@ type Report struct {
 	Summary  string      `json:"summary"`
 	Question string      `json:"question,omitempty"`
 	Pull     int         `json:"pull,omitempty"`
-	At       time.Time   `json:"at"`
+	// Head is a child's branch head at its ready report.
+	Head string    `json:"head,omitempty"`
+	At   time.Time `json:"at"`
 }
 
 // Assignment binds a Ticket to one executor instance.
@@ -123,6 +125,12 @@ const (
 	InputResumed InputKind = "resumed"
 	// InputReview carries a review's findings to the implementer whose ready report it sent back (FileReview).
 	InputReview InputKind = "review"
+	// InputAgent carries a message from another agent (AgentMessage); it grants nothing.
+	InputAgent InputKind = "agent"
+	// InputChild reports a child Ticket's result or failure to its lead.
+	InputChild InputKind = "child"
+	// InputTask carries a sub-task's instructions to a child.
+	InputTask InputKind = "task"
 )
 
 // Input is something that reached a Ticket after it started.
@@ -144,6 +152,12 @@ type Input struct {
 	// DeliveredTo is the Assignment the Input was last delivered to.
 	DeliveredTo string     `json:"deliveredTo,omitempty"`
 	DeliveredAt *time.Time `json:"deliveredAt,omitempty"`
+	// From is the Ticket an InputAgent or InputChild comes from.
+	From string `json:"from,omitempty"`
+	// MessageID is the AgentMessage an InputAgent carries.
+	MessageID string `json:"messageId,omitempty"`
+	// Answer is set when an InputAgent answers a question the Ticket asked.
+	Answer bool `json:"answer,omitempty"`
 }
 
 // Attention is a question for a person; TriggerID is the human message that raised it.
@@ -153,6 +167,8 @@ type Attention struct {
 	TriggerID string `json:"triggerId,omitempty"`
 	// At is when the Ticket began waiting for a person's answer; a replaced question keeps it.
 	At time.Time `json:"at,omitzero"`
+	// Child is the child Ticket whose failure raised the Attention on its lead.
+	Child string `json:"child,omitempty"`
 }
 
 // TicketEndBy says who ended a Ticket.
@@ -297,6 +313,8 @@ type Execution struct {
 	Runtime    string `json:"runtime,omitempty"`
 	Node       string `json:"node,omitempty"`
 	Model      string `json:"model,omitempty"`
+	// Base is the commit a forked child's branch starts at.
+	Base string `json:"base,omitempty"`
 }
 
 // Origin holds the Triggers a Ticket was accepted from: the one that started it and the batch its evaluation held.
@@ -350,6 +368,33 @@ type Ticket struct {
 	Pairing string `json:"pairing,omitempty"`
 	// Review is the review in progress, nil when none is.
 	Review *ReviewState `json:"review,omitempty"`
+	// Lead is the Ticket this one is a child of, or empty (split.go).
+	Lead string `json:"lead,omitempty"`
+	// Children are the IDs of the Tickets split off this one, every one it ever had.
+	Children []string `json:"children,omitempty"`
+	// Deps are the sibling Ticket IDs that must end before this child starts.
+	Deps []string `json:"deps,omitempty"`
+	// Waiting are the Deps not yet ended; while any is, the Ticket has no Assignment.
+	Waiting []string `json:"waiting,omitempty"`
+	// Depth is how deeply the Ticket is nested: 0 for a lead or a plain Ticket.
+	Depth int `json:"depth,omitempty"`
+	// Plan is the split plan of a plan-first Ticket, nil otherwise.
+	Plan *PlanState `json:"plan,omitempty"`
+	// SplitKey is the sub-task key the child was made from.
+	SplitKey string `json:"splitKey,omitempty"`
+	// Events are what the Engine recorded on the Ticket's timeline that no other field keeps, oldest first.
+	Events []TicketEvent `json:"events,omitempty"`
+}
+
+// TicketEvent is something the Engine recorded on a Ticket's timeline, such as a child's spawn ("child/spawned"), end
+// ("child/ended", with its Outcome: ready, dropped, stopped or continued) or failure ("child/failed"). Ref is the
+// Ticket or item it is about.
+type TicketEvent struct {
+	Type    string    `json:"type"`
+	At      time.Time `json:"at"`
+	Ref     string    `json:"ref,omitempty"`
+	Outcome string    `json:"outcome,omitempty"`
+	Text    string    `json:"text,omitempty"`
 }
 
 // Follow is a Thread a Ticket follows: Own when the Ticket opened it, Closed once the Thread closed.
@@ -589,3 +634,37 @@ var ErrNodeOffline = errors.New("node offline")
 
 // ReasonNodeOffline is why Retry elsewhere ends an Assignment whose node went offline.
 const ReasonNodeOffline = "node offline"
+
+// SourceAgent is the Source of an Input that another agent wrote.
+const SourceAgent = "agent"
+
+// Reasons a child Ticket ends or is released.
+const (
+	// ReasonLeadEnded is why a lead's ending stops its open children.
+	ReasonLeadEnded = "lead ended"
+	// ReasonContinuedWithout is why a failed child is stopped so its dependents can start.
+	ReasonContinuedWithout = "continued without it"
+)
+
+// Deliverable returns the Inputs of Undelivered that may go to the worker now, in order: while it waits for a person
+// (WaitsForPerson), the messages of other Tickets and of Athena (KeptWhileWaiting) stay undelivered until the wait
+// clears.
+func (t *Ticket) Deliverable() []string {
+	if len(t.Undelivered) == 0 || !t.WaitsForPerson() {
+		return t.Undelivered
+	}
+	var out []string
+	for _, id := range t.Undelivered {
+		if in := findInput(t, id); in == nil || !KeptWhileWaiting(in) {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// KeptWhileWaiting reports whether an Input is a message from another Ticket's worker, a child's end or Athena's
+// word on a split (InputAgent, InputChild, InputTask): automatic, so it never lifts a blocked or failed report, but
+// kept undelivered while the worker waits for a person rather than dropped, so it is delivered once the wait clears.
+func KeptWhileWaiting(in *Input) bool {
+	return in != nil && (in.Kind == InputAgent || in.Kind == InputChild || in.Kind == InputTask)
+}

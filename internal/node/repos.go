@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -448,9 +449,27 @@ func (n *Node) prepareGitHub(s *session) error {
 	unlock := lockRepo(clone)
 	defer unlock()
 	env := cloneGitEnv(clone, p.github)
+	// Branches shipped here before the clone existed (childgit.go) come in now, before the worktree.
+	ictx, icancel := context.WithTimeout(n.ctx, seedTimeout)
+	n.applyImports(s.t.ID, seedGit(ictx, clone, env))
+	icancel()
+	// A child starts from its lead's commit (Execution.Base), when this clone has it (childgit.go).
+	cenv := repoGitEnv(env, filepath.Join(clone, ".git"), clone)
+	childBase, baseErr := worktreeBase(func(args ...string) (string, error) { return gitIn(clone, cenv, args...) }, s.t, base)
 	if seeded {
-		// The Ticket moved here from another node: its work comes from the server's checkpoint (seed.go).
+		// The Ticket moved here from another node: its work comes from the server's checkpoint (seed.go), or, for a
+		// child forked from its lead elsewhere, its branch from the lead's (childgit.go).
+		if baseErr == nil {
+			base = childBase
+		}
 		return n.seedWorktree(s, clone, defaultBranch, base, env, rec)
 	}
-	return ensureWorktree(clone, p.workDir, branchName(s.t), base, env)
+	if baseErr != nil {
+		var missing *baseMissing
+		if s.t.Lead != "" && errors.As(baseErr, &missing) {
+			return n.startLate(s, clone, base, env)
+		}
+		return baseErr
+	}
+	return ensureWorktree(clone, p.workDir, branchName(s.t), childBase, env)
 }

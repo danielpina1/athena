@@ -21,8 +21,9 @@ const (
 	maxSeeds = 4
 )
 
-// seedTransfer is one seed bundle on its way in.
+// seedTransfer is one seed or branch bundle on its way in.
 type seedTransfer struct {
+	kind   string
 	ticket string
 	f      *os.File
 	size   int64
@@ -39,10 +40,11 @@ func (tr *seedTransfer) discard() {
 	}
 }
 
-// onSeedChunk takes one chunk of a seed, on the reader goroutine. A chunk of another kind, for another Ticket than its
-// transfer's, past the bound or past maxSeeds transfers, is dropped (its transfer is no seed).
-func (c *Client) onSeedChunk(cn *conn, ch *athenav1.BlobChunk) {
-	if ch.GetKind() != blobKindSeed {
+// onBlobChunk takes one chunk of a seed or of a shipped branch (branch.go), on the reader goroutine; both count
+// against maxSeeds. A chunk of another kind, of another kind or for another Ticket than its transfer's, past the bound
+// or past maxSeeds transfers, is dropped (its transfer is then neither).
+func (c *Client) onBlobChunk(cn *conn, ch *athenav1.BlobChunk) {
+	if ch.GetKind() != blobKindSeed && ch.GetKind() != blobKindBranch {
 		c.log.Warn("a blob of an unknown kind from the server; dropped", "kind", ch.GetKind())
 		return
 	}
@@ -58,11 +60,12 @@ func (c *Client) onSeedChunk(cn *conn, ch *athenav1.BlobChunk) {
 	tr := cn.seeds[id]
 	if tr == nil {
 		if len(cn.seeds) >= maxSeeds || id == "" {
-			c.log.Warn("too many seeds at once from the server; dropped", "ticket", ch.GetTicketId())
+			c.log.Warn("too many seeds and branches at once from the server; dropped", "kind", ch.GetKind(),
+				"ticket", ch.GetTicketId())
 			return
 		}
-		tr = &seedTransfer{ticket: ch.GetTicketId()}
-		f, err := os.CreateTemp(c.tmpDir, "athena-seed-*.bundle")
+		tr = &seedTransfer{kind: ch.GetKind(), ticket: ch.GetTicketId()}
+		f, err := os.CreateTemp(c.tmpDir, "athena-"+ch.GetKind()+"-*.bundle")
 		if err != nil {
 			c.log.Error("keep a seed", "error", err)
 			tr.bad = true
@@ -73,7 +76,7 @@ func (c *Client) onSeedChunk(cn *conn, ch *athenav1.BlobChunk) {
 	if tr.bad || tr.done {
 		return
 	}
-	if !strings.EqualFold(tr.ticket, ch.GetTicketId()) {
+	if tr.kind != ch.GetKind() || !strings.EqualFold(tr.ticket, ch.GetTicketId()) {
 		tr.bad = true
 		tr.discard()
 		return
@@ -104,32 +107,55 @@ func (c *Client) onSeedChunk(cn *conn, ch *athenav1.BlobChunk) {
 // worktree then starts from the pushed branch or the default branch, and the session hears so).
 func (c *Client) seed(cn *conn, t target, a ArgsSeed) error {
 	sd := node.Seed{TicketID: a.TicketID, AssignmentID: a.AssignmentID, SHA: a.SHA, At: a.At, From: a.From, Offline: a.Offline,
-		Unsent: a.Unsent}
+		Unsent: a.Unsent, Fork: a.Fork, Base: a.Base}
 	var path string
 	if a.Transfer != "" {
-		cn.mu.Lock()
-		tr := cn.seeds[a.Transfer]
-		delete(cn.seeds, a.Transfer)
-		cn.mu.Unlock()
+		p, err := c.takeTransfer(cn, blobKindSeed, a.Transfer, a.TicketID)
 		switch {
-		case tr == nil || !tr.done || tr.bad || tr.f == nil:
+		case errors.Is(err, errNotWhole):
 			c.log.Warn("the seed's bundle did not arrive whole; seeding without it", "ticket", a.TicketID)
-			if tr != nil {
-				tr.discard()
+			if sd.Fork {
+				// A fork is nothing without the lead's checkpoint: the child starts from the default branch, told why.
+				sd.Fork, sd.Base, sd.SHA, sd.Unsent = false, "", "", node.SeedForkLate
 			}
-		case !strings.EqualFold(tr.ticket, a.TicketID):
-			tr.discard()
+		case err != nil:
 			return errors.New("the seed's bundle is another ticket's")
 		default:
-			path = tr.f.Name()
+			path = p
 			sd.Bundle = path
 		}
+	}
+	if sd.Fork && path == "" {
+		sd.Fork, sd.Base, sd.SHA, sd.Unsent = false, "", "", node.SeedForkLate
 	}
 	err := t.Seed(sd)
 	if path != "" {
 		os.Remove(path) // taken (moved) by the node, or refused
 	}
 	return err
+}
+
+// errNotWhole is a transfer that is not there whole: never came, cut short, over a bound, or of another kind.
+var errNotWhole = errors.New("did not arrive whole")
+
+// takeTransfer takes the whole transfer id of kind for ticketID off the connection and returns its file, which is the
+// caller's to remove. A transfer of another Ticket is discarded with an error; one not whole, with errNotWhole.
+func (c *Client) takeTransfer(cn *conn, kind, id, ticketID string) (string, error) {
+	cn.mu.Lock()
+	tr := cn.seeds[id]
+	delete(cn.seeds, id)
+	cn.mu.Unlock()
+	switch {
+	case tr == nil || !tr.done || tr.bad || tr.f == nil || tr.kind != kind:
+		if tr != nil {
+			tr.discard()
+		}
+		return "", errNotWhole
+	case !strings.EqualFold(tr.ticket, ticketID):
+		tr.discard()
+		return "", errors.New("the bundle is another ticket's")
+	}
+	return tr.f.Name(), nil
 }
 
 // dropSeeds removes the seeds a connection that ended was still receiving or never used. The caller holds cn.mu.

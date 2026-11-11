@@ -78,6 +78,8 @@ type TaskOptions struct {
 	Pairing string
 	// Node pins the task to a node by id; empty leaves the placement to the fleet.
 	Node string
+	// PlanFirst holds the task for a planner's breakdown (plan.go): it gets no Assignment until the split is settled.
+	PlanFirst bool
 }
 
 // ReportInput is a worker's report on its Ticket. A Question asks a person (an empty one keeps the current question);
@@ -89,6 +91,8 @@ type ReportInput struct {
 	Summary      string
 	Question     string
 	Pull         int
+	// Head is the child's branch head, read by the node at a ready report.
+	Head string
 }
 
 // Engine is the domain's single entry point. Each command runs in one transaction; the Executor calls and Events it
@@ -104,6 +108,11 @@ type Engine struct {
 	// It has its own lock so a waiter never needs mu.
 	waitMu  sync.Mutex
 	waiters map[string]chan struct{}
+	// agentWaiters holds, per Ticket or agent message someone waits on (keyed ticket:<id> or msg:<id>), the channel
+	// that closes after the commit that ends the Ticket or stores the answer (agents.go). It is under waitMu too.
+	agentWaiters map[string]*agentWaiter
+	// waitForMax bounds a WaitFor; zero is WaitForMax. Tests shorten it.
+	waitForMax time.Duration
 	// reg and cmdHist are set by SetMetrics before the first command; nil without metrics.
 	reg     *metrics.Registry
 	cmdHist map[string]*metrics.Histogram
@@ -117,6 +126,9 @@ type Engine struct {
 	defaultRuntime string
 	// pairing is Options.Pairing, nil without one.
 	pairing func() PairingDefaults
+	// split and nodes are Options.Split and Options.Nodes; each may be nil.
+	split func() SplitLimits
+	nodes NodeDirectory
 }
 
 // Options configure an Engine beyond its Repositories and Executor. Every field may be left zero.
@@ -142,6 +154,11 @@ type Options struct {
 	// every Ticket the router accepts) and the rounds a review may take. Without it no Ticket is paired unless its task
 	// asks, and a review takes at most 2 rounds. Like Policy, it runs inside a command's transaction.
 	Pairing func() PairingDefaults
+	// Split returns the limits of splitting and of agent messages; without it, or for its zero fields, the defaults
+	// (split.go). Like Policy, it runs inside a command's transaction.
+	Split func() SplitLimits
+	// Nodes resolves a child's node hint (children.go). Without it, a node hint is refused.
+	Nodes NodeDirectory
 }
 
 // NewEngine returns an Engine with the plan 1 options: a clock and an event sink (see Options).
@@ -165,7 +182,8 @@ func NewEngineWith(repos Repositories, exec Executor, opts Options) *Engine {
 		def = RuntimeClaude // empty, or not a runtime: never a Ticket on a runtime nobody has
 	}
 	return &Engine{repos: repos, exec: exec, now: now, emit: emit, waiters: map[string]chan struct{}{},
-		policy: opts.Policy, scope: opts.Scope, wake: opts.Wake, relays: opts.Relays, defaultRuntime: def, pairing: opts.Pairing}
+		policy: opts.Policy, scope: opts.Scope, wake: opts.Wake, relays: opts.Relays, defaultRuntime: def, pairing: opts.Pairing,
+		split: opts.Split, nodes: opts.Nodes, agentWaiters: map[string]*agentWaiter{}}
 }
 
 // ValidRuntime reports whether name is a runtime a Ticket may run on: RuntimeClaude, RuntimeCodex or RuntimeAuto.
@@ -189,8 +207,9 @@ func (e *Engine) ticketRuntime(name string) (string, error) {
 
 // SubmitOwnerTask records the owner's task: a Trigger, a direct accept Decision with an explicit Mandate, and a Ticket
 // whose title is the text's first line, with one pending Assignment and the text as its first Input; then it queues
-// the Assignment's launch. A task on a repository (TaskOptions.Repo, owner/name) works there and has no Channel: its
-// worker reports to the owner, and its replies are refused.
+// the Assignment's launch; a PlanFirst task instead has no Assignment and waits for its split plan (plan.go). A task
+// on a repository (TaskOptions.Repo, owner/name) works there and has no Channel: its worker reports to the owner, and
+// its replies are refused.
 func (e *Engine) SubmitOwnerTask(text string, opts TaskOptions) (Ticket, error) {
 	title := titleOf(text)
 	if title == "" {
@@ -210,6 +229,15 @@ func (e *Engine) SubmitOwnerTask(text string, opts TaskOptions) (Ticket, error) 
 		}
 		if opts.Dir != "" {
 			return Ticket{}, userErrorf("a task on a repository runs in its own worktree: it takes no directory")
+		}
+	}
+	if opts.PlanFirst {
+		if opts.Repo == "" && opts.Dir == "" {
+			return Ticket{}, userErrorf(msgSplitNeedsGit)
+		}
+		if opts.Dir != "" && opts.Node == "" {
+			// A folder never moves, and the children are pinned to its node: record it now, with no Assignment yet.
+			opts.Node = LocalNode
 		}
 	}
 	var created, existing *Ticket
@@ -248,7 +276,16 @@ func (e *Engine) SubmitOwnerTask(text string, opts TaskOptions) (Ticket, error) 
 			RequestID: opts.RequestID,
 			Pairing:   o.ticketPairing(opts.Pairing),
 		}
-		assignment := o.newAssignment(t)
+		assignment := ""
+		if opts.PlanFirst {
+			// R1: a held Ticket has no Assignment until its split is settled.
+			t.Plan = &PlanState{State: PlanPlanning, At: o.at}
+			if err := o.enqueuePlan(t); err != nil {
+				return err
+			}
+		} else {
+			assignment = o.newAssignment(t)
+		}
 		input := Input{ID: newID(), Kind: InputTrigger, At: o.at, TriggerID: trigger.ID, Text: text, Human: true}
 		t.Inputs = []Input{input}
 		t.Undelivered = []string{input.ID}
@@ -261,7 +298,9 @@ func (e *Engine) SubmitOwnerTask(text string, opts TaskOptions) (Ticket, error) 
 		if err := o.tx.PutTicket(t); err != nil {
 			return err
 		}
-		o.start(t, assignment)
+		if assignment != "" {
+			o.start(t, assignment)
+		}
 		o.event(EventTicketCreated, t, assignment, map[string]any{"decisionId": decision.ID})
 		created = t
 		return nil
@@ -320,7 +359,7 @@ func (e *Engine) AssignmentStarted(ticketID, assignmentID, sessionID, model, run
 			open.ResumedAt = o.timestamp()
 		}
 		t.UpdatedAt = o.at
-		if t.Ended == nil && len(t.Undelivered) > 0 {
+		if t.Ended == nil && len(t.Deliverable()) > 0 {
 			o.deliver(t, a.ID)
 		}
 		o.event(EventAssignmentStarted, t, a.ID, map[string]any{"sessionId": sessionID})
@@ -494,6 +533,11 @@ func (e *Engine) FileReport(ticketID string, r ReportInput) error {
 		if t.PendingApproval != "" && (r.State == ReportReady || r.State == ReportDropped) {
 			return userErrorf("an action of ticket %s waits for the owner's approval; report %s after it is answered", ticketID, r.State)
 		}
+		if r.State == ReportReady {
+			if err := o.refuseOpenChildren(t); err != nil {
+				return err
+			}
+		}
 		attention := t.Attention
 		var raised *Attention
 		if r.Question != "" && (attention == nil || attention.Question != r.Question) {
@@ -515,11 +559,22 @@ func (e *Engine) FileReport(ticketID string, r ReportInput) error {
 			t.Stats.TimeToFirstReport = nonNegative(o.at.Sub(t.CreatedAt))
 		}
 		a.Report = &Report{State: r.State, Summary: r.Summary, Question: r.Question, Pull: r.Pull, At: o.at}
+		if t.Lead != "" && r.State == ReportReady {
+			a.Report.Head = r.Head
+		}
 		t.UpdatedAt = o.at
 		if r.State == ReportBlocked || r.State == ReportFailed {
-			t.Undelivered = slices.DeleteFunc(t.Undelivered, func(id string) bool { return automatic(findInput(t, id)) })
+			// A message of another Ticket or of Athena stays for after the wait (KeptWhileWaiting); other automatic
+			// Inputs, such as notes, are dropped.
+			t.Undelivered = slices.DeleteFunc(t.Undelivered, func(id string) bool {
+				in := findInput(t, id)
+				return automatic(in) && !KeptWhileWaiting(in)
+			})
 			if len(t.Undelivered) == 0 {
 				t.Undelivered = nil
+			}
+			if err := o.childFailed(t, r); err != nil {
+				return err
 			}
 		}
 		if r.State == ReportReady && o.holdsForReview(t, a) {
@@ -610,6 +665,10 @@ func (e *Engine) AddPersonInputWithID(ticketID, inputID, text string) error {
 		if err := o.wake(t); err != nil {
 			return err
 		}
+		// The owner answered a child here rather than from its lead's card: the lead no longer waits on it.
+		if err := o.clearChildAttention(t); err != nil {
+			return err
+		}
 		return o.tx.PutTicket(t)
 	})
 }
@@ -650,6 +709,9 @@ func (e *Engine) RetryTicket(ticketID string) error {
 		t.UpdatedAt = o.at
 		o.stop(t, replaced, reasonRetried)
 		o.start(t, assignment)
+		if err := o.clearChildAttention(t); err != nil {
+			return err
+		}
 		return o.tx.PutTicket(t)
 	})
 }
@@ -816,6 +878,8 @@ const (
 	effectEvent
 	// effectRelease wakes the waiters of an Approval that is no longer pending.
 	effectRelease
+	// effectAgentRelease wakes the WaitFor callers of an ended Ticket or an answered agent message.
+	effectAgentRelease
 )
 
 // effect is an Executor call or an Event a command produces; it runs after the command commits. Executor calls
@@ -827,6 +891,8 @@ type effect struct {
 	reason       string
 	event        Event
 	approvalID   string
+	// waitKey is the agentWaiters key an effectAgentRelease wakes.
+	waitKey string
 }
 
 // op is one command in progress: its transaction, its time and the effects it collected.
@@ -848,6 +914,11 @@ type op struct {
 	defaultRuntime string
 	// pairing is the Engine's Options.Pairing (pairingDefaults).
 	pairing func() PairingDefaults
+	// split and nodes are the Engine's Options.Split and Options.Nodes.
+	split func() SplitLimits
+	nodes NodeDirectory
+	// endingChildren is set while a child's end ends the dependents it stops (childEnded), whose own ends it handles.
+	endingChildren bool
 }
 
 // observe queues a metrics observation that runs once the command committed. Callers check o.reg first, so that no
@@ -874,7 +945,7 @@ func (e *Engine) run(fn func(o *op) error) error {
 	err := e.repos.Tx(func(tx Tx) error {
 		// A fresh op per attempt, so nothing collected by a failed attempt leaks.
 		o = &op{tx: tx, at: e.now(), reg: e.reg, policy: e.policy, relays: e.relays, defaultRuntime: e.defaultRuntime,
-			pairing: e.pairing}
+			pairing: e.pairing, split: e.split, nodes: e.nodes}
 		return fn(o)
 	})
 	if err != nil {
@@ -890,6 +961,10 @@ func (e *Engine) run(fn func(o *op) error) error {
 		}
 		if fx.kind == effectRelease {
 			e.release(fx.approvalID)
+			continue
+		}
+		if fx.kind == effectAgentRelease {
+			e.releaseAgentWait(fx.waitKey)
 			continue
 		}
 		t := cloneTicket(fx.ticket)
@@ -1023,7 +1098,8 @@ func (o *op) endAssignment(t *Ticket, a *Assignment, reason string) {
 }
 
 // addInput adds an Input once and asks the Executor to deliver it, or to launch again a pending Assignment whose
-// launch failed once no person is waited for. Automatic Inputs are held back while the worker waits for a person.
+// launch failed once no person is waited for. Automatic Inputs are held back while the worker waits for a person:
+// dropped, or, for one KeptWhileWaiting, kept undelivered and delivered once the wait clears.
 func (o *op) addInput(t *Ticket, in Input) {
 	if findInput(t, in.ID) != nil {
 		return
@@ -1032,7 +1108,7 @@ func (o *op) addInput(t *Ticket, in Input) {
 	t.UpdatedAt = o.at
 	live := t.Ended == nil
 	held := live && automatic(&in) && t.WaitsForPerson()
-	if !held {
+	if !held || KeptWhileWaiting(&in) {
 		t.Undelivered = append(t.Undelivered, in.ID)
 	}
 	if !live || held {
@@ -1155,14 +1231,18 @@ func (o *op) endAt(t *Ticket, by TicketEndBy, outcome TicketOutcome, reason stri
 	for _, id := range stopping {
 		o.stop(t, id, stopReason)
 	}
-	return nil
+	o.releaseAgentWait(ticketWaitKey(t.ID))
+	if err := o.endChildren(t); err != nil {
+		return err
+	}
+	return o.childEnded(t)
 }
 
 // --- Helpers ---
 
 // automatic reports whether an Input is a message no person wrote, such as a bot's or a note.
 func automatic(in *Input) bool {
-	return in != nil && (in.Kind == InputNote || (in.Kind == InputTrigger && !in.Human))
+	return in != nil && (in.Kind == InputNote || in.Kind == InputAgent || in.Kind == InputChild || in.Kind == InputTask || (in.Kind == InputTrigger && !in.Human))
 }
 
 // settleAttention adds the time the Ticket waited for a person's answer so far to its stats; the caller clears or
@@ -1314,6 +1394,10 @@ func cloneTicket(t *Ticket) Ticket {
 	c.SessionCosts = maps.Clone(t.SessionCosts)
 	c.Stats.ByRuntime = maps.Clone(t.Stats.ByRuntime)
 	c.Review = clonePtr(t.Review)
+	c.Children = slices.Clone(t.Children)
+	c.Deps = slices.Clone(t.Deps)
+	c.Waiting = slices.Clone(t.Waiting)
+	c.Events = slices.Clone(t.Events)
 	return c
 }
 

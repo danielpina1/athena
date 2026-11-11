@@ -4,6 +4,7 @@
 // escapes.
 import { ChevronRightIcon } from "lucide-react";
 import { useMemo, useState } from "react";
+import { Link } from "react-router";
 import type { TimelineEntry } from "@/gen/athena/v1/state_pb";
 import { stripAnsi } from "@/lib/text/ansi";
 import { cn } from "@/ui/cn";
@@ -30,6 +31,21 @@ function When({ at }: { at: number }) {
   );
 }
 
+/** The title, with the other Ticket's id in it a link to that Ticket. */
+function Title({ title, ticket }: { title: string; ticket?: string }) {
+  const at = ticket ? title.indexOf(ticket) : -1;
+  if (!ticket || at < 0) return title;
+  return (
+    <>
+      {title.slice(0, at)}
+      <Link to={`/tickets/${encodeURIComponent(ticket)}`} className="font-mono underline decoration-line-soft underline-offset-4 hover:decoration-text">
+        {ticket}
+      </Link>
+      {title.slice(at + ticket.length)}
+    </>
+  );
+}
+
 function RowText({ row, onViewReport }: { row: Row; onViewReport?: (assignmentId: string) => void }) {
   const { view } = row;
   if (row.type === "group") {
@@ -53,7 +69,7 @@ function RowText({ row, onViewReport }: { row: Row; onViewReport?: (assignmentId
     <div className="grid min-w-0 gap-0.5">
       <div className="flex min-w-0 flex-wrap items-baseline gap-x-2">
         <span dir="auto" className="min-w-0 text-sm font-semibold wrap-anywhere">
-          {stripAnsi(view.title)}
+          <Title title={stripAnsi(view.title)} ticket={view.ticket} />
         </span>
         {view.badge && <Mono className="wrap-anywhere">{stripAnsi(view.badge)}</Mono>}
       </div>
@@ -76,6 +92,7 @@ export function Timeline({
   trimmed,
   onViewReport,
   question = "",
+  split = 0,
 }: {
   entries: readonly TimelineEntry[];
   trimmed: boolean;
@@ -83,10 +100,12 @@ export function Timeline({
   onViewReport?: (assignmentId: string) => void;
   /** The question the Ticket waits on the owner to answer, if any: the newest report row asks it. */
   question?: string;
+  /** How many sub-tasks the Ticket's split has: its drafted row says so. */
+  split?: number;
 }) {
   // The shared clock: "Today" turns into "Yesterday" at midnight without a new entry.
   const now = useNow();
-  const days = useMemo(() => buildTimeline(entries, now, question), [entries, now, question]);
+  const days = useMemo(() => buildTimeline(entries, now, question, split), [entries, now, question, split]);
   // The entries there at the first render are the history; any other one arrived while the page was open.
   const [initial] = useState(() => new Set(entries.map(entryKey)));
   const fresh = (row: Row) => (row.type === "group" ? row.entries : [row.entry]).some((e) => !initial.has(entryKey(e)));

@@ -50,7 +50,7 @@ export function TicketHeader({
         >
           {ticket.id}
         </Link>
-        {where && <Mono>{where}</Mono>}
+        {where && <Mono className="min-w-0 break-all">{where}</Mono>}
         {ticket.model && <Mono>{ticket.model}</Mono>}
         <Mono>
           <RelativeTime at={since} />

@@ -38,6 +38,8 @@ var (
 	subscriptions string
 	//go:embed reviewer.md
 	reviewer string
+	//go:embed planner.md
+	planner string
 )
 
 // Worker is the system prompt appended to every worker session.
@@ -50,6 +52,10 @@ var Router = compose(router, admission, replies, subscriptions)
 // Reviewer is the system prompt appended to a review session (implement + review pairing): what to read, that it
 // changes nothing, and the review tool's output format and verdict rule.
 var Reviewer = compose1(reviewer) + "\n"
+
+// Planner is the system prompt of the planner's one turn: how to split a task into sub-tasks and the JSON to answer
+// with. It is not an owner-editable part.
+var Planner = compose1(planner) + "\n"
 
 // routerParts are the parts the router prompt is composed of, in order.
 var routerParts = []string{PartRouter, PartAdmission, PartReplies, PartSubscriptions}

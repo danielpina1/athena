@@ -236,3 +236,25 @@ and the Ryzen box has `athena`, `git` and a logged-in `claude`. On the Mac, `$S`
    screen shows `ryzen` revoked.
 
 Clean up: `rm -rf ~/.athena-node` on the Ryzen box.
+
+## Splitting work (needs your second computer, for step 2)
+
+This part checks plan 7. How splitting works is in [agents.md](agents.md). It needs the Ryzen box from the section above
+as a node, running the same version of `athena` as the Mac (node Protocol 2), and a clone of the Athena repository on
+the Mac. Record "not run" for a step you have not done.
+
+1. **Plan first, split into two.** In the dashboard, start a task on the Athena repository itself with **Plan first**
+   ticked: ask for two small, separate changes (for example one line in two different docs). The Ticket shows
+   "planning", then "Needs you" with a draft. Open it in the split editor, check there are two sub-tasks and no
+   overlap warning, and press **Approve and start**. The lead shows two children.
+2. **One child on the second machine.** Before approving, set the second sub-task's node to `ryzen` in the editor.
+   After approving, that child's card shows `ryzen`, and its worktree is under `~/.athena-node/work` on the Ryzen box.
+   The other child runs on the Mac.
+3. **Both ready, one pull request.** Both children end ready, each with its branch and head. The lead starts, merges
+   both branches (`git merge athena/t-...`) and opens one pull request. A child never opens one: if you see a child's
+   pull request, that is a failure. Close the pull request when you have looked at it.
+4. **`ask_agent` is answered.** While two children run, tell one (as a follow-up) to ask its sibling a question with
+   `ask_agent`. The sibling's Ticket shows the message, answers with `reply`, and the answer reaches the first one. The
+   first Ticket's timeline shows it. Neither message cleared anything that waited on you.
+
+Clean up: close the pull request, delete the branches it made, and stop the Tickets that are still open.

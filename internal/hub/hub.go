@@ -107,6 +107,10 @@ type Source interface {
 	Proposals() ([]*athenav1.ProposalView, error)
 	// Proposal returns one Proposal in whatever state it has.
 	Proposal(id string) (*athenav1.ProposalView, error)
+	// AgentMessages returns the agent messages sent from or to a Ticket, oldest first.
+	AgentMessages(ticketID string) ([]core.AgentMessage, error)
+	// SplitLimits returns the current limits of splitting; a zero field is its default.
+	SplitLimits() core.SplitLimits
 }
 
 type ringEntry struct {
@@ -1009,7 +1013,13 @@ func (h *Hub) detail(t *core.Ticket, st core.Stage) *athenav1.TicketDetail {
 	if err != nil {
 		h.log.Warn("hub: detail: answered approvals", "ticket", t.ID, "error", err)
 	}
-	d := ticketDetail(t, st, h.src.GitFolder, origin, pending, answered, h.replyActors(t))
+	// Likewise without the agent messages: the timeline lacks them.
+	messages, err := h.src.AgentMessages(t.ID)
+	if err != nil {
+		h.log.Warn("hub: detail: agent messages", "ticket", t.ID, "error", err)
+	}
+	d := ticketDetail(t, st, h.src.GitFolder, origin, pending, answered, h.replyActors(t), messages,
+		h.src.SplitLimits().WithDefaults().MaxChildren)
 	d.Summary = h.summary(t, st)
 	return d
 }

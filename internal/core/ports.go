@@ -65,6 +65,16 @@ type Tx interface {
 	PutReceipt(r *Receipt) error
 	// TicketReceipts returns a Ticket's reply receipts, in queue order (Seq).
 	TicketReceipts(ticketID string) ([]*Receipt, error)
+	// PutAgentMessage inserts or replaces an agent message.
+	PutAgentMessage(m *AgentMessage) error
+	// GetAgentMessage returns the agent message with the given ID, or nil, nil if there is none.
+	GetAgentMessage(id string) (*AgentMessage, error)
+	// AgentMessagesOf returns the agent messages sent from or to a Ticket, oldest first.
+	AgentMessagesOf(ticketID string) ([]*AgentMessage, error)
+	// CountAgentMessagesFrom counts the agent messages a Ticket sent at or after since.
+	CountAgentMessagesFrom(ticketID string, since time.Time) (int, error)
+	// AgentAnswer returns the agent message that answers messageID, or nil, nil if there is none.
+	AgentAnswer(messageID string) (*AgentMessage, error)
 	// GetProposal returns the Proposal with the given ID, or nil, nil if there is none.
 	GetProposal(id string) (*Proposal, error)
 	// PutProposal inserts or replaces a Proposal.
@@ -127,6 +137,10 @@ const (
 	EventPolicyChanged      = "policy.changed"
 	EventProposalCreated    = "proposal.created"
 	EventProposalSettled    = "proposal.settled"
+	// EventChildrenSpawned is emitted on a lead whose worker split off child Tickets.
+	EventChildrenSpawned = "children.spawned"
+	// EventAgentMessage is emitted on both Tickets of an agent message, an ask or an answer.
+	EventAgentMessage = "agent.message"
 )
 
 // Event is what the Engine reports after a committed change.

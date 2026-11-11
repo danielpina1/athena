@@ -1,5 +1,5 @@
-// The Needs you page: every approval, question, review, stuck Ticket and Ticket whose node is offline that waits on the
-// owner, approvals first, then answers, then the rest, each oldest first (selectNeedsYou). An offline card the owner
+// The Needs you page: every approval, question, review, stuck Ticket, Ticket whose node is offline, split to approve and
+// lead whose child failed that waits on the owner, approvals first, then answers, then the rest, each oldest first (selectNeedsYou). An offline card the owner
 // chose to wait on is left out until the page reloads (OfflineCard). On the desktop j and k move between the cards and a, d
 // and r act on the one in focus (each card registers its own keys).
 //
@@ -18,9 +18,11 @@ import { Waiting } from "@/ui/athena/Waiting";
 import { Button } from "@/ui/primitives/button";
 import { AnswerCard } from "./AnswerCard";
 import { BrakeNotice } from "./BrakeNotice";
+import { ChildCard } from "./ChildCard";
 import { ApprovalCard } from "./ApprovalCard";
 import { OfferCard } from "./OfferCard";
 import { OfflineCard, useWaited } from "./OfflineCard";
+import { PlanCard } from "./PlanCard";
 import { ProposalCard } from "./ProposalCard";
 import { ReviewCard } from "./ReviewCard";
 import { StalledCard } from "./StalledCard";
@@ -42,6 +44,10 @@ function ItemCard({ item }: { item: NeedsYouItem }) {
       return <ReviewCard ticket={item.ticket} />;
     case "offline":
       return <OfflineCard ticket={item.ticket} />;
+    case "plan":
+      return <PlanCard ticket={item.ticket} />;
+    case "child":
+      return <ChildCard ticket={item.ticket} />;
     default:
       return <StalledCard ticket={item.ticket} />;
   }

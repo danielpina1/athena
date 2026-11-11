@@ -5,8 +5,21 @@ import { timestampMs, type Timestamp } from "@bufbuild/protobuf/wkt";
 import type { ApprovalView, ProposalView, TicketSummary } from "@/gen/athena/v1/state_pb";
 import type { AthenaData } from "./state";
 
-/** offline: the Ticket's node is offline (plan 6); the owner may Retry elsewhere or wait. */
-export type NeedsYouKind = "approval" | "proposal" | "answer" | "review" | "delivery" | "blocked" | "failed" | "offline";
+/**
+ * offline: the Ticket's node is offline (plan 6); the owner may Retry elsewhere or wait. plan: a plan-first Ticket's
+ * split is drafted or failed. child: a lead whose child ticket failed or is blocked.
+ */
+export type NeedsYouKind =
+  | "approval"
+  | "proposal"
+  | "answer"
+  | "review"
+  | "delivery"
+  | "blocked"
+  | "failed"
+  | "offline"
+  | "plan"
+  | "child";
 
 export type NeedsYouItem = { kind: NeedsYouKind; ticket: TicketSummary; approval?: ApprovalView; proposal?: ProposalView };
 
@@ -25,17 +38,22 @@ export type Counts = { needsYou: number; open: number; working: number; endedTod
 type Slice = Pick<AthenaData, "tickets" | "approvals"> & Partial<Pick<AthenaData, "answering" | "proposals">>;
 type TicketsSlice = Pick<AthenaData, "tickets"> & Partial<Pick<AthenaData, "answering">>;
 
-const KINDS = new Set<string>(["approval", "proposal", "answer", "review", "delivery", "blocked", "failed", "offline"]);
+const KINDS = new Set<string>(["approval", "proposal", "answer", "review", "delivery", "blocked", "failed", "offline", "plan", "child"]);
 
 const NOTHING_ANSWERED: Answering = new Map();
 
 /**
  * The Needs you kind of a Ticket waiting on the owner, or undefined. A Ticket whose approval the owner answered here
  * waits on no one while the answer is in flight (ruling R30): its approval was cleared from it optimistically, or the
- * answering map still holds it (a Ticket Delta that came meanwhile names it again).
+ * answering map still holds it (a Ticket Delta that came meanwhile names it again). A child whose lead waits on the
+ * owner for it (the lead's attentionChild) is the lead's card, not one of its own (R8), when it failed or is blocked
+ * without a question; one blocked with a question of its own keeps its answer card, which alone can answer it.
  */
-function needsYouKind(t: TicketSummary, answering: Answering): NeedsYouKind | undefined {
+function needsYouKind(t: TicketSummary, answering: Answering, tickets?: Tickets): NeedsYouKind | undefined {
   if (t.stage !== "person" || !KINDS.has(t.action)) return undefined;
+  if (t.lead && (t.action === "failed" || t.action === "blocked") && tickets?.get(t.lead)?.attentionChild === t.id) {
+    return undefined;
+  }
   if (t.action === "approval" && (t.pendingApprovalId === "" || answering.has(t.pendingApprovalId))) return undefined;
   return t.action as NeedsYouKind;
 }
@@ -55,6 +73,8 @@ const RANK: Record<NeedsYouKind, number> = {
   blocked: 3,
   failed: 3,
   offline: 3,
+  plan: 3,
+  child: 3,
 };
 
 /** When the item started waiting: an approval or Proposal when it was made, anything else when its Ticket last changed. */
@@ -103,7 +123,7 @@ export function selectNeedsYou(s: Slice): NeedsYouItem[] {
       if (ticket) items.push({ kind: "proposal", ticket, proposal });
     }
     for (const ticket of s.tickets.values()) {
-      const kind = needsYouKind(ticket, answering);
+      const kind = needsYouKind(ticket, answering, s.tickets);
       if (!kind || kind === "proposal") continue;
       const approval = kind === "approval" ? s.approvals.get(ticket.pendingApprovalId) : undefined;
       items.push(approval ? { kind, ticket, approval } : { kind, ticket });
@@ -116,14 +136,14 @@ function cmp(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
 
-function matchesStage(t: TicketSummary, stage: TicketFilter["stage"], answering: Answering): boolean {
+function matchesStage(t: TicketSummary, stage: TicketFilter["stage"], answering: Answering, tickets: Tickets): boolean {
   switch (stage) {
     case undefined:
       return true;
     case "open":
       return t.stage !== "ended";
     case "needsYou":
-      return needsYouKind(t, answering) !== undefined;
+      return needsYouKind(t, answering, tickets) !== undefined;
     default:
       return t.stage === stage;
   }
@@ -137,7 +157,7 @@ export function selectTickets(s: TicketsSlice, f: TicketFilter): TicketSummary[]
     const q = f.q?.trim().toLowerCase();
     const out: TicketSummary[] = [];
     for (const t of s.tickets.values()) {
-      if (!matchesStage(t, f.stage, answering)) continue;
+      if (!matchesStage(t, f.stage, answering, s.tickets)) continue;
       if (f.repo !== undefined && t.repo !== f.repo) continue;
       if (f.model !== undefined && t.model !== f.model) continue;
       if (f.runtime !== undefined && t.runtime !== f.runtime) continue;

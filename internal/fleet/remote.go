@@ -767,14 +767,15 @@ func (lk *nodeLink) reconcile() {
 		if a == nil || a.Node != lk.nodeID || a.State == core.AssignmentEnded {
 			continue
 		}
-		if _, moved := lk.f.seedFrom(t, *a, lk.nodeID); moved && a.State == core.AssignmentPending {
+		if a.State == core.AssignmentPending && lk.f.needsSeed(t, *a, lk.nodeID) {
 			// Placed here while the node was away (or its seed was cut short): seeded first, then started.
 			lk.f.launchSeeded(t.ID, a.ID, lk.nodeID)
 			continue
 		}
-		r.Start(t, *a)
-		if len(t.Undelivered) > 0 && a.State == core.AssignmentRunning {
-			r.Deliver(t, *a)
+		// After the branches the Ticket needs here: what was shipped before this link is not known to be there.
+		lk.f.send(t, *a, lk.nodeID, false)
+		if len(t.Deliverable()) > 0 && a.State == core.AssignmentRunning {
+			lk.f.send(t, *a, lk.nodeID, true)
 		}
 	}
 	s, ok := lk.fetchStatus()

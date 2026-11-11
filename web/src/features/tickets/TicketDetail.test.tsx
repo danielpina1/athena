@@ -389,3 +389,15 @@ test("a repository Ticket whose node is offline offers Retry elsewhere in its he
   renderDetail("/tickets/T-2");
   expect(screen.queryByRole("button", { name: "Retry elsewhere" })).toBeNull();
 });
+
+test("a Ticket whose split waits on the owner opens the breakdown editor from its page", async () => {
+  const user = userEvent.setup();
+  const planned = { id: "T-1", title: "Port the parser", stage: "person", action: "plan", planState: "draft", repo: "acme/api", updatedAt: at(0) };
+  load({ tickets: [planned] });
+  detail({ summary: planned, breakdown: { state: "draft", revision: 1, tasks: [{ key: "api", title: "API" }, { key: "ui", title: "UI" }] } });
+  renderDetail();
+  expect(screen.getByText("A split of Port the parser waits for you (2 sub-tasks)")).toBeTruthy();
+  await user.click(screen.getByRole("button", { name: "Review split" }));
+  const editor = await screen.findByRole("dialog", { name: "Review split" });
+  expect(within(editor).getByRole("group", { name: "Sub-task ui" })).toBeTruthy();
+});

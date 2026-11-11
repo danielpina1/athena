@@ -39,7 +39,7 @@ const dialTimeout = 2 * time.Second
 // usage is each command's usage line, without the --state-dir flag every command takes.
 var usage = map[string]string{
 	"server":          "athena server [--slots N] [--model M] [--blocked a,b] [--approval-timeout D] [--claude PATH] [--codex PATH] [--node-name NAME]",
-	"task":            `athena task "<text>" [--dir D | --repo owner/name] [--model M] [--runtime claude|codex|auto] [--review[=false]]`,
+	"task":            `athena task "<text>" [--dir D | --repo owner/name] [--model M] [--runtime claude|codex|auto] [--review[=false]] [--plan-first]`,
 	"github":          "athena github setup --app-id N --slug S --key FILE --installation N --repo owner/name [--repo ...] [--receive-all owner/name ...] | athena github check",
 	"policy":          "athena policy show | athena policy set FILE",
 	"triggers":        "athena triggers [--thread K]",
@@ -228,6 +228,7 @@ func (c *command) task(args []string) int {
 	repo := c.fs.String("repo", "", "GitHub repository (owner/name) the task works in, through the App")
 	model := c.fs.String("model", "", "model for this task")
 	runtime := c.fs.String("runtime", "", "runtime the task runs on: claude, codex or auto (default: runtimes.default of config.json)")
+	planFirst := c.fs.Bool("plan-first", false, "have a planner draft a split into child tickets first, for review in the dashboard (needs --repo or a git --dir)")
 	var review optionalBool
 	c.fs.Var(&review, "review", "have a read-only session review each ready report first; --review=false (with the =) for none; default: the policy's pairing")
 	pos, code, ok := c.parse(args, 1, -1)
@@ -252,8 +253,12 @@ func (c *command) task(args []string) int {
 		ID string `json:"id"`
 	}
 	if err := call(c.stateDir, server.Request{Op: server.OpSubmit, Text: strings.Join(pos, " "), Dir: taskDir, Repo: *repo, Model: *model,
-		Runtime: *runtime, Review: review.value}, &out); err != nil {
+		Runtime: *runtime, Review: review.value, PlanFirst: *planFirst}, &out); err != nil {
 		return c.fail(err)
+	}
+	if *planFirst {
+		fmt.Fprintf(c.stdout, "%s: planning a split; review it in the dashboard\n", out.ID)
+		return 0
 	}
 	fmt.Fprintln(c.stdout, out.ID)
 	return 0

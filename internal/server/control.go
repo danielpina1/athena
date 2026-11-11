@@ -92,6 +92,8 @@ type Request struct {
 	// Review pairs a submitted task with a review of its ready reports (true) or with none (false); unset is the
 	// Policy's pairing default.
 	Review *bool `json:"review,omitempty"`
+	// PlanFirst holds a submitted task for a planner's split, which the owner reviews in the dashboard.
+	PlanFirst bool `json:"planFirst,omitempty"`
 	// Policy is the settings document policy.set saves.
 	Policy json.RawMessage `json:"policy,omitempty"`
 	// Node pins a submitted task to a node by id; empty leaves the placement to the fleet (the dashboard's node

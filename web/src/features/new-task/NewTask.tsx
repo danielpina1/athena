@@ -6,6 +6,8 @@
 // runtime's list (ModelPicker), Claude Code's under Auto, where a model applies on Claude Code only; a choice the next
 // runtime does not list goes back to Default. Other…'s suggestions are the recent models of the chosen runtime. With
 // two nodes or more the task can be pinned to one (NodePicker); the runtimes offered are then that node's.
+// "Plan first" holds the task while a planner drafts its split into child tickets; it needs a git branch, so it is
+// offered with a repository or a folder the list knows as git, and is sent only then.
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { useNavigate } from "react-router";
 import { modKeyLabel } from "@/app/shortcuts";
@@ -41,6 +43,8 @@ export function NewTask() {
   const busy = useRef(false);
   const field = useRef<HTMLTextAreaElement>(null);
   const reviewHint = useId();
+  const planHint = useId();
+  const [planFirst, setPlanFirst] = useState(false);
   const repos = useAthena((s) => s.repos);
   /** The node select's value: "" (any node) or a node id. */
   const [pickedNode, setPickedNode] = useState("");
@@ -75,6 +79,8 @@ export function NewTask() {
   );
   const repo = resolveRepo(repoText, repos);
   const ready = text.trim() !== "" && repo.kind !== "invalid";
+  // Splitting needs a git branch: a repository, or a folder the list knows as git (R2).
+  const splittable = repo.kind === "repo" || (repo.kind === "dir" && repos.some((r) => r.name === repo.dir && r.kind === "git"));
 
   const pickRuntime = (next: string) => {
     setPicked(next);
@@ -99,6 +105,7 @@ export function NewTask() {
     arg.runtime = runtime;
     if (node !== "") arg.node = node;
     if (pairable && review !== undefined) arg.review = review;
+    if (splittable && planFirst) arg.planFirst = true;
     const r = await submitTask(arg).finally(() => {
       busy.current = false;
       setSending(false);
@@ -167,6 +174,15 @@ export function NewTask() {
           </p>
         </div>
       )}
+      <div className="grid gap-1">
+        <label className="flex min-h-11 items-center gap-3 text-sm lg:min-h-0">
+          <Switch checked={splittable && planFirst} onCheckedChange={setPlanFirst} disabled={!splittable} aria-describedby={planHint} />
+          Plan first
+        </label>
+        <p id={planHint} className="text-sm text-muted">
+          {splittable ? "Athena drafts a split into sub-tasks for you to approve first." : "Needs a repository."}
+        </p>
+      </div>
       {error && (
         <p role="alert" className="text-sm text-danger">
           {error}

@@ -10,6 +10,7 @@ import { Link, useLocation, useSearchParams } from "react-router";
 import type { ApprovalView, TicketSummary } from "@/gen/athena/v1/state_pb";
 import { AnswerCard } from "@/features/needs-you/AnswerCard";
 import { ApprovalCard } from "@/features/needs-you/ApprovalCard";
+import { PlanCard } from "@/features/needs-you/PlanCard";
 import { TrustBadge } from "@/features/control/trust";
 import { stopTicket } from "@/features/needs-you/stopTicket";
 import { useShortcut } from "@/app/shortcuts";
@@ -34,6 +35,7 @@ import { DocumentsStrip } from "./DocumentsStrip";
 import { Facts } from "./Facts";
 import { filterSearch } from "./Filters";
 import { FilesView } from "./FilesView";
+import { Relatives } from "./Relatives";
 
 // The diff viewer is outside the initial bundle budget: its chunk loads when the Changes tab opens.
 const DiffView = lazy(() => import("./DiffView"));
@@ -246,6 +248,7 @@ function TicketTabs({
               trimmed={detail.timelineTrimmed}
               onViewReport={revealReport}
               question={ticket.stage === "person" && ticket.action === "answer" ? ticket.attentionQuestion : ""}
+              split={detail.breakdown?.tasks.length}
             />
           </Suspense>
         ) : (
@@ -346,6 +349,7 @@ export function TicketDetail({ id }: { id: string }) {
       {summary.stage === "person" && summary.action === "answer" && (
         <AnswerCard key={summary.attentionQuestion} ticket={summary} header={false} />
       )}
+      {summary.stage === "person" && summary.action === "plan" && <PlanCard ticket={summary} header={false} />}
       {detail && detail.reports.length > 0 && (
         <Suspense fallback={<Skeleton className="h-32 w-full" />}>
           <ReportCard
@@ -359,6 +363,7 @@ export function TicketDetail({ id }: { id: string }) {
         </Suspense>
       )}
       <Facts ticket={summary} threads={detail?.threads ?? []} />
+      <Relatives ticket={summary} />
       {listed && <DocumentsStrip files={files} />}
       <TicketTabs ticket={summary} files={files} focusComposer={focusComposer} onComposerFocused={onComposerFocused} />
       {file && (

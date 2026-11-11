@@ -895,3 +895,223 @@ func TestOfflineAfterTestOverride(t *testing.T) {
 		t.Fatalf("a bad duration: %v", got)
 	}
 }
+
+// splitDispatcher is a Dispatcher over a fresh store and an Engine that runs nothing; gitDir is a folder the facts pass
+// found to be a git repository.
+func splitDispatcher(t *testing.T) (d *Dispatcher, eng *core.Engine, gitDir string) {
+	t.Helper()
+	st, err := store.Open(filepath.Join(t.TempDir(), "athena.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	eng = core.NewEngine(st.Repos(), nopExec{}, nil, nil)
+	gitDir = t.TempDir()
+	facts := newPlaceFacts()
+	facts.known[gitDir] = placeFact{git: true, resolved: gitDir}
+	return &Dispatcher{st: st, eng: eng, log: discardLogger(), facts: facts}, eng, gitDir
+}
+
+// do sends the dashboard Command action as a client whose passkey is not fresh.
+func do(d *Dispatcher, id string, action any) *athenav1.CommandResult {
+	c := &athenav1.Command{Id: id}
+	switch a := action.(type) {
+	case *athenav1.SubmitTask:
+		c.Action = &athenav1.Command_SubmitTask{SubmitTask: a}
+	case *athenav1.UpdateBreakdown:
+		c.Action = &athenav1.Command_UpdateBreakdown{UpdateBreakdown: a}
+	case *athenav1.ApproveBreakdown:
+		c.Action = &athenav1.Command_ApproveBreakdown{ApproveBreakdown: a}
+	case *athenav1.RejectBreakdown:
+		c.Action = &athenav1.Command_RejectBreakdown{RejectBreakdown: a}
+	case *athenav1.Replan:
+		c.Action = &athenav1.Command_Replan{Replan: a}
+	case *athenav1.ContinueWithout:
+		c.Action = &athenav1.Command_ContinueWithout{ContinueWithout: a}
+	}
+	return d.Do(context.Background(), web.Origin{ClientID: "phone"}, c)
+}
+
+func twoSubTasks() []core.ChildSpec {
+	return []core.ChildSpec{{Key: "api", Title: "API", Instructions: "Build the API"},
+		{Key: "ui", Title: "UI", Instructions: "Build the UI", Deps: []string{"api"}}}
+}
+
+// A plan-first task waits for its plan; the owner edits the draft and approves it, with no fresh passkey, and it splits.
+// A plain folder cannot be split. A failed plan is planned again on the owner's word, or run as one ticket.
+func TestDispatchPlanFirstAndApprove(t *testing.T) {
+	d, eng, gitDir := splitDispatcher(t)
+	res := do(d, "p0", &athenav1.SubmitTask{Text: "Split me", Dir: t.TempDir(), PlanFirst: true})
+	if res.GetOk() || res.GetCode() != web.CodeInvalid ||
+		res.GetMessage() != "Splitting needs a git repository: each child works on its own branch." {
+		t.Fatalf("plan first in a plain folder = %v", res)
+	}
+	res = do(d, "p1", &athenav1.SubmitTask{Text: "Split me", Dir: gitDir, PlanFirst: true})
+	if !res.GetOk() {
+		t.Fatalf("plan first = %v", res)
+	}
+	id := res.GetTicketId()
+	if tk, _, _ := eng.Ticket(id); tk.Plan == nil || tk.Plan.State != core.PlanPlanning || len(tk.Assignments) != 0 {
+		t.Fatalf("plan-first ticket = %+v", tk)
+	}
+	// A git repository the facts pass has not probed yet is looked at now, not taken for a plain folder.
+	fresh := t.TempDir()
+	if err := os.Mkdir(filepath.Join(fresh, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if res := do(d, "p1b", &athenav1.SubmitTask{Text: "Split me fresh", Dir: fresh, PlanFirst: true}); !res.GetOk() {
+		t.Fatalf("plan first in an unprobed git folder = %v", res)
+	}
+	if err := eng.PlanDrafted(id, core.Breakdown{Tasks: twoSubTasks()}); err != nil {
+		t.Fatal(err)
+	}
+	res = do(d, "p2", &athenav1.UpdateBreakdown{TicketId: id, Revision: 1, Tasks: []*athenav1.SubTaskView{
+		{Key: "api", Title: "API", Instructions: "Build the API", Areas: []string{"internal/api"}, Runtime: "codex", Model: "o3"},
+		{Key: "ui", Title: "UI v2", Instructions: "Build the UI", Deps: []string{"api"}},
+		{Key: "docs", Title: "Docs", Instructions: "Write it down"},
+	}})
+	if !res.GetOk() {
+		t.Fatalf("update = %v", res)
+	}
+	tk, _, _ := eng.Ticket(id)
+	b := tk.Plan.Breakdown
+	if b.Revision != 2 || len(b.Tasks) != 3 || b.Tasks[1].Title != "UI v2" || b.Tasks[0].Runtime != "codex" ||
+		b.Tasks[0].Model != "o3" || b.Tasks[0].Areas[0] != "internal/api" || b.Tasks[1].Deps[0] != "api" {
+		t.Fatalf("breakdown after update = %+v", b)
+	}
+	res = do(d, "p3", &athenav1.ApproveBreakdown{TicketId: id, Revision: 2})
+	if !res.GetOk() {
+		t.Fatalf("approve without a fresh passkey = %v", res)
+	}
+	if tk, _, _ = eng.Ticket(id); tk.Plan.State != core.PlanApproved || len(tk.Children) != 3 {
+		t.Fatalf("after approve: plan %+v children %v", tk.Plan, tk.Children)
+	}
+
+	// A failed plan: Try again, then Run as one ticket.
+	res = do(d, "p4", &athenav1.SubmitTask{Text: "Split me too", Dir: gitDir, PlanFirst: true})
+	other := res.GetTicketId()
+	if err := eng.PlanFailed(other, "no answer"); err != nil {
+		t.Fatal(err)
+	}
+	if res = do(d, "p5", &athenav1.Replan{TicketId: other}); !res.GetOk() {
+		t.Fatalf("replan = %v", res)
+	}
+	if tk, _, _ = eng.Ticket(other); tk.Plan.State != core.PlanPlanning {
+		t.Fatalf("after replan: %+v", tk.Plan)
+	}
+	if err := eng.PlanFailed(other, "no answer again"); err != nil {
+		t.Fatal(err)
+	}
+	if res = do(d, "p6", &athenav1.RejectBreakdown{TicketId: other}); !res.GetOk() {
+		t.Fatalf("reject = %v", res)
+	}
+	if tk, _, _ = eng.Ticket(other); tk.Plan.State != core.PlanRejected || len(tk.Assignments) != 1 {
+		t.Fatalf("after reject: %+v, %d assignments", tk.Plan, len(tk.Assignments))
+	}
+	if res = do(d, "p7", &athenav1.RejectBreakdown{TicketId: other}); res.GetOk() || res.GetCode() != web.CodeInvalid {
+		t.Fatalf("reject of a settled plan = %v", res)
+	}
+}
+
+// An edit or an approval of a draft that changed meanwhile is refused with the stale-revision sentence.
+func TestDispatchUpdateStaleRevision(t *testing.T) {
+	d, eng, gitDir := splitDispatcher(t)
+	id := do(d, "s1", &athenav1.SubmitTask{Text: "Split me", Dir: gitDir, PlanFirst: true}).GetTicketId()
+	if err := eng.PlanDrafted(id, core.Breakdown{Tasks: twoSubTasks()}); err != nil {
+		t.Fatal(err)
+	}
+	const stale = "The split changed meanwhile; reload it and try again."
+	res := do(d, "s2", &athenav1.UpdateBreakdown{TicketId: id, Revision: 3, Tasks: []*athenav1.SubTaskView{
+		{Key: "api", Title: "API", Instructions: "Build the API"}}})
+	if res.GetOk() || res.GetCode() != web.CodeInvalid || res.GetMessage() != stale {
+		t.Fatalf("stale update = %v", res)
+	}
+	res = do(d, "s3", &athenav1.ApproveBreakdown{TicketId: id, Revision: 3})
+	if res.GetOk() || res.GetCode() != web.CodeInvalid || res.GetMessage() != stale {
+		t.Fatalf("stale approve = %v", res)
+	}
+	if tk, _, _ := eng.Ticket(id); tk.Plan.Breakdown.Revision != 1 || len(tk.Children) != 0 {
+		t.Fatalf("a stale command changed the draft: %+v", tk.Plan.Breakdown)
+	}
+}
+
+// Continue without it ends the child and starts the dependents that waited for it; it is refused for a Ticket that is
+// not a child.
+func TestDispatchContinueWithout(t *testing.T) {
+	d, eng, gitDir := splitDispatcher(t)
+	lead, err := eng.SubmitOwnerTask("Lead", core.TaskOptions{Dir: gitDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids, err := eng.SpawnChildren(lead.ID, twoSubTasks())
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := do(d, "c1", &athenav1.ContinueWithout{TicketId: ids[0]})
+	if !res.GetOk() {
+		t.Fatalf("continue without = %v", res)
+	}
+	if c, _, _ := eng.Ticket(ids[0]); c.Ended == nil || c.Ended.Outcome != core.OutcomeStopped {
+		t.Fatalf("child after continue without: %+v", c.Ended)
+	}
+	if dep, _, _ := eng.Ticket(ids[1]); len(dep.Waiting) != 0 || len(dep.Assignments) != 1 {
+		t.Fatalf("dependent after continue without: waiting %v, %d assignments", dep.Waiting, len(dep.Assignments))
+	}
+	res = do(d, "c2", &athenav1.ContinueWithout{TicketId: lead.ID})
+	if res.GetOk() || res.GetCode() != web.CodeInvalid || !strings.Contains(res.GetMessage(), "not a child ticket") {
+		t.Fatalf("continue without a lead = %v", res)
+	}
+}
+
+// An agent message reaches the open detail of the Ticket that sent it as well as the one it went to: the sender's
+// asked entry is pushed live, and so is the answerer's answered entry.
+func TestAgentMessagePushedToSenderDetail(t *testing.T) {
+	d, eng, gitDir := splitDispatcher(t)
+	lead, err := eng.SubmitOwnerTask("Lead", core.TaskOptions{Dir: gitDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids, err := eng.SpawnChildren(lead.ID, []core.ChildSpec{{Key: "api", Title: "API", Instructions: "Build the API"},
+		{Key: "ui", Title: "UI", Instructions: "Build the UI"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := hub.New(newHubSource(d), discardLogger())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	h.Start(ctx)
+	d.st.OnCommit(h.OnCommit)
+	defer d.st.OnCommit(nil)
+	sub, _ := h.Subscribe(0, h.Epoch())
+	defer sub.Close()
+	sub.Watch(ids[0])
+	sub.Watch(ids[1])
+	// waitEntry waits for a detail delta of ticketID whose timeline has kind/subkind.
+	waitEntry := func(ticketID, kind, subkind string) {
+		t.Helper()
+		deadline := time.After(waitTimeout)
+		for {
+			select {
+			case dl := <-sub.C():
+				if td := dl.GetTicketDetail(); td != nil && td.GetSummary().GetId() == ticketID {
+					for _, e := range td.GetTimeline() {
+						if e.GetKind() == kind && e.GetSubkind() == subkind {
+							return
+						}
+					}
+				}
+			case <-deadline:
+				t.Fatalf("no %s/%s entry pushed in %s's detail", kind, subkind, ticketID)
+			}
+		}
+	}
+	m, err := eng.AskAgent(ids[0], ids[1], "Which port?")
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitEntry(ids[0], "agent", "asked")
+	if _, err := eng.AnswerAgent(ids[1], m.ID, "8080"); err != nil {
+		t.Fatal(err)
+	}
+	waitEntry(ids[1], "agent", "answered")
+}

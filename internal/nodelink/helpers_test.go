@@ -306,7 +306,8 @@ func (f *fakeTarget) seen() []string {
 	defer f.mu.Unlock()
 	return append([]string(nil), f.events...)
 }
-func (f *fakeTarget) Seed(node.Seed) error { return nil }
+func (f *fakeTarget) Seed(node.Seed) error                 { return nil }
+func (f *fakeTarget) ImportBranch(node.BranchImport) error { return nil }
 func (f *fakeTarget) Deliver(t core.Ticket, a core.Assignment) {
 	f.event("deliver " + t.ID + "/" + a.ID)
 }

@@ -151,7 +151,7 @@ func (n *Node) handleConn(ctx context.Context, conn net.Conn) {
 			if err := json.Unmarshal(line, &req); err != nil {
 				resp = WorkerResponse{Error: "malformed worker request"}
 			} else {
-				resp = n.handleWorker(req)
+				resp = n.handleWorker(ctx, req)
 			}
 		case OpWorkerTools:
 			var req WorkerRequest
@@ -272,7 +272,7 @@ func (n *Node) ruleContext(s *session, runtime string) RuleContext {
 	home, _ := os.UserHomeDir()
 	c := RuleContext{TicketDir: s.place.workDir, Blocked: n.cfg.Blocked, Home: home, StateDir: n.cfg.StateDir,
 		AthenaBin: n.cfg.AthenaBin, VenvActive: false, ReadOnly: s.reviewing(), Restricted: s.restricted(),
-		Shadow: n.heldForOwner(s), Secrets: n.cfg.Secrets}
+		Shadow: n.heldForOwner(s), Child: s.t.Lead, Secrets: n.cfg.Secrets}
 	if c.Restricted {
 		c.ReadRoots = restrictedReadRoots()
 	}
@@ -736,6 +736,15 @@ func (n *Node) handleReport(req ReportRequest) Response {
 		return Response{Error: "a tool call of yours failed in the step that filed this report, so you cannot have seen its result; " +
 			"read the result, then report again"}
 	}
+	// A child delivers commits: its ready report needs a clean worktree, and carries its branch head (R6).
+	head := ""
+	if s.t.Lead != "" && req.Status == string(core.ReportReady) {
+		var err error
+		if head, err = n.childReadyHead(s); err != nil {
+			s.log.Warn("report refused", "state", req.Status, "error", err)
+			return Response{Error: err.Error()}
+		}
+	}
 	if req.Pull < 0 {
 		return Response{Error: "pull must be a pull request number"}
 	}
@@ -758,7 +767,7 @@ func (n *Node) handleReport(req ReportRequest) Response {
 	}
 	err := n.engine().FileReport(req.Ticket, core.ReportInput{
 		AssignmentID: req.Assignment, State: core.ReportState(req.Status), Summary: req.Summary, Question: req.Question,
-		Pull: req.Pull,
+		Pull: req.Pull, Head: head,
 	})
 	if err != nil {
 		s.log.Warn("report refused", "state", req.Status, "error", err)

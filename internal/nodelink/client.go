@@ -27,7 +27,7 @@ import (
 // Any change to an Args struct (proxies.go, serve.go) or to the fields of a call bumps Protocol. Both ends decode args
 // strictly, and a fact the server cannot decode is refused as a UserError, which still advances the applied-fact mark:
 // without the bump a node and a server of different versions would drop facts silently instead of refusing the link.
-const Protocol = 1
+const Protocol = 2
 
 const (
 	// heartbeat and deadAfter are every node link's: a dropped node is noticed in under 10 s.
@@ -166,7 +166,7 @@ type conn struct {
 	pending map[uint64]chan *athenav1.NodeResult // requests waiting for their answer
 	factIDs map[uint64]uint64                    // call id -> fact seq, of facts not answered yet
 	subs    map[uint64]context.CancelFunc        // subscriptions, by the id of their subscribe call
-	seeds   map[string]*seedTransfer             // seed bundles on their way in, by transfer id (seed.go)
+	seeds   map[string]*seedTransfer             // seed and branch bundles on their way in, by transfer id (seed.go)
 
 	// sendMu orders the frames of the link's calls: every fact committed before a request is queued before it.
 	sendMu sync.Mutex
@@ -523,7 +523,7 @@ func (c *Client) onFrame(cn *conn, f *athenav1.Frame) {
 	case *athenav1.Frame_NodeCall:
 		c.serve(cn, b.NodeCall)
 	case *athenav1.Frame_BlobChunk:
-		c.onSeedChunk(cn, b.BlobChunk)
+		c.onBlobChunk(cn, b.BlobChunk)
 	case *athenav1.Frame_Error:
 		c.log.Warn("the server reported an error", "code", b.Error.GetCode(), "message", b.Error.GetMessage())
 	}

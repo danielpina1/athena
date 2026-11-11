@@ -49,6 +49,9 @@ type fakeSource struct {
 	// triggerReads counts Trigger calls; triggerErr fails them, as a store that cannot be read does.
 	triggerReads int
 	triggerErr   error
+	// messages are the agent messages from or to each Ticket; limits the split limits.
+	messages map[string][]core.AgentMessage
+	limits   core.SplitLimits
 }
 
 func newFake() *fakeSource {
@@ -141,6 +144,18 @@ func (f *fakeSource) Trust(t core.Trigger) string {
 		return core.TrustAllowed
 	}
 	return core.TrustStranger
+}
+
+func (f *fakeSource) AgentMessages(ticketID string) ([]core.AgentMessage, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.messages[ticketID], nil
+}
+
+func (f *fakeSource) SplitLimits() core.SplitLimits {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.limits
 }
 
 func (f *fakeSource) GitFolder(dir string) bool { f.mu.Lock(); defer f.mu.Unlock(); return f.git[dir] }

@@ -40,6 +40,12 @@ describe("actions", () => {
       [() => actions.interrupt("T-1"), { case: "interrupt", value: { ticketId: "T-1" } }],
       [() => actions.submitTask({ text: "on mini", node: "n-mini" }), { case: "submitTask", value: { text: "on mini", node: "n-mini" } }],
       [() => actions.retryElsewhere("T-1"), { case: "retryElsewhere", value: { ticketId: "T-1" } }],
+      [() => actions.submitTask({ text: "split it", repo: "o/r", planFirst: true }), { case: "submitTask", value: { text: "split it", repo: "o/r", planFirst: true } }],
+      [() => actions.updateBreakdown("T-1", 2, [{ key: "a", title: "A" }]), { case: "updateBreakdown", value: { ticketId: "T-1", revision: 2, tasks: [{ key: "a", title: "A" }] } }],
+      [() => actions.approveBreakdown("T-1", 2), { case: "approveBreakdown", value: { ticketId: "T-1", revision: 2 } }],
+      [() => actions.rejectBreakdown("T-1"), { case: "rejectBreakdown", value: { ticketId: "T-1" } }],
+      [() => actions.replan("T-1"), { case: "replan", value: { ticketId: "T-1" } }],
+      [() => actions.continueWithout("T-2"), { case: "continueWithout", value: { ticketId: "T-2" } }],
       // One hour, and no name: the server ignores one (R25).
       [() => actions.createNodeToken(), { case: "createNodeToken", value: { ttlSeconds: 3600, name: "" } }],
       [() => actions.setNodeDraining("n-mini", true), { case: "setNodeDraining", value: { nodeId: "n-mini", draining: true } }],

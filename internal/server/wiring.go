@@ -25,6 +25,7 @@ import (
 	"github.com/danielpina1/athena/internal/node"
 	"github.com/danielpina1/athena/internal/outbox"
 	"github.com/danielpina1/athena/internal/pki"
+	"github.com/danielpina1/athena/internal/planner"
 	"github.com/danielpina1/athena/internal/policy"
 	"github.com/danielpina1/athena/internal/runtime/codex"
 	"github.com/danielpina1/athena/internal/sources"
@@ -442,6 +443,14 @@ func (c *policyCache) pairing() core.PairingDefaults {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.cur.PairingDefaults()
+}
+
+// splitLimits is the Engine's split limits: the current settings' (policy.Settings.SplitLimits), so a saved change
+// holds from the next command on, as the dashboard shows it.
+func (c *policyCache) splitLimits() core.SplitLimits {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.cur.SplitLimits()
 }
 
 // settings is the router's: the current settings.
@@ -895,6 +904,12 @@ func (w *webEndpoint) status() WebStatusResult {
 		out.CertNotAfter = &notAfter
 	}
 	return out
+}
+
+// plannerConfig is the planner of the configuration c: it runs the server's claude binary (--claude; empty is
+// planner.DefaultBinary) and keeps its transcript and working directory under stateDir.
+func plannerConfig(c PlannerConfig, claudeBinary, stateDir string) planner.Config {
+	return planner.Config{Strategy: c.Strategy, Model: c.Model, Binary: claudeBinary, StateDir: stateDir}
 }
 
 // CodexHome is Athena's own CODEX_HOME, <stateDir>/codex: never the owner's ~/.codex.

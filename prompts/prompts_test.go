@@ -75,3 +75,17 @@ func TestPartsIncludeReviewer(t *testing.T) {
 		}
 	}
 }
+
+func TestPlannerPromptSize(t *testing.T) {
+	if n := len(Planner); n == 0 || n >= 2000 {
+		t.Errorf("the planner prompt is %d characters; it must be under 2,000", n)
+	}
+	if n := len(planner); n >= 2000 {
+		t.Errorf("planner.md is %d characters; it must be under 2,000", n)
+	}
+	for _, want := range []string{"JSON", "<task>", "areas", "deps", "branch", "one task"} {
+		if !strings.Contains(Planner, want) {
+			t.Errorf("the planner prompt never says %q", want)
+		}
+	}
+}

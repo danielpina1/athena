@@ -19,9 +19,9 @@ import (
 )
 
 // A worker's MCP tools beside report (reference 007 "Executor tools", under Athena's names): ack, reply,
-// follow_thread, mark_unrelated and handback. `athena mcp --ticket` forwards each call, with the session's Ticket and
-// Assignment, to the node socket (OpWorker), which runs it on the Engine for that live session only; an Engine refusal
-// comes back as a tool error the model reads.
+// follow_thread, mark_unrelated and handback, then the agent tools (agenttools.go). `athena mcp --ticket` forwards each
+// call, with the session's Ticket and Assignment, to the node socket (OpWorker), which runs it on the Engine for that
+// live session only; an Engine refusal comes back as a tool error the model reads.
 
 // OpWorker runs one of a worker's tools other than report; OpWorkerTools lists the tools a session's MCP server offers
 // (a WorkerRequest without Tool and Args, answered with a WorkerToolsResponse).
@@ -53,7 +53,7 @@ type WorkerResponse struct {
 	Error  string          `json:"error,omitempty"`
 }
 
-var workerTools = []routerTool{
+var workerTools = append([]routerTool{
 	{"ack", "Acknowledge a person's request that reached your ticket, before substantial work on it: one brief sentence, " +
 		"at most 100 words, naming the concrete object and the intended result (\"On it: renaming the Save changes button " +
 		"to Save.\"). It is posted as a reply to their message, once per message. Check the input card's acknowledged line " +
@@ -68,9 +68,11 @@ var workerTools = []routerTool{
 	{"reply", "Answer a person's explicit question that reached your ticket, naming the trigger_id of its input card; " +
 		"a quick question needs no acknowledgement first. Only answers: never use it for progress, results or questions. " +
 		"Athena delivers the result to people from your ready (or dropped) report, and asks your question from the " +
-		"question of a waiting or blocked report. At most 4,000 characters; GitHub comments support Markdown.",
-		obj([]string{"trigger_id", "text"}, map[string]any{
+		"question of a waiting or blocked report. At most 4,000 characters; GitHub comments support Markdown. To answer " +
+		"another agent's message, name its message_id instead of a trigger_id.",
+		obj([]string{"text"}, map[string]any{
 			"trigger_id": sprop("The trigger_id line of the question's input card (not the input id)."),
+			"message_id": sprop("The message_id line of another agent's message, to answer it instead of a person."),
 			"text":       sprop("The answer."),
 			"purpose":    enum("answer, the only purpose a worker sends; it may be omitted.", core.PurposeAnswer),
 		})},
@@ -92,11 +94,11 @@ var workerTools = []routerTool{
 			"trigger_id": sprop("The trigger_id of the message, from its input card."),
 			"reason":     sprop("One sentence: why it is not this ticket's."),
 		})},
-}
+}, agentTools...)
 
 // restrictedWithout are the worker tools a restricted session (toolpolicy.go) goes without: follow_thread reads other
-// Threads.
-var restrictedWithout = []string{"follow_thread"}
+// Threads, and the agent tools reach other Tickets (R13).
+var restrictedWithout = []string{"follow_thread", "hand_off", "ask_agent", "wait_for", "agents"}
 
 // WorkerTools returns the names of a worker's tools, report first, in the order the server lists them.
 func WorkerTools() []string { return workerToolsFor(false) }
@@ -161,7 +163,7 @@ func addWorkerTools(s *mcp.Server, ticketID, assignmentID, socket string, offere
 }
 
 // handleWorker runs one worker tool for a live session.
-func (n *Node) handleWorker(req WorkerRequest) WorkerResponse {
+func (n *Node) handleWorker(ctx context.Context, req WorkerRequest) WorkerResponse {
 	label := "worker_unknown"
 	known := slices.ContainsFunc(workerTools, func(t routerTool) bool { return t.name == req.Tool })
 	if known {
@@ -184,9 +186,12 @@ func (n *Node) handleWorker(req WorkerRequest) WorkerResponse {
 	if s.restricted() && slices.Contains(restrictedWithout, req.Tool) {
 		// Its server does not offer the tool; a call that comes anyway is refused.
 		s.log.Warn("worker tool refused", "tool", req.Tool, "error", "restricted tool policy")
-		return WorkerResponse{Error: restrictedFollowReason}
+		if req.Tool == "follow_thread" {
+			return WorkerResponse{Error: restrictedFollowReason}
+		}
+		return WorkerResponse{Error: restrictedAgentReason}
 	}
-	res, err := n.workerTool(s, req.Tool, req.Args)
+	res, err := n.workerTool(ctx, s, req.Tool, req.Args)
 	if err != nil {
 		s.log.Warn("worker tool refused", "tool", req.Tool, "error", err)
 		return WorkerResponse{Error: err.Error()}
@@ -212,9 +217,11 @@ func decodeArgs(raw json.RawMessage, v any) error {
 	return nil
 }
 
-func (n *Node) workerTool(s *session, tool string, raw json.RawMessage) (any, error) {
+func (n *Node) workerTool(ctx context.Context, s *session, tool string, raw json.RawMessage) (any, error) {
 	eng := n.engine()
 	switch tool {
+	case "hand_off", "ask_agent", "wait_for", "agents":
+		return n.agentTool(ctx, s, tool, raw)
 	case "ack":
 		var in struct {
 			TriggerID string `json:"trigger_id"`
@@ -241,6 +248,7 @@ func (n *Node) workerTool(s *session, tool string, raw json.RawMessage) (any, er
 			Purpose   string `json:"purpose"`
 			Text      string `json:"text"`
 			TriggerID string `json:"trigger_id,omitempty"`
+			MessageID string `json:"message_id,omitempty"`
 		}
 		if err := decodeArgs(raw, &in); err != nil {
 			return nil, err
@@ -259,9 +267,12 @@ func (n *Node) workerTool(s *session, tool string, raw json.RawMessage) (any, er
 		default:
 			return nil, fmt.Errorf("unknown purpose %q: a worker's reply is an answer", in.Purpose)
 		}
-		if in.TriggerID == "" {
-			return nil, errors.New("trigger_id is required: name the trigger_id line of the question's input card; answer " +
-				"the owner's messages, which have none, in your session output")
+		if (in.TriggerID == "") == (in.MessageID == "") {
+			return nil, errors.New("name trigger_id for a person's question, or message_id for another agent's; answer " +
+				"the owner's messages, which have neither, in your session output")
+		}
+		if in.MessageID != "" {
+			return answerAgent(eng, s, in.MessageID, in.Text)
 		}
 		out, err := eng.ReplyOnce(core.ReplyRequest{TicketID: s.t.ID, TriggerID: in.TriggerID, Purpose: core.PurposeAnswer, Text: in.Text})
 		if err != nil {

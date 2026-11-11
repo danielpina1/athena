@@ -125,7 +125,7 @@ func (d *Dispatcher) handleRequest(req Request) (any, error) {
 	case OpPing:
 		return nil, nil
 	case OpSubmit:
-		t, err := d.submit(req.Text, req.Dir, req.Model, req.Repo, req.Runtime, pairingOf(req.Review), "", req.Node)
+		t, err := d.submit(req.Text, req.Dir, req.Model, req.Repo, req.Runtime, pairingOf(req.Review), "", req.Node, req.PlanFirst)
 		if err != nil {
 			return nil, err
 		}
@@ -377,7 +377,8 @@ func (d *Dispatcher) act(o web.Origin, c *athenav1.Command) *athenav1.CommandRes
 	switch a := c.GetAction().(type) {
 	case *athenav1.Command_SubmitTask:
 		s := a.SubmitTask
-		t, err := d.submit(s.GetText(), s.GetDir(), s.GetModel(), s.GetRepo(), s.GetRuntime(), pairingOf(s.Review), requestID(o, c), s.GetNode())
+		t, err := d.submit(s.GetText(), s.GetDir(), s.GetModel(), s.GetRepo(), s.GetRuntime(), pairingOf(s.Review), requestID(o, c),
+			s.GetNode(), s.GetPlanFirst())
 		if err != nil {
 			return d.failure(err)
 		}
@@ -396,6 +397,29 @@ func (d *Dispatcher) act(o web.Origin, c *athenav1.Command) *athenav1.CommandRes
 		}
 	case *athenav1.Command_RetryElsewhere:
 		if err := d.retryElsewhere(a.RetryElsewhere.GetTicketId()); err != nil {
+			return d.failure(err)
+		}
+	case *athenav1.Command_UpdateBreakdown:
+		u := a.UpdateBreakdown
+		if _, err := d.eng.UpdateBreakdown(u.GetTicketId(), int(u.GetRevision()), childSpecs(u.GetTasks())); err != nil {
+			return d.failure(err)
+		}
+	case *athenav1.Command_ApproveBreakdown:
+		// Not Sensitive: the children get the lead's Mandate and nothing beyond it.
+		ab := a.ApproveBreakdown
+		if _, err := d.eng.ApproveBreakdown(ab.GetTicketId(), int(ab.GetRevision())); err != nil {
+			return d.failure(err)
+		}
+	case *athenav1.Command_RejectBreakdown:
+		if err := d.eng.RejectBreakdown(a.RejectBreakdown.GetTicketId()); err != nil {
+			return d.failure(err)
+		}
+	case *athenav1.Command_Replan:
+		if err := d.eng.Replan(a.Replan.GetTicketId()); err != nil {
+			return d.failure(err)
+		}
+	case *athenav1.Command_ContinueWithout:
+		if err := d.eng.ContinueWithout(a.ContinueWithout.GetTicketId()); err != nil {
 			return d.failure(err)
 		}
 	case *athenav1.Command_CreateNodeToken:
@@ -598,12 +622,16 @@ func pairingOf(review *bool) string {
 	return core.PairingOff
 }
 
-func (d *Dispatcher) submit(text, dir, model, repo, runtime, pairing, requestID, nodeID string) (core.Ticket, error) {
+// A planFirst task needs a branch for each child: a folder must be a git repository (Ruling R2).
+func (d *Dispatcher) submit(text, dir, model, repo, runtime, pairing, requestID, nodeID string, planFirst bool) (core.Ticket, error) {
 	if dir != "" {
 		if !filepath.IsAbs(dir) {
 			return core.Ticket{}, userErrorf("directory %s must be an absolute path", dir)
 		}
 		dir = filepath.Clean(dir)
+		if planFirst && !d.gitFolder(dir) {
+			return core.Ticket{}, userErrorf(msgSplitNeedsGit)
+		}
 	}
 	if repo != "" {
 		if d.gh == nil || !d.gh.running() {
@@ -621,11 +649,29 @@ func (d *Dispatcher) submit(text, dir, model, repo, runtime, pairing, requestID,
 		}
 	}
 	t, err := d.eng.SubmitOwnerTask(text, core.TaskOptions{Dir: dir, Model: model, Repo: repo, Runtime: runtime, Pairing: pairing,
-		RequestID: requestID, Node: nodeID})
+		RequestID: requestID, Node: nodeID, PlanFirst: planFirst})
 	if errors.Is(err, core.ErrDuplicate) {
 		return t, nil
 	}
 	return t, err
+}
+
+// msgSplitNeedsGit refuses a plan-first task in a folder that is not a git repository (Ruling R2).
+const msgSplitNeedsGit = "Splitting needs a git repository: each child works on its own branch."
+
+// gitFolder reports whether dir is a git repository: as the facts pass found it, or, for a folder it has not probed
+// yet (or with no facts, the dashboard off), as the folder itself says now.
+func (d *Dispatcher) gitFolder(dir string) bool { return d.facts.check(dir).git }
+
+// childSpecs are the sub-tasks of a dashboard's edited draft.
+func childSpecs(tasks []*athenav1.SubTaskView) []core.ChildSpec {
+	out := make([]core.ChildSpec, 0, len(tasks))
+	for _, s := range tasks {
+		out = append(out, core.ChildSpec{Key: s.GetKey(), Title: s.GetTitle(), Instructions: s.GetInstructions(),
+			Areas: slices.Clone(s.GetAreas()), Deps: slices.Clone(s.GetDeps()), Runtime: s.GetRuntime(), Node: s.GetNode(),
+			Model: s.GetModel()})
+	}
+	return out
 }
 
 func (d *Dispatcher) unsubscribe(thread string) error {

@@ -73,6 +73,9 @@ type RuleContext struct {
 	// is restricted): a git push is denied (shadowPushRule).
 	Shadow bool
 
+	// Child is the lead of a child Ticket's session (Ticket.Lead), else "": a git push is denied (childPushRule).
+	Child string
+
 	// Secrets are the node's secret files (Config.Secrets: the GitHub App key): no session may read them, in any
 	// spelling, nor search a directory that holds one.
 	Secrets []string
@@ -126,7 +129,7 @@ func escalate(rule, reason string) Decision {
 }
 
 // Evaluate applies the hook rules in order: credential reads (deny), any write of a
-// read-only session (deny), a git push in shadow mode (deny), blocked commands (deny), an AI attribution in a commit or
+// read-only session (deny), a git push of a child Ticket or in shadow mode (deny), blocked commands (deny), an AI attribution in a commit or
 // pull request (deny), writes to a protected path (deny) or outside the ticket dir (escalate; for Bash the
 // redirections and file commands that name a target), risky Bash commands
 // (escalate); anything else is allowed. Malformed input is denied. A Bash
@@ -170,6 +173,9 @@ func evaluate(ctx RuleContext, tool string, input json.RawMessage) Decision {
 		return d
 	}
 	if tool == "Bash" {
+		if d, ok := childPushRule(ctx, str(in, "command")); ok {
+			return d
+		}
 		if d, ok := shadowPushRule(ctx, str(in, "command")); ok {
 			return d
 		}
