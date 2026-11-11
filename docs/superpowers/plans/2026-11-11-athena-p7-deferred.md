@@ -33,13 +33,13 @@ Plan 7 was agents and splitting work (`docs/superpowers/plans/2026-11-11-athena-
 - A sub-task key that parses as a Ticket id (`t-12`) is not refused. Keys with only digits are (F3).
 - A sub-task key `s1` can collide with an automatic `s1`.
 - The cap sentence reads "between 1 and 0" when the cap is already used.
-- Plan Revision restarts at 1 after Replan, so a stale client could approve a new draft.
-- In the split editor: Save then a quick Approve is refused as stale, keystrokes during a Save are lost, dep chips allow cycles (the server refuses them), and closing discards a dirty draft.
+- In the split editor: keystrokes during a Save are lost, dep chips allow cycles (the server refuses them), and closing discards a dirty draft.
 - `WaitFor` on a same-repository Ticket that ended before the wait began is refused rather than answered Done.
-- A child's failure overwrites a pending Attention of the lead, so the lead's own question leaves Needs you.
+- `ask_agent` refuses a held Ticket that waits on the asker only when the wait is direct. In a longer chain the ask is accepted, and `wait_for` returns "Not yet" after 20 seconds.
+- When a child fails while its lead has its own question open, the child's own card shows Retry and Stop but not "Continue without it". The lead's card offers it again once its question is answered.
+- One unidentified `internal/node` test failure was seen twice under `-race` in a full run. It did not reproduce alone or with `-count=2` or `-count=3`.
 - The lead's timeline shows a child's end twice (`child/*` and `input/child`); the UI dedupes by instant.
 - An Autopilot firing under the brake is not covered by a test of `SpawnChildren`.
 - A refused auto-approve leaves no note on the timeline.
 - Parallel plans share the planner's settings and transcript files.
 - The fork's first-message path and the GitHub base path have no end-to-end test. The two-machine path is the owner's smoke test.
-- One unidentified `internal/node` test failure was seen once in an early `make check` and did not reproduce.
