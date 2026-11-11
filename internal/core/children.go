@@ -103,7 +103,7 @@ func (o *op) spawn(lead *Ticket, specs []ChildSpec) ([]string, error) {
 		dir = lead.Execution.Directory
 	}
 	if lead.Repo == "" && dir == "" {
-		return nil, userErrorf("Splitting needs a git repository: each child works on its own branch.")
+		return nil, userErrorf(msgSplitNeedsGit)
 	}
 	if lead.Depth+1 > lim.MaxHops {
 		return nil, userErrorf("Child tickets nest at most %d deep; do this part yourself.", lim.MaxHops)

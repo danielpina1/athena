@@ -59,6 +59,12 @@ const (
 	cmdContinueWithout       = "continue_without"
 	cmdAskAgent              = "ask_agent"
 	cmdAnswerAgent           = "answer_agent"
+	cmdPlanDrafted           = "plan_drafted"
+	cmdPlanFailed            = "plan_failed"
+	cmdUpdateBreakdown       = "update_breakdown"
+	cmdApproveBreakdown      = "approve_breakdown"
+	cmdRejectBreakdown       = "reject_breakdown"
+	cmdReplan                = "replan"
 )
 
 var commandNames = []string{
@@ -71,6 +77,7 @@ var commandNames = []string{
 	cmdPropose, cmdApplyProposal, cmdDiscardProposal, cmdSettleProposal, cmdHoldWaiting, cmdStartProposal,
 	cmdAllowedByRule, cmdAssignmentPlaced, cmdNodeOffline, cmdNodeBack, cmdRetryElsewhere,
 	cmdSpawnChildren, cmdContinueWithout, cmdAskAgent, cmdAnswerAgent,
+	cmdPlanDrafted, cmdPlanFailed, cmdUpdateBreakdown, cmdApproveBreakdown, cmdRejectBreakdown, cmdReplan,
 }
 
 // TicketStats are a Ticket's performance numbers (spec §10.3). The Engine updates them in the same transaction as the

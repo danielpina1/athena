@@ -16,7 +16,7 @@ import (
 )
 
 // LocalID is the id of the node embedded in the server.
-const LocalID = "local"
+const LocalID = core.LocalNode
 
 // placeRetry is the pause before a placement that failed on the store is tried again.
 const placeRetry = time.Second

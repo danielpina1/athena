@@ -78,6 +78,8 @@ type TaskOptions struct {
 	Pairing string
 	// Node pins the task to a node by id; empty leaves the placement to the fleet.
 	Node string
+	// PlanFirst holds the task for a planner's breakdown (plan.go): it gets no Assignment until the split is settled.
+	PlanFirst bool
 }
 
 // ReportInput is a worker's report on its Ticket. A Question asks a person (an empty one keeps the current question);
@@ -205,8 +207,9 @@ func (e *Engine) ticketRuntime(name string) (string, error) {
 
 // SubmitOwnerTask records the owner's task: a Trigger, a direct accept Decision with an explicit Mandate, and a Ticket
 // whose title is the text's first line, with one pending Assignment and the text as its first Input; then it queues
-// the Assignment's launch. A task on a repository (TaskOptions.Repo, owner/name) works there and has no Channel: its
-// worker reports to the owner, and its replies are refused.
+// the Assignment's launch; a PlanFirst task instead has no Assignment and waits for its split plan (plan.go). A task
+// on a repository (TaskOptions.Repo, owner/name) works there and has no Channel: its worker reports to the owner, and
+// its replies are refused.
 func (e *Engine) SubmitOwnerTask(text string, opts TaskOptions) (Ticket, error) {
 	title := titleOf(text)
 	if title == "" {
@@ -226,6 +229,15 @@ func (e *Engine) SubmitOwnerTask(text string, opts TaskOptions) (Ticket, error) 
 		}
 		if opts.Dir != "" {
 			return Ticket{}, userErrorf("a task on a repository runs in its own worktree: it takes no directory")
+		}
+	}
+	if opts.PlanFirst {
+		if opts.Repo == "" && opts.Dir == "" {
+			return Ticket{}, userErrorf(msgSplitNeedsGit)
+		}
+		if opts.Dir != "" && opts.Node == "" {
+			// A folder never moves, and the children are pinned to its node: record it now, with no Assignment yet.
+			opts.Node = LocalNode
 		}
 	}
 	var created, existing *Ticket
@@ -264,7 +276,16 @@ func (e *Engine) SubmitOwnerTask(text string, opts TaskOptions) (Ticket, error) 
 			RequestID: opts.RequestID,
 			Pairing:   o.ticketPairing(opts.Pairing),
 		}
-		assignment := o.newAssignment(t)
+		assignment := ""
+		if opts.PlanFirst {
+			// R1: a held Ticket has no Assignment until its split is settled.
+			t.Plan = &PlanState{State: PlanPlanning, At: o.at}
+			if err := o.enqueuePlan(t); err != nil {
+				return err
+			}
+		} else {
+			assignment = o.newAssignment(t)
+		}
 		input := Input{ID: newID(), Kind: InputTrigger, At: o.at, TriggerID: trigger.ID, Text: text, Human: true}
 		t.Inputs = []Input{input}
 		t.Undelivered = []string{input.ID}
@@ -277,7 +298,9 @@ func (e *Engine) SubmitOwnerTask(text string, opts TaskOptions) (Ticket, error) 
 		if err := o.tx.PutTicket(t); err != nil {
 			return err
 		}
-		o.start(t, assignment)
+		if assignment != "" {
+			o.start(t, assignment)
+		}
 		o.event(EventTicketCreated, t, assignment, map[string]any{"decisionId": decision.ID})
 		created = t
 		return nil
