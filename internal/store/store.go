@@ -185,6 +185,11 @@ var migrations = []string{
 	ALTER TABLE enroll_tokens ADD COLUMN kind TEXT NOT NULL DEFAULT 'passkey';`,
 	// 13: when a node's certificate expires, recorded at its join ('' for a node that joined before this).
 	`ALTER TABLE nodes ADD COLUMN cert_not_after TEXT NOT NULL DEFAULT '';`,
+	// 14: agent messages (plan 7). Ticket fields ride in the existing doc column.
+	`CREATE TABLE agent_messages (id TEXT PRIMARY KEY, from_ticket TEXT NOT NULL, to_ticket TEXT NOT NULL, reply_to TEXT NOT NULL DEFAULT '', at TEXT NOT NULL, doc TEXT NOT NULL);
+	CREATE INDEX agent_messages_from ON agent_messages (from_ticket, at);
+	CREATE INDEX agent_messages_to ON agent_messages (to_ticket, at);
+	CREATE INDEX agent_messages_reply ON agent_messages (reply_to);`,
 }
 
 const schemaKey = "schema"
