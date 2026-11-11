@@ -106,6 +106,11 @@ type Engine struct {
 	// It has its own lock so a waiter never needs mu.
 	waitMu  sync.Mutex
 	waiters map[string]chan struct{}
+	// agentWaiters holds, per Ticket or agent message someone waits on (keyed ticket:<id> or msg:<id>), the channel
+	// that closes after the commit that ends the Ticket or stores the answer (agents.go). It is under waitMu too.
+	agentWaiters map[string]*agentWaiter
+	// waitForMax bounds a WaitFor; zero is WaitForMax. Tests shorten it.
+	waitForMax time.Duration
 	// reg and cmdHist are set by SetMetrics before the first command; nil without metrics.
 	reg     *metrics.Registry
 	cmdHist map[string]*metrics.Histogram
@@ -176,7 +181,7 @@ func NewEngineWith(repos Repositories, exec Executor, opts Options) *Engine {
 	}
 	return &Engine{repos: repos, exec: exec, now: now, emit: emit, waiters: map[string]chan struct{}{},
 		policy: opts.Policy, scope: opts.Scope, wake: opts.Wake, relays: opts.Relays, defaultRuntime: def, pairing: opts.Pairing,
-		split: opts.Split, nodes: opts.Nodes}
+		split: opts.Split, nodes: opts.Nodes, agentWaiters: map[string]*agentWaiter{}}
 }
 
 // ValidRuntime reports whether name is a runtime a Ticket may run on: RuntimeClaude, RuntimeCodex or RuntimeAuto.
@@ -841,6 +846,8 @@ const (
 	effectEvent
 	// effectRelease wakes the waiters of an Approval that is no longer pending.
 	effectRelease
+	// effectAgentRelease wakes the WaitFor callers of an ended Ticket or an answered agent message.
+	effectAgentRelease
 )
 
 // effect is an Executor call or an Event a command produces; it runs after the command commits. Executor calls
@@ -852,6 +859,8 @@ type effect struct {
 	reason       string
 	event        Event
 	approvalID   string
+	// waitKey is the agentWaiters key an effectAgentRelease wakes.
+	waitKey string
 }
 
 // op is one command in progress: its transaction, its time and the effects it collected.
@@ -920,6 +929,10 @@ func (e *Engine) run(fn func(o *op) error) error {
 		}
 		if fx.kind == effectRelease {
 			e.release(fx.approvalID)
+			continue
+		}
+		if fx.kind == effectAgentRelease {
+			e.releaseAgentWait(fx.waitKey)
 			continue
 		}
 		t := cloneTicket(fx.ticket)
@@ -1185,6 +1198,7 @@ func (o *op) endAt(t *Ticket, by TicketEndBy, outcome TicketOutcome, reason stri
 	for _, id := range stopping {
 		o.stop(t, id, stopReason)
 	}
+	o.releaseAgentWait(ticketWaitKey(t.ID))
 	if err := o.endChildren(t); err != nil {
 		return err
 	}

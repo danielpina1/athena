@@ -139,6 +139,8 @@ const (
 	EventProposalSettled    = "proposal.settled"
 	// EventChildrenSpawned is emitted on a lead whose worker split off child Tickets.
 	EventChildrenSpawned = "children.spawned"
+	// EventAgentMessage is emitted on both Tickets of an agent message, an ask or an answer.
+	EventAgentMessage = "agent.message"
 )
 
 // Event is what the Engine reports after a committed change.
