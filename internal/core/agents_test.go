@@ -289,3 +289,33 @@ func TestAgentsVisibleSet(t *testing.T) {
 	eq(t, "stage", views[0].Stage, "ended")
 	eq(t, "repo", views[2].Repo, "o/r")
 }
+
+// A wait on an open Ticket of the repository that is not kin comes to its result when the Ticket ends.
+func TestWaitForRepoTicketThatEnds(t *testing.T) {
+	h := splitHarness(t)
+	a, b := repoTask(h, "A", "o/r"), repoTask(h, "B", "o/r")
+	type out struct {
+		r   WaitResult
+		err error
+	}
+	done := make(chan out, 1)
+	go func() {
+		r, err := h.eng.WaitFor(context.Background(), a, b)
+		done <- out{r, err}
+	}()
+	time.Sleep(30 * time.Millisecond)
+	h.must(h.eng.StopTicket(b, "done"))
+	select {
+	case o := <-done:
+		h.must(o.err)
+		if !o.r.Done || o.r.Ticket == nil {
+			t.Fatalf("result: %+v", o.r)
+		}
+		eq(t, "view", [3]string{o.r.Ticket.ID, o.r.Ticket.Relation, o.r.Ticket.Stage}, [3]string{b, "repo", "ended"})
+	case <-time.After(time.Second):
+		t.Fatal("WaitFor did not wake on the end")
+	}
+	// A wait that starts after the end finds it out of reach.
+	_, err := h.eng.WaitFor(context.Background(), a, b)
+	wantRefusal(t, "ended repo ticket", err, "is not one your ticket can reach")
+}

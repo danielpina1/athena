@@ -243,6 +243,9 @@ func (e *Engine) waitCheck(ticketID, target string) (func() (WaitResult, error),
 	if !ok {
 		return nil, "", userErrorf("%q is not a ticket id or a message id", target)
 	}
+	// Visibility is judged when the wait starts: an open Ticket of the repository stays reachable once it ends, so the
+	// wait on it comes to its result.
+	rel := ""
 	check := func() (r WaitResult, err error) {
 		err = e.repos.Tx(func(tx Tx) error {
 			from, err := tx.GetTicket(ticketID)
@@ -256,11 +259,10 @@ func (e *Engine) waitCheck(ticketID, target string) (func() (WaitResult, error),
 			if err != nil {
 				return err
 			}
-			rel := ""
-			if t != nil && t.ID != from.ID {
+			if rel == "" && t != nil && t.ID != from.ID {
 				rel = relationOf(from, t)
 			}
-			if rel == "" {
+			if rel == "" || t == nil {
 				return userErrorf("%s is not one your ticket can reach: agents() lists those it can.", id)
 			}
 			if t.Ended == nil {
