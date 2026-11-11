@@ -1,4 +1,5 @@
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { create } from "@bufbuild/protobuf";
@@ -28,7 +29,7 @@ const show = (id: string) =>
     </MemoryRouter>,
   );
 
-test("a draft says how many sub-tasks its split has, and offers no review here", () => {
+test("a draft says how many sub-tasks its split has, and Review split opens the editor", async () => {
   load({ tickets: [{ id: "T-1", title: "Port the parser", stage: "person", action: "plan", planState: "draft" }] });
   detail({
     summary: { id: "T-1", title: "Port the parser", stage: "person", action: "plan", planState: "draft" },
@@ -36,11 +37,14 @@ test("a draft says how many sub-tasks its split has, and offers no review here",
   });
   show("T-1");
   expect(screen.getByText("A split of Port the parser waits for you (3 sub-tasks)")).toBeTruthy();
-  expect(screen.queryByRole("button", { name: "Review split" })).toBeNull();
   expect(actions.watch).toHaveBeenCalledWith("T-1");
+  expect(screen.queryByRole("dialog")).toBeNull();
+  await userEvent.click(screen.getByRole("button", { name: "Review split" }));
+  const editor = await screen.findByRole("dialog", { name: "Review split" });
+  expect(editor.querySelectorAll("[data-subtask]")).toHaveLength(3);
 });
 
-test("a failed plan says why", () => {
+test("a failed plan says why, and Review split opens it too", () => {
   load({ tickets: [{ id: "T-2", title: "Port the parser", stage: "person", action: "plan", planState: "failed" }] });
   detail({
     summary: { id: "T-2", title: "Port the parser", stage: "person", action: "plan", planState: "failed" },
@@ -48,5 +52,5 @@ test("a failed plan says why", () => {
   });
   show("T-2");
   expect(screen.getByText("Planning Port the parser failed: the planner timed out")).toBeTruthy();
-  expect(screen.queryByRole("button", { name: "Review split" })).toBeNull();
+  expect(screen.getByRole("button", { name: "Review split" })).toBeTruthy();
 });

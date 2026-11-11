@@ -1,12 +1,19 @@
 // Splits, end to end (plan 7): the New task "Plan first" switch, a lead's Relatives block and its timeline of the
 // split, its child tickets and an agent message, and the Needs you cards of a split waiting for the owner (PlanCard)
-// and of a lead whose child failed (ChildCard). The shared server's fake sessions never split, so the link edit
-// (link.ts) shapes real Tickets into a lead and its children. Every Ticket a test opens is stopped at its end (R37).
+// and of a lead whose child failed (ChildCard). Those screens come from the link edit (link.ts), which shapes real
+// Tickets into a lead and its children. The last test splits for real: plan first in a temporary git folder, the
+// planner's fixture (e2e/fixtures/planner.jsonl), the breakdown editor, and the children's reports through the
+// harness. Every Ticket a test opens is stopped at its end (R37).
+import { execFile } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { promisify } from "node:util";
 import { create } from "@bufbuild/protobuf";
 import { timestampFromMs } from "@bufbuild/protobuf/wkt";
 import type { Page } from "@playwright/test";
-import { BreakdownViewSchema } from "../src/gen/athena/v1/state_pb";
-import { athena, expect, expectAccessible, liveFeed, signedInPage, test } from "./harness";
+import { BreakdownViewSchema, RepoViewSchema } from "../src/gen/athena/v1/state_pb";
+import { athena, expect, expectAccessible, liveFeed, sessionAssignment, signedInPage, test } from "./harness";
 import { editLink, fixedNode, runtimeStatus, timelineEntry, type LinkEdits } from "./link";
 
 async function stopAll(...tickets: string[]) {
@@ -21,6 +28,18 @@ async function both(page: Page, name: string, mask: ReturnType<Page["locator"]>[
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
   await expectAccessible(page);
   await expect(page).toHaveScreenshot(`${name}-dark.png`, { mask: [...mask, ...liveFeed(page)], fullPage });
+  await page.emulateMedia({ colorScheme: "light", reducedMotion: "reduce" });
+}
+
+/** The editor dialog alone, light and dark, axe clean. */
+async function editorShots(page: Page, editor: ReturnType<Page["locator"]>, name: string) {
+  await expectAccessible(page);
+  await page.evaluate(() => document.fonts.ready);
+  await expect(editor).toHaveScreenshot(`${name}-light.png`);
+  await page.emulateMedia({ colorScheme: "dark", reducedMotion: "reduce" });
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await expectAccessible(page);
+  await expect(editor).toHaveScreenshot(`${name}-dark.png`);
   await page.emulateMedia({ colorScheme: "light", reducedMotion: "reduce" });
 }
 
@@ -169,7 +188,7 @@ test("Needs you asks for a split and for a failed child on its lead, light and d
     const card = page.getByRole("group", { name: "Port the parser" });
     await expect(card.getByText(question)).toBeVisible();
     await expect(page.getByRole("group", { name: "Parser lexer" })).toHaveCount(0);
-    await expect(page.getByRole("button", { name: "Review split" })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Review split" })).toHaveCount(2);
     const mask = [
       page.locator("time"),
       page.locator('main a[href^="/tickets/"]'),
@@ -187,5 +206,91 @@ test("Needs you asks for a split and for a failed child on its lead, light and d
     await expect(drop).toBeVisible();
   } finally {
     await stopAll(ids.draft, ids.failed, ids.lead, ids.child);
+  }
+});
+
+const run = promisify(execFile);
+const git = (cwd: string, ...args: string[]) =>
+  run("git", ["-c", "user.name=Athena E2E", "-c", "user.email=e2e@example.com", ...args], { cwd, encoding: "utf8" });
+
+test("a split runs end to end: plan first, the editor, children in order, and a child left out", async ({ page, session }) => {
+  test.setTimeout(150_000);
+  await page.clock.setFixedTime(new Date("2026-11-04T10:00:00"));
+  await page.emulateMedia({ colorScheme: "light", reducedMotion: "reduce" });
+  // A git folder with one commit: splitting needs a branch (R2). The e2e server has no GitHub repositories.
+  const dir = mkdtempSync(join(tmpdir(), "athena-e2e-split-"));
+  await git(dir, "init", "-q", "-b", "main");
+  writeFileSync(join(dir, "README.md"), "# Settings\n");
+  await git(dir, "add", ".");
+  await git(dir, "commit", "-q", "-m", "first");
+  // The folder is in the picker as a local repository, as the scan of localRepoRoots would list it.
+  await editLink(page, { node, repos: (r) => r.push(create(RepoViewSchema, { name: dir, kind: "git" })) });
+  await signedInPage(page);
+  const ids = { lead: "", api: "", ui: "" };
+  try {
+    // 1. New task in the folder, Plan first.
+    await page.goto("/new");
+    await page.getByRole("textbox", { name: "What should Athena do?" }).fill("Add a settings screen");
+    const repo = page.getByRole("combobox", { name: "Repository" });
+    await repo.fill(dir);
+    await page.getByRole("option", { name: dir, exact: true }).click();
+    await page.getByRole("switch", { name: "Plan first" }).click();
+    await page.getByRole("button", { name: "Start" }).click();
+    await expect(page).toHaveURL(/\/tickets\/T-\d+/);
+    ids.lead = decodeURIComponent(new URL(page.url()).pathname.split("/").pop()!);
+
+    // 2. The planner's draft waits in Needs you; Review split shows the overlap under both rows.
+    await page.goto("/");
+    const card = page.getByRole("group", { name: "Add a settings screen" });
+    await expect(card.getByText("A split of Add a settings screen waits for you (3 sub-tasks)")).toBeVisible({ timeout: 20_000 });
+    await card.getByRole("button", { name: "Review split" }).click();
+    const editor = page.getByRole("dialog", { name: "Review split" });
+    const row = (key: string) => editor.getByRole("group", { name: `Sub-task ${key}` });
+    await expect(row("ui").getByText("Overlaps with docs: web/src")).toBeVisible();
+    await expect(row("docs").getByText("Overlaps with ui: web/src")).toBeVisible();
+    await expect(row("ui").getByRole("button", { name: "after api" })).toHaveAttribute("aria-pressed", "true");
+    // The editor alone: the page behind it holds the folder's temporary path. The overlap under ui is in view.
+    await row("ui").getByText("Overlaps with docs: web/src").scrollIntoViewIfNeeded();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(page.viewportSize()!.width);
+    await editorShots(page, editor, "split-editor");
+
+    // 3. Leave docs out, rename ui, approve.
+    await row("docs").getByRole("button", { name: "Remove docs" }).click();
+    await expect(row("ui").getByText(/Overlaps/)).toHaveCount(0);
+    await row("ui").getByRole("textbox", { name: "Title" }).fill("Add the settings page");
+    await editor.getByRole("button", { name: "Approve and start" }).click();
+    await expect(editor).toHaveCount(0);
+
+    // 4. The lead's children: api works, ui waits for it.
+    await page.goto(`/tickets/${ids.lead}?tab=timeline`);
+    const children = page.getByRole("list", { name: "Child tickets" }).getByRole("listitem");
+    await expect(children).toHaveText([/Add the API.*Working/, /Add the settings page.*after api/], { timeout: 20_000 });
+    ids.api = (await children.nth(0).getByRole("link").textContent()) ?? "";
+    ids.ui = (await children.nth(1).getByRole("link").textContent()) ?? "";
+
+    // 5. api is ready: ui starts.
+    await session.report(ids.api, "ready", "The settings endpoint is in.");
+    await expect(children.nth(1)).not.toContainText("after api", { timeout: 20_000 });
+    await expect.poll(() => sessionAssignment(ids.ui), { message: `the session of ${ids.ui}`, timeout: 20_000 }).not.toBe("");
+
+    // 6. ui fails: the lead asks, in one card; the child has none of its own. Go on without it.
+    await session.report(ids.ui, "failed", "The page tests fail.");
+    await page.goto("/");
+    const lead = page.getByRole("group", { name: "Add a settings screen" });
+    await expect(lead.getByRole("button", { name: "Continue without it" })).toBeVisible({ timeout: 20_000 });
+    await expect(page.getByRole("group", { name: "Add the settings page" })).toHaveCount(0);
+    await lead.getByRole("button", { name: "Continue without it" }).click();
+    await expect(lead).toHaveCount(0);
+
+    // 7. The lead starts, and its timeline tells the split's story.
+    await expect.poll(() => sessionAssignment(ids.lead), { message: `the session of ${ids.lead}`, timeout: 20_000 }).not.toBe("");
+    await page.goto(`/tickets/${ids.lead}?tab=timeline`);
+    const rows = page.getByTestId("timeline-row");
+    await expect(rows.filter({ hasText: `Child ${ids.api} is ready` })).toHaveCount(1);
+    await expect(rows.filter({ hasText: `Child ${ids.ui} was left out` })).toHaveCount(1);
+    await expectAccessible(page);
+  } finally {
+    await stopAll(ids.ui, ids.api, ids.lead);
+    rmSync(dir, { recursive: true, force: true });
   }
 });

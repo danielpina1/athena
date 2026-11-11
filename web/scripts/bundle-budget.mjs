@@ -42,6 +42,7 @@ const sentinels = [
   "athena-lazy-chunk:diff-view",
   "athena-lazy-chunk:doc-viewer",
   "athena-lazy-chunk:nodes-view",
+  "athena-lazy-chunk:breakdown-editor",
 ];
 for (const key of seen) {
   const code = readFileSync(join(dist, manifest[key].file), "utf8");
