@@ -43,3 +43,43 @@ Plan 7 was agents and splitting work (`docs/superpowers/plans/2026-11-11-athena-
 - A refused auto-approve leaves no note on the timeline.
 - Parallel plans share the planner's settings and transcript files.
 - The fork's first-message path and the GitHub base path have no end-to-end test. The two-machine path is the owner's smoke test.
+
+## Rulings made during the build
+
+Each line: what was decided, why, and what it costs if wrong. F1-F22 answer the pre-flight scan and are also written into the plan text.
+
+- Ruling F1: T7 adds the nodelink Args types and engineProxy methods for its new EngineCallbacks; T9 adds the fleet answers, scoping and Protocol 2 — keeps make check green per task — cost if wrong: T7 is a bit larger.
+- Ruling F2: T9 updates TestHelloChecked for Protocol 2 and drops the duplicate TestProtocolMismatchRefused — reuse the existing test — cost: none.
+- Ruling F3: sub-task keys must contain a letter; auto-numbered keys are "s1","s2"…; an all-digit key is refused — keys never parse as Ticket ids — cost: an owner-typed "1" is refused with a sentence.
+- Ruling F4: agent message ids are "m-<hex>" — WaitFor can tell a message from a Ticket — cost: none.
+- Ruling F5: the lead-state check lives in each entry point (hand_off: lead working; ApproveBreakdown: lead planning with a draft), not in the shared spawn — cost: none.
+- Ruling F6: the drop cascade stops only sibling children that never started and depend on the dropped child; a plan-first lead never cascades — it removes the dropped child from its Deps and starts when the rest have ended — keeps R8 — cost: none.
+- Ruling F7: folder children pin to the lead's folder node (lead.Execution.Node, or the node of its Directory placement), not to a latest Assignment — R2 holds for plan-first leads — cost: none.
+- Ruling F8: hops and the rate limit both count only messages inside MessageWindow — a stale chain cannot block a Ticket forever — cost: a slow ping-pong over >10 min is not caught by hops (rate limit still is).
+- Ruling F9: a child's reply is allowed when it answers an agent message (reply{message_id}, trigger_id then optional); reply to a Channel stays refused — R3 amended — cost: none.
+- Ruling F10: a refusal that raises an Attention commits (fn returns nil) and the command then returns the refusal error — matches Engine.run's rollback-on-error — cost: none.
+- Ruling F11: Fleet.Deliver/Start to a Ticket with branches to ship goes through a per-Ticket serialized ship-then-forward path (implementer's design, per-Ticket mutex or queue) — cost: delivery to that Ticket waits up to shipWait.
+- Ruling F12: the Engine records events: T3 child/spawned, child/ended; T5 split/drafted, split/approved, split/rejected, split/failed, split/one (R18); T10 tests them in the timeline — cost: a few more event kinds.
+- Ruling F13: a child persists its sub-task key (Ticket.SplitKey) and the view sends it; Relatives and e2e show keys mapped from dep Ticket ids — cost: one column.
+- Ruling F14: new timeline copy goes where timeline copy lives today and counts inside the 2.5 KB initial-route allowance; the Global Constraint text is corrected — cost: tighter budget.
+- Ruling F15: BreakdownView carries max_children — cost: none.
+- Ruling F16: ChildSpec and SubTaskView get an optional model hint; §6.4's hand_off "target" is expressed as the optional runtime/node/model hints (new ruling R24) — cost: none.
+- Ruling F17: new ruling R25 — a spawn over the WIP brake is refused to the worker with a sentence (it may try again), not recorded as a wip_brake Decision, because a child is not a router candidate; noted as a deviation from §18.1 — cost: the worker, not the router, retries.
+- Ruling F18: planner.Config gets Binary, wired from the server's --claude path; all tests run fakeclaude — cost: none.
+- Ruling F19: planner Claude config gets StateDir; LLM.Model is dropped (Claude.Model is the one) — cost: none.
+- Ruling F20: T5's test filter covers every T5 test name — cost: none.
+- Ruling F21: the cap sentence is built in the Engine wrapper that knows the lead id; a planner reply with 0 or 1 sub-tasks runs as one Ticket (R18), not a failed plan — cost: none.
+- Ruling F22: PlanCard's "Review split" action moves to T13 with the editor; T12 renders the card without it — cost: none.
+- Task 4: Ruling: accept "there is no ticket <id>; agents() lists the live ones." for a never-existing target — "has ended" would be false — cost: none
+- Task 5: Ruling: Approve's lead check is Plan.State == draft with a Breakdown (brief's "planning with a draft" read as the draft state) — the only workable reading — cost: none
+- Task 6: Ruling: planner runs in <StateDir>/planner (private empty dir); Request.Dir unused by llm — keeps the prompt cache stable and outside any repo — cost: planner can't read repo files (it has no tools anyway)
+- Task 8: Ruling: a child's end keeps its checkpoint ref (and branch); the lead's cleanup on the same node deletes them; on another node they stay (falls under the deferred "pruning a child's branch on its own node") — the mirror upload must never lose the child's final head — cost: a few stale refs per remote child until pruning lands
+- Task 9: Ruling: accept test substitutions (TestRemoteHandOffSpawns via engine proxy, TestForkSeedAcrossNodes via scratch repo) — node side covered by T8 TestForkSeedStartsAtBase; owner smoke test covers the real two-machine path — cost: one integration seam untested in Go
+- Task 9: Ruling: accept node package changes outside the file list (SeedForkLate, keepImport/applyImports) and the one-time "late" mirror wait per commit — needed by the no-clone ruling; a late commit is already announced to the child — cost: none
+- Task 11: Ruling: accept Options.Nodes = flt directly (fleet built before Engine) and ctx-cancel re-queue of the plan effect (effects runner keeps the row on shutdown) — cost: none
+- Final: Ruling (I2): a child blocked WITH a question shows its own question card in Needs you (the lead dedupe covers failed and question-less blocked only); answering the child clears the lead's child Attention for it — the owner answers the one who asked — cost: two cards in rare cases
+- Final: Ruling (I3): refuse ask_agent to a held Ticket that waits on the sender, with a sentence the model reads — cost: none
+- Final: Ruling: fix in the same wave — the must-fix minor (child failure must not replace the lead's own Attention), editor Save-then-Approve (setDraft(next)), Revision continues across Replan, planner JSON cannot set base (clear in PlanDrafted), agents.md wait_for wording — all cheap — cost: none
+- Final: parked — Replan from a pre-fix stored draft restarts at revision 1 — Ruling: no plan-first draft exists in any deployed build, so no stored draft predates the fix — cost: none
+- Final: parked — held-target refusal checks direct deps only (transitive A→C→B→A accepted) — Ruling: real, deferred; wait_for is bounded at 20 s so nothing hangs — cost: a wasted ask in a 3-deep chain
+- Final: parked — a failed child kept beside the lead's own question has no "Continue without it" on its own card; other child card kinds show beside the lead — Ruling: real, deferred; the lead's card returns once its own question is answered — cost: one extra click
