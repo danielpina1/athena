@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/danielpina1/athena/internal/core"
 )
@@ -24,9 +25,35 @@ import (
 // its branch and checkpoint ref kept (the server's mirror takes the checkpoint later, for R7); the lead's cleanup
 // deletes its children's branches and checkpoint refs in that repository.
 
+// baseMissing is the launch's error for a child whose Base this node does not have.
+type baseMissing struct{ base string }
+
+func (e *baseMissing) Error() string {
+	return "the lead's commit " + short7(e.base) + " is not on this node"
+}
+
 // errBaseMissing is the launch's error for a child whose Base this node does not have.
-func errBaseMissing(base string) error {
-	return fmt.Errorf("the lead's commit %s is not on this node", short7(base))
+func errBaseMissing(base string) error { return &baseMissing{base: base} }
+
+// startLate makes a child's new worktree at the default branch def when its Base is not in this clone and no seed
+// brings it (its fork seed was lost, or a later Assignment of it moved here): the first message says why, as a fork
+// line (SeedForkLate). Under the clone's lock.
+func (n *Node) startLate(s *session, clone, def string, env []string) error {
+	if err := ensureWorktree(clone, s.place.workDir, branchName(s.t), def, env); err != nil {
+		return err
+	}
+	rec := seedRecord{TicketID: s.t.ID, AssignmentID: s.a.ID, From: "another node", Unsent: SeedForkLate,
+		Created: time.Now(), Note: forkLateLine(s.t.Lead)}
+	err := os.MkdirAll(filepath.Join(n.cfg.StateDir, "seeds"), 0o700)
+	if err == nil {
+		err = n.writeSeed(s.t.ID, rec)
+	}
+	if err != nil {
+		s.log.Warn("keep the fork line", "error", err)
+	}
+	s.log.Warn("the lead's commit is not on this node; the child starts from the default branch", "lead", s.t.Lead,
+		"commit", s.t.Execution.Base)
+	return nil
 }
 
 func short7(sha string) string {

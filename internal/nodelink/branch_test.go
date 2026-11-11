@@ -86,8 +86,20 @@ func TestBranchChunksThenImport(t *testing.T) {
 	tgt.mu.Lock()
 	sd := tgt.seeds[len(tgt.seeds)-1]
 	tgt.mu.Unlock()
-	if sd.Bundle != "" || !sd.Fork || sd.Base != base {
-		t.Fatalf("seed = %+v, want no bundle (a branch transfer), and the fork and its base", sd)
+	if sd.Bundle != "" || sd.Fork || sd.Base != "" || sd.Unsent != node.SeedForkLate {
+		t.Fatalf("seed = %+v, want a fork whose bundle is not there (a branch transfer) downgraded to %q", sd, node.SeedForkLate)
+	}
+	// A fork seed with its bundle whole keeps Fork and Base.
+	fs.blob(t, &athenav1.BlobChunk{TransferId: "s2", Kind: "seed", TicketId: "T-0002", Data: []byte("seed"), Last: true})
+	eventually(t, "the chunks sent", func() bool { return fs.sess.Queued(athenav1.Channel_BLOB) == 0 })
+	fs.call(t, 204, ServeSeed, ArgsSeed{TicketID: "T-0002", AssignmentID: "A-2", Transfer: "s2", SHA: sha, From: "studio",
+		Fork: true, Base: base})
+	eventually(t, "the seed answered", func() bool { return fs.result(204) != nil })
+	tgt.mu.Lock()
+	sd = tgt.seeds[len(tgt.seeds)-1]
+	tgt.mu.Unlock()
+	if !sd.Fork || sd.Base != base || sd.Unsent != "" {
+		t.Fatalf("seed = %+v, want the fork and its base", sd)
 	}
 	eventually(t, "no temp files left", func() bool {
 		entries, _ := os.ReadDir(c.tmpDir)

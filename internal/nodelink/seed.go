@@ -114,12 +114,19 @@ func (c *Client) seed(cn *conn, t target, a ArgsSeed) error {
 		switch {
 		case errors.Is(err, errNotWhole):
 			c.log.Warn("the seed's bundle did not arrive whole; seeding without it", "ticket", a.TicketID)
+			if sd.Fork {
+				// A fork is nothing without the lead's checkpoint: the child starts from the default branch, told why.
+				sd.Fork, sd.Base, sd.SHA, sd.Unsent = false, "", "", node.SeedForkLate
+			}
 		case err != nil:
 			return errors.New("the seed's bundle is another ticket's")
 		default:
 			path = p
 			sd.Bundle = path
 		}
+	}
+	if sd.Fork && path == "" {
+		sd.Fork, sd.Base, sd.SHA, sd.Unsent = false, "", "", node.SeedForkLate
 	}
 	err := t.Seed(sd)
 	if path != "" {

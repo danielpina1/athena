@@ -375,3 +375,40 @@ func TestImportBranchBeforeClone(t *testing.T) {
 	// Taken once: nothing left to apply.
 	n.applyImports("T-1", seedGit(context.Background(), clone, cloneGitEnv(clone, "o/r")))
 }
+
+// TestChildBaseMissingStartsFromDefault: a child whose lead's commit is not on this node and that no seed brings (a
+// later Assignment of it, or a fork seed that was lost) starts from the default branch instead of failing its launch,
+// and its first message says why.
+func TestChildBaseMissingStartsFromDefault(t *testing.T) {
+	_, work := fakeGitHub(t, "o/r")
+	n := testNode(t)
+	trunk := git(t, work, "rev-parse", "HEAD")
+	child := core.Ticket{ID: "T-2", Lead: "T-1", Repo: "o/r", Execution: &core.Execution{Base: strings.Repeat("e", 40)},
+		Assignments: []core.Assignment{{ID: "a1", State: core.AssignmentEnded}, {ID: "a2"}}}
+	a := child.Assignments[1]
+	clone := CloneDir(n.cfg.StateDir, "o/r")
+	p := placement{workDir: filepath.Join(n.cfg.WorkRoot, "t-2"), repo: clone, github: "o/r", common: filepath.Join(clone, ".git")}
+	s := n.newSession(child, a, p)
+	if err := n.prepareGitHub(s); err != nil {
+		t.Fatalf("prepareGitHub = %v, want the default branch", err)
+	}
+	if got := git(t, p.workDir, "rev-parse", "HEAD"); got != trunk {
+		t.Fatalf("child HEAD = %s, want the default branch's %s", got, trunk)
+	}
+	if got := git(t, p.workDir, "rev-parse", "--abbrev-ref", "HEAD"); got != "athena/t-2" {
+		t.Fatalf("child branch = %s", got)
+	}
+	note, fork := n.takeMovedNote(s)
+	if want := "T-1's commit did not reach the server in time; you start from the default branch."; note != want || !fork {
+		t.Fatalf("note = %q (fork %v), want %q", note, fork, want)
+	}
+
+	// A Ticket that is not a child keeps the error for a Base it lacks.
+	plain := core.Ticket{ID: "T-3", Repo: "o/r", Execution: &core.Execution{Base: strings.Repeat("e", 40)},
+		Assignments: []core.Assignment{{ID: "b1"}}}
+	p3 := placement{workDir: filepath.Join(n.cfg.WorkRoot, "t-3"), repo: clone, github: "o/r", common: filepath.Join(clone, ".git")}
+	if err := n.prepareGitHub(n.newSession(plain, plain.Assignments[0], p3)); err == nil ||
+		!strings.Contains(err.Error(), "is not on this node") {
+		t.Fatalf("a plain Ticket's missing base = %v", err)
+	}
+}

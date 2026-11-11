@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -464,6 +465,10 @@ func (n *Node) prepareGitHub(s *session) error {
 		return n.seedWorktree(s, clone, defaultBranch, base, env, rec)
 	}
 	if baseErr != nil {
+		var missing *baseMissing
+		if s.t.Lead != "" && errors.As(baseErr, &missing) {
+			return n.startLate(s, clone, base, env)
+		}
 		return baseErr
 	}
 	return ensureWorktree(clone, p.workDir, branchName(s.t), childBase, env)
