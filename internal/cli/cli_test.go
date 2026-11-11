@@ -506,3 +506,35 @@ func TestTaskUsageNamesReview(t *testing.T) {
 		t.Fatalf("task usage: exit %d, %q", code, errOut)
 	}
 }
+
+// `athena task --plan-first` holds the task for a planner's split and says where to review it; it needs a repository or
+// a git folder.
+func TestTaskPlanFirstFlag(t *testing.T) {
+	t.Setenv("ATHENA_FAKE_PLANNER_FIXTURE", "/nonexistent/athena-test-planner.jsonl")
+	dir := startServer(t)
+	ctx := context.Background()
+	repo := t.TempDir()
+	for _, args := range [][]string{
+		{"init", "-q", "-b", "main"},
+		{"-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "init"},
+	} {
+		if out, err := exec.Command("git", append([]string{"-C", repo}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	code, out, errOut := athena(ctx, "task", "--plan-first", "Split me", "--dir", repo, "--state-dir", dir)
+	if code != 0 {
+		t.Fatalf("task --plan-first: exit %d, stderr %q", code, errOut)
+	}
+	id, rest, ok := strings.Cut(strings.TrimSpace(out), ":")
+	if !ok || rest != " planning a split; review it in the dashboard" || !strings.HasPrefix(id, "T-") {
+		t.Fatalf("task --plan-first printed %q", out)
+	}
+	if d := detail(t, dir, id); !strings.HasSuffix(d.Stage, "/plan") && d.Stage != "working/planning" {
+		t.Fatalf("stage = %q, want planning or its plan", d.Stage)
+	}
+	code, _, errOut = athena(ctx, "task", "--plan-first", "No repo", "--state-dir", dir)
+	if code != 1 || !strings.Contains(errOut, "Splitting needs a git repository") {
+		t.Fatalf("task --plan-first without a place: exit %d, stderr %q", code, errOut)
+	}
+}

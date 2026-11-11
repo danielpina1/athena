@@ -28,6 +28,7 @@ import (
 	"github.com/danielpina1/athena/internal/node"
 	"github.com/danielpina1/athena/internal/outbox"
 	"github.com/danielpina1/athena/internal/pause"
+	"github.com/danielpina1/athena/internal/planner"
 	"github.com/danielpina1/athena/internal/policy"
 	"github.com/danielpina1/athena/internal/router"
 	"github.com/danielpina1/athena/internal/sources"
@@ -229,6 +230,11 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	} else {
 		logger.Info("codex is disabled (runtimes.codex.enabled is false)")
 	}
+	plan, err := planner.New(plannerConfig(fileCfg.Planner, ncfg.ClaudeBinary, stateDir))
+	if err != nil {
+		return fmt.Errorf("server: planner.strategy of %s: %w", ConfigFile, err)
+	}
+	logger.Info("planner", "strategy", plan.Name(), "model", fileCfg.Planner.Model)
 	if ncfg.Chooser == nil {
 		ncfg.Chooser = fileCfg.Runtimes.chooser()
 	}
@@ -302,7 +308,8 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	}
 	flt.SetPaused(killSwitch.Paused())
 	eng := core.NewEngineWith(st.Repos(), flt, core.Options{Now: time.Now, Emit: emit, Policy: pc.policy, Scope: sourceReg,
-		Wake: fx.Wake, Relays: routerOn, DefaultRuntime: fileCfg.Runtimes.Default, Pairing: pc.pairing})
+		Wake: fx.Wake, Relays: routerOn, DefaultRuntime: fileCfg.Runtimes.Default, Pairing: pc.pairing,
+		Split: pc.splitLimits, Nodes: flt})
 	eng.SetMetrics(reg)
 	n.SetEngine(eng)
 	flt.SetEngine(eng)
@@ -328,6 +335,10 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	// An applied push or pull request runs on the node, once: a failure settles it failed, never retried.
 	fx.Handle(core.EffectApplyProposal, applyProposals(st, eng, flt, killSwitch.Paused, logger.With("component", "proposals")),
 		effects.Options{Concurrency: 1})
+	// A plan-first task's split is drafted on this server by one planner turn, with no tools; a failure waits for the
+	// owner (R17).
+	fx.Handle(core.EffectPlan, planHandler(eng, plan, killSwitch.Paused, fleetPlanFacts(flt), pc.splitLimits,
+		logger.With("component", "planner")), effects.Options{Concurrency: 1})
 	var host *router.Host
 	if routerOn {
 		host = router.New(router.Config{Bin: ncfg.AthenaBin, StateDir: stateDir, Model: fileCfg.Router.Model,
@@ -355,7 +366,7 @@ func Run(ctx context.Context, cfg Config) (err error) {
 		if !s.Paused {
 			// Held effects were put off by their delay; run them now, not when the delay ends.
 			if _, err := st.ReleaseEffects(st.Now(), core.EffectReply, core.EffectAssessment, core.EffectRelay,
-				core.EffectApplyProposal); err != nil {
+				core.EffectApplyProposal, core.EffectPlan); err != nil {
 				logger.Error("resume: release held effects", "error", err)
 			}
 		}
