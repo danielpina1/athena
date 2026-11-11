@@ -67,6 +67,23 @@ func (f *placeFacts) lookup(dir string) placeFact {
 	return guessPlace(dir)
 }
 
+// check returns dir's facts for a caller that may touch the filesystem (a command, off the hub's loop): what the last
+// pass found, or else a probe of the folder now. A folder not known yet is also left to a pass, which records it and
+// tells the dashboards when it differs from their guess. Without a placeFacts it probes the folder.
+func (f *placeFacts) check(dir string) placeFact {
+	if f == nil {
+		return probePlace(dir)
+	}
+	f.mu.Lock()
+	fact, ok := f.known[dir]
+	f.mu.Unlock()
+	if ok {
+		return fact
+	}
+	f.lookup(dir) // marks it asked and wakes a pass
+	return f.probe(dir)
+}
+
 // refresh probes the folders read and not known yet, or, when periodic, every folder read since the last periodic
 // pass. It returns the folders whose fact differs from what lookup returned for them before, sorted.
 func (f *placeFacts) refresh(periodic bool) []string {

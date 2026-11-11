@@ -659,14 +659,9 @@ func (d *Dispatcher) submit(text, dir, model, repo, runtime, pairing, requestID,
 // msgSplitNeedsGit refuses a plan-first task in a folder that is not a git repository (Ruling R2).
 const msgSplitNeedsGit = "Splitting needs a git repository: each child works on its own branch."
 
-// gitFolder reports whether dir is a git repository, as the facts pass found it; without the facts (no dashboard), it
-// looks at the folder itself.
-func (d *Dispatcher) gitFolder(dir string) bool {
-	if d.facts == nil {
-		return probePlace(dir).git
-	}
-	return d.facts.lookup(dir).git
-}
+// gitFolder reports whether dir is a git repository: as the facts pass found it, or, for a folder it has not probed
+// yet (or with no facts, the dashboard off), as the folder itself says now.
+func (d *Dispatcher) gitFolder(dir string) bool { return d.facts.check(dir).git }
 
 // childSpecs are the sub-tasks of a dashboard's edited draft.
 func childSpecs(tasks []*athenav1.SubTaskView) []core.ChildSpec {

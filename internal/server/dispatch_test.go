@@ -954,6 +954,14 @@ func TestDispatchPlanFirstAndApprove(t *testing.T) {
 	if tk, _, _ := eng.Ticket(id); tk.Plan == nil || tk.Plan.State != core.PlanPlanning || len(tk.Assignments) != 0 {
 		t.Fatalf("plan-first ticket = %+v", tk)
 	}
+	// A git repository the facts pass has not probed yet is looked at now, not taken for a plain folder.
+	fresh := t.TempDir()
+	if err := os.Mkdir(filepath.Join(fresh, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if res := do(d, "p1b", &athenav1.SubmitTask{Text: "Split me fresh", Dir: fresh, PlanFirst: true}); !res.GetOk() {
+		t.Fatalf("plan first in an unprobed git folder = %v", res)
+	}
 	if err := eng.PlanDrafted(id, core.Breakdown{Tasks: twoSubTasks()}); err != nil {
 		t.Fatal(err)
 	}
@@ -1053,4 +1061,57 @@ func TestDispatchContinueWithout(t *testing.T) {
 	if res.GetOk() || res.GetCode() != web.CodeInvalid || !strings.Contains(res.GetMessage(), "not a child ticket") {
 		t.Fatalf("continue without a lead = %v", res)
 	}
+}
+
+// An agent message reaches the open detail of the Ticket that sent it as well as the one it went to: the sender's
+// asked entry is pushed live, and so is the answerer's answered entry.
+func TestAgentMessagePushedToSenderDetail(t *testing.T) {
+	d, eng, gitDir := splitDispatcher(t)
+	lead, err := eng.SubmitOwnerTask("Lead", core.TaskOptions{Dir: gitDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids, err := eng.SpawnChildren(lead.ID, []core.ChildSpec{{Key: "api", Title: "API", Instructions: "Build the API"},
+		{Key: "ui", Title: "UI", Instructions: "Build the UI"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := hub.New(newHubSource(d), discardLogger())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	h.Start(ctx)
+	d.st.OnCommit(h.OnCommit)
+	defer d.st.OnCommit(nil)
+	sub, _ := h.Subscribe(0, h.Epoch())
+	defer sub.Close()
+	sub.Watch(ids[0])
+	sub.Watch(ids[1])
+	// waitEntry waits for a detail delta of ticketID whose timeline has kind/subkind.
+	waitEntry := func(ticketID, kind, subkind string) {
+		t.Helper()
+		deadline := time.After(waitTimeout)
+		for {
+			select {
+			case dl := <-sub.C():
+				if td := dl.GetTicketDetail(); td != nil && td.GetSummary().GetId() == ticketID {
+					for _, e := range td.GetTimeline() {
+						if e.GetKind() == kind && e.GetSubkind() == subkind {
+							return
+						}
+					}
+				}
+			case <-deadline:
+				t.Fatalf("no %s/%s entry pushed in %s's detail", kind, subkind, ticketID)
+			}
+		}
+	}
+	m, err := eng.AskAgent(ids[0], ids[1], "Which port?")
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitEntry(ids[0], "agent", "asked")
+	if _, err := eng.AnswerAgent(ids[1], m.ID, "8080"); err != nil {
+		t.Fatal(err)
+	}
+	waitEntry(ids[1], "agent", "answered")
 }

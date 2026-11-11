@@ -12,7 +12,7 @@ import (
 
 // Agent messages: one agent's Ticket writes to another's (plan 7).
 
-// PutAgentMessage inserts or replaces an agent message.
+// PutAgentMessage inserts or replaces an agent message. Both its Tickets change: each one's timeline shows it.
 func (tx *Tx) PutAgentMessage(m *core.AgentMessage) error {
 	doc, err := json.Marshal(m)
 	if err != nil {
@@ -25,6 +25,7 @@ func (tx *Tx) PutAgentMessage(m *core.AgentMessage) error {
 	if err != nil {
 		return fmt.Errorf("store: put agent message %q: %w", m.ID, err)
 	}
+	tx.changes.Tickets = addID(addID(tx.changes.Tickets, m.From), m.To)
 	return nil
 }
 

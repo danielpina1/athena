@@ -261,7 +261,6 @@ func (s hubSource) Placement(t *core.Ticket) (string, string, string) {
 	return id, s.d.nodeName(id), waiting
 }
 
-// GitFolder reports whether dir has a .git entry, as the placeFacts pass last found it (see Repos).
 // AgentMessages returns the agent messages sent from or to a Ticket, oldest first.
 func (s hubSource) AgentMessages(ticketID string) ([]core.AgentMessage, error) {
 	var out []core.AgentMessage
@@ -288,6 +287,7 @@ func (s hubSource) SplitLimits() core.SplitLimits {
 	return cur.SplitLimits()
 }
 
+// GitFolder reports whether dir has a .git entry, as the placeFacts pass last found it (see Repos).
 func (s hubSource) GitFolder(dir string) bool { return s.d.facts.lookup(dir).git }
 
 // Trust classifies a Trigger's sender under the current Policy; there is none until settings are saved or checked.

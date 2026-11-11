@@ -129,3 +129,14 @@ func TestMigration14OnExistingDB(t *testing.T) {
 	}
 	inTx(t, s, func(tx core.Tx) error { return tx.PutAgentMessage(agentMsg("m", "t1", "t2", "", t0)) })
 }
+
+// A message changes what both its Tickets' timelines show: the commit names the sender and the receiver.
+func TestAgentMessageReportsBothTickets(t *testing.T) {
+	s, _ := openTemp(t)
+	var got Changes
+	s.OnCommit(func(c Changes) { got = c })
+	inTx(t, s, func(tx core.Tx) error { return tx.PutAgentMessage(agentMsg("m1", "T-1", "T-2", "", t0)) })
+	if len(got.Tickets) != 2 || got.Tickets[0] != "T-1" || got.Tickets[1] != "T-2" {
+		t.Fatalf("changed tickets = %v, want T-1 and T-2", got.Tickets)
+	}
+}
