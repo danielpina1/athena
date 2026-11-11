@@ -89,6 +89,8 @@ type ReportInput struct {
 	Summary      string
 	Question     string
 	Pull         int
+	// Head is the child's branch head, read by the node at a ready report.
+	Head string
 }
 
 // Engine is the domain's single entry point. Each command runs in one transaction; the Executor calls and Events it
@@ -1162,7 +1164,7 @@ func (o *op) endAt(t *Ticket, by TicketEndBy, outcome TicketOutcome, reason stri
 
 // automatic reports whether an Input is a message no person wrote, such as a bot's or a note.
 func automatic(in *Input) bool {
-	return in != nil && (in.Kind == InputNote || (in.Kind == InputTrigger && !in.Human))
+	return in != nil && (in.Kind == InputNote || in.Kind == InputAgent || in.Kind == InputChild || in.Kind == InputTask || (in.Kind == InputTrigger && !in.Human))
 }
 
 // settleAttention adds the time the Ticket waited for a person's answer so far to its stats; the caller clears or

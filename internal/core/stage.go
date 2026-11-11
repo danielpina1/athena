@@ -16,6 +16,20 @@ func TicketStage(t *Ticket) Stage {
 	if a := t.LatestAssignment(); a != nil && a.NodeOffline != nil && a.State != AssignmentEnded {
 		return Stage{"person", "offline"}
 	}
+	if t.Plan != nil {
+		switch t.Plan.State {
+		case PlanPlanning:
+			return Stage{"working", "planning"}
+		case PlanDraft, PlanFailed:
+			return Stage{"person", "plan"}
+		}
+	}
+	if t.Attention != nil && t.Attention.Child != "" {
+		return Stage{"person", "child"}
+	}
+	if len(t.Assignments) == 0 && len(t.Waiting) > 0 {
+		return Stage{"working", "waiting"}
+	}
 	if t.Delivery != nil {
 		return Stage{"person", "delivery"}
 	}
