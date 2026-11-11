@@ -165,8 +165,9 @@ export default function BreakdownEditor({ ticketId, onClose }: { ticketId: strin
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const hint = useId();
-  // The store's draft, until the owner edits it: a newer revision replaces an untouched one.
-  if (view && (!draft || (!draft.dirty && draft.revision !== view.revision))) setDraft(fromView(view));
+  // The store's draft, until the owner edits it: a newer revision replaces an untouched one. Revisions only grow, also
+  // across Replan, so a draft just saved here (the next revision) waits for its Delta rather than reverting to the old.
+  if (view && (!draft || (!draft.dirty && draft.revision < view.revision))) setDraft(fromView(view));
 
   const rows = draft?.rows ?? [];
   const max = view?.maxChildren || MAX_CHILDREN;
@@ -195,9 +196,9 @@ export default function BreakdownEditor({ ticketId, onClose }: { ticketId: strin
   };
   const save = async (d: Draft) => {
     if (!(await send(() => updateBreakdown(ticketId, d.revision, tasksOf(d.rows))))) return undefined;
-    // The saved draft is the next revision; its Delta replaces this one.
+    // The saved draft is the next revision, so an Approve before its Delta approves it; a newer Delta replaces it.
     const next = { ...d, revision: d.revision + 1, dirty: false };
-    setDraft({ ...d, dirty: false });
+    setDraft(next);
     return next;
   };
   const approve = async () => {

@@ -46,11 +46,14 @@ const NOTHING_ANSWERED: Answering = new Map();
  * The Needs you kind of a Ticket waiting on the owner, or undefined. A Ticket whose approval the owner answered here
  * waits on no one while the answer is in flight (ruling R30): its approval was cleared from it optimistically, or the
  * answering map still holds it (a Ticket Delta that came meanwhile names it again). A child whose lead waits on the
- * owner for it (the lead's attentionChild) is the lead's card, not one of its own (R8).
+ * owner for it (the lead's attentionChild) is the lead's card, not one of its own (R8), when it failed or is blocked
+ * without a question; one blocked with a question of its own keeps its answer card, which alone can answer it.
  */
 function needsYouKind(t: TicketSummary, answering: Answering, tickets?: Tickets): NeedsYouKind | undefined {
   if (t.stage !== "person" || !KINDS.has(t.action)) return undefined;
-  if (t.lead && tickets?.get(t.lead)?.attentionChild === t.id) return undefined;
+  if (t.lead && (t.action === "failed" || t.action === "blocked") && tickets?.get(t.lead)?.attentionChild === t.id) {
+    return undefined;
+  }
   if (t.action === "approval" && (t.pendingApprovalId === "" || answering.has(t.pendingApprovalId))) return undefined;
   return t.action as NeedsYouKind;
 }

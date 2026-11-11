@@ -136,6 +136,19 @@ test("Approve on a dirty draft saves first, then approves the saved revision", a
   expect(onClose).toHaveBeenCalled();
 });
 
+test("Approve right after Save, before the saved draft's Delta arrives, approves the saved revision", async () => {
+  const { user } = setup();
+  await user.type(within(row("api")).getByRole("textbox", { name: "Title" }), " endpoint");
+  await user.click(screen.getByRole("button", { name: "Save" }));
+  expect(actions.updateBreakdown).toHaveBeenCalledWith("T-1", 3, expect.any(Array));
+  // The store still holds revision 3: the Delta for revision 4 has not come yet.
+  await user.click(screen.getByRole("button", { name: "Approve and start" }));
+  expect(actions.updateBreakdown).toHaveBeenCalledTimes(1);
+  expect(actions.approveBreakdown).toHaveBeenCalledWith("T-1", 4);
+  // The edit stays on screen until the Delta replaces it.
+  expect((within(row("api")).getByRole("textbox", { name: "Title" }) as HTMLInputElement).value).toBe("Add the API endpoint");
+});
+
 test("Approve on a clean draft approves at once", async () => {
   const { user } = setup();
   await user.click(screen.getByRole("button", { name: "Approve and start" }));
