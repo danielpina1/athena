@@ -87,6 +87,32 @@ func shadowPushRule(ctx RuleContext, command string) (Decision, bool) {
 	return Decision{}, false
 }
 
+// ruleChild is the rule of a child Ticket's denied push.
+const ruleChild = "child"
+
+// childDelivers is why a child Ticket of lead may not push or open a pull request (R6).
+func childDelivers(lead string) string {
+	return "A child ticket delivers through its lead: commit on your branch and report ready; " + lead + " merges it."
+}
+
+// childPushRule denies a `git push` (also inside `sh -c`) of a child Ticket's session (ctx.Child, its lead): the lead
+// merges the child's branch.
+func childPushRule(ctx RuleContext, command string) (Decision, bool) {
+	if ctx.Child == "" || !strings.Contains(command, "push") {
+		return Decision{}, false
+	}
+	match := func(words []string) (string, string) {
+		if words[0] == "git" && gitSubcommand(words[1:]) == "push" {
+			return "git push", childDelivers(ctx.Child)
+		}
+		return "", ""
+	}
+	if hit, reason := findBlocked(command, match, 0); hit != "" {
+		return deny(ruleChild, reason), true
+	}
+	return Decision{}, false
+}
+
 // pushPayload is the payload of a push Proposal; a pull_request Proposal's is a HeldPull.
 type pushPayload struct {
 	Branch string `json:"branch"`
@@ -230,6 +256,9 @@ func (n *Node) handlePropose(req ProposeRequest) ProposeResponse {
 	}
 	if s.reviewing() {
 		return ProposeResponse{Error: "a review session opens no pull request: review the local branch"}
+	}
+	if s.t.Lead != "" {
+		return ProposeResponse{Error: childDelivers(s.t.Lead)}
 	}
 	if !n.heldForOwner(s) {
 		return ProposeResponse{OK: true}

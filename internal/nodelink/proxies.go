@@ -48,6 +48,12 @@ const (
 	MethodPropose          = "propose"
 	MethodPendingProposals = "pendingProposals"
 	MethodStartProposal    = "startProposal"
+	// The agent tools' requests. Until the fleet answers them (plan 7 Task 9), a server refuses them as unknown.
+	MethodSpawnChildren = "spawnChildren"
+	MethodAskAgent      = "askAgent"
+	MethodAnswerAgent   = "answerAgent"
+	MethodWaitFor       = "waitFor"
+	MethodAgents        = "agents"
 	// Requests of Credentials (and TokenRevoker).
 	MethodToken    = "token"
 	MethodRevoke   = "revoke"
@@ -97,6 +103,11 @@ var methods = map[string]struct {
 	MethodPropose:               {false, func() any { return new(ArgsPropose) }},
 	MethodPendingProposals:      {false, func() any { return new(ArgsPendingProposals) }},
 	MethodStartProposal:         {false, func() any { return new(ArgsStartProposal) }},
+	MethodSpawnChildren:         {false, func() any { return new(ArgsSpawnChildren) }},
+	MethodAskAgent:              {false, func() any { return new(ArgsAskAgent) }},
+	MethodAnswerAgent:           {false, func() any { return new(ArgsAnswerAgent) }},
+	MethodWaitFor:               {false, func() any { return new(ArgsWaitFor) }},
+	MethodAgents:                {false, func() any { return new(ArgsAgents) }},
 	MethodToken:                 {false, func() any { return new(ArgsToken) }},
 	MethodRevoke:                {false, func() any { return new(ArgsRevoke) }},
 	MethodIdentity:              {false, func() any { return new(ArgsIdentity) }},
@@ -203,6 +214,18 @@ type (
 	ArgsPendingProposals struct{}
 	// ArgsStartProposal answers with a JSON bool (first).
 	ArgsStartProposal struct{ ID string }
+	// ArgsSpawnChildren answers with a JSON []string, the children's ids.
+	ArgsSpawnChildren struct {
+		LeadID string
+		Specs  []core.ChildSpec
+	}
+	// ArgsAskAgent and ArgsAnswerAgent answer with the stored core.AgentMessage.
+	ArgsAskAgent    struct{ FromID, Target, Text string }
+	ArgsAnswerAgent struct{ FromID, MessageID, Text string }
+	// ArgsWaitFor answers with the core.WaitResult; the server waits at most core.WaitForMax.
+	ArgsWaitFor struct{ TicketID, Target string }
+	// ArgsAgents answers with a JSON []core.AgentView.
+	ArgsAgents struct{ TicketID string }
 
 	// ArgsToken answers with ResultToken. A refusal the same request will not get past (github.ErrPermanent or ErrGone
 	// on the server) is answered with user_error set.
@@ -406,6 +429,37 @@ func (p engineProxy) PendingProposals() ([]core.Proposal, error) {
 func (p engineProxy) StartProposal(id string) (bool, error) {
 	var out bool
 	err := p.c.request(context.Background(), MethodStartProposal, ArgsStartProposal{id}, &out)
+	return out, err
+}
+
+func (p engineProxy) SpawnChildren(leadID string, specs []core.ChildSpec) ([]string, error) {
+	var out []string
+	err := p.c.request(context.Background(), MethodSpawnChildren, ArgsSpawnChildren{leadID, specs}, &out)
+	return out, err
+}
+
+func (p engineProxy) AskAgent(fromID, target, text string) (core.AgentMessage, error) {
+	var out core.AgentMessage
+	err := p.c.request(context.Background(), MethodAskAgent, ArgsAskAgent{fromID, target, text}, &out)
+	return out, err
+}
+
+func (p engineProxy) AnswerAgent(fromID, messageID, text string) (core.AgentMessage, error) {
+	var out core.AgentMessage
+	err := p.c.request(context.Background(), MethodAnswerAgent, ArgsAnswerAgent{fromID, messageID, text}, &out)
+	return out, err
+}
+
+// WaitFor waits on the server, which answers within core.WaitForMax, below the request timeout; ctx ends it early.
+func (p engineProxy) WaitFor(ctx context.Context, ticketID, target string) (core.WaitResult, error) {
+	var out core.WaitResult
+	err := p.c.request(ctx, MethodWaitFor, ArgsWaitFor{ticketID, target}, &out)
+	return out, err
+}
+
+func (p engineProxy) Agents(ticketID string) ([]core.AgentView, error) {
+	var out []core.AgentView
+	err := p.c.request(context.Background(), MethodAgents, ArgsAgents{ticketID}, &out)
 	return out, err
 }
 

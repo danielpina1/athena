@@ -173,6 +173,13 @@ type EngineCallbacks interface {
 	// RecordUsage adds what the node observed to the Ticket's stats. It takes the Engine's lock: never call it while
 	// holding a node lock that Start, Deliver or Stop also take.
 	RecordUsage(ticketID, assignmentID string, u core.UsageDelta) error
+	// The agent tools (agenttools.go): hand_off splits a child off, ask_agent and reply{message_id} message another
+	// agent's Ticket, wait_for waits for a Ticket or a message, and agents lists the Tickets a worker can reach.
+	SpawnChildren(leadID string, specs []core.ChildSpec) ([]string, error)
+	AskAgent(fromID, target, text string) (core.AgentMessage, error)
+	AnswerAgent(fromID, messageID, text string) (core.AgentMessage, error)
+	WaitFor(ctx context.Context, ticketID, target string) (core.WaitResult, error)
+	Agents(ticketID string) ([]core.AgentView, error)
 }
 
 var _ EngineCallbacks = (*core.Engine)(nil)
@@ -2178,6 +2185,8 @@ func renderInputs(t core.Ticket, ids []string, trigger func(id string) (core.Tri
 			fmt.Fprintf(&b, "[input %s: note]\nNote: %s\n\n", in.ID, quoteText(in.Text))
 		case core.InputReview:
 			fmt.Fprintf(&b, "[input %s: review]\n%s\n\nAddress the findings, then report ready again.\n\n", in.ID, quoteText(in.Text))
+		case core.InputAgent, core.InputChild, core.InputTask:
+			b.WriteString(agentCard(*in))
 		default:
 			var tr core.Trigger
 			found := false
