@@ -20,7 +20,8 @@ import (
 // the child's checkpoint fetched into refs/athena/<ticket>/import-<child>, then athena/<child> set to its head.
 //
 // A child's branch is what it delivers, so its clean worktree is removed even with commits no other branch has, and
-// its branch kept; the lead's cleanup deletes its children's branches in that repository.
+// its branch and checkpoint ref kept (the server's mirror takes the checkpoint later, for R7); the lead's cleanup
+// deletes its children's branches and checkpoint refs in that repository.
 
 // errBaseMissing is the launch's error for a child whose Base this node does not have.
 func errBaseMissing(base string) error {
@@ -194,16 +195,24 @@ func fetchBundle(git func(args ...string) (string, error), bundle, src, dst stri
 	return err
 }
 
-// deleteChildBranches deletes the branches of the lead t's children in the repository git runs in, once the lead's
-// worktree is gone. A branch a worktree still has checked out stays (git refuses it).
+// deleteChildBranches deletes the branches and checkpoint refs of the lead t's children in the repository git runs
+// in, once the lead's worktree is gone. A branch a worktree still has checked out stays (git refuses it), and so does
+// that child's checkpoint ref.
 func deleteChildBranches(git func(args ...string) (string, error), t core.Ticket, log *slog.Logger) {
 	for _, c := range t.Children {
 		branch := branchName(core.Ticket{ID: c})
-		if _, err := git("rev-parse", "--verify", "--quiet", "refs/heads/"+branch); err != nil {
+		if _, err := git("rev-parse", "--verify", "--quiet", "refs/heads/"+branch); err == nil {
+			if _, err := git("branch", "-D", branch); err != nil {
+				log.Warn("remove the child's branch", "ticket", t.ID, "branch", branch, "error", err)
+				continue
+			}
+		}
+		ref := checkpointRef(c)
+		if _, err := git("rev-parse", "--verify", "--quiet", ref); err != nil {
 			continue
 		}
-		if _, err := git("branch", "-D", branch); err != nil {
-			log.Warn("remove the child's branch", "ticket", t.ID, "branch", branch, "error", err)
+		if _, err := git("update-ref", "-d", ref); err != nil {
+			log.Warn("remove the child's checkpoint ref", "ticket", t.ID, "ref", ref, "error", err)
 		}
 	}
 }

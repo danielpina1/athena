@@ -1,6 +1,9 @@
 package node
 
 import (
+	"bytes"
+	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -216,30 +219,68 @@ func TestImportBranch(t *testing.T) {
 	}
 }
 
-// TestChildCleanupKeepsBranch: a child's clean worktree is removed although its commits are on no other branch; the
-// branch, which is what it delivers, is kept, and its checkpoint ref goes.
+// TestChildCleanupKeepsBranch: a child's clean worktree is removed although its commits are on no other branch. Its
+// branch, which is what it delivers, is kept, and so is its checkpoint ref, which the server's mirror may not have
+// taken yet: CheckpointBundle still sends the head the ready report named. Its seed refs go. The lead's cleanup on the
+// same node then deletes the child's branch and checkpoint ref.
 func TestChildCleanupKeepsBranch(t *testing.T) {
 	repo := newRepo(t)
-	root := t.TempDir()
-	child := core.Ticket{ID: "T-2", Lead: "T-1"}
-	wt := filepath.Join(root, "t-2")
-	if err := ensureWorktree(repo, wt, branchName(child), "HEAD", nil); err != nil {
+	work := t.TempDir()
+	log := slog.New(slog.DiscardHandler)
+	n := New(Config{WorkRoot: work, StateDir: t.TempDir(), Logger: log}, nil)
+	common := filepath.Join(repo, ".git")
+	child := core.Ticket{ID: "T-2", Lead: "T-1", Execution: &core.Execution{Directory: repo}}
+	p := placement{workDir: filepath.Join(work, "t-2"), repo: repo, common: common}
+	if err := n.recordPlacement(child, p); err != nil {
 		t.Fatal(err)
 	}
-	git(t, wt, "commit", "-q", "--allow-empty", "-m", "child work")
-	head := git(t, wt, "rev-parse", "HEAD")
-	if _, err := checkpoint(wt, child.ID, nil, "test"); err != nil {
+	if err := repoWorktree(p, child); err != nil {
 		t.Fatal(err)
 	}
-	cleanupWorktree(placement{workDir: wt, repo: repo, common: filepath.Join(repo, ".git")}, child, root, slog.New(slog.DiscardHandler))
-	if _, err := os.Stat(wt); !os.IsNotExist(err) {
+	git(t, p.workDir, "commit", "-q", "--allow-empty", "-m", "child work")
+	head, err := n.childReadyHead(n.newSession(child, core.Assignment{ID: "a1"}, p))
+	if err != nil || head != git(t, p.workDir, "rev-parse", "HEAD") {
+		t.Fatalf("childReadyHead = %q, %v", head, err)
+	}
+	git(t, repo, "update-ref", ticketRefs(child.ID)+"seed", head)
+	cleanupWorktree(p, child, work, log)
+	if _, err := os.Stat(p.workDir); !os.IsNotExist(err) {
 		t.Fatalf("the child's clean worktree was kept: %v", err)
 	}
 	if got := git(t, repo, "rev-parse", "refs/heads/athena/t-2"); got != head {
 		t.Fatalf("athena/t-2 = %s, want %s", got, head)
 	}
-	if refs := git(t, repo, "for-each-ref", ticketRefs(child.ID)); refs != "" {
-		t.Fatalf("the child's refs are left: %s", refs)
+	if refs := git(t, repo, "for-each-ref", "--format=%(refname)", ticketRefs(child.ID)); refs != checkpointRef(child.ID) {
+		t.Fatalf("the child's refs = %q, want its checkpoint only", refs)
+	}
+	var b bytes.Buffer
+	sha, err := n.CheckpointBundle(context.Background(), child.ID, "", &b)
+	if err != nil {
+		t.Fatalf("CheckpointBundle after the child ended: %v", err)
+	}
+	bundle := filepath.Join(t.TempDir(), "child.bundle")
+	if err := os.WriteFile(bundle, b.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fresh := t.TempDir()
+	git(t, fresh, "init", "-q")
+	git(t, fresh, "fetch", "-q", bundle, checkpointRef(child.ID)+":refs/x")
+	if got := git(t, fresh, "rev-parse", "refs/x"); got != sha {
+		t.Fatalf("the bundle holds %s, want %s", got, sha)
+	}
+	git(t, fresh, "merge-base", "--is-ancestor", head, "refs/x") // the reported head is in it
+
+	lead := core.Ticket{ID: "T-1", Children: []string{"T-2"}}
+	lwt := filepath.Join(work, "t-1")
+	if err := ensureWorktree(repo, lwt, branchName(lead), "HEAD", nil); err != nil {
+		t.Fatal(err)
+	}
+	cleanupWorktree(placement{workDir: lwt, repo: repo, common: common}, lead, work, log)
+	if refs := git(t, repo, "for-each-ref", "refs/athena/", "refs/heads/athena/t-2"); refs != "" {
+		t.Fatalf("refs left after the lead's cleanup: %s", refs)
+	}
+	if _, err := n.CheckpointBundle(context.Background(), child.ID, "", &b); !errors.Is(err, ErrNoCheckpoint) {
+		t.Fatalf("CheckpointBundle after the lead's cleanup = %v, want ErrNoCheckpoint", err)
 	}
 }
 
@@ -259,6 +300,8 @@ func TestLeadCleanupDeletesChildBranches(t *testing.T) {
 	}
 	git(t, repo, "update-ref", "refs/athena/t-1/import-t-2", head)
 	git(t, repo, "update-ref", "refs/athena/t-1/import-t-3", head)
+	git(t, repo, "update-ref", checkpointRef("T-2"), head)
+	git(t, repo, "update-ref", checkpointRef("T-4"), head)
 	cleanupWorktree(placement{workDir: wt, repo: repo, common: filepath.Join(repo, ".git")}, lead, root, slog.New(slog.DiscardHandler))
 	if _, err := os.Stat(wt); !os.IsNotExist(err) {
 		t.Fatalf("the lead's worktree was kept: %v", err)
@@ -266,7 +309,7 @@ func TestLeadCleanupDeletesChildBranches(t *testing.T) {
 	if got := git(t, repo, "for-each-ref", "--format=%(refname)", "refs/heads/athena/"); got != "refs/heads/athena/t-1\nrefs/heads/athena/t-4" {
 		t.Fatalf("branches left = %q", got)
 	}
-	if refs := git(t, repo, "for-each-ref", "refs/athena/"); refs != "" {
-		t.Fatalf("refs left: %s", refs)
+	if refs := git(t, repo, "for-each-ref", "--format=%(refname)", "refs/athena/"); refs != checkpointRef("T-4") {
+		t.Fatalf("refs left = %q, want another Ticket's checkpoint only", refs)
 	}
 }

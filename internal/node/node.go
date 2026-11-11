@@ -2687,8 +2687,8 @@ const keptNote = "its git links were checked against the placement record; its f
 // cleanupWorktree removes an ended Ticket's worktree when nothing in it would be lost: no uncommitted or untracked
 // changes (Athena's own .athena directory is ignored) and no commits on its branch that exist nowhere else (no other
 // branch, no remote; a child's commits are on its branch, which the lead merges, so they never keep it). Otherwise it
-// keeps it and logs why. The branch itself is kept; the Ticket's checkpoint ref goes with the worktree, and a lead's
-// children's branches in that repository go too.
+// keeps it and logs why. The branch itself is kept; the Ticket's checkpoint ref goes with the worktree (a child's
+// stays, for the server's mirror), and a lead's children's branches and checkpoint refs in that repository go too.
 func cleanupWorktree(p placement, t core.Ticket, workRoot string, log *slog.Logger) {
 	if err := os.RemoveAll(restrictedTempDir(p.workDir)); err != nil {
 		log.Warn("remove the session's temporary root", "ticket", t.ID, "error", err)
@@ -2755,12 +2755,17 @@ func cleanupWorktree(p placement, t core.Ticket, workRoot string, log *slog.Logg
 	log.Info("removed worktree", "dir", p.workDir)
 	// Its refs go with it, the checkpoint (checkpoint.go) and any seed or superseded state (seed.go): nothing of the
 	// Ticket's work in progress stays reachable.
-	// A lead's imports of its children's branches are among them; the children's branches go too (childgit.go).
+	// A lead's imports of its children's branches are among them; the children's branches and checkpoints go too
+	// (childgit.go). A child keeps its checkpoint, the head it delivers, until the server's mirror may have taken it:
+	// its lead's cleanup deletes it.
 	refs, err := gitOut(p.repo, "for-each-ref", "--format=%(refname)", ticketRefs(t.ID))
 	if err != nil {
 		log.Warn("list the ticket's refs", "error", err)
 	}
 	for _, ref := range strings.Fields(refs) {
+		if t.Lead != "" && ref == checkpointRef(t.ID) {
+			continue
+		}
 		if _, err := gitOut(p.repo, "update-ref", "-d", ref); err != nil {
 			log.Warn("remove the ticket's ref", "ref", ref, "error", err)
 		}
