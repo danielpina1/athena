@@ -16,6 +16,8 @@ export type EntryView = {
   badge?: string;
   /** A Report: its row offers "View report". */
   report?: boolean;
+  /** The other Ticket an agent or child entry is about: its id in the title links to it. */
+  ticket?: string;
 };
 
 type Entry = Pick<TimelineEntry, "kind" | "subkind" | "subject" | "text" | "refId"> &
@@ -55,6 +57,26 @@ const INPUT: Record<string, string> = {
   trigger: "Automated message",
 };
 
+// An agent message, a child ticket and the split plan; $ is the other Ticket, or the number of sub-tasks.
+const AGENT: Record<string, string> = { asked: "Asked $", received: "$ asked", answered: "Answered $", answer: "$ answered" };
+
+const CHILD: Record<string, [string, Tone]> = {
+  spawned: ["spawned", "neutral"],
+  ready: ["is ready", "ok"],
+  failed: ["failed", "danger"],
+  dropped: ["was dropped", "warn"],
+  stopped: ["was dropped", "warn"],
+  continued: ["was left out", "warn"],
+};
+
+const SPLIT: Record<string, [string, Tone]> = {
+  drafted: ["Split drafted ($)", "neutral"],
+  approved: ["Split approved", "ok"],
+  rejected: ["Run as one ticket", "neutral"],
+  single: ["Run as one ticket", "neutral"],
+  failed: ["Planning failed", "danger"],
+};
+
 /** The source of a Trigger an older server sent without a subkind, from its id. */
 function legacySource(refId: string): string {
   if (refId.startsWith("github:issue:")) return "issue";
@@ -87,9 +109,9 @@ function resetsAt(text: string, from: number): string {
 
 /**
  * What an entry says. `afterLimit`: the entry is the first start after a usage limit, so the work continues there
- * ("Continued on Codex · gpt-5.5").
+ * ("Continued on Codex · gpt-5.5"). `split`: how many sub-tasks the Ticket's split has, for a drafted one.
  */
-export function describeEntry(e: Entry, afterLimit = false): EntryView {
+export function describeEntry(e: Entry, afterLimit = false, split = 0): EntryView {
   const sub = e.subkind;
   const text = e.text;
   switch (e.kind) {
@@ -166,6 +188,21 @@ export function describeEntry(e: Entry, afterLimit = false): EntryView {
       return { title: "You replied", subtitle: text, tone: "neutral" };
     case "input":
       return { title: INPUT[sub] ?? "Message", subtitle: text, tone: "neutral" };
+    case "agent":
+      if (sub in AGENT) return { title: AGENT[sub].replace("$", e.subject), subtitle: text, tone: "neutral", ticket: e.subject };
+      break;
+    case "child":
+      if (sub in CHILD) {
+        const [what, tone] = CHILD[sub];
+        return { title: `Child ${e.subject} ${what}`, subtitle: text, tone, ticket: e.subject };
+      }
+      break;
+    case "split":
+      if (sub in SPLIT) {
+        const [title, tone] = SPLIT[sub];
+        return { title: title.replace(" ($)", split ? ` (${split})` : ""), subtitle: text, tone };
+      }
+      break;
     case "approval": {
       let verdict = sub;
       let subject = e.subject;
@@ -215,7 +252,7 @@ const isStart = (e: TimelineEntry) => e.kind === "assignment" && (e.subkind === 
  * The rows, oldest first, with each run of answered approvals of one verdict, each within 10 minutes of the last, one
  * row. The first start after a usage limit says the work continued there.
  */
-function rowsOf(sorted: TimelineEntry[]): Row[] {
+function rowsOf(sorted: TimelineEntry[], split: number): Row[] {
   const rows: Row[] = [];
   let afterLimit = false;
   for (let i = 0; i < sorted.length; ) {
@@ -228,7 +265,7 @@ function rowsOf(sorted: TimelineEntry[]): Row[] {
       const run = sorted.slice(i, j);
       rows.push({ type: "group", key: entryKey(e), at: entryMs(run[run.length - 1]), entries: run, items: run.map((r) => joined(r.subject, r.text)), view: groupView(run) });
     } else {
-      rows.push({ type: "entry", key: entryKey(e), at: entryMs(e), entry: e, view: describeEntry(e, afterLimit && isStart(e)) });
+      rows.push({ type: "entry", key: entryKey(e), at: entryMs(e), entry: e, view: describeEntry(e, afterLimit && isStart(e), split) });
       if (e.kind === "assignment" && e.subkind === "limited") afterLimit = true;
       else if (isStart(e)) afterLimit = false;
       j = i + 1;
@@ -258,11 +295,15 @@ export const clockTime = (at: number) => clock.format(new Date(at));
 
 /**
  * The rail's days, newest first, each with its rows newest first. An open question (the Ticket waits on the owner's
- * answer) is the newest report's: that row says so and has the orange dot.
+ * answer) is the newest report's: that row says so and has the orange dot. A child's end reaches its lead twice, as
+ * the child entry and as the input it gives the lead at the same moment: the input is left out.
  */
-export function buildTimeline(entries: readonly TimelineEntry[], now: number, question = ""): Day[] {
-  const sorted = [...entries].sort((a, b) => entryMs(a) - entryMs(b));
-  const rows = rowsOf(sorted).reverse();
+export function buildTimeline(entries: readonly TimelineEntry[], now: number, question = "", split = 0): Day[] {
+  const ends = new Set(entries.filter((e) => e.kind === "child").map(entryMs));
+  const sorted = entries
+    .filter((e) => !(e.kind === "input" && e.subkind === "child" && ends.has(entryMs(e))))
+    .sort((a, b) => entryMs(a) - entryMs(b));
+  const rows = rowsOf(sorted, split).reverse();
   const asking = question.trim() ? rows.find((r) => r.type === "entry" && r.entry.kind === "report") : undefined;
   if (asking) asking.view = { ...asking.view, title: "Asked you a question", subtitle: question, tone: "attention" };
   const days: Day[] = [];

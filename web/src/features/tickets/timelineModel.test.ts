@@ -212,3 +212,39 @@ test("timeline copy for restart, resumed, limited, continued and review verdicts
     "Started work · Claude Code · opus 4.1",
   ]);
 });
+
+test("agent, child and split entries read as what happened", () => {
+  expect(describeEntry(e("agent", "asked", "T-7", "Which port?"))).toMatchObject({ title: "Asked T-7", subtitle: "Which port?", ticket: "T-7" });
+  expect(titleOf("agent", "received", "T-7")).toBe("T-7 asked");
+  expect(titleOf("agent", "answered", "T-7")).toBe("Answered T-7");
+  expect(titleOf("agent", "answer", "T-7")).toBe("T-7 answered");
+
+  expect(describeEntry(e("child", "spawned", "T-8", "Write the parser"))).toMatchObject({ title: "Child T-8 spawned", ticket: "T-8" });
+  expect(describeEntry(e("child", "ready", "T-8"))).toMatchObject({ title: "Child T-8 is ready", tone: "ok" });
+  expect(describeEntry(e("child", "failed", "T-8", "tests fail"))).toMatchObject({ title: "Child T-8 failed", subtitle: "tests fail", tone: "danger" });
+  expect(titleOf("child", "dropped", "T-8")).toBe("Child T-8 was dropped");
+  expect(titleOf("child", "stopped", "T-8")).toBe("Child T-8 was dropped");
+  expect(titleOf("child", "continued", "T-8")).toBe("Child T-8 was left out");
+
+  expect(describeEntry(e("split", "drafted"), false, 3).title).toBe("Split drafted (3)");
+  expect(describeEntry(e("split", "approved", "", "T-8, T-9"))).toMatchObject({ title: "Split approved", subtitle: "T-8, T-9" });
+  expect(titleOf("split", "rejected")).toBe("Run as one ticket");
+  expect(titleOf("split", "single", "", "Nothing to split")).toBe("Run as one ticket");
+  expect(describeEntry(e("split", "failed", "", "timed out"))).toMatchObject({ title: "Planning failed", subtitle: "timed out", tone: "danger" });
+});
+
+test("a child's end shows once on its lead: its input/child twin is left out", () => {
+  const days = buildTimeline(
+    [
+      e("child", "ready", "T-8", "", NOW - 5 * MIN, "T-8"),
+      e("input", "child", "", "T-8 (Parser) is ready: done.", NOW - 5 * MIN, "I-1"),
+      // A dependent's note that its dep is ready has no child entry beside it: it stays.
+      e("input", "child", "", "T-9 is ready.", NOW - 2 * MIN, "I-2"),
+      e("split", "drafted", "", "", NOW - 30 * MIN),
+    ],
+    NOW,
+    "",
+    2,
+  );
+  expect(days[0].rows.map((r) => r.view.title)).toEqual(["Message", "Child T-8 is ready", "Split drafted (2)"]);
+});

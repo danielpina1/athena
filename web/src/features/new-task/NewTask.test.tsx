@@ -436,3 +436,35 @@ test("a refused task says the server's sentence", async () => {
     expect(screen.getByRole("alert").textContent).toBe("github is not running: a task on a repository needs it (see athena status)"),
   );
 });
+
+test("Plan first needs a repository or a git folder, and is sent as planFirst", async () => {
+  const user = setup();
+  const plan = () => screen.getByRole("switch", { name: "Plan first" });
+  const hint = () => document.getElementById(plan().getAttribute("aria-describedby") ?? "")?.textContent;
+  expect((plan() as HTMLButtonElement).disabled).toBe(true);
+  expect(hint()).toBe("Needs a repository.");
+  // A plain folder is not a git repository.
+  await user.type(repoBox(), "/Users/me/notes");
+  expect((plan() as HTMLButtonElement).disabled).toBe(true);
+  await user.clear(repoBox());
+  await user.type(repoBox(), "/Users/me/code/web");
+  expect((plan() as HTMLButtonElement).disabled).toBe(false);
+  expect(hint()).toBe("Athena drafts a split into sub-tasks for you to approve first.");
+  await user.clear(repoBox());
+  await user.type(repoBox(), "acme/api");
+  await user.click(plan());
+  await user.type(task(), "Port the parser");
+  await user.click(start());
+  expect(submitTask).toHaveBeenLastCalledWith({ text: "Port the parser", repo: "acme/api", runtime: "auto", planFirst: true });
+});
+
+test("a Plan first left on is not sent once the repository is gone", async () => {
+  const user = setup();
+  submitTask.mockResolvedValue(create(CommandResultSchema, { ok: false, code: "unavailable" }));
+  await user.type(repoBox(), "acme/api");
+  await user.click(screen.getByRole("switch", { name: "Plan first" }));
+  await user.clear(repoBox());
+  await user.type(task(), "x");
+  await user.click(start());
+  expect(submitTask).toHaveBeenLastCalledWith({ text: "x", runtime: "auto" });
+});

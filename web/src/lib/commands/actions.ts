@@ -41,6 +41,8 @@ export function submitTask(t: {
   review?: boolean;
   /** A node id to run it on; left out, any node. */
   node?: string;
+  /** Hold it while a planner drafts its split into child tickets, for the owner to approve. */
+  planFirst?: boolean;
 }) {
   const value = {
     text: t.text,
@@ -49,8 +51,36 @@ export function submitTask(t: {
     model: t.model ?? "",
     runtime: t.runtime ?? "",
     node: t.node ?? "",
+    planFirst: t.planFirst ?? false,
   };
   return submit({ case: "submitTask", value: t.review === undefined ? value : { ...value, review: t.review } });
+}
+
+type SubTasks = Extract<Action, { case: "updateBreakdown" }>["value"]["tasks"];
+
+/** revision is the draft's (BreakdownView.revision) the owner edited; a draft changed meanwhile is refused. */
+export function updateBreakdown(ticketId: string, revision: number, tasks: SubTasks) {
+  return submit({ case: "updateBreakdown", value: { ticketId, revision, tasks } });
+}
+
+/** Splits the plan-first Ticket into its draft's sub-tasks, when the draft is still at revision. */
+export function approveBreakdown(ticketId: string, revision: number) {
+  return submit({ case: "approveBreakdown", value: { ticketId, revision } });
+}
+
+/** Runs the plan-first Ticket as one ticket. */
+export function rejectBreakdown(ticketId: string) {
+  return submit({ case: "rejectBreakdown", value: { ticketId } });
+}
+
+/** Asks the planner again for the split. */
+export function replan(ticketId: string) {
+  return submit({ case: "replan", value: { ticketId } });
+}
+
+/** Ends the child ticket so its lead and the dependents that waited for it go on without it. */
+export function continueWithout(childId: string) {
+  return submit({ case: "continueWithout", value: { ticketId: childId } });
 }
 
 export function reply(ticketId: string, text: string) {
