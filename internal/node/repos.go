@@ -448,6 +448,10 @@ func (n *Node) prepareGitHub(s *session) error {
 	unlock := lockRepo(clone)
 	defer unlock()
 	env := cloneGitEnv(clone, p.github)
+	// Branches shipped here before the clone existed (childgit.go) come in now, before the worktree.
+	ictx, icancel := context.WithTimeout(n.ctx, seedTimeout)
+	n.applyImports(s.t.ID, seedGit(ictx, clone, env))
+	icancel()
 	// A child starts from its lead's commit (Execution.Base), when this clone has it (childgit.go).
 	cenv := repoGitEnv(env, filepath.Join(clone, ".git"), clone)
 	childBase, baseErr := worktreeBase(func(args ...string) (string, error) { return gitIn(clone, cenv, args...) }, s.t, base)

@@ -177,6 +177,22 @@ type Fleet struct {
 	// way, by Assignment id (under mu).
 	seeds   sync.WaitGroup
 	seeding map[string]*seedRun
+
+	// Shipped branches (branches.go): shipped are those a node has, by node, child and head; late the commits a wait
+	// for the mirror gave up on; shipQs the queued Starts and Delivers of each Ticket that waits for a ship, by id;
+	// mirrorWake is closed and replaced whenever a checkpoint is recorded. ships are the queues' goroutines, which
+	// Close waits for.
+	shipMu     sync.Mutex
+	shipped    map[shipKey]bool
+	late       map[string]bool
+	shipQs     map[string]*shipQueue
+	mirrorWake chan struct{}
+	ships      sync.WaitGroup
+
+	// dir is the nodes as the store had them when last read (directory.go): what a child's node hint resolves
+	// against inside an Engine command, which must not read the store.
+	dirMu sync.Mutex
+	dir   []store.Node
 }
 
 // New returns a Fleet; it serves nodes once its Engine is set.
@@ -200,7 +216,9 @@ func New(cfg Config) *Fleet {
 		ctx: ctx, cancel: cancel, remotes: map[string]*Remote{}, waiting: map[string]*waitEntry{}, dropped: map[string]time.Time{},
 		placeWake: make(chan struct{}, 1), placeDone: make(chan struct{}), ckLocal: map[string]string{}, ckWake: make(chan struct{}, 1),
 		localTooBig: map[string]bool{}, offTimers: map[string]*offTimer{}, seeding: map[string]*seedRun{},
-		applying: map[string]applyGrant{}, started: map[string]string{}}
+		applying: map[string]applyGrant{}, started: map[string]string{}, shipped: map[shipKey]bool{}, late: map[string]bool{},
+		shipQs: map[string]*shipQueue{}, mirrorWake: make(chan struct{})}
+	f.refreshDir()
 	if cfg.Engine != nil {
 		f.eng.Store(cfg.Engine)
 	}
@@ -243,6 +261,7 @@ func (f *Fleet) Close() {
 	f.wg.Wait()
 	<-f.placeDone
 	f.seeds.Wait()
+	f.ships.Wait()
 	f.bg.Wait()
 }
 
@@ -342,6 +361,7 @@ func (f *Fleet) Nodes() []NodeView {
 		f.log.Error("list nodes", "error", err)
 		return out
 	}
+	f.setDir(rows)
 	for _, n := range rows {
 		v := NodeView{ID: n.ID, Name: n.Name, LastSeen: n.LastSeen, CertExpires: n.CertNotAfter}
 		f.mu.Lock()
@@ -439,6 +459,7 @@ func (f *Fleet) Revoke(id string) error {
 	if lk != nil {
 		lk.end(CloseRevoked, reasonRevoked)
 	}
+	f.refreshDir()
 	f.log.Info("node revoked", "node", id)
 	f.changed()
 	return nil
@@ -576,6 +597,9 @@ func (f *Fleet) welcome(lk *nodeLink, h *athenav1.NodeHello) bool {
 	f.sendState(lk)
 	r.attach(lk, n.Name, h, at)
 	f.pubMu.Unlock()
+	// What was shipped to the node before is not known to be there now: reconcile ships it again.
+	f.forgetShipped(id)
+	f.refreshDir()
 	// Under connMu, as the offline timer's check: the node's Tickets are not flagged offline after this.
 	f.nodeBack(id)
 	f.log.Info("node linked", "node", id, "name", n.Name, "applied", n.AppliedFactSeq, "version", h.GetVersion())

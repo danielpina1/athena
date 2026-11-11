@@ -273,6 +273,34 @@ func (f *Fleet) answer(ctx context.Context, nodeID string, a any) (any, error) {
 			return nil, err
 		}
 		return eng.Propose(a.Proposal)
+
+	// The agent calls (plan 7) are the calling Ticket's: its node must be the one it runs on.
+	case *nodelink.ArgsSpawnChildren:
+		if err := guard(a.LeadID); err != nil {
+			return nil, err
+		}
+		return eng.SpawnChildren(a.LeadID, a.Specs)
+	case *nodelink.ArgsAskAgent:
+		if err := guard(a.FromID); err != nil {
+			return nil, err
+		}
+		return eng.AskAgent(a.FromID, a.Target, a.Text)
+	case *nodelink.ArgsAnswerAgent:
+		if err := guard(a.FromID); err != nil {
+			return nil, err
+		}
+		return eng.AnswerAgent(a.FromID, a.MessageID, a.Text)
+	case *nodelink.ArgsWaitFor:
+		if err := guard(a.TicketID); err != nil {
+			return nil, err
+		}
+		// Under the request's context; the Engine answers within core.WaitForMax, below the node's request timeout.
+		return eng.WaitFor(ctx, a.TicketID, a.Target)
+	case *nodelink.ArgsAgents:
+		if err := guard(a.TicketID); err != nil {
+			return nil, err
+		}
+		return eng.Agents(a.TicketID)
 	case *nodelink.ArgsPendingProposals:
 		return pendingProposalsOn(eng, nodeID, func(ticketID string) bool { return f.applyingOn(nodeID, ticketID) })
 	case *nodelink.ArgsStartProposal:

@@ -305,6 +305,29 @@ func head(dir, ref string) (string, bool, error) {
 	return out, out != "", nil
 }
 
+// shaRe is a full commit name, SHA-1 or SHA-256.
+var shaRe = regexp.MustCompile(`^[0-9a-f]{40}([0-9a-f]{24})?$`)
+
+// Has reports whether the commit sha is in repo's mirror (git cat-file -e): a child's head the server can ship, or the
+// lead's commit a fork seed starts at. A mirror not made yet has none.
+func (m *Mirror) Has(repo, sha string) (bool, error) {
+	dir, err := m.repoDir(repo)
+	if err != nil {
+		return false, err
+	}
+	if !shaRe.MatchString(sha) {
+		return false, fmt.Errorf("%q is not a commit name", sha)
+	}
+	defer m.lock(dir)()
+	if _, err := os.Stat(filepath.Join(dir, "HEAD")); err != nil {
+		return false, nil
+	}
+	if _, err := mirrorGit(context.Background(), dir, "cat-file", "-e", sha+"^{commit}"); err != nil {
+		return false, nil // git says so with its exit status: not there
+	}
+	return true, nil
+}
+
 // Bundle writes a git bundle of the Ticket's whole checkpoint ref to w and returns its commit: what a node fetches
 // into its clone to restore the work. ErrNoCheckpoint: the mirror holds none. The bundle streams from git to w, with
 // no copy of its own; on an error w may hold part of one. The repository stays locked while w takes it: a caller that
@@ -455,12 +478,18 @@ func (f *Fleet) Checkpoint(ticketID string) (c Checkpoint, ok bool, err error) {
 	return c, true, nil
 }
 
+// recordCheckpoint records the Ticket's checkpoint, and wakes what waits for a commit to reach the mirror
+// (branches.go).
 func (f *Fleet) recordCheckpoint(c Checkpoint) error {
 	b, err := json.Marshal(c)
 	if err != nil {
 		return err
 	}
-	return f.cfg.Store.KVSet(checkpointKey+strings.ToLower(c.TicketID), string(b))
+	if err := f.cfg.Store.KVSet(checkpointKey+strings.ToLower(c.TicketID), string(b)); err != nil {
+		return err
+	}
+	f.mirrorChanged()
+	return nil
 }
 
 // checkpointSent applies a node's CheckpointSent: the Ticket is placed on the node and works in repo, and its bundle,
@@ -628,7 +657,8 @@ func (f *Fleet) sweepLoop() {
 
 // SweepMirror deletes from the mirror, with their records, the checkpoints of Tickets that ended MirrorKeep ago or
 // more, or that the Engine no longer knows; then the refs no record names (a bundle whose fact was refused or never
-// applied) whose commit is MirrorKeep old and whose Ticket ended or is unknown; then compacts each repository.
+// applied) whose commit is MirrorKeep old and whose Ticket ended or is unknown; then compacts each repository. A
+// child's checkpoint stays while its lead is open: it is the branch the server ships to the lead's node.
 func (f *Fleet) SweepMirror() error {
 	eng := f.engine()
 	if eng == nil || f.cfg.Mirror == nil {
@@ -655,7 +685,7 @@ func (f *Fleet) SweepMirror() error {
 			errs = append(errs, err)
 			kept[strings.ToLower(c.TicketID)] = true
 			continue
-		case t.Ended == nil || now.Sub(t.Ended.At) < MirrorKeep:
+		case t.Ended == nil || now.Sub(t.Ended.At) < MirrorKeep || leadOpen(eng, t):
 			kept[strings.ToLower(c.TicketID)] = true
 			continue
 		}
@@ -669,6 +699,15 @@ func (f *Fleet) SweepMirror() error {
 	}
 	errs = append(errs, f.sweepOrphans(eng, kept, now), f.cfg.Mirror.Compact())
 	return errors.Join(errs...)
+}
+
+// leadOpen reports whether t is a child whose lead has not ended.
+func leadOpen(eng *core.Engine, t core.Ticket) bool {
+	if t.Lead == "" {
+		return false
+	}
+	lead, _, err := eng.Ticket(t.Lead)
+	return err == nil && lead.Ended == nil
 }
 
 // sweepOrphans deletes the checkpoint refs no record names, MirrorKeep old by their commit, whose Ticket ended or is
@@ -703,6 +742,8 @@ func (f *Fleet) sweepOrphans(eng *core.Engine, kept map[string]bool, now time.Ti
 			}
 			if t, ok := tickets[r.id]; ok && t.Ended == nil {
 				continue
+			} else if lead, open := tickets[strings.ToLower(t.Lead)]; ok && t.Lead != "" && open && lead.Ended == nil {
+				continue // a child's branch, while its lead is open
 			}
 			if err := m.deleteRef(r.dir, r.ref); err != nil {
 				errs = append(errs, err)

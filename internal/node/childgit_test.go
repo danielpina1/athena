@@ -313,3 +313,65 @@ func TestLeadCleanupDeletesChildBranches(t *testing.T) {
 		t.Fatalf("refs left = %q, want another Ticket's checkpoint only", refs)
 	}
 }
+
+// TestForkSeedLateLine: a child whose lead's commit did not reach the server in time is seeded with no bundle: its
+// worktree starts from the default branch, and its first message says why, as a fork line.
+func TestForkSeedLateLine(t *testing.T) {
+	src := newRepo(t)
+	clone := t.TempDir()
+	git(t, clone, "clone", "-q", src, ".")
+	def := git(t, clone, "rev-parse", "HEAD")
+	n := New(Config{WorkRoot: t.TempDir(), StateDir: t.TempDir()}, nil)
+	child := core.Ticket{ID: "T-2", Lead: "T-1", Repo: "o/r", Execution: &core.Execution{Base: strings.Repeat("e", 40)}}
+	a := core.Assignment{ID: "a1"}
+	if err := n.Seed(Seed{TicketID: child.ID, AssignmentID: a.ID, From: "mini", Unsent: SeedForkLate}); err != nil {
+		t.Fatal(err)
+	}
+	rec, ok := n.seedFor(child, a.ID)
+	if !ok || rec.Unsent != SeedForkLate {
+		t.Fatalf("seed record = %+v, %v", rec, ok)
+	}
+	wt := filepath.Join(t.TempDir(), "t-2")
+	s := n.newSession(child, a, placement{workDir: wt, repo: clone, common: filepath.Join(clone, ".git")})
+	if err := n.seedWorktree(s, clone, "main", def, nil, rec); err != nil {
+		t.Fatal(err)
+	}
+	if got := git(t, wt, "rev-parse", "HEAD"); got != def {
+		t.Fatalf("child HEAD = %s, want the default branch's %s", got, def)
+	}
+	note, fork := n.takeMovedNote(s)
+	if want := "T-1's commit did not reach the server in time; you start from the default branch."; note != want || !fork {
+		t.Fatalf("note = %q (fork %v), want %q", note, fork, want)
+	}
+}
+
+// TestImportBranchBeforeClone: a branch shipped to a node that has no clone of the repository yet is kept, and
+// imported at the clone step of the Ticket's launch.
+func TestImportBranchBeforeClone(t *testing.T) {
+	src := newRepo(t)
+	state := t.TempDir()
+	lead := core.Ticket{ID: "T-1", Repo: "o/r"}
+	n := New(Config{WorkRoot: t.TempDir(), StateDir: state}, ticketEngine{tickets: map[string]core.Ticket{"T-1": lead}})
+	childHead, _, bundle := leadCheckpoint(t, src, "T-2", "child work")
+	if err := n.ImportBranch(BranchImport{TicketID: "T-1", Child: "T-2", SHA: childHead, Bundle: bundle}); err != nil {
+		t.Fatalf("an import before the clone: %v", err)
+	}
+	if _, err := os.Stat(bundle); !os.IsNotExist(err) {
+		t.Fatalf("the bundle was not taken: %v", err)
+	}
+
+	clone := CloneDir(state, "o/r")
+	if err := os.MkdirAll(filepath.Dir(clone), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	git(t, filepath.Dir(clone), "clone", "-q", src, clone)
+	n.applyImports("T-1", seedGit(context.Background(), clone, cloneGitEnv(clone, "o/r")))
+	if got := git(t, clone, "rev-parse", "refs/heads/athena/t-2"); got != childHead {
+		t.Fatalf("athena/t-2 = %s, want %s", got, childHead)
+	}
+	if entries, _ := os.ReadDir(filepath.Join(state, "imports")); len(entries) != 0 {
+		t.Fatalf("kept imports left: %v", entries)
+	}
+	// Taken once: nothing left to apply.
+	n.applyImports("T-1", seedGit(context.Background(), clone, cloneGitEnv(clone, "o/r")))
+}

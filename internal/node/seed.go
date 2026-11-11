@@ -53,6 +53,9 @@ const (
 	SeedTooBig     = "too-big"
 	SeedSendFailed = "failed"
 	seedRestore    = "restore"
+	// SeedForkLate is a child placed away from its lead whose lead's commit did not reach the server in time: it is
+	// seeded with no bundle and starts from the default branch.
+	SeedForkLate = "fork-late"
 )
 
 // Seed is the server's word that the Ticket's next Assignment moved to this node, with the work to restore.
@@ -113,7 +116,7 @@ func (n *Node) Seed(sd Seed) error {
 		return &core.UserError{Msg: "bad seed: the checkpoint is not a commit name"}
 	}
 	switch sd.Unsent {
-	case "", SeedTooBig, SeedSendFailed:
+	case "", SeedTooBig, SeedSendFailed, SeedForkLate:
 	default:
 		return &core.UserError{Msg: "bad seed: unknown reason " + sd.Unsent}
 	}
@@ -320,7 +323,7 @@ func (n *Node) takeMovedNote(s *session) (note string, fork bool) {
 		return "", false
 	}
 	n.dropSeed(s.t.ID)
-	return rec.Note, rec.Fork
+	return rec.Note, rec.Fork || rec.Unsent == SeedForkLate
 }
 
 // movedLine says where the moved Ticket's work came from (how): rec's checkpoint, the branch pushed to GitHub, the
@@ -429,6 +432,9 @@ func (n *Node) seedWorktree(s *session, clone, defaultBranch, base string, env [
 		return n.forkWorktree(ctx, s, git, clone, env, rec)
 	}
 	branch := branchName(t)
+	if rec.Unsent == SeedForkLate {
+		return n.forkLateWorktree(s, git, clone, base, env, rec)
+	}
 	from, how := base, seedFromBase
 	if rec.Bundle {
 		if parent, err := n.fetchSeed(t, git, rec); err != nil {

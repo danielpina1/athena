@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/danielpina1/athena/internal/core"
@@ -102,6 +103,36 @@ func (n *Node) forkWorktree(ctx context.Context, s *session, git func(args ...st
 	return nil
 }
 
+// forkLateLine is the first message's line of a child placed away from its lead whose lead's commit did not reach
+// the server in time.
+func forkLateLine(lead string) string {
+	return lead + "'s commit did not reach the server in time; you start from the default branch."
+}
+
+// forkLateWorktree builds a new worktree for a child whose fork seed came without the lead's checkpoint (SeedForkLate),
+// under the clone's lock: its branch starts at base, the default branch unless this clone has the lead's commit.
+func (n *Node) forkLateWorktree(s *session, git func(args ...string) (string, error), clone, base string, env []string,
+	rec seedRecord) error {
+	t, p := s.t, s.place
+	note := forkLateLine(t.Lead)
+	if t.Execution != nil && t.Execution.Base != "" && base == t.Execution.Base {
+		note = forkLine(t.Lead, base) // the lead's commit was here already
+	}
+	branch := branchName(t)
+	_, _ = git("worktree", "prune")
+	if _, err := git("rev-parse", "--verify", "--quiet", "refs/heads/"+branch); err == nil {
+		if _, err := git("update-ref", "refs/heads/"+branch, base); err != nil {
+			return err
+		}
+	}
+	if err := ensureWorktree(clone, p.workDir, branch, base, env); err != nil {
+		return err
+	}
+	n.finishSeed(s, git, rec, note)
+	s.log.Info("worktree started without the lead's commit", "lead", t.Lead, "commit", base)
+	return nil
+}
+
 // BranchImport is the server's word that the branch of Child, a Ticket that ran on another node, is SHA: Bundle is a
 // git bundle of Child's checkpoint ref from the server's mirror, which holds SHA. TicketID is the Ticket that needs it
 // (the lead, or a dependent), whose repository takes the branch.
@@ -110,7 +141,8 @@ type BranchImport struct{ TicketID, Child, SHA, Bundle string }
 // ImportBranch sets athena/<child> in the repository of bi.TicketID on this node to bi.SHA, from bi's bundle: the
 // bundle is fetched into refs/athena/<ticket>/import-<child>, then the branch is forced to SHA, which the fetched ref
 // must hold. A branch a worktree on this node has checked out is never moved. A branch already at SHA is left as it
-// is, with nothing fetched. The bundle file stays the caller's.
+// is, with nothing fetched. The bundle file stays the caller's, except on a node with no clone of a GitHub Ticket's
+// repository yet: there the bundle is taken and kept, and the import is done at the clone step of the Ticket's launch.
 func (n *Node) ImportBranch(bi BranchImport) error {
 	if !seedTicketRe.MatchString(bi.TicketID) || !seedTicketRe.MatchString(bi.Child) || strings.HasPrefix(bi.Child, "-") {
 		return &core.UserError{Msg: "bad branch import: ticket or child id"}
@@ -135,10 +167,12 @@ func (n *Node) ImportBranch(bi BranchImport) error {
 	}
 	var env []string
 	if p.github != "" {
-		if _, err := os.Stat(filepath.Join(p.repo, ".git")); err != nil {
-			return fmt.Errorf("this node has no clone of %s yet", p.github)
-		}
 		defer lockRepo(p.repo)()
+		if _, err := os.Stat(filepath.Join(p.repo, ".git")); err != nil {
+			// The node clones with an Assignment's token only: the import waits for the clone step of the Ticket's
+			// launch (applyImports), under the same lock.
+			return n.keepImport(bi)
+		}
 		env = cloneGitEnv(p.repo, p.github)
 	}
 	common := p.common
@@ -213,6 +247,53 @@ func deleteChildBranches(git func(args ...string) (string, error), t core.Ticket
 		}
 		if _, err := git("update-ref", "-d", ref); err != nil {
 			log.Warn("remove the child's checkpoint ref", "ticket", t.ID, "ref", ref, "error", err)
+		}
+	}
+}
+
+// keepImport keeps an import for a Ticket whose clone this node has not made yet: the bundle is taken into
+// <StateDir>/imports, and applyImports does the import once the clone is there. A later import of the same child
+// replaces it.
+func (n *Node) keepImport(bi BranchImport) error {
+	if n.cfg.StateDir == "" {
+		return errors.New("no state directory for imports")
+	}
+	dir := filepath.Join(n.cfg.StateDir, "imports")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	file := filepath.Join(dir, strings.ToLower(bi.TicketID)+"-"+strings.ToLower(bi.Child)+".bundle")
+	if err := takeFile(bi.Bundle, file, MaxCheckpointBundle); err != nil {
+		return fmt.Errorf("keep the branch of %s: %w", bi.Child, err)
+	}
+	bi.Bundle = file
+	key := strings.ToLower(bi.TicketID)
+	n.importMu.Lock()
+	defer n.importMu.Unlock()
+	if n.imports == nil {
+		n.imports = map[string][]BranchImport{}
+	}
+	n.imports[key] = append(slices.DeleteFunc(n.imports[key], func(x BranchImport) bool {
+		return strings.EqualFold(x.Child, bi.Child)
+	}), bi)
+	n.log.Info("branch kept for the clone step", "ticket", bi.TicketID, "child", bi.Child, "commit", bi.SHA)
+	return nil
+}
+
+// applyImports does the imports kept for the Ticket (keepImport) in its clone, whose git runs through git, under the
+// clone's lock. One that fails is logged: the lead's Input still names the branch.
+func (n *Node) applyImports(ticketID string, git func(args ...string) (string, error)) {
+	key := strings.ToLower(ticketID)
+	n.importMu.Lock()
+	kept := n.imports[key]
+	delete(n.imports, key)
+	n.importMu.Unlock()
+	for _, bi := range kept {
+		if err := importBranch(git, bi, n.log); err != nil {
+			n.log.Warn("import a kept branch", "ticket", bi.TicketID, "child", bi.Child, "error", err)
+		}
+		if err := os.Remove(bi.Bundle); err != nil && !errors.Is(err, os.ErrNotExist) {
+			n.log.Warn("remove a kept branch's bundle", "file", bi.Bundle, "error", err)
 		}
 	}
 }

@@ -209,6 +209,10 @@ type Node struct {
 	runners   sync.WaitGroup
 	// seedSwept is when the seeds were last swept (seed.go), in Unix nanoseconds.
 	seedSwept atomic.Int64
+	// imports are the branches shipped before this node had a clone of their Ticket's repository, by lowercased Ticket
+	// id (childgit.go), under importMu.
+	importMu sync.Mutex
+	imports  map[string][]BranchImport
 
 	mu   sync.Mutex
 	live map[string]*session // by Ticket ID: launched sessions until their runner ends

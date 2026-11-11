@@ -229,31 +229,30 @@ func hasRuntime(c candidate, need string) bool {
 var _ core.Executor = (*Fleet)(nil)
 
 // Start queues a pending Assignment that is not placed yet for placement, on the fleet's own goroutine; any other goes
-// to its node (an Assignment placed on no node, from before there were nodes, to the local one).
+// to its node (an Assignment placed on no node, from before there were nodes, to the local one), after the branches
+// its Ticket needs there (branches.go).
 func (f *Fleet) Start(t core.Ticket, a core.Assignment) {
 	if a.Node == "" && a.State == core.AssignmentPending {
 		f.enqueue(t.ID, a.ID)
 		return
 	}
-	if _, moved := f.seedFrom(t, a, a.Node); moved && a.State == core.AssignmentPending {
-		// Placed, not yet started, and moved (a resume after a restart between its placement and its seed): seeded first.
+	if a.State == core.AssignmentPending && f.needsSeed(t, a, a.Node) {
+		// Placed, not yet started, and moved (a resume after a restart between its placement and its seed), or a child
+		// forked from its lead elsewhere: seeded first.
 		f.launchSeeded(t.ID, a.ID, a.Node)
 		return
 	}
-	if tg := f.Target(a.Node); tg != nil {
-		tg.Start(t, a)
-	}
+	f.send(t, a, a.Node, false)
 }
 
-// Deliver sends the Ticket's waiting Inputs to the node its Assignment runs on. An Assignment still waiting for its
-// node takes them with its Start.
+// Deliver sends the Ticket's waiting Inputs to the node its Assignment runs on, after the branches its Ticket needs
+// there (branches.go), in order with its other Delivers. An Assignment still waiting for its node takes them with its
+// Start.
 func (f *Fleet) Deliver(t core.Ticket, a core.Assignment) {
 	if a.Node == "" && a.State == core.AssignmentPending {
 		return
 	}
-	if tg := f.Target(a.Node); tg != nil {
-		tg.Deliver(t, a)
-	}
+	f.send(t, a, a.Node, true)
 }
 
 // Stop ends the Assignment on its node, and drops it from placement if it still waits for one.
@@ -617,11 +616,13 @@ func (f *Fleet) launch(ticketID, assignmentID, nodeID string) {
 	if !ok || a.State == core.AssignmentEnded || t.Ended != nil {
 		return
 	}
-	if _, moved := f.seedFrom(t, *a, nodeID); moved {
+	if f.needsSeed(t, *a, nodeID) {
 		f.launchSeeded(ticketID, assignmentID, nodeID) // its worktree comes from the checkpoint first
 		return
 	}
-	tg.Start(t, *a)
+	if f.send(t, *a, nodeID, false) {
+		return // after its branches, by the Ticket's ship queue, which stops it again if it ended meanwhile
+	}
 	if t, a, ok = find(); ok && (a.State == core.AssignmentEnded || t.Ended != nil) {
 		tg.Stop(t, *a, a.EndedReason)
 	}
